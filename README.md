@@ -9,7 +9,7 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-![output](https://github.com/splashdust/bevy_voxel_world/assets/428824/24a9ffd0-6b9b-40d8-aa66-c72dac575f09)
+![output](https://github.com/splashdust/bevy_voxel_world/assets/428824/9c38e241-5618-474e-8788-8e45670c7391)
 
 The voxel terrain can be controlled in two main ways: through a terrain lookup function, and directly by `set_voxel` and `get_voxel` functions. The world has two "layers" of voxel information, one that is purely procedural and determined by a terrain lookup function, and one that is memory based and controlled by `set_voxel`. The data layer always overrides the procedural layer. This way, the world can be infinitely large, but we only need to store information about voxels that are deliberately changed.
 
