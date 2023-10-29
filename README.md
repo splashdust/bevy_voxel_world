@@ -21,7 +21,7 @@ fn my_system(mut voxel_world: VoxelWorld) {
 }
 ```
 
-Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Ground`. `Ground` voxels also holds a mterial type value of type `u8`, meaning that a maximum of 256 material types are supported.
+Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Ground`. `Ground` voxels also holds a mterial type value of type `u8`, meaning that a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback. Each material can map to three indexes; to sides and bottom (examples coming soon.)
 
 For an example on how to use a terrain lookup function, see [this example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/noise_terrain.rs).
 
