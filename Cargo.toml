@@ -1,0 +1,31 @@
+[package]
+name = "bevy_voxel_world"
+description = "A voxel world plugin for Bevy"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joacim Magnusson <joacim@isogram.se>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/splashdust/bevy_voxel_world"
+repository = "https://github.com/splashdust/bevy_voxel_world"
+exclude = ["/assets/", "/examples/", "/.github/"]
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dependencies]
+bevy = { version = "0.11.3", features = [
+    "bevy_render",
+    "bevy_asset",
+    "bevy_pbr",
+] }
+block-mesh = "0.2.0"
+ndshape = "0.3.0"
+futures-lite = "1.13.0"
+rand = "0.8.5"
+
+[dev-dependencies]
+noise = "0.8.2"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
