@@ -9,6 +9,8 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
+![output](https://github.com/splashdust/bevy_voxel_world/assets/428824/24a9ffd0-6b9b-40d8-aa66-c72dac575f09)
+
 ## Gotchas
 
 `bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.
