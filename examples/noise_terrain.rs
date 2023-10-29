@@ -12,24 +12,14 @@ fn main() {
 }
 
 fn setup(mut commands: Commands) {
-    // Here we setup some noise, initialized once and then cloned for the "get voxel" closure
-    let mut noise = HybridMulti::<Perlin>::new(1234);
-    noise.octaves = 5;
-    noise.frequency = 1.1;
-    noise.lacunarity = 2.8;
-    noise.persistence = 0.4;
-
-    let boxed_noise = Box::new(noise.clone());
-
     commands.insert_resource(VoxelWorldConfiguration {
-        // This is the spawn distance (in 32 meter chunks) around the camera. Currently it is equal in all direction,
-        // meaning that many chunks will be spawned that are not visible.
+        // This is the spawn distance (in 32 meter chunks), centered around the camera.
         spawning_distance: 15,
 
         // Here we supply a closure that returns another closure that returns a voxel value for a given position.
         // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
-        // to a differrent thread for the meshing process.
-        voxel_lookup_delegate: Box::new(move |_chunk_pos| get_voxel_fn(boxed_noise.clone())), // `get_voxel_fn` is defined below
+        // to a differrent thread for the meshing process. A new closure is fetched for each chunk.
+        voxel_lookup_delegate: Box::new(move |_chunk_pos| get_voxel_fn()), // `get_voxel_fn` is defined below
         ..Default::default()
     });
 
@@ -66,9 +56,14 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn(
-    noise: Box<HybridMulti<Perlin>>,
-) -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+    // Set up some noise to use as the terrain height map
+    let mut noise = HybridMulti::<Perlin>::new(1234);
+    noise.octaves = 5;
+    noise.frequency = 1.1;
+    noise.lacunarity = 2.8;
+    noise.persistence = 0.4;
+
     // We use this to cache the noise value for each y column so we only need
     // to calculate it once per x/z coordinate
     let mut cache = HashMap::<(i32, i32), f64>::new();
@@ -88,6 +83,7 @@ fn get_voxel_fn(
 
         let [x, y, z] = pos.as_dvec3().to_array();
 
+        // If y is less than the noise sample, we will set the voxel to solid
         let is_ground = y - 2.0
             < match cache.get(&(pos.x, pos.z)) {
                 Some(sample) => *sample,
@@ -99,6 +95,7 @@ fn get_voxel_fn(
             };
 
         if is_ground {
+            // Solid voxel of material type 0
             WorldVoxel::Solid(0)
         } else {
             WorldVoxel::Air
