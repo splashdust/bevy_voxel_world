@@ -23,7 +23,6 @@ jobs:
     needs: [setup]
     steps:
       - uses: actions/checkout@v3
-      - name: Build
-        run: cargo build --verbose
+      - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --verbose
