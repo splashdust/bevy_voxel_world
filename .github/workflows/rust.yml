@@ -18,11 +18,12 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get install -yq --no-install-recommends libudev-dev libasound2-dev libxcb-composite0-dev
 
-  build:
+  test:
     runs-on: ubuntu-latest
     needs: [setup]
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.7.0
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --workspace

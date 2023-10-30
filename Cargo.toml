@@ -29,5 +29,5 @@ rand = "0.8.5"
 noise = "0.8.2"
 
 [[example]]
-name = "basic"
-path = "examples/basic.rs"
+name = "noise_terrain"
+path = "examples/noise_terrain.rs"
