@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use block_mesh::{
-    visible_block_faces, OrientedBlockFace, UnitQuadBuffer, Voxel,
-    VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+    visible_block_faces, OrientedBlockFace, UnitQuadBuffer, Voxel, VoxelVisibility,
+    RIGHT_HANDED_Y_UP_CONFIG,
 };
 
 use bevy::{
@@ -72,13 +72,9 @@ fn mesh_from_quads(
             aos.extend_from_slice(&ao);
 
             // TODO: Fix AO anisotropy
-            indices.extend_from_slice(
-                &face.quad_mesh_indices(positions.len() as u32),
-            );
+            indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
-            positions.extend_from_slice(
-                &face.quad_mesh_positions(&quad.into(), 1.0),
-            );
+            positions.extend_from_slice(&face.quad_mesh_positions(&quad.into(), 1.0));
 
             normals.extend_from_slice(&face.quad_mesh_normals());
 
@@ -88,8 +84,7 @@ fn mesh_from_quads(
                 &quad.into(),
             ));
 
-            let voxel_index =
-                PaddedChunkShape::linearize(quad.minimum) as usize;
+            let voxel_index = PaddedChunkShape::linearize(quad.minimum) as usize;
             let material_type = match voxels[voxel_index] {
                 WorldVoxel::Solid(mt) => texture_index_mapper(mt),
                 _ => [0, 0, 0],
@@ -167,11 +162,7 @@ fn side_aos(neighbours: [WorldVoxel; 8]) -> [u32; 4] {
     ]
 }
 
-fn face_aos(
-    voxel_pos: &[u32; 3],
-    face_normal: &IVec3,
-    voxels: &VoxelArray,
-) -> [u32; 4] {
+fn face_aos(voxel_pos: &[u32; 3], face_normal: &IVec3, voxels: &VoxelArray) -> [u32; 4] {
     let [x, y, z] = *voxel_pos;
 
     match *face_normal {

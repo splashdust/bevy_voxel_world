@@ -5,8 +5,8 @@ use bevy::{
     render::{
         mesh::{MeshVertexAttribute, MeshVertexBufferLayout},
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderRef,
-            SpecializedMeshPipelineError, VertexFormat,
+            AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
+            VertexFormat,
         },
     },
 };
