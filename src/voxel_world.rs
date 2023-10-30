@@ -58,15 +58,14 @@ impl<'w, 's> VoxelWorld<'w, 's> {
             {
                 let modified_voxels = modified_voxels.read().unwrap();
                 if let Some(voxel) = modified_voxels.get(&position) {
-                    return voxel.clone();
+                    return *voxel;
                 }
             }
 
-            chunks
+            *chunks
                 .get(&chunk_pos)
                 .and_then(|chunk| chunk.get_voxel(vox_pos))
                 .unwrap_or(&WorldVoxel::Unset)
-                .clone()
         })
     }
 
@@ -300,7 +299,7 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
 
         for chunk in self.dirty_chunks.iter() {
             let voxel_data_fn = (self.configuration.voxel_lookup_delegate)(chunk.position);
-            let texture_index_mapper = (&self.configuration.texture_index_mapper).clone();
+            let texture_index_mapper = self.configuration.texture_index_mapper.clone();
 
             let mut chunk_task = ChunkTask {
                 position: chunk.position,

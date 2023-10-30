@@ -46,10 +46,7 @@ impl Plugin for VoxelWorldPlugin {
         app.init_resource::<VoxelWorldConfiguration>()
             .init_resource::<ChunkMap>()
             .init_resource::<ModifiedVoxels>()
-            .add_systems(
-                First,
-                (spawn_chunks_in_view, retire_chunks_out_of_view),
-            )
+            .add_systems(First, (spawn_chunks_in_view, retire_chunks_out_of_view))
             .add_systems(PostUpdate, remesh_dirty_chunks)
             .add_systems(Last, despawn_retired_chunks)
             .add_event::<ChunkWillSpawn>()
@@ -71,7 +68,7 @@ impl Plugin for VoxelWorldPlugin {
             let mut preloaded_texture = true;
 
             // Use built-in default texture if no texture is specified.
-            let image_handle = if self.voxel_texture == "" {
+            let image_handle = if self.voxel_texture.is_empty() {
                 let mut image = Image::from_buffer(
                     include_bytes!("shaders/default_texture.png"),
                     bevy::render::texture::ImageType::MimeType("image/png"),
@@ -80,18 +77,15 @@ impl Plugin for VoxelWorldPlugin {
                 )
                 .unwrap();
                 image.reinterpret_stacked_2d_as_array(4);
-                let mut image_assets =
-                    app.world.resource_mut::<Assets<Image>>();
+                let mut image_assets = app.world.resource_mut::<Assets<Image>>();
                 image_assets.add(image)
             } else {
-                let asset_server =
-                    app.world.get_resource::<AssetServer>().unwrap();
+                let asset_server = app.world.get_resource::<AssetServer>().unwrap();
                 preloaded_texture = false;
                 asset_server.load(self.voxel_texture.clone())
             };
 
-            let mut material_assets =
-                app.world.resource_mut::<Assets<VoxelTextureMaterial>>();
+            let mut material_assets = app.world.resource_mut::<Assets<VoxelTextureMaterial>>();
 
             let mat_handle = material_assets.add(VoxelTextureMaterial {
                 voxels_texture: image_handle.clone(),
@@ -167,28 +161,25 @@ mod tests {
         let mut app = _test_setup_app();
 
         // Set and get some voxels
-        app.add_systems(
-            Startup,
-            |mut voxel_world: crate::prelude::VoxelWorld| {
-                let positions = vec![
-                    IVec3::new(0, 100, 0),
-                    IVec3::new(0, 0, 0),
-                    IVec3::new(1, 0, 1),
-                    IVec3::new(1, 1, 1),
-                    IVec3::new(100, 200, 300),
-                    IVec3::new(-1, 0, -1),
-                    IVec3::new(0, -1, 0),
-                    IVec3::new(-100, -200, -300),
-                ];
+        app.add_systems(Startup, |mut voxel_world: crate::prelude::VoxelWorld| {
+            let positions = vec![
+                IVec3::new(0, 100, 0),
+                IVec3::new(0, 0, 0),
+                IVec3::new(1, 0, 1),
+                IVec3::new(1, 1, 1),
+                IVec3::new(100, 200, 300),
+                IVec3::new(-1, 0, -1),
+                IVec3::new(0, -1, 0),
+                IVec3::new(-100, -200, -300),
+            ];
 
-                let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
-                for pos in positions {
-                    voxel_world.set_voxel(pos, test_voxel);
-                    assert_eq!(voxel_world.get_voxel(pos), test_voxel)
-                }
-            },
-        );
+            for pos in positions {
+                voxel_world.set_voxel(pos, test_voxel);
+                assert_eq!(voxel_world.get_voxel(pos), test_voxel)
+            }
+        });
 
         app.update();
     }
@@ -227,22 +218,16 @@ mod tests {
 
         let check_pos = positions.clone();
 
-        app.add_systems(
-            Startup,
-            move |voxel_world: crate::prelude::VoxelWorld| {
-                let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+        app.add_systems(Startup, move |voxel_world: crate::prelude::VoxelWorld| {
+            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
-                for pos in check_pos.clone() {
-                    assert_eq!(
-                        voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(
-                            pos.x as f32,
-                            pos.z as f32
-                        )),
-                        Some((pos, test_voxel))
-                    )
-                }
-            },
-        );
+            for pos in check_pos.clone() {
+                assert_eq!(
+                    voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(pos.x as f32, pos.z as f32)),
+                    Some((pos, test_voxel))
+                )
+            }
+        });
 
         app.update();
     }
@@ -271,15 +256,9 @@ mod tests {
             app.update();
         }
 
-        app.add_systems(
-            Update,
-            |mut voxel_world: crate::prelude::VoxelWorld| {
-                voxel_world.set_voxel(
-                    IVec3::new(0, 0, 0),
-                    crate::voxel::WorldVoxel::Solid(1),
-                );
-            },
-        );
+        app.add_systems(Update, |mut voxel_world: crate::prelude::VoxelWorld| {
+            voxel_world.set_voxel(IVec3::new(0, 0, 0), crate::voxel::WorldVoxel::Solid(1));
+        });
 
         app.update();
 

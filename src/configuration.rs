@@ -3,6 +3,9 @@ use std::sync::Arc;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
+pub type VoxelLookupFn = Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync>;
+pub type VoxelLookupDelegate = Box<dyn Fn(IVec3) -> VoxelLookupFn + Send + Sync>;
+
 ///
 /// Configuration for the voxel world
 ///
@@ -26,8 +29,7 @@ pub struct VoxelWorldConfiguration {
     /// The delegate will be called every time a new chunk needs to be computed. The delegate should
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
-    pub voxel_lookup_delegate:
-        Box<dyn Fn(IVec3) -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> + Send + Sync>,
+    pub voxel_lookup_delegate: VoxelLookupDelegate,
 }
 
 impl Default for VoxelWorldConfiguration {
