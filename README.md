@@ -1,5 +1,6 @@
 # bevy_voxel_world
 
+[![Crates.io](https://img.shields.io/crates/v/bevy_voxel_world.svg)](https://crates.io/crates/bevy_voxel_world)
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](https://github.com/bevyengine/bevy#license)
 [![Bevy tracking](https://img.shields.io/badge/Bevy%20tracking-released%20version-lightblue)](https://github.com/bevyengine/bevy/blob/main/docs/plugins_guidelines.md#main-branch-tracking)
 
@@ -20,6 +21,7 @@ fn my_system(mut voxel_world: VoxelWorld) {
     voxel_world.set_voxel(IVec3 { ... }, WorldVoxel::Ground(0));
 }
 ```
+
 This will update the voxel value at the given location, and cause `bevy_voxel_world` to queue the affected chunk for re-meshing.
 
 Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Ground`. `Ground` voxels also holds a mterial type value of type `u8`, meaning that a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback. Each material can map to three indexes; top, sides and bottom (examples coming soon.)
