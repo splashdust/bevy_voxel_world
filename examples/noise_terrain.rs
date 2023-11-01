@@ -14,7 +14,7 @@ fn main() {
 fn setup(mut commands: Commands) {
     commands.insert_resource(VoxelWorldConfiguration {
         // This is the spawn distance (in 32 meter chunks), centered around the camera.
-        spawning_distance: 15,
+        spawning_distance: 25,
 
         // Here we supply a closure that returns another closure that returns a voxel value for a given position.
         // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
@@ -28,7 +28,7 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3dBundle {
-            transform: Transform::from_xyz(-200.0, 180.0, -200.0).looking_at(Vec3::Y, Vec3::Y),
+            transform: Transform::from_xyz(-200.0, 180.0, -200.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
         // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
@@ -71,13 +71,8 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     // Then we return this boxed closure that captures the noise and the cache
     // This will get sent off to a separate thread for meshing by bevy_voxel_world
     Box::new(move |pos: IVec3| {
-        // Currently, bevy_voxel_world does not spawn any chunks below y=0 or above y=64
-        // (this is just a naive optimization that will be removed in the future)
-        // So we set those to solid and air here just to avoid empty holes where
-        // the terrain gets cut off
-        if pos.y > 63 {
-            return WorldVoxel::Air;
-        } else if pos.y < 1 {
+        // Sea level
+        if pos.y < 1 {
             return WorldVoxel::Solid(3);
         }
 
