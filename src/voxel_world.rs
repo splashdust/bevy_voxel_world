@@ -212,9 +212,7 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
 
         let queue_chunks_intersecting_ray_from_point =
             |point: Vec2, queue: &mut VecDeque<IVec3>| {
-                let ray = camera
-                    .viewport_to_world(&cam_gtf, point)
-                    .unwrap_or_default();
+                let ray = camera.viewport_to_world(cam_gtf, point).unwrap_or_default();
                 let mut current = ray.origin;
                 let mut t = 0.0;
                 for _ in 0..spawning_distance {
@@ -285,7 +283,7 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
 
                 // If this chunk is not in view, it should be just outside of view, and we can
                 // skip queing any neighbors, effectively culling the neighboring chunks
-                if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, &camera, &cam_gtf) {
+                if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, camera, cam_gtf) {
                     continue;
                 }
             } else {
