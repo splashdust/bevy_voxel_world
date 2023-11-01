@@ -134,7 +134,7 @@ fn spawn_chunk_meshes(mut mesh_spawner: VoxelWorldMeshSpawner) {
 }
 
 fn retire_chunks_out_of_view(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.remove_chunks_out_of_view();
+    voxel_world.remove_chunks_out_of_view_or_distance();
 }
 
 fn despawn_retired_chunks(mut voxel_world: VoxelWorldInternal) {

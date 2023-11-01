@@ -1,10 +1,13 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock},
+};
 
 use bevy::{
     ecs::system::SystemParam,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task},
-    utils::HashMap,
+    utils::{HashMap, HashSet},
 };
 use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use futures_lite::future;
@@ -185,7 +188,8 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
 
     dirty_chunks: Query<'w, 's, &'static Chunk, With<NeedsRemesh>>,
     retired_chunks: Query<'w, 's, &'static Chunk, With<NeedsDespawn>>,
-    camera: Query<'w, 's, &'static Transform, With<VoxelWorldCamera>>,
+    all_chunks: Query<'w, 's, (&'static Chunk, Option<&'static ComputedVisibility>)>,
+    camera: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
 
     ev_chunk_will_spawn: EventWriter<'w, ChunkWillSpawn>,
     ev_chunk_will_despawn: EventWriter<'w, ChunkWillDespawn>,
@@ -195,50 +199,109 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
 impl<'w, 's> VoxelWorldInternal<'w, 's> {
     /// Spawn chunks within the given distance of the camera
     pub fn spawn_chunks_in_view(&mut self) {
-        let camera_position = self
-            .camera
-            .get_single()
-            .unwrap_or(&Transform::default())
-            .translation;
-        let distance = self.configuration.spawning_distance as i32;
+        let (camera, cam_gtf) = self.camera.get_single().unwrap();
+        let cam_pos = cam_gtf.translation().as_ivec3();
 
-        let min = camera_position.as_ivec3() - IVec3::splat(distance * CHUNK_SIZE_I);
-        let max = camera_position.as_ivec3() + IVec3::splat(distance * CHUNK_SIZE_I);
+        let spawning_distance = self.configuration.spawning_distance as i32;
+        let spawning_distance_squared = spawning_distance.pow(2);
 
-        // TODO: This naive implementation needs to be optimized to only spawn chunks
-        // that are within the view frustum and that actually have voxels in them.
-        // Also, it might make more sense to start closest to the camera and work outwards.
-        for x in (min.x..=max.x).step_by(CHUNK_SIZE_U as usize) {
-            for y in (0..2 * CHUNK_SIZE_I).step_by(CHUNK_SIZE_U as usize) {
-                for z in (min.z..=max.z).step_by(CHUNK_SIZE_U as usize) {
-                    let chunk_position = IVec3::new(x, y, z) / CHUNK_SIZE_I;
+        let viewport_size = camera.physical_viewport_size().unwrap_or_default();
 
+        let mut visited = HashSet::new();
+        let mut chunks_deque = VecDeque::with_capacity((spawning_distance.pow(2) * 3) as usize);
+
+        let queue_chunks_intersecting_ray_from_point =
+            |point: Vec2, queue: &mut VecDeque<IVec3>| {
+                let ray = camera
+                    .viewport_to_world(&cam_gtf, point)
+                    .unwrap_or_default();
+                let mut current = ray.origin;
+                let mut t = 0.0;
+                for _ in 0..spawning_distance {
+                    let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
                     let has_chunk = {
                         let chunk_map = (*self.chunk_map).read().unwrap();
-                        chunk_map.contains_key(&chunk_position)
+                        chunk_map.contains_key(&chunk_pos)
                     };
-
                     if !has_chunk {
-                        let chunk = Chunk {
-                            position: chunk_position,
-                            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
-                            entity: self.commands.spawn(NeedsRemesh).id(),
-                        };
+                        queue.push_back(chunk_pos);
+                    }
+                    t += CHUNK_SIZE_F;
+                    current = ray.origin + ray.direction * t;
+                }
+            };
 
-                        self.ev_chunk_will_spawn.send(ChunkWillSpawn {
-                            chunk_key: chunk_position,
-                            entity: chunk.entity,
-                        });
+        // Each frame we pick a random point on the screen
+        let random_point_in_viewport = {
+            let x = rand::random::<f32>() * viewport_size.x as f32;
+            let y = rand::random::<f32>() * viewport_size.y as f32;
+            Vec2::new(x, y)
+        };
 
-                        let mut chunk_map_write = (*self.chunk_map).write().unwrap();
+        // We then cast a ray from this point, picking up any unspawned chunks along the ray
+        queue_chunks_intersecting_ray_from_point(random_point_in_viewport, &mut chunks_deque);
 
-                        chunk_map_write.insert(chunk_position, chunk.entity);
+        // We also queue the chunk closest to the camera to make sure it will always spawn early
+        let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
+        chunks_deque.push_back(chunk_at_camera);
 
-                        self.commands.entity(chunk.entity).insert(chunk).insert(
-                            Transform::from_translation(
-                                chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0,
-                            ),
-                        );
+        // Then, when we have an initial queue of chunks, we do kind of a flood fill to spawn
+        // any new chunks we come across within the spawning distance.
+        while let Some(chunk_position) = chunks_deque.pop_front() {
+            if visited.contains(&chunk_position) {
+                continue;
+            }
+            visited.insert(chunk_position);
+
+            if chunk_position.distance_squared(chunk_at_camera) > spawning_distance_squared {
+                continue;
+            }
+
+            let has_chunk = {
+                let chunk_map = (*self.chunk_map).read().unwrap();
+                chunk_map.contains_key(&chunk_position)
+            };
+
+            if !has_chunk {
+                let chunk = Chunk {
+                    position: chunk_position,
+                    voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+                    entity: self.commands.spawn(NeedsRemesh).id(),
+                };
+
+                self.ev_chunk_will_spawn.send(ChunkWillSpawn {
+                    chunk_key: chunk_position,
+                    entity: chunk.entity,
+                });
+
+                {
+                    let mut chunk_map_write = (*self.chunk_map).write().unwrap();
+                    chunk_map_write.insert(chunk_position, chunk.entity);
+                }
+
+                self.commands.entity(chunk.entity).insert(chunk).insert(
+                    Transform::from_translation(chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0),
+                );
+
+                // If this chunk is not in view, it should be just outside of view, and we can
+                // skip queing any neighbors, effectively culling the neighboring chunks
+                if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, &camera, &cam_gtf) {
+                    continue;
+                }
+            } else {
+                // If the chunk was already spawned, we can move on without queueing any neighbors
+                continue;
+            }
+
+            // If we get here, we queue the neighbors
+            for x in -1..=1 {
+                for y in -1..=1 {
+                    for z in -1..=1 {
+                        let queue_pos = chunk_position + IVec3::new(x, y, z);
+                        if queue_pos == chunk_position {
+                            continue;
+                        }
+                        chunks_deque.push_back(queue_pos);
                     }
                 }
             }
@@ -246,49 +309,48 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
     }
 
     /// Remove chunks that are outside the given distance of the camera
-    pub fn remove_chunks_out_of_view(&mut self) {
-        let camera_position = self
-            .camera
-            .get_single()
-            .unwrap_or(&Transform::default())
-            .translation;
-        let distance = self.configuration.spawning_distance as i32;
+    pub fn remove_chunks_out_of_view_or_distance(&mut self) {
+        let spawning_distance = self.configuration.spawning_distance as i32;
+        let spawning_distance_squared = spawning_distance.pow(2);
 
-        let min =
-            (camera_position.as_ivec3() - IVec3::splat(distance * CHUNK_SIZE_I)) / CHUNK_SIZE_I;
-        let max =
-            (camera_position.as_ivec3() + IVec3::splat(distance * CHUNK_SIZE_I)) / CHUNK_SIZE_I;
+        let (_, cam_gtf) = self.camera.get_single().unwrap();
+        let cam_pos = cam_gtf.translation().as_ivec3();
+
+        let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
 
         let chunks_to_remove = {
-            let mut remove = Vec::new();
-            let chunk_map_read = (*self.chunk_map).read().unwrap();
-            for (chunk_position, _) in chunk_map_read.iter() {
-                if chunk_position.x < min.x
-                    || chunk_position.x > max.x
-                    || chunk_position.z < min.z
-                    || chunk_position.z > max.z
-                {
-                    remove.push(*chunk_position);
+            let mut remove = Vec::with_capacity(1000);
+            for (chunk, computed_visibility) in self.all_chunks.iter() {
+                let is_chunk_in_view = {
+                    if let Some(cv) = computed_visibility {
+                        cv.is_visible_in_view()
+                    } else {
+                        true
+                    }
+                };
+                let dist_squared = chunk.position.distance_squared(chunk_at_camera);
+                if !is_chunk_in_view || dist_squared > spawning_distance_squared + 1 {
+                    remove.push(chunk);
                 }
             }
             remove
         };
 
-        for chunk_position in chunks_to_remove {
-            let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-            if let Some(entity) = chunk_map_write.remove(&chunk_position) {
-                self.commands.entity(entity).insert(NeedsDespawn);
-                self.ev_chunk_will_despawn.send(ChunkWillDespawn {
-                    chunk_key: chunk_position,
-                    entity,
-                });
-            }
+        for chunk in chunks_to_remove {
+            self.commands.entity(chunk.entity).insert(NeedsDespawn);
+            self.ev_chunk_will_despawn.send(ChunkWillDespawn {
+                chunk_key: chunk.position,
+                entity: chunk.entity,
+            });
         }
     }
 
     pub fn despawn_retired_chunks(&mut self) {
         for chunk in self.retired_chunks.iter() {
-            self.commands.entity(chunk.entity).despawn_recursive();
+            let mut chunk_map_write = (*self.chunk_map).write().unwrap();
+            if let Some(entity) = chunk_map_write.remove(&chunk.position) {
+                self.commands.entity(entity).despawn_recursive();
+            }
         }
     }
 
@@ -462,7 +524,7 @@ impl ChunkTask {
         self.voxels = Arc::new(voxels);
 
         // If the chunk is empty or full, we don't need to mesh it.
-        self.is_empty = filled_count == PaddedChunkShape::SIZE - 1 || filled_count == 0;
+        self.is_empty = filled_count == PaddedChunkShape::SIZE || filled_count == 0;
     }
 
     pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
@@ -488,6 +550,22 @@ fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)
+}
+
+#[inline]
+fn is_in_view(world_point: Vec3, camera: &Camera, cam_global_transform: &GlobalTransform) -> bool {
+    if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
+        // When the position is within the viewport the values returned will be between
+        // -1.0 and 1.0 on the X and Y axes, and between 0.0 and 1.0 on the Z axis.
+        chunk_vp.x >= -1.0
+            && chunk_vp.x <= 1.0
+            && chunk_vp.y >= -1.0
+            && chunk_vp.y <= 1.0
+            && chunk_vp.z >= 0.0
+            && chunk_vp.z <= 1.0
+    } else {
+        false
+    }
 }
 
 #[derive(Component)]
