@@ -44,4 +44,4 @@ Feedback, issues and pull requests are welcomed!
 
 | bevy | bevy_voxel_world |
 | ---- | ---------------- |
-| 0.11 | 0.1              |
+| 0.11 | ^0.1              |
