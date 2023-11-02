@@ -12,6 +12,10 @@ This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_v
 
 ![bvw_480](https://github.com/splashdust/bevy_voxel_world/assets/428824/98d25cd1-0a6c-4618-b0de-0e16ca5af636)
 
+```bash
+$ cargo run -r --example noise_terrain
+```
+
 The voxel terrain can be controlled in two main ways: through a terrain lookup function, and directly by `set_voxel` and `get_voxel` functions. The world has two "layers" of voxel information, one that is purely procedural and determined by a terrain lookup function, and one that is memory based and controlled by `set_voxel`. The data layer always overrides the procedural layer. This way, the world can be infinitely large, but we only need to store information about voxels that are deliberately changed.
 
 The `set_voxel` and `get_voxel` access functions are easily reached from any normal Bevy system:
@@ -44,4 +48,4 @@ Feedback, issues and pull requests are welcomed!
 
 | bevy | bevy_voxel_world |
 | ---- | ---------------- |
-| 0.11 | ^0.1              |
+| 0.11 | ^0.1             |
