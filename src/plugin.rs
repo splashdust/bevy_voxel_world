@@ -122,7 +122,7 @@ fn prepare_texture(
 }
 
 fn spawn_chunks_in_view(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.spawn_chunks_in_view();
+    voxel_world.spawn_chunks();
 }
 
 fn remesh_dirty_chunks(mut voxel_world: VoxelWorldInternal) {
@@ -134,7 +134,7 @@ fn spawn_chunk_meshes(mut mesh_spawner: VoxelWorldMeshSpawner) {
 }
 
 fn retire_chunks_out_of_view(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.remove_chunks_out_of_view_or_distance();
+    voxel_world.retire_chunks();
 }
 
 fn despawn_retired_chunks(mut voxel_world: VoxelWorldInternal) {

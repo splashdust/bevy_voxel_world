@@ -6,14 +6,25 @@ use bevy::prelude::*;
 pub type VoxelLookupFn = Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync>;
 pub type VoxelLookupDelegate = Box<dyn Fn(IVec3) -> VoxelLookupFn + Send + Sync>;
 
-///
-/// Configuration for the voxel world
-///
+#[derive(Default)]
+pub enum ChunkDespawnStrategy {
+    /// Despawn chunks that are further than `spawning_distance` away from the camera
+    /// or outside of the viewport.
+    #[default]
+    FarAwayOrOutOfView,
+
+    /// Only desapwn chunks that are further than `spawning_distance` away from the camera.
+    FarAway,
+}
+
+/// Configuration resource for bevy_voxel_world
 #[derive(Resource)]
-//#[reflect(Resource)]
 pub struct VoxelWorldConfiguration {
     /// Distance in chunks to spawn chunks around the camera
     pub spawning_distance: u32,
+
+    /// Strategy for despawning chunks
+    pub chunk_despawn_strategy: ChunkDespawnStrategy,
 
     /// Debugging aids
     pub debug_draw_chunks: bool,
@@ -36,6 +47,7 @@ impl Default for VoxelWorldConfiguration {
     fn default() -> Self {
         Self {
             spawning_distance: 10,
+            chunk_despawn_strategy: ChunkDespawnStrategy::default(),
             debug_draw_chunks: false,
             texture_index_mapper: Arc::new(|mat| match mat {
                 0 => [0, 0, 0],

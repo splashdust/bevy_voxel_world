@@ -13,8 +13,8 @@ use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use futures_lite::future;
 
 use crate::{
-    configuration::VoxelWorldConfiguration, meshing, voxel::WorldVoxel,
-    voxel_material::VoxelTextureMaterialHandle,
+    configuration::VoxelWorldConfiguration, meshing, prelude::ChunkDespawnStrategy,
+    voxel::WorldVoxel, voxel_material::VoxelTextureMaterialHandle,
 };
 
 pub const CHUNK_SIZE_U: u32 = 32;
@@ -198,7 +198,7 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
 
 impl<'w, 's> VoxelWorldInternal<'w, 's> {
     /// Spawn chunks within the given distance of the camera
-    pub fn spawn_chunks_in_view(&mut self) {
+    pub fn spawn_chunks(&mut self) {
         let (camera, cam_gtf) = self.camera.get_single().unwrap();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
@@ -307,7 +307,7 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
     }
 
     /// Remove chunks that are outside the given distance of the camera
-    pub fn remove_chunks_out_of_view_or_distance(&mut self) {
+    pub fn retire_chunks(&mut self) {
         let spawning_distance = self.configuration.spawning_distance as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
@@ -319,15 +319,20 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
         let chunks_to_remove = {
             let mut remove = Vec::with_capacity(1000);
             for (chunk, computed_visibility) in self.all_chunks.iter() {
-                let is_chunk_in_view = {
-                    if let Some(cv) = computed_visibility {
-                        cv.is_visible_in_view()
-                    } else {
-                        true
+                let should_be_culled = {
+                    match self.configuration.chunk_despawn_strategy {
+                        ChunkDespawnStrategy::FarAway => false,
+                        ChunkDespawnStrategy::FarAwayOrOutOfView => {
+                            if let Some(cv) = computed_visibility {
+                                !cv.is_visible_in_view()
+                            } else {
+                                false
+                            }
+                        }
                     }
                 };
                 let dist_squared = chunk.position.distance_squared(chunk_at_camera);
-                if !is_chunk_in_view || dist_squared > spawning_distance_squared + 1 {
+                if should_be_culled || dist_squared > spawning_distance_squared + 1 {
                     remove.push(chunk);
                 }
             }
