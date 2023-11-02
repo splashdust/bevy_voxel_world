@@ -152,6 +152,16 @@ mod tests {
     fn _test_setup_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, VoxelWorldPlugin::minimal()));
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.spawn((
+                Camera3dBundle {
+                    transform: Transform::from_xyz(10.0, 10.0, 10.0)
+                        .looking_at(Vec3::ZERO, Vec3::Y),
+                    ..default()
+                },
+                VoxelWorldCamera,
+            ));
+        });
 
         app
     }
@@ -277,21 +287,15 @@ mod tests {
     fn chunk_will_despawn_event() {
         let mut app = _test_setup_app();
 
-        // Setup dummy camera
-        app.add_systems(Startup, |mut commands: Commands| {
-            commands
-                .spawn(Transform::default())
-                .insert(VoxelWorldCamera);
-        });
-
-        app.update();
-
         // move camera to simulate chunks going out of view
         app.add_systems(
             Update,
-            |mut query: Query<&mut Transform, With<VoxelWorldCamera>>| {
+            |mut query: Query<&mut GlobalTransform, With<VoxelWorldCamera>>| {
                 for mut transform in query.iter_mut() {
-                    transform.translation.x += 100.0;
+                    // Not sure why, but when running tests, bevy won't update the GlobalTransform
+                    // when a Transform has changed, so as a workaround we set it here directly.
+                    let tf = Transform::from_xyz(1000.0, 1000.0, 1000.0);
+                    *transform = GlobalTransform::from(tf);
                 }
             },
         );
