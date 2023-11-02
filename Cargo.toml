@@ -10,6 +10,8 @@ repository = "https://github.com/splashdust/bevy_voxel_world"
 documentation = "https://github.com/splashdust/bevy_voxel_world"
 readme = "README.md"
 exclude = ["/assets/", "/examples/", "/.github/"]
+keywords = ["bevy", "voxels", "gamedev", "voxelengine"]
+categories = ["game-development", "graphics"]
 
 [profile.dev.package."*"]
 opt-level = 3
