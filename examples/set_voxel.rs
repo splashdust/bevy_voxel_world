@@ -30,7 +30,7 @@ fn setup(mut commands: Commands) {
 }
 
 fn set_solid_voxel(mut voxel_world: VoxelWorld) {
-    // Gnerate some random values
+    // Generate some random values
     let size = 10;
     let mut rng = rand::thread_rng();
     let x = rng.gen_range(-size..size);
@@ -45,7 +45,7 @@ fn set_solid_voxel(mut voxel_world: VoxelWorld) {
     }
 }
 
-// animate camera back and forth
+// Rotate the camera around the origin
 fn move_camera(time: Res<Time>, mut query: Query<&mut Transform, With<VoxelWorldCamera>>) {
     let mut transform = query.single_mut();
     let time_seconds = time.elapsed_seconds();
