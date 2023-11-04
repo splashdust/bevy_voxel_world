@@ -36,7 +36,7 @@ Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. 
 
 ## Voxel materials
 
-`Ground` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback. Each material can map to three indexes; top, sides and bottom (examples coming soon.)
+`Ground` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback.
 
 A custom array texture can be supplied when initializing the plugin:
 
@@ -45,7 +45,7 @@ VoxelWorldPlugin::default()
     .with_voxel_texture("images/materials.png", 6)
 ```
 
-This should be image with a size of `W x (w * n)`, where `n` is the number of indexes. So an array of 4 16x16 px textures would be 16x64 px in size. The number of indexes is specified in the second parameter (6 in the example above).
+This should be image with a size of `W x (W * n)`, where `n` is the number of indexes. So an array of 4 16x16 px textures would be 16x64 px in size. The number of indexes is specified in the second parameter (6 in the example above).
 
 Then, to map out which indexes belong to which material type, you can supply a `texture_index_mapper` callback:
 
