@@ -191,7 +191,6 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
     all_chunks: Query<'w, 's, (&'static Chunk, Option<&'static ComputedVisibility>)>,
     camera: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
 
-    ev_chunk_will_spawn: EventWriter<'w, ChunkWillSpawn>,
     ev_chunk_will_despawn: EventWriter<'w, ChunkWillDespawn>,
     ev_chunk_will_remesh: EventWriter<'w, ChunkWillRemesh>,
 }
@@ -265,11 +264,6 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
                     position: chunk_position,
                     entity: self.commands.spawn(NeedsRemesh).id(),
                 };
-
-                self.ev_chunk_will_spawn.send(ChunkWillSpawn {
-                    chunk_key: chunk_position,
-                    entity: chunk.entity,
-                });
 
                 {
                     let mut chunk_map_write = (*self.chunk_map).write().unwrap();
@@ -429,6 +423,7 @@ pub(crate) struct VoxelWorldMeshSpawner<'w, 's> {
     mesh_assets: ResMut<'w, Assets<Mesh>>,
     material_handle: Res<'w, VoxelTextureMaterialHandle>,
     loading_texture: ResMut<'w, LoadingTexture>,
+    ev_chunk_will_spawn: EventWriter<'w, ChunkWillSpawn>,
 }
 
 impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
@@ -457,6 +452,11 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
                                 ..default()
                             })
                             .remove::<bevy::render::primitives::Aabb>();
+
+                        self.ev_chunk_will_spawn.send(ChunkWillSpawn {
+                            chunk_key: chunk_task.position,
+                            entity: chunk.entity,
+                        });
                     }
                     let mut chunk_map_write = (*self.chunk_map).write().unwrap();
                     let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
