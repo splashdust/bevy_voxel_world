@@ -29,7 +29,6 @@ pub struct VoxelWorldCamera;
 pub struct VoxelWorld<'w, 's> {
     chunk_map: Res<'w, ChunkMap>,
     modified_voxels: Res<'w, ModifiedVoxels>,
-    chunks: Query<'w, 's, &'static Chunk>,
 
     commands: Commands<'w, 's>,
 }
@@ -44,16 +43,7 @@ impl<'w, 's> VoxelWorld<'w, 's> {
     /// This is useful for spawning tasks that need to access the voxel world
     pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync> {
         let modified_voxels = self.modified_voxels.0.clone();
-        let chunks = self
-            .chunks
-            .iter()
-            .map(|chunk| {
-                (
-                    chunk.position,
-                    (*self.chunks.get(chunk.entity).unwrap()).clone(),
-                )
-            })
-            .collect::<HashMap<IVec3, _>>();
+        let chunk_map = self.chunk_map.clone();
 
         Arc::new(move |position| {
             let (chunk_pos, vox_pos) = get_chunk_voxel_position(position);
@@ -65,10 +55,17 @@ impl<'w, 's> VoxelWorld<'w, 's> {
                 }
             }
 
-            *chunks
-                .get(&chunk_pos)
-                .and_then(|chunk| chunk.get_voxel(vox_pos))
-                .unwrap_or(&WorldVoxel::Unset)
+            let chunk_opt = {
+                let chun_map_read = chunk_map.read().unwrap();
+                chun_map_read.get(&chunk_pos).cloned()
+            };
+
+            if let Some(chunk_data) = chunk_opt {
+                let i = PaddedChunkShape::linearize(vox_pos.to_array()) as usize;
+                chunk_data.voxels[i]
+            } else {
+                WorldVoxel::Unset
+            }
         })
     }
 
@@ -154,24 +151,27 @@ impl<'w, 's> VoxelWorld<'w, 's> {
             modified_voxels_write.insert(position, voxel);
         };
 
-        let chunk_entity_opt = {
+        let chunk_opt = {
             let chunk_map = (*self.chunk_map).read().unwrap();
             chunk_map.get(&chunk_pos).cloned()
         };
 
-        if let Some(chunk_entity) = chunk_entity_opt {
-            if let Ok(chunk) = self.chunks.get(chunk_entity) {
-                // Mark the chunk as needing remeshing
-                self.commands.entity(chunk.entity).insert(NeedsRemesh);
-            }
+        if let Some(chunk_data) = chunk_opt {
+            // Mark the chunk as needing remeshing
+            self.commands.entity(chunk_data.entity).insert(NeedsRemesh);
         } else {
             let chunk = Chunk {
                 position: chunk_pos,
-                voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
                 entity: self.commands.spawn(NeedsRemesh).id(),
             };
             let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-            chunk_map_write.insert(chunk_pos, chunk.entity);
+            chunk_map_write.insert(
+                chunk_pos,
+                ChunkData {
+                    voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+                    entity: chunk.entity,
+                },
+            );
             self.commands.entity(chunk.entity).insert(chunk);
         }
     }
@@ -263,7 +263,6 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
             if !has_chunk {
                 let chunk = Chunk {
                     position: chunk_position,
-                    voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
                     entity: self.commands.spawn(NeedsRemesh).id(),
                 };
 
@@ -274,7 +273,13 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
 
                 {
                     let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-                    chunk_map_write.insert(chunk_position, chunk.entity);
+                    chunk_map_write.insert(
+                        chunk_position,
+                        ChunkData {
+                            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+                            entity: chunk.entity,
+                        },
+                    );
                 }
 
                 self.commands.entity(chunk.entity).insert(chunk).insert(
@@ -351,8 +356,8 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
     pub fn despawn_retired_chunks(&mut self) {
         for chunk in self.retired_chunks.iter() {
             let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-            if let Some(entity) = chunk_map_write.remove(&chunk.position) {
-                self.commands.entity(entity).despawn_recursive();
+            if let Some(chunk_data) = chunk_map_write.remove(&chunk.position) {
+                self.commands.entity(chunk_data.entity).despawn_recursive();
             }
         }
     }
@@ -366,29 +371,36 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
             let voxel_data_fn = (self.configuration.voxel_lookup_delegate)(chunk.position);
             let texture_index_mapper = self.configuration.texture_index_mapper.clone();
 
-            let mut chunk_task = ChunkTask {
-                position: chunk.position,
-                voxels: chunk.voxels.clone(),
-                modified_voxels: self.modified_voxels.clone(),
-                mesh: None,
-                is_empty: true,
+            let chunk_opt = {
+                let chunk_map = (*self.chunk_map).read().unwrap();
+                chunk_map.get(&chunk.position).cloned()
             };
 
-            let thread = thread_pool.spawn(async move {
-                chunk_task.generate(voxel_data_fn);
-                chunk_task.mesh(texture_index_mapper);
-                chunk_task
-            });
+            if let Some(chunk_data) = chunk_opt {
+                let mut chunk_task = ChunkTask {
+                    position: chunk.position,
+                    voxels: chunk_data.voxels.clone(),
+                    modified_voxels: self.modified_voxels.clone(),
+                    mesh: None,
+                    is_empty: true,
+                };
 
-            self.commands
-                .entity(chunk.entity)
-                .insert(ChunkThread(thread))
-                .remove::<NeedsRemesh>();
+                let thread = thread_pool.spawn(async move {
+                    chunk_task.generate(voxel_data_fn);
+                    chunk_task.mesh(texture_index_mapper);
+                    chunk_task
+                });
 
-            self.ev_chunk_will_remesh.send(ChunkWillRemesh {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
+                self.commands
+                    .entity(chunk.entity)
+                    .insert(ChunkThread(thread))
+                    .remove::<NeedsRemesh>();
+
+                self.ev_chunk_will_remesh.send(ChunkWillRemesh {
+                    chunk_key: chunk.position,
+                    entity: chunk.entity,
+                });
+            }
         }
     }
 }
@@ -412,6 +424,7 @@ pub(crate) struct VoxelWorldMeshSpawner<'w, 's> {
         ),
         Without<NeedsRemesh>,
     >,
+    chunk_map: Res<'w, ChunkMap>,
     mesh_assets: ResMut<'w, Assets<Mesh>>,
     material_handle: Res<'w, VoxelTextureMaterialHandle>,
     loading_texture: ResMut<'w, LoadingTexture>,
@@ -443,7 +456,11 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
                         })
                         .remove::<bevy::render::primitives::Aabb>();
 
-                    chunk.voxels = chunk_data.voxels;
+                    {
+                        let mut chunk_map_write = (*self.chunk_map).write().unwrap();
+                        let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
+                        chunk_data_mut.voxels = chunk_data.voxels;
+                    }
                 }
             }
 
@@ -452,13 +469,19 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
     }
 }
 
+#[derive(Clone)]
+pub struct ChunkData {
+    pub voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
+    pub entity: Entity,
+}
+
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 pub(crate) type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
 #[derive(Resource, Deref, DerefMut)]
-pub struct ChunkMap(Arc<RwLock<HashMap<IVec3, Entity>>>);
+pub struct ChunkMap(Arc<RwLock<HashMap<IVec3, ChunkData>>>);
 
 impl Default for ChunkMap {
     fn default() -> Self {
@@ -469,15 +492,7 @@ impl Default for ChunkMap {
 #[derive(Component, Clone)]
 pub struct Chunk {
     position: IVec3,
-    voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
     entity: Entity,
-}
-
-impl Chunk {
-    fn get_voxel(&self, position: UVec3) -> Option<&WorldVoxel> {
-        let i = PaddedChunkShape::linearize(position.to_array()) as usize;
-        self.voxels.get(i)
-    }
 }
 
 #[derive(Component)]
