@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Move voxel data to `ChunkMap` instead of the `Chunk` component. This makes `get_voxel()` much faster, because we don't need to `collect()` all the `Chunk`s to find the correct voxel data.
+
 ## 0.2.0
 
 - Rewrite spawning system\
