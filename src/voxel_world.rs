@@ -437,19 +437,19 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
             return;
         }
 
-        for (mut thread, mut chunk, transform) in &mut self.chunking_threads {
+        for (mut thread, chunk, transform) in &mut self.chunking_threads {
             let thread_result = future::block_on(future::poll_once(&mut thread.0));
 
             if thread_result.is_none() {
                 continue;
             }
 
-            if let Some(chunk_data) = thread_result {
-                if !chunk_data.is_empty {
+            if let Some(chunk_task) = thread_result {
+                if !chunk_task.is_empty {
                     self.commands
                         .entity(chunk.entity)
                         .insert(MaterialMeshBundle {
-                            mesh: self.mesh_assets.add(chunk_data.mesh.unwrap()),
+                            mesh: self.mesh_assets.add(chunk_task.mesh.unwrap()),
                             material: self.material_handle.0.clone(),
                             transform: *transform,
                             ..default()
@@ -459,7 +459,7 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
                     {
                         let mut chunk_map_write = (*self.chunk_map).write().unwrap();
                         let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
-                        chunk_data_mut.voxels = chunk_data.voxels;
+                        chunk_data_mut.voxels = chunk_task.voxels;
                     }
                 }
             }
