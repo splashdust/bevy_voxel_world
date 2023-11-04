@@ -11,6 +11,10 @@ impl WorldVoxel {
     pub fn is_unset(&self) -> bool {
         *self == WorldVoxel::Unset
     }
+
+    pub fn is_air(&self) -> bool {
+        *self == WorldVoxel::Air
+    }
 }
 
 impl Voxel for WorldVoxel {

@@ -383,6 +383,7 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
                     modified_voxels: self.modified_voxels.clone(),
                     mesh: None,
                     is_empty: true,
+                    is_full: false,
                 };
 
                 let thread = thread_pool.spawn(async move {
@@ -446,21 +447,20 @@ impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
 
             if let Some(chunk_task) = thread_result {
                 if !chunk_task.is_empty {
-                    self.commands
-                        .entity(chunk.entity)
-                        .insert(MaterialMeshBundle {
-                            mesh: self.mesh_assets.add(chunk_task.mesh.unwrap()),
-                            material: self.material_handle.0.clone(),
-                            transform: *transform,
-                            ..default()
-                        })
-                        .remove::<bevy::render::primitives::Aabb>();
-
-                    {
-                        let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-                        let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
-                        chunk_data_mut.voxels = chunk_task.voxels;
+                    if !chunk_task.is_full {
+                        self.commands
+                            .entity(chunk.entity)
+                            .insert(MaterialMeshBundle {
+                                mesh: self.mesh_assets.add(chunk_task.mesh.unwrap()),
+                                material: self.material_handle.0.clone(),
+                                transform: *transform,
+                                ..default()
+                            })
+                            .remove::<bevy::render::primitives::Aabb>();
                     }
+                    let mut chunk_map_write = (*self.chunk_map).write().unwrap();
+                    let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
+                    chunk_data_mut.voxels = chunk_task.voxels;
                 }
             }
 
@@ -501,6 +501,7 @@ pub(crate) struct ChunkTask {
     voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
     modified_voxels: ModifiedVoxels,
     is_empty: bool,
+    is_full: bool,
     mesh: Option<Mesh>,
 }
 
@@ -524,7 +525,7 @@ impl ChunkTask {
 
             if let Some(voxel) = modified_voxels.get(&block_pos) {
                 voxels[i as usize] = *voxel;
-                if !voxel.is_unset() {
+                if !voxel.is_unset() && !voxel.is_air() {
                     filled_count += 1;
                 }
                 continue;
@@ -541,8 +542,8 @@ impl ChunkTask {
 
         self.voxels = Arc::new(voxels);
 
-        // If the chunk is empty or full, we don't need to mesh it.
-        self.is_empty = filled_count == PaddedChunkShape::SIZE || filled_count == 0;
+        self.is_empty = filled_count == 0;
+        self.is_full = filled_count == PaddedChunkShape::SIZE;
     }
 
     pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
