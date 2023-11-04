@@ -75,7 +75,7 @@ commands.insert_resource(VoxelWorldConfiguration {
 });
 ```
 
-The `texture_index_mapper` callback is supplied with a material type and should return an array with three values. The values indicate witch texture index maps to `[top, sides, bottom]` of a voxel.
+The `texture_index_mapper` callback is supplied with a material type and should return an array with three values. The values indicate which texture index maps to `[top, sides, bottom]` of a voxel.
 
 ## Gotchas
 
