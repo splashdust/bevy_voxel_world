@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- Update to Bevy 0.12
+
 ## 0.2.2
 
 - Fix an issue where filled underground chunks would never get meshed, even if they were modified
