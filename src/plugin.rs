@@ -98,7 +98,12 @@ impl Plugin for VoxelWorldPlugin {
                 );
 
             let mat_handle = material_assets.add(ExtendedMaterial {
-                base: StandardMaterial::default(),
+                base: StandardMaterial {
+                    reflectance: 0.05,
+                    metallic: 0.05,
+                    perceptual_roughness: 0.95,
+                    ..default()
+                },
                 extension: StandardVoxelMaterial {
                     voxels_texture: image_handle.clone(),
                 },
