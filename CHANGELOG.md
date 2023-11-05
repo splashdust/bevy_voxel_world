@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Fix an issue where filled underground chunks would never get meshed, even if they were modified
+- `ChunkWillSpawn` event now only fire when actually meshed chunks spawn, preventing massive spam of this event.
+
 ## 0.2.1
 
 - Move voxel data to `ChunkMap` instead of the `Chunk` component. This makes `get_voxel()` much faster, because we don't need to `collect()` all the `Chunk`s to find the correct voxel data.
