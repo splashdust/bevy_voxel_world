@@ -1,9 +1,13 @@
-use bevy::{asset::load_internal_asset, prelude::*};
+use bevy::{
+    asset::{embedded_asset, load_internal_asset},
+    pbr::ExtendedMaterial,
+    prelude::*,
+};
 
 use crate::{
     configuration::VoxelWorldConfiguration,
     voxel_material::{
-        TextureLayers, VoxelTextureMaterial, VoxelTextureMaterialHandle,
+        StandardVoxelMaterial, StandardVoxelMaterialHandle, TextureLayers,
         VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
@@ -63,7 +67,9 @@ impl Plugin for VoxelWorldPlugin {
                 Shader::from_wgsl
             );
 
-            app.add_plugins(MaterialPlugin::<VoxelTextureMaterial>::default());
+            app.add_plugins(MaterialPlugin::<
+                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+            >::default());
 
             let mut preloaded_texture = true;
 
@@ -74,6 +80,7 @@ impl Plugin for VoxelWorldPlugin {
                     bevy::render::texture::ImageType::MimeType("image/png"),
                     bevy::render::texture::CompressedImageFormats::default(),
                     false,
+                    bevy::render::texture::ImageSampler::Default,
                 )
                 .unwrap();
                 image.reinterpret_stacked_2d_as_array(4);
@@ -85,17 +92,23 @@ impl Plugin for VoxelWorldPlugin {
                 asset_server.load(self.voxel_texture.clone())
             };
 
-            let mut material_assets = app.world.resource_mut::<Assets<VoxelTextureMaterial>>();
+            let mut material_assets = app
+                .world
+                .resource_mut::<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>(
+                );
 
-            let mat_handle = material_assets.add(VoxelTextureMaterial {
-                voxels_texture: image_handle.clone(),
+            let mat_handle = material_assets.add(ExtendedMaterial {
+                base: StandardMaterial::default(),
+                extension: StandardVoxelMaterial {
+                    voxels_texture: image_handle.clone(),
+                },
             });
 
             app.insert_resource(LoadingTexture {
                 is_loaded: preloaded_texture,
                 handle: image_handle,
             });
-            app.insert_resource(VoxelTextureMaterialHandle(mat_handle));
+            app.insert_resource(StandardVoxelMaterialHandle(mat_handle));
             app.insert_resource(TextureLayers(self.texture_layers));
 
             app.add_systems(Update, (prepare_texture, spawn_chunk_meshes));
@@ -111,7 +124,7 @@ fn prepare_texture(
 ) {
     if loading_texture.is_loaded
         || asset_server.get_load_state(loading_texture.handle.clone())
-            != bevy::asset::LoadState::Loaded
+            != Some(bevy::asset::LoadState::Loaded)
     {
         return;
     }

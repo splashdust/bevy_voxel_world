@@ -17,14 +17,14 @@ categories = ["game-development", "graphics"]
 opt-level = 3
 
 [dependencies]
-bevy = { version = "0.11.3", features = [
+bevy = { git = "https://github.com/bonsairobo/bevy.git", branch = "fix_embedded_path", features = [
     "bevy_render",
     "bevy_asset",
     "bevy_pbr",
 ] }
 block-mesh = "0.2.0"
 ndshape = "0.3.0"
-futures-lite = "1.13.0"
+futures-lite = "2.0.0"
 rand = "0.8.5"
 
 [dev-dependencies]

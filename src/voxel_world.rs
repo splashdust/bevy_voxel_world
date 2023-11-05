@@ -14,7 +14,7 @@ use futures_lite::future;
 
 use crate::{
     configuration::VoxelWorldConfiguration, meshing, prelude::ChunkDespawnStrategy,
-    voxel::WorldVoxel, voxel_material::VoxelTextureMaterialHandle,
+    voxel::WorldVoxel, voxel_material::StandardVoxelMaterialHandle,
 };
 
 pub const CHUNK_SIZE_U: u32 = 32;
@@ -188,7 +188,7 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
 
     dirty_chunks: Query<'w, 's, &'static Chunk, With<NeedsRemesh>>,
     retired_chunks: Query<'w, 's, &'static Chunk, With<NeedsDespawn>>,
-    all_chunks: Query<'w, 's, (&'static Chunk, Option<&'static ComputedVisibility>)>,
+    all_chunks: Query<'w, 's, (&'static Chunk, Option<&'static ViewVisibility>)>,
     camera: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
 
     ev_chunk_will_despawn: EventWriter<'w, ChunkWillDespawn>,
@@ -317,13 +317,13 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
 
         let chunks_to_remove = {
             let mut remove = Vec::with_capacity(1000);
-            for (chunk, computed_visibility) in self.all_chunks.iter() {
+            for (chunk, view_visibility) in self.all_chunks.iter() {
                 let should_be_culled = {
                     match self.configuration.chunk_despawn_strategy {
                         ChunkDespawnStrategy::FarAway => false,
                         ChunkDespawnStrategy::FarAwayOrOutOfView => {
-                            if let Some(cv) = computed_visibility {
-                                !cv.is_visible_in_view()
+                            if let Some(visibility) = view_visibility {
+                                !visibility.get()
                             } else {
                                 false
                             }
@@ -421,7 +421,7 @@ pub(crate) struct VoxelWorldMeshSpawner<'w, 's> {
     >,
     chunk_map: Res<'w, ChunkMap>,
     mesh_assets: ResMut<'w, Assets<Mesh>>,
-    material_handle: Res<'w, VoxelTextureMaterialHandle>,
+    material_handle: Res<'w, StandardVoxelMaterialHandle>,
     loading_texture: ResMut<'w, LoadingTexture>,
     ev_chunk_will_spawn: EventWriter<'w, ChunkWillSpawn>,
 }
