@@ -1,8 +1,4 @@
-use bevy::{
-    asset::{embedded_asset, load_internal_asset},
-    pbr::ExtendedMaterial,
-    prelude::*,
-};
+use bevy::{asset::load_internal_asset, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
     configuration::VoxelWorldConfiguration,

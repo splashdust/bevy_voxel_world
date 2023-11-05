@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
     reflect::{TypePath, TypeUuid},
     render::{
-        mesh::{MeshVertexAttribute, MeshVertexBufferLayout, VertexAttributeDescriptor},
+        mesh::{MeshVertexAttribute, MeshVertexBufferLayout},
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
             VertexFormat,
