@@ -17,7 +17,7 @@ categories = ["game-development", "graphics"]
 opt-level = 3
 
 [dependencies]
-bevy = { git = "https://github.com/bonsairobo/bevy.git", branch = "fix_embedded_path", features = [
+bevy = { version = "0.12", features = [
     "bevy_render",
     "bevy_asset",
     "bevy_pbr",
