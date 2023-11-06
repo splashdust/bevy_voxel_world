@@ -51,7 +51,7 @@ Then, to map out which indexes belong to which material type, you can supply a `
 
 ```rust
 commands.insert_resource(VoxelWorldConfiguration {
-    texture_index_mapper: std::sync::Arc::new(|vox_mat: u8| {
+    texture_index_mapper: Arc::new(|vox_mat: u8| {
         match vox_mat {
             // Top brick
             0 => [0, 1, 2],
