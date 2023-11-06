@@ -79,15 +79,14 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
         let [x, y, z] = pos.as_dvec3().to_array();
 
         // If y is less than the noise sample, we will set the voxel to solid
-        let is_ground = y - 2.0
-            < match cache.get(&(pos.x, pos.z)) {
-                Some(sample) => *sample,
-                None => {
-                    let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
-                    cache.insert((pos.x, pos.z), sample);
-                    sample
-                }
-            };
+        let is_ground = y < match cache.get(&(pos.x, pos.z)) {
+            Some(sample) => *sample,
+            None => {
+                let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
+                cache.insert((pos.x, pos.z), sample);
+                sample
+            }
+        };
 
         if is_ground {
             // Solid voxel of material type 0
