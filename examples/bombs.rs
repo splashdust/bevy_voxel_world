@@ -15,7 +15,6 @@ fn main() {
 
 #[derive(Component)]
 struct ExplosionTimeout {
-    /// track when the bomb should explode (non-repeating timer)
     timer: Timer,
 }
 
