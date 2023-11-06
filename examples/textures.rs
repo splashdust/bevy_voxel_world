@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
+use std::sync::Arc;
 
 fn main() {
     App::new()
@@ -20,7 +21,7 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(VoxelWorldConfiguration {
         // To specify how the texture map to different kind of voxels we add this mapping callback
         // For each material type, we specify the texture coordinates for the top, side and bottom faces.
-        texture_index_mapper: std::sync::Arc::new(|vox_mat: u8| {
+        texture_index_mapper: Arc::new(|vox_mat: u8| {
             match vox_mat {
                 // Top brick
                 0 => [0, 1, 2],
