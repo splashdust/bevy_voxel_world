@@ -51,24 +51,16 @@ Then, to map out which indexes belong to which material type, you can supply a `
 
 ```rust
 commands.insert_resource(VoxelWorldConfiguration {
-    texture_index_mapper: Arc::new(|vox_mat: u8| {
+    texture_index_mapper: std::sync::Arc::new(|vox_mat: u8| {
         match vox_mat {
-            // Grass
+            // Top brick
             0 => [0, 1, 2],
 
-            // Dirt
+            // Full brick
             1 => [2, 2, 2],
 
-            // Stone
-            2 => [3, 3, 3],
-
-            // Sand
-            3 => [4, 4, 4],
-
-            // Snow
-            4 => [5, 5, 5],
-
-            _ => [2, 2, 2],
+            // Grass
+            2 | _ => [3, 3, 3],
         }
     }),
     ..Default::default()
@@ -76,6 +68,8 @@ commands.insert_resource(VoxelWorldConfiguration {
 ```
 
 The `texture_index_mapper` callback is supplied with a material type and should return an array with three values. The values indicate which texture index maps to `[top, sides, bottom]` of a voxel.
+
+See the [textures example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/textures.rs) for a runnable example of this.
 
 ## Gotchas
 
