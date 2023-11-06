@@ -71,6 +71,8 @@ The `texture_index_mapper` callback is supplied with a material type and should 
 
 See the [textures example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/textures.rs) for a runnable example of this.
 
+<img width="558" alt="Screenshot 2023-11-06 at 21 50 05" src="https://github.com/splashdust/bevy_voxel_world/assets/428824/382fdcf7-9d70-4432-b2ba-18479d34346f">
+
 ## Gotchas
 
 `bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.
