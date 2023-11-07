@@ -26,17 +26,17 @@ The `set_voxel` and `get_voxel` access functions are easily reached from any nor
 
 ```rust
 fn my_system(mut voxel_world: VoxelWorld) {
-    voxel_world.set_voxel(IVec3 { ... }, WorldVoxel::Ground(0));
+    voxel_world.set_voxel(IVec3 { ... }, WorldVoxel::Solid(0));
 }
 ```
 
 This will update the voxel value at the given location in the persisting `HashMap`, and cause `bevy_voxel_world` to queue the affected chunk for re-meshing.
 
-Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Ground`.
+Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Solid`.
 
 ## Voxel materials
 
-`Ground` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback.
+`Solid` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback.
 
 A custom array texture can be supplied when initializing the plugin:
 
