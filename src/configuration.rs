@@ -6,15 +6,28 @@ use bevy::prelude::*;
 pub type VoxelLookupFn = Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync>;
 pub type VoxelLookupDelegate = Box<dyn Fn(IVec3) -> VoxelLookupFn + Send + Sync>;
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
     /// Despawn chunks that are further than `spawning_distance` away from the camera
     /// or outside of the viewport.
     #[default]
     FarAwayOrOutOfView,
 
-    /// Only desapwn chunks that are further than `spawning_distance` away from the camera.
+    /// Only despawn chunks that are further than `spawning_distance` away from the camera.
     FarAway,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub enum ChunkSpawnStrategy {
+    /// Spawn chunks that are within `spawning_distance` of the camera
+    /// and also inside the viewport.
+    #[default]
+    CloseAndInView,
+
+    /// Spawn chunks that are within `spawning_distance` of the camera, regardless of whether
+    /// they are in the viewport or not. Will only have an effect if the despawn strategy is
+    /// `FarAway`.
+    Close,
 }
 
 /// Configuration resource for bevy_voxel_world
@@ -25,6 +38,15 @@ pub struct VoxelWorldConfiguration {
 
     /// Strategy for despawning chunks
     pub chunk_despawn_strategy: ChunkDespawnStrategy,
+
+    /// Strategy for spawning chunks
+    /// This is only used if the despawn strategy is `FarAway`
+    pub chunk_spawn_strategy: ChunkSpawnStrategy,
+
+    /// Maximum number of chunks that can get queued for spawning in a given frame.
+    /// In some scenarios, reducing this number can help with performance, due to less
+    /// thread contention.
+    pub max_spawn_per_frame: usize,
 
     /// Debugging aids
     pub debug_draw_chunks: bool,
@@ -48,7 +70,9 @@ impl Default for VoxelWorldConfiguration {
         Self {
             spawning_distance: 10,
             chunk_despawn_strategy: ChunkDespawnStrategy::default(),
-            debug_draw_chunks: false,
+            chunk_spawn_strategy: ChunkSpawnStrategy::default(),
+            debug_draw_chunks: true,
+            max_spawn_per_frame: 1000,
             texture_index_mapper: Arc::new(|mat| match mat {
                 0 => [0, 0, 0],
                 1 => [1, 1, 1],

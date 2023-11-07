@@ -13,8 +13,11 @@ use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use futures_lite::future;
 
 use crate::{
-    configuration::VoxelWorldConfiguration, meshing, prelude::ChunkDespawnStrategy,
-    voxel::WorldVoxel, voxel_material::StandardVoxelMaterialHandle,
+    configuration::VoxelWorldConfiguration,
+    meshing,
+    prelude::{ChunkDespawnStrategy, ChunkSpawnStrategy},
+    voxel::WorldVoxel,
+    voxel_material::StandardVoxelMaterialHandle,
 };
 
 pub const CHUNK_SIZE_U: u32 = 32;
@@ -38,6 +41,12 @@ impl<'w, 's> VoxelWorld<'w, 's> {
     /// Get the voxel at the given position, or None if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
         self.get_voxel_fn()(position)
+    }
+
+    /// Set the voxel at the given position. This will create a new chunk if one does not exist at
+    /// the given position.
+    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel) {
+        self.voxel_write_buffer.push((position, voxel));
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
@@ -149,12 +158,6 @@ impl<'w, 's> VoxelWorld<'w, 's> {
             z: pos_2d.y.floor() as i32,
         })
     }
-
-    /// Set the voxel at the given position. This will create a new chunk if one does not exist at
-    /// the given position.
-    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel) {
-        self.voxel_write_buffer.push((position, voxel));
-    }
 }
 
 /// This is used internally by the plugin to manage the world
@@ -223,10 +226,14 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
         chunks_deque.push_back(chunk_at_camera);
 
+        let spawn_stratey = &self.configuration.chunk_spawn_strategy;
+        let despawn_strategy = &self.configuration.chunk_despawn_strategy;
+        let max_spawn_per_frame = self.configuration.max_spawn_per_frame;
+
         // Then, when we have an initial queue of chunks, we do kind of a flood fill to spawn
         // any new chunks we come across within the spawning distance.
         while let Some(chunk_position) = chunks_deque.pop_front() {
-            if visited.contains(&chunk_position) {
+            if visited.contains(&chunk_position) || chunks_deque.len() > max_spawn_per_frame {
                 continue;
             }
             visited.insert(chunk_position);
@@ -261,10 +268,14 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
                     Transform::from_translation(chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0),
                 );
 
-                // If this chunk is not in view, it should be just outside of view, and we can
-                // skip queing any neighbors, effectively culling the neighboring chunks
-                if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, camera, cam_gtf) {
-                    continue;
+                if spawn_stratey != &ChunkSpawnStrategy::Close
+                    && despawn_strategy != &ChunkDespawnStrategy::FarAway
+                {
+                    // If this chunk is not in view, it should be just outside of view, and we can
+                    // skip queing any neighbors, effectively culling the neighboring chunks
+                    if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, camera, cam_gtf) {
+                        continue;
+                    }
                 }
             } else {
                 // If the chunk was already spawned, we can move on without queueing any neighbors
