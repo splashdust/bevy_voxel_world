@@ -29,6 +29,7 @@ pub struct VoxelWorldCamera;
 pub struct VoxelWorld<'w, 's> {
     chunk_map: Res<'w, ChunkMap>,
     modified_voxels: Res<'w, ModifiedVoxels>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
 
     commands: Commands<'w, 's>,
 }
@@ -44,9 +45,18 @@ impl<'w, 's> VoxelWorld<'w, 's> {
     pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync> {
         let modified_voxels = self.modified_voxels.0.clone();
         let chunk_map = self.chunk_map.clone();
+        let write_buffer = self.voxel_write_buffer.clone();
 
         Arc::new(move |position| {
             let (chunk_pos, vox_pos) = get_chunk_voxel_position(position);
+
+            if let Some(voxel) = write_buffer
+                .iter()
+                .find(|(pos, _)| *pos == position)
+                .map(|(_, voxel)| *voxel)
+            {
+                return voxel;
+            }
 
             {
                 let modified_voxels = modified_voxels.read().unwrap();
@@ -143,37 +153,7 @@ impl<'w, 's> VoxelWorld<'w, 's> {
     /// Set the voxel at the given position. This will create a new chunk if one does not exist at
     /// the given position.
     pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel) {
-        let (chunk_pos, _vox_pos) = get_chunk_voxel_position(position);
-
-        // Set the voxel in the modified_voxels map. This map persists when chunks are despawned
-        {
-            let mut modified_voxels_write = (*self.modified_voxels).write().unwrap();
-            modified_voxels_write.insert(position, voxel);
-        };
-
-        let chunk_opt = {
-            let chunk_map = (*self.chunk_map).read().unwrap();
-            chunk_map.get(&chunk_pos).cloned()
-        };
-
-        if let Some(chunk_data) = chunk_opt {
-            // Mark the chunk as needing remeshing
-            self.commands.entity(chunk_data.entity).insert(NeedsRemesh);
-        } else {
-            let chunk = Chunk {
-                position: chunk_pos,
-                entity: self.commands.spawn(NeedsRemesh).id(),
-            };
-            let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-            chunk_map_write.insert(
-                chunk_pos,
-                ChunkData {
-                    voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
-                    entity: chunk.entity,
-                },
-            );
-            self.commands.entity(chunk.entity).insert(chunk);
-        }
+        self.voxel_write_buffer.push((position, voxel));
     }
 }
 
@@ -185,6 +165,7 @@ pub(crate) struct VoxelWorldInternal<'w, 's> {
     chunk_map: Res<'w, ChunkMap>,
     modified_voxels: Res<'w, ModifiedVoxels>,
     configuration: Res<'w, VoxelWorldConfiguration>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
 
     dirty_chunks: Query<'w, 's, &'static Chunk, With<NeedsRemesh>>,
     retired_chunks: Query<'w, 's, &'static Chunk, With<NeedsDespawn>>,
@@ -397,6 +378,37 @@ impl<'w, 's> VoxelWorldInternal<'w, 's> {
                 });
             }
         }
+    }
+
+    pub fn flush_voxel_write_buffer(&mut self) {
+        let mut chunk_map = (*self.chunk_map).write().unwrap();
+        let mut modified_voxels = (*self.modified_voxels).write().unwrap();
+
+        for (position, voxel) in self.voxel_write_buffer.iter() {
+            let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
+            modified_voxels.insert(*position, *voxel);
+
+            let chunk_opt = { chunk_map.get(&chunk_pos).cloned() };
+
+            if let Some(chunk_data) = chunk_opt {
+                // Mark the chunk as needing remeshing
+                self.commands.entity(chunk_data.entity).insert(NeedsRemesh);
+            } else {
+                let chunk = Chunk {
+                    position: chunk_pos,
+                    entity: self.commands.spawn(NeedsRemesh).id(),
+                };
+                chunk_map.insert(
+                    chunk_pos,
+                    ChunkData {
+                        voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+                        entity: chunk.entity,
+                    },
+                );
+                self.commands.entity(chunk.entity).insert(chunk);
+            }
+        }
+        self.voxel_write_buffer.clear();
     }
 }
 
@@ -624,3 +636,6 @@ impl Default for ModifiedVoxels {
         Self(Arc::new(RwLock::new(HashMap::new())))
     }
 }
+
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct VoxelWriteBuffer(Vec<(IVec3, WorldVoxel)>);

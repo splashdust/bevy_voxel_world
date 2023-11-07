@@ -46,8 +46,9 @@ impl Plugin for VoxelWorldPlugin {
         app.init_resource::<VoxelWorldConfiguration>()
             .init_resource::<ChunkMap>()
             .init_resource::<ModifiedVoxels>()
+            .init_resource::<VoxelWriteBuffer>()
             .add_systems(First, (spawn_chunks_in_view, retire_chunks_out_of_view))
-            .add_systems(PostUpdate, remesh_dirty_chunks)
+            .add_systems(PostUpdate, (flush_voxel_writes, remesh_dirty_chunks))
             .add_systems(Last, despawn_retired_chunks)
             .add_event::<ChunkWillSpawn>()
             .add_event::<ChunkWillDespawn>()
@@ -153,6 +154,10 @@ fn retire_chunks_out_of_view(mut voxel_world: VoxelWorldInternal) {
 
 fn despawn_retired_chunks(mut voxel_world: VoxelWorldInternal) {
     voxel_world.despawn_retired_chunks();
+}
+
+fn flush_voxel_writes(mut voxel_world: VoxelWorldInternal) {
+    voxel_world.flush_voxel_write_buffer();
 }
 
 // -------- TESTS --------
@@ -287,6 +292,7 @@ mod tests {
         });
 
         app.update();
+        app.update(); // Need two cycles for the write buffer to flush
 
         app.add_systems(
             Update,
