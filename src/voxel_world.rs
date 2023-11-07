@@ -31,7 +31,7 @@ pub struct VoxelWorld<'w, 's> {
     modified_voxels: Res<'w, ModifiedVoxels>,
     voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
 
-    commands: Commands<'w, 's>,
+    _commands: Commands<'w, 's>,
 }
 
 impl<'w, 's> VoxelWorld<'w, 's> {
