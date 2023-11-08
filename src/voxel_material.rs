@@ -16,6 +16,13 @@ pub(crate) struct StandardVoxelMaterialHandle(
     pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
 );
 
+/// Keeps track of the loading status of the image used for the voxel texture
+#[derive(Resource)]
+pub(crate) struct LoadingTexture {
+    pub is_loaded: bool,
+    pub handle: Handle<Image>,
+}
+
 #[derive(Resource)]
 pub(crate) struct TextureLayers(pub u32);
 
@@ -60,4 +67,22 @@ impl MaterialExtension for StandardVoxelMaterial {
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }
+}
+
+pub(crate) fn prepare_texture(
+    asset_server: Res<AssetServer>,
+    texture_layers: Res<TextureLayers>,
+    mut loading_texture: ResMut<LoadingTexture>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if loading_texture.is_loaded
+        || asset_server.get_load_state(loading_texture.handle.clone())
+            != Some(bevy::asset::LoadState::Loaded)
+    {
+        return;
+    }
+    loading_texture.is_loaded = true;
+
+    let image = images.get_mut(&loading_texture.handle).unwrap();
+    image.reinterpret_stacked_2d_as_array(texture_layers.0);
 }

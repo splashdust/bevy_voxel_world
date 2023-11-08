@@ -1,43 +1,52 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, RwLock},
-};
-
-use bevy::{
-    ecs::system::SystemParam,
-    prelude::*,
-    tasks::{AsyncComputeTaskPool, Task},
-    utils::{HashMap, HashSet},
-};
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
-use futures_lite::future;
+///
+/// VoxelWorld
+/// This module implements most of the public API for bevy_voxel_world.
+///
+use bevy::{ecs::system::SystemParam, prelude::*};
+use ndshape::ConstShape;
+use std::sync::Arc;
 
 use crate::{
-    configuration::VoxelWorldConfiguration,
-    meshing,
-    prelude::{ChunkDespawnStrategy, ChunkSpawnStrategy},
+    chunk,
     voxel::WorldVoxel,
-    voxel_material::StandardVoxelMaterialHandle,
+    voxel_world_internal::{get_chunk_voxel_position, ChunkMap, ModifiedVoxels, VoxelWriteBuffer},
 };
 
-pub const CHUNK_SIZE_U: u32 = 32;
-pub const CHUNK_SIZE_I: i32 = CHUNK_SIZE_U as i32;
-pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
-
+/// This component is used to mark the Camera that bevy_voxel_world should use to determine
+/// which chunks to spawn and despawn.
 #[derive(Component)]
 pub struct VoxelWorldCamera;
 
+/// Fired when a chunk is about to be despawned.
+#[derive(Event)]
+pub struct ChunkWillDespawn {
+    pub chunk_key: IVec3,
+    pub entity: Entity,
+}
+
+/// Fired when a chunk is about to be spawned.
+#[derive(Event)]
+pub struct ChunkWillSpawn {
+    pub chunk_key: IVec3,
+    pub entity: Entity,
+}
+
+/// Fired when a chunk is about to be remeshed.
+#[derive(Event)]
+pub struct ChunkWillRemesh {
+    pub chunk_key: IVec3,
+    pub entity: Entity,
+}
+
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
-pub struct VoxelWorld<'w, 's> {
+pub struct VoxelWorld<'w> {
     chunk_map: Res<'w, ChunkMap>,
     modified_voxels: Res<'w, ModifiedVoxels>,
     voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
-
-    _commands: Commands<'w, 's>,
 }
 
-impl<'w, 's> VoxelWorld<'w, 's> {
+impl<'w> VoxelWorld<'w> {
     /// Get the voxel at the given position, or None if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
         self.get_voxel_fn()(position)
@@ -52,9 +61,9 @@ impl<'w, 's> VoxelWorld<'w, 's> {
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
     pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync> {
-        let modified_voxels = self.modified_voxels.0.clone();
         let chunk_map = self.chunk_map.clone();
         let write_buffer = self.voxel_write_buffer.clone();
+        let modified_voxels = self.modified_voxels.clone();
 
         Arc::new(move |position| {
             let (chunk_pos, vox_pos) = get_chunk_voxel_position(position);
@@ -68,9 +77,8 @@ impl<'w, 's> VoxelWorld<'w, 's> {
             }
 
             {
-                let modified_voxels = modified_voxels.read().unwrap();
-                if let Some(voxel) = modified_voxels.get(&position) {
-                    return *voxel;
+                if let Some(voxel) = modified_voxels.get_voxel(&position) {
+                    return voxel;
                 }
             }
 
@@ -80,7 +88,7 @@ impl<'w, 's> VoxelWorld<'w, 's> {
             };
 
             if let Some(chunk_data) = chunk_opt {
-                let i = PaddedChunkShape::linearize(vox_pos.to_array()) as usize;
+                let i = chunk::PaddedChunkShape::linearize(vox_pos.to_array()) as usize;
                 chunk_data.voxels[i]
             } else {
                 WorldVoxel::Unset
@@ -159,494 +167,3 @@ impl<'w, 's> VoxelWorld<'w, 's> {
         })
     }
 }
-
-/// This is used internally by the plugin to manage the world
-#[derive(SystemParam)]
-pub(crate) struct VoxelWorldInternal<'w, 's> {
-    commands: Commands<'w, 's>,
-
-    chunk_map: Res<'w, ChunkMap>,
-    modified_voxels: Res<'w, ModifiedVoxels>,
-    configuration: Res<'w, VoxelWorldConfiguration>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
-
-    dirty_chunks: Query<'w, 's, &'static Chunk, With<NeedsRemesh>>,
-    retired_chunks: Query<'w, 's, &'static Chunk, With<NeedsDespawn>>,
-    all_chunks: Query<'w, 's, (&'static Chunk, Option<&'static ViewVisibility>)>,
-    camera: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
-
-    ev_chunk_will_despawn: EventWriter<'w, ChunkWillDespawn>,
-    ev_chunk_will_remesh: EventWriter<'w, ChunkWillRemesh>,
-}
-
-impl<'w, 's> VoxelWorldInternal<'w, 's> {
-    /// Spawn chunks within the given distance of the camera
-    pub fn spawn_chunks(&mut self) {
-        let (camera, cam_gtf) = self.camera.get_single().unwrap();
-        let cam_pos = cam_gtf.translation().as_ivec3();
-
-        let spawning_distance = self.configuration.spawning_distance as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-
-        let viewport_size = camera.physical_viewport_size().unwrap_or_default();
-
-        let mut visited = HashSet::new();
-        let mut chunks_deque = VecDeque::with_capacity((spawning_distance.pow(2) * 3) as usize);
-
-        let queue_chunks_intersecting_ray_from_point =
-            |point: Vec2, queue: &mut VecDeque<IVec3>| {
-                let ray = camera.viewport_to_world(cam_gtf, point).unwrap_or_default();
-                let mut current = ray.origin;
-                let mut t = 0.0;
-                for _ in 0..spawning_distance {
-                    let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-                    let has_chunk = {
-                        let chunk_map = (*self.chunk_map).read().unwrap();
-                        chunk_map.contains_key(&chunk_pos)
-                    };
-                    if !has_chunk {
-                        queue.push_back(chunk_pos);
-                    }
-                    t += CHUNK_SIZE_F;
-                    current = ray.origin + ray.direction * t;
-                }
-            };
-
-        // Each frame we pick a random point on the screen
-        let random_point_in_viewport = {
-            let x = rand::random::<f32>() * viewport_size.x as f32;
-            let y = rand::random::<f32>() * viewport_size.y as f32;
-            Vec2::new(x, y)
-        };
-
-        // We then cast a ray from this point, picking up any unspawned chunks along the ray
-        queue_chunks_intersecting_ray_from_point(random_point_in_viewport, &mut chunks_deque);
-
-        // We also queue the chunk closest to the camera to make sure it will always spawn early
-        let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
-        chunks_deque.push_back(chunk_at_camera);
-
-        let spawn_stratey = &self.configuration.chunk_spawn_strategy;
-        let despawn_strategy = &self.configuration.chunk_despawn_strategy;
-        let max_spawn_per_frame = self.configuration.max_spawn_per_frame;
-
-        // Then, when we have an initial queue of chunks, we do kind of a flood fill to spawn
-        // any new chunks we come across within the spawning distance.
-        while let Some(chunk_position) = chunks_deque.pop_front() {
-            if visited.contains(&chunk_position) || chunks_deque.len() > max_spawn_per_frame {
-                continue;
-            }
-            visited.insert(chunk_position);
-
-            if chunk_position.distance_squared(chunk_at_camera) > spawning_distance_squared {
-                continue;
-            }
-
-            let has_chunk = {
-                let chunk_map = (*self.chunk_map).read().unwrap();
-                chunk_map.contains_key(&chunk_position)
-            };
-
-            if !has_chunk {
-                let chunk = Chunk {
-                    position: chunk_position,
-                    entity: self.commands.spawn(NeedsRemesh).id(),
-                };
-
-                {
-                    let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-                    chunk_map_write.insert(
-                        chunk_position,
-                        ChunkData {
-                            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
-                            entity: chunk.entity,
-                        },
-                    );
-                }
-
-                self.commands.entity(chunk.entity).insert(chunk).insert(
-                    Transform::from_translation(chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0),
-                );
-
-                if spawn_stratey != &ChunkSpawnStrategy::Close
-                    && despawn_strategy != &ChunkDespawnStrategy::FarAway
-                {
-                    // If this chunk is not in view, it should be just outside of view, and we can
-                    // skip queing any neighbors, effectively culling the neighboring chunks
-                    if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, camera, cam_gtf) {
-                        continue;
-                    }
-                }
-            } else {
-                // If the chunk was already spawned, we can move on without queueing any neighbors
-                continue;
-            }
-
-            // If we get here, we queue the neighbors
-            for x in -1..=1 {
-                for y in -1..=1 {
-                    for z in -1..=1 {
-                        let queue_pos = chunk_position + IVec3::new(x, y, z);
-                        if queue_pos == chunk_position {
-                            continue;
-                        }
-                        chunks_deque.push_back(queue_pos);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Remove chunks that are outside the given distance of the camera
-    pub fn retire_chunks(&mut self) {
-        let spawning_distance = self.configuration.spawning_distance as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-
-        let (_, cam_gtf) = self.camera.get_single().unwrap();
-        let cam_pos = cam_gtf.translation().as_ivec3();
-
-        let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
-
-        let chunks_to_remove = {
-            let mut remove = Vec::with_capacity(1000);
-            for (chunk, view_visibility) in self.all_chunks.iter() {
-                let should_be_culled = {
-                    match self.configuration.chunk_despawn_strategy {
-                        ChunkDespawnStrategy::FarAway => false,
-                        ChunkDespawnStrategy::FarAwayOrOutOfView => {
-                            if let Some(visibility) = view_visibility {
-                                !visibility.get()
-                            } else {
-                                false
-                            }
-                        }
-                    }
-                };
-                let dist_squared = chunk.position.distance_squared(chunk_at_camera);
-                if should_be_culled || dist_squared > spawning_distance_squared + 1 {
-                    remove.push(chunk);
-                }
-            }
-            remove
-        };
-
-        for chunk in chunks_to_remove {
-            self.commands.entity(chunk.entity).insert(NeedsDespawn);
-            self.ev_chunk_will_despawn.send(ChunkWillDespawn {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
-        }
-    }
-
-    pub fn despawn_retired_chunks(&mut self) {
-        for chunk in self.retired_chunks.iter() {
-            let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-            if let Some(chunk_data) = chunk_map_write.remove(&chunk.position) {
-                self.commands.entity(chunk_data.entity).despawn_recursive();
-            }
-        }
-    }
-
-    /// Remesh dirty chunks
-    /// This function will spawn a new thread for each chunk that needs remeshing
-    pub fn remesh_dirty_chunks(&mut self) {
-        let thread_pool = AsyncComputeTaskPool::get();
-
-        for chunk in self.dirty_chunks.iter() {
-            let voxel_data_fn = (self.configuration.voxel_lookup_delegate)(chunk.position);
-            let texture_index_mapper = self.configuration.texture_index_mapper.clone();
-
-            let chunk_opt = {
-                let chunk_map = (*self.chunk_map).read().unwrap();
-                chunk_map.get(&chunk.position).cloned()
-            };
-
-            if let Some(chunk_data) = chunk_opt {
-                let mut chunk_task = ChunkTask {
-                    position: chunk.position,
-                    voxels: chunk_data.voxels.clone(),
-                    modified_voxels: self.modified_voxels.clone(),
-                    mesh: None,
-                    is_empty: true,
-                    is_full: false,
-                };
-
-                let thread = thread_pool.spawn(async move {
-                    chunk_task.generate(voxel_data_fn);
-                    chunk_task.mesh(texture_index_mapper);
-                    chunk_task
-                });
-
-                self.commands
-                    .entity(chunk.entity)
-                    .insert(ChunkThread(thread))
-                    .remove::<NeedsRemesh>();
-
-                self.ev_chunk_will_remesh.send(ChunkWillRemesh {
-                    chunk_key: chunk.position,
-                    entity: chunk.entity,
-                });
-            }
-        }
-    }
-
-    pub fn flush_voxel_write_buffer(&mut self) {
-        let mut chunk_map = (*self.chunk_map).write().unwrap();
-        let mut modified_voxels = (*self.modified_voxels).write().unwrap();
-
-        for (position, voxel) in self.voxel_write_buffer.iter() {
-            let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
-            modified_voxels.insert(*position, *voxel);
-
-            let chunk_opt = { chunk_map.get(&chunk_pos).cloned() };
-
-            if let Some(chunk_data) = chunk_opt {
-                // Mark the chunk as needing remeshing
-                self.commands.entity(chunk_data.entity).insert(NeedsRemesh);
-            } else {
-                let chunk = Chunk {
-                    position: chunk_pos,
-                    entity: self.commands.spawn(NeedsRemesh).id(),
-                };
-                chunk_map.insert(
-                    chunk_pos,
-                    ChunkData {
-                        voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
-                        entity: chunk.entity,
-                    },
-                );
-                self.commands.entity(chunk.entity).insert(chunk);
-            }
-        }
-        self.voxel_write_buffer.clear();
-    }
-}
-
-#[derive(Resource)]
-pub(crate) struct LoadingTexture {
-    pub is_loaded: bool,
-    pub handle: Handle<Image>,
-}
-
-#[derive(SystemParam)]
-pub(crate) struct VoxelWorldMeshSpawner<'w, 's> {
-    commands: Commands<'w, 's>,
-    chunking_threads: Query<
-        'w,
-        's,
-        (
-            &'static mut ChunkThread,
-            &'static mut Chunk,
-            &'static Transform,
-        ),
-        Without<NeedsRemesh>,
-    >,
-    chunk_map: Res<'w, ChunkMap>,
-    mesh_assets: ResMut<'w, Assets<Mesh>>,
-    material_handle: Res<'w, StandardVoxelMaterialHandle>,
-    loading_texture: ResMut<'w, LoadingTexture>,
-    ev_chunk_will_spawn: EventWriter<'w, ChunkWillSpawn>,
-}
-
-impl<'w, 's> VoxelWorldMeshSpawner<'w, 's> {
-    /// Spawn meshes for chunks that have finished remeshing
-    pub fn spawn_meshes(&mut self) {
-        if !self.loading_texture.is_loaded {
-            return;
-        }
-
-        for (mut thread, chunk, transform) in &mut self.chunking_threads {
-            let thread_result = future::block_on(future::poll_once(&mut thread.0));
-
-            if thread_result.is_none() {
-                continue;
-            }
-
-            if let Some(chunk_task) = thread_result {
-                if !chunk_task.is_empty {
-                    if !chunk_task.is_full {
-                        self.commands
-                            .entity(chunk.entity)
-                            .insert(MaterialMeshBundle {
-                                mesh: self.mesh_assets.add(chunk_task.mesh.unwrap()),
-                                material: self.material_handle.0.clone(),
-                                transform: *transform,
-                                ..default()
-                            })
-                            .remove::<bevy::render::primitives::Aabb>();
-
-                        self.ev_chunk_will_spawn.send(ChunkWillSpawn {
-                            chunk_key: chunk_task.position,
-                            entity: chunk.entity,
-                        });
-                    }
-                    let mut chunk_map_write = (*self.chunk_map).write().unwrap();
-                    let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
-                    chunk_data_mut.voxels = chunk_task.voxels;
-                }
-            }
-
-            self.commands.entity(chunk.entity).remove::<ChunkThread>();
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ChunkData {
-    pub voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
-    pub entity: Entity,
-}
-
-// A chunk with 1-voxel boundary padding.
-pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
-pub(crate) type PaddedChunkShape =
-    ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
-
-#[derive(Resource, Deref, DerefMut)]
-pub struct ChunkMap(Arc<RwLock<HashMap<IVec3, ChunkData>>>);
-
-impl Default for ChunkMap {
-    fn default() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
-    }
-}
-
-#[derive(Component, Clone)]
-pub struct Chunk {
-    position: IVec3,
-    entity: Entity,
-}
-
-#[derive(Component)]
-pub(crate) struct ChunkTask {
-    position: IVec3,
-    voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
-    modified_voxels: ModifiedVoxels,
-    is_empty: bool,
-    is_full: bool,
-    mesh: Option<Mesh>,
-}
-
-impl ChunkTask {
-    pub fn generate<F>(&mut self, mut voxel_data_fn: F)
-    where
-        F: FnMut(IVec3) -> WorldVoxel + Send + 'static,
-    {
-        let mut filled_count = 0;
-        let modified_voxels = (*self.modified_voxels).read().unwrap();
-        let mut voxels = [WorldVoxel::Unset; PaddedChunkShape::SIZE as usize];
-
-        for i in 0..PaddedChunkShape::SIZE {
-            let chunk_block = PaddedChunkShape::delinearize(i);
-
-            let block_pos = IVec3 {
-                x: chunk_block[0] as i32 + (self.position.x * CHUNK_SIZE_I) - 1,
-                y: chunk_block[1] as i32 + (self.position.y * CHUNK_SIZE_I) - 1,
-                z: chunk_block[2] as i32 + (self.position.z * CHUNK_SIZE_I) - 1,
-            };
-
-            if let Some(voxel) = modified_voxels.get(&block_pos) {
-                voxels[i as usize] = *voxel;
-                if !voxel.is_unset() && !voxel.is_air() {
-                    filled_count += 1;
-                }
-                continue;
-            }
-
-            let voxel = voxel_data_fn(block_pos);
-
-            voxels[i as usize] = voxel;
-
-            if let WorldVoxel::Solid(_) = voxel {
-                filled_count += 1;
-            }
-        }
-
-        self.voxels = Arc::new(voxels);
-
-        self.is_empty = filled_count == 0;
-        self.is_full = filled_count == PaddedChunkShape::SIZE;
-    }
-
-    pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
-        if self.mesh.is_none() {
-            self.mesh = Some(meshing::generate_chunk_mesh(
-                self.voxels.clone(),
-                self.position,
-                texture_index_mapper,
-            ));
-        }
-    }
-}
-
-/// Returns a tuple of the chunk position and the voxel position within the chunk.
-#[inline]
-fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
-    let chunk_position = IVec3 {
-        x: (position.x as f32 / CHUNK_SIZE_F).floor() as i32,
-        y: (position.y as f32 / CHUNK_SIZE_F).floor() as i32,
-        z: (position.z as f32 / CHUNK_SIZE_F).floor() as i32,
-    };
-
-    let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
-
-    (chunk_position, voxel_position)
-}
-
-#[inline]
-fn is_in_view(world_point: Vec3, camera: &Camera, cam_global_transform: &GlobalTransform) -> bool {
-    if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
-        // When the position is within the viewport the values returned will be between
-        // -1.0 and 1.0 on the X and Y axes, and between 0.0 and 1.0 on the Z axis.
-        chunk_vp.x >= -1.0
-            && chunk_vp.x <= 1.0
-            && chunk_vp.y >= -1.0
-            && chunk_vp.y <= 1.0
-            && chunk_vp.z >= 0.0
-            && chunk_vp.z <= 1.0
-    } else {
-        false
-    }
-}
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread(Task<ChunkTask>);
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct NeedsRemesh;
-
-#[derive(Component)]
-pub struct NeedsDespawn;
-
-#[derive(Event)]
-pub struct ChunkWillDespawn {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
-
-#[derive(Event)]
-pub struct ChunkWillSpawn {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
-
-#[derive(Event)]
-pub struct ChunkWillRemesh {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
-
-#[derive(Resource, Deref, DerefMut, Clone)]
-pub struct ModifiedVoxels(Arc<RwLock<HashMap<IVec3, WorldVoxel>>>);
-
-impl Default for ModifiedVoxels {
-    fn default() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
-    }
-}
-
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct VoxelWriteBuffer(Vec<(IVec3, WorldVoxel)>);

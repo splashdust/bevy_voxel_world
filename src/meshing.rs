@@ -15,9 +15,9 @@ use bevy::{
 use ndshape::ConstShape;
 
 use crate::{
+    chunk::{PaddedChunkShape, CHUNK_SIZE_U},
     voxel::WorldVoxel,
     voxel_material::ATTRIBUTE_TEX_INDEX,
-    voxel_world::{PaddedChunkShape, CHUNK_SIZE_U},
 };
 
 type VoxelArray = Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>;

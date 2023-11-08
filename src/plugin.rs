@@ -1,12 +1,21 @@
-use bevy::{asset::load_internal_asset, pbr::ExtendedMaterial, prelude::*};
+use bevy::{
+    asset::load_internal_asset,
+    pbr::ExtendedMaterial,
+    prelude::*,
+    render::texture::{CompressedImageFormats, ImageSampler, ImageType},
+};
 
 use crate::{
     configuration::VoxelWorldConfiguration,
     voxel_material::{
-        StandardVoxelMaterial, StandardVoxelMaterialHandle, TextureLayers,
-        VOXEL_TEXTURE_SHADER_HANDLE,
+        prepare_texture, LoadingTexture, StandardVoxelMaterial, StandardVoxelMaterialHandle,
+        TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
+    voxel_world_internal::{
+        despawn_retired_chunks, flush_voxel_write_buffer, remesh_dirty_chunks, retire_chunks,
+        setup_internals, spawn_chunks, spawn_meshes,
+    },
 };
 
 pub struct VoxelWorldPlugin {
@@ -44,11 +53,9 @@ impl Default for VoxelWorldPlugin {
 impl Plugin for VoxelWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelWorldConfiguration>()
-            .init_resource::<ChunkMap>()
-            .init_resource::<ModifiedVoxels>()
-            .init_resource::<VoxelWriteBuffer>()
-            .add_systems(First, (spawn_chunks_in_view, retire_chunks_out_of_view))
-            .add_systems(PostUpdate, (flush_voxel_writes, remesh_dirty_chunks))
+            .add_systems(Startup, setup_internals)
+            .add_systems(First, (spawn_chunks, retire_chunks))
+            .add_systems(PostUpdate, (flush_voxel_write_buffer, remesh_dirty_chunks))
             .add_systems(Last, despawn_retired_chunks)
             .add_event::<ChunkWillSpawn>()
             .add_event::<ChunkWillDespawn>()
@@ -74,10 +81,10 @@ impl Plugin for VoxelWorldPlugin {
             let image_handle = if self.voxel_texture.is_empty() {
                 let mut image = Image::from_buffer(
                     include_bytes!("shaders/default_texture.png"),
-                    bevy::render::texture::ImageType::MimeType("image/png"),
-                    bevy::render::texture::CompressedImageFormats::default(),
+                    ImageType::MimeType("image/png"),
+                    CompressedImageFormats::default(),
                     false,
-                    bevy::render::texture::ImageSampler::Default,
+                    ImageSampler::Default,
                 )
                 .unwrap();
                 image.reinterpret_stacked_2d_as_array(4);
@@ -113,51 +120,9 @@ impl Plugin for VoxelWorldPlugin {
             app.insert_resource(StandardVoxelMaterialHandle(mat_handle));
             app.insert_resource(TextureLayers(self.texture_layers));
 
-            app.add_systems(Update, (prepare_texture, spawn_chunk_meshes));
+            app.add_systems(Update, (prepare_texture, spawn_meshes));
         }
     }
-}
-
-fn prepare_texture(
-    asset_server: Res<AssetServer>,
-    texture_layers: Res<TextureLayers>,
-    mut loading_texture: ResMut<LoadingTexture>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    if loading_texture.is_loaded
-        || asset_server.get_load_state(loading_texture.handle.clone())
-            != Some(bevy::asset::LoadState::Loaded)
-    {
-        return;
-    }
-    loading_texture.is_loaded = true;
-
-    let image = images.get_mut(&loading_texture.handle).unwrap();
-    image.reinterpret_stacked_2d_as_array(texture_layers.0);
-}
-
-fn spawn_chunks_in_view(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.spawn_chunks();
-}
-
-fn remesh_dirty_chunks(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.remesh_dirty_chunks();
-}
-
-fn spawn_chunk_meshes(mut mesh_spawner: VoxelWorldMeshSpawner) {
-    mesh_spawner.spawn_meshes();
-}
-
-fn retire_chunks_out_of_view(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.retire_chunks();
-}
-
-fn despawn_retired_chunks(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.despawn_retired_chunks();
-}
-
-fn flush_voxel_writes(mut voxel_world: VoxelWorldInternal) {
-    voxel_world.flush_voxel_write_buffer();
 }
 
 // -------- TESTS --------
@@ -190,7 +155,7 @@ mod tests {
         let mut app = _test_setup_app();
 
         // Set and get some voxels
-        app.add_systems(Startup, |mut voxel_world: crate::prelude::VoxelWorld| {
+        app.add_systems(Update, |mut voxel_world: crate::prelude::VoxelWorld| {
             let positions = vec![
                 IVec3::new(0, 100, 0),
                 IVec3::new(0, 0, 0),
@@ -220,20 +185,20 @@ mod tests {
         // Set up vector och positions to test
         let positions = vec![
             IVec3::new(0, 5, 0),
-            IVec3::new(0, 7, 0),
-            IVec3::new(0, 10, 0),
-            IVec3::new(10, 5, 10),
-            IVec3::new(10, 7, 10),
-            IVec3::new(10, 10, 10),
-            IVec3::new(-10, 5, -10),
-            IVec3::new(-10, 7, -10),
+            IVec3::new(1, 7, 0),
+            IVec3::new(2, 10, 0),
+            IVec3::new(3, 5, 10),
+            IVec3::new(4, 7, 10),
+            IVec3::new(5, 10, 10),
+            IVec3::new(-6, 5, -10),
+            IVec3::new(-7, 7, -10),
             IVec3::new(-10, 10, -10),
         ];
 
         let make_pos = positions.clone();
 
         app.add_systems(
-            Startup,
+            Update,
             move |mut voxel_world: crate::prelude::VoxelWorld| {
                 let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
@@ -247,7 +212,7 @@ mod tests {
 
         let check_pos = positions.clone();
 
-        app.add_systems(Startup, move |voxel_world: crate::prelude::VoxelWorld| {
+        app.add_systems(Update, move |voxel_world: crate::prelude::VoxelWorld| {
             let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
             for pos in check_pos.clone() {
@@ -270,7 +235,7 @@ mod tests {
         app.add_systems(
             Update,
             |mut ev_chunk_will_spawn: EventReader<ChunkWillSpawn>| {
-                let spawn_count = ev_chunk_will_spawn.iter().count();
+                let spawn_count = ev_chunk_will_spawn.read().count();
                 assert!(spawn_count > 0);
             },
         );
@@ -297,7 +262,7 @@ mod tests {
         app.add_systems(
             Update,
             |mut ev_chunk_will_remesh: EventReader<ChunkWillRemesh>| {
-                let count = ev_chunk_will_remesh.iter().count();
+                let count = ev_chunk_will_remesh.read().count();
                 assert_eq!(count, 1)
             },
         );
@@ -327,7 +292,7 @@ mod tests {
         app.add_systems(
             Update,
             |mut ev_chunk_will_despawn: EventReader<ChunkWillDespawn>| {
-                let count = ev_chunk_will_despawn.iter().count();
+                let count = ev_chunk_will_despawn.read().count();
                 assert!(count > 0)
             },
         );
