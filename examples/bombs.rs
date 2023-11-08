@@ -46,7 +46,7 @@ fn setup(mut commands: Commands) {
     });
 
     commands.spawn(ExplosionTimeout {
-        timer: Timer::from_seconds(0.1, TimerMode::Repeating),
+        timer: Timer::from_seconds(0.25, TimerMode::Repeating),
     });
 
     // --- Just scene setup below ---
@@ -130,8 +130,8 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
 }
 
 fn move_camera(time: Res<Time>, mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera>>) {
-    cam_transform.single_mut().translation.x += time.delta_seconds() * 15.0;
-    cam_transform.single_mut().translation.z += time.delta_seconds() * 30.0;
+    cam_transform.single_mut().translation.x += time.delta_seconds() * 7.0;
+    cam_transform.single_mut().translation.z += time.delta_seconds() * 12.0;
 }
 
 fn explosion(
