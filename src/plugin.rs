@@ -53,7 +53,7 @@ impl Default for VoxelWorldPlugin {
 impl Plugin for VoxelWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelWorldConfiguration>()
-            .add_systems(Startup, setup_internals)
+            .add_systems(PreStartup, setup_internals)
             .add_systems(First, (spawn_chunks, retire_chunks))
             .add_systems(PostUpdate, (flush_voxel_write_buffer, remesh_dirty_chunks))
             .add_systems(Last, despawn_retired_chunks)
