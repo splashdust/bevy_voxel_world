@@ -26,7 +26,8 @@ pub enum ChunkSpawnStrategy {
 
     /// Spawn chunks that are within `spawning_distance` of the camera, regardless of whether
     /// they are in the viewport or not. Will only have an effect if the despawn strategy is
-    /// `FarAway`.
+    /// `FarAway`. If this strategy is used a flood fill will be used to find unspawned chunks
+    /// and therefore it might make sense to lower the `spawning_rays` option.
     Close,
 }
 
@@ -47,6 +48,15 @@ pub struct VoxelWorldConfiguration {
     /// In some scenarios, reducing this number can help with performance, due to less
     /// thread contention.
     pub max_spawn_per_frame: usize,
+
+    /// Number of rays to cast when spawning chunks. Higher values will result in more
+    /// chunks being spawned per frame, but will also increase cpu load, and can lead to
+    /// thread contention.
+    pub spawning_rays: usize,
+
+    /// How far outside of the viewports spawning rays should get cast. Higher values will
+    /// will reduce the likelyhood of chunks popping in, but will also increase cpu load.
+    pub spawning_ray_margin: u32,
 
     /// Debugging aids
     pub debug_draw_chunks: bool,
@@ -72,7 +82,9 @@ impl Default for VoxelWorldConfiguration {
             chunk_despawn_strategy: ChunkDespawnStrategy::default(),
             chunk_spawn_strategy: ChunkSpawnStrategy::default(),
             debug_draw_chunks: true,
-            max_spawn_per_frame: 10000,
+            max_spawn_per_frame: 1000,
+            spawning_rays: 100,
+            spawning_ray_margin: 25,
             texture_index_mapper: Arc::new(|mat| match mat {
                 0 => [0, 0, 0],
                 1 => [1, 1, 1],

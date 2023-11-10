@@ -110,10 +110,11 @@ pub(crate) fn spawn_chunks(
     };
 
     // Each frame we pick some random points on the screen
-    for _ in 0..100 {
+    let m = configuration.spawning_ray_margin;
+    for _ in 0..configuration.spawning_rays {
         let random_point_in_viewport = {
-            let x = rand::random::<f32>() * (viewport_size.x + 100) as f32;
-            let y = rand::random::<f32>() * (viewport_size.y + 100) as f32;
+            let x = rand::random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
+            let y = rand::random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
             Vec2::new(x, y)
         };
 
@@ -132,14 +133,11 @@ pub(crate) fn spawn_chunks(
         }
     }
 
-    // Get config options
-    let spawn_stratey = &configuration.chunk_spawn_strategy;
-    let despawn_strategy = &configuration.chunk_despawn_strategy;
-    let max_spawn_per_frame = configuration.max_spawn_per_frame;
-
     // Then, when we have a queue of chunks, we can set them up for spawning
     while let Some(chunk_position) = chunks_deque.pop_front() {
-        if visited.contains(&chunk_position) || chunks_deque.len() > max_spawn_per_frame {
+        if visited.contains(&chunk_position)
+            || chunks_deque.len() > configuration.max_spawn_per_frame
+        {
             continue;
         }
         visited.insert(chunk_position);
@@ -175,19 +173,25 @@ pub(crate) fn spawn_chunks(
                 .insert(Transform::from_translation(
                     chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0,
                 ));
+        } else {
+            continue;
+        }
 
-            if spawn_stratey != &ChunkSpawnStrategy::Close
-                && despawn_strategy != &ChunkDespawnStrategy::FarAway
-            {
-                // If this chunk is not in view, it should be just outside of view, and we can
-                // skip queing any neighbors, effectively culling the neighboring chunks
-                if !is_in_view(chunk_position.as_vec3() * CHUNK_SIZE_F, camera, cam_gtf) {
-                    continue;
+        if configuration.chunk_spawn_strategy != ChunkSpawnStrategy::Close {
+            continue;
+        }
+
+        // If we get here, we queue the neighbors
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    let queue_pos = chunk_position + IVec3::new(x, y, z);
+                    if queue_pos == chunk_position {
+                        continue;
+                    }
+                    chunks_deque.push_back(queue_pos);
                 }
             }
-        } else {
-            // If the chunk was already spawned, we can move on without queueing any neighbors
-            continue;
         }
     }
 }
@@ -398,6 +402,7 @@ pub(crate) fn spawn_meshes(
 
 /// Check if the given world point is within the camera's view
 #[inline]
+#[allow(dead_code)]
 fn is_in_view(world_point: Vec3, camera: &Camera, cam_global_transform: &GlobalTransform) -> bool {
     if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
         // When the position is within the viewport the values returned will be between
