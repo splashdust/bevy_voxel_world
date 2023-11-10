@@ -23,21 +23,6 @@ fn setup(mut commands: Commands) {
         // This is the spawn distance (in 32 meter chunks), centered around the camera.
         spawning_distance: 15,
 
-        // Because we're flying quite low across the terrain, disabling viewport culling here
-        // helps avoid mountain tops from being cut off.
-        chunk_despawn_strategy: ChunkDespawnStrategy::FarAway,
-        chunk_spawn_strategy: ChunkSpawnStrategy::Close,
-
-        // A low number helps in this example, because we're modifying the terrain a lot
-        // each frame while also moving quite fast across the terrain. If the spawn count
-        // is too high, the meshing threads will be too busy at the "frontier" to keep up
-        // with the modifications caused by the "bombs", which casuses the terrain changes
-        // to "lag".
-        //
-        // The downside, of course, is that the initial terrain generation will be take longer,
-        // and empty chunks may occasionally be visible within the spawn radius.
-        max_spawn_per_frame: 10,
-
         // Here we supply a closure that returns another closure that returns a voxel value for a given position.
         // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
         // to a differrent thread for the meshing process. A new closure is fetched for each chunk.
