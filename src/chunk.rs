@@ -35,6 +35,7 @@ pub struct NeedsDespawn;
 #[derive(Clone)]
 pub struct ChunkData {
     pub voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
+    pub is_full: bool,
     pub entity: Entity,
 }
 

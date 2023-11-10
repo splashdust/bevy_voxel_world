@@ -40,7 +40,7 @@ impl Default for ModifiedVoxels {
 
 impl ModifiedVoxels {
     pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel> {
-        let modified_voxels = (*self).read().unwrap();
+        let modified_voxels = self.read().unwrap();
         modified_voxels.get(position).cloned()
     }
 }
@@ -87,17 +87,21 @@ pub(crate) fn spawn_chunks(
     let mut visited = HashSet::new();
     let mut chunks_deque = VecDeque::with_capacity((spawning_distance.pow(2) * 3) as usize);
 
+    let mut chunk_map = chunk_map.write().unwrap();
+
+    // Shoots a ray from the given point, and queue all (non-spawned) chunks intersecting the ray
     let queue_chunks_intersecting_ray_from_point = |point: Vec2, queue: &mut VecDeque<IVec3>| {
         let ray = camera.viewport_to_world(cam_gtf, point).unwrap_or_default();
         let mut current = ray.origin;
         let mut t = 0.0;
         for _ in 0..spawning_distance {
             let chunk_pos = current.as_ivec3() / chunk::CHUNK_SIZE_I;
-            let has_chunk = {
-                let chunk_map = (*chunk_map).read().unwrap();
-                chunk_map.contains_key(&chunk_pos)
-            };
-            if !has_chunk {
+            if let Some(chunk) = chunk_map.get(&chunk_pos) {
+                if chunk.is_full {
+                    // If we hit a full chunk, we can stop the ray early
+                    break;
+                }
+            } else {
                 queue.push_back(chunk_pos);
             }
             t += chunk::CHUNK_SIZE_F;
@@ -105,26 +109,35 @@ pub(crate) fn spawn_chunks(
         }
     };
 
-    // Each frame we pick a random point on the screen
-    let random_point_in_viewport = {
-        let x = rand::random::<f32>() * viewport_size.x as f32;
-        let y = rand::random::<f32>() * viewport_size.y as f32;
-        Vec2::new(x, y)
-    };
+    // Each frame we pick some random points on the screen
+    for _ in 0..100 {
+        let random_point_in_viewport = {
+            let x = rand::random::<f32>() * (viewport_size.x + 100) as f32;
+            let y = rand::random::<f32>() * (viewport_size.y + 100) as f32;
+            Vec2::new(x, y)
+        };
 
-    // We then cast a ray from this point, picking up any unspawned chunks along the ray
-    queue_chunks_intersecting_ray_from_point(random_point_in_viewport, &mut chunks_deque);
+        // Then, for each point, we cast a ray, picking up any unspawned chunks along the ray
+        queue_chunks_intersecting_ray_from_point(random_point_in_viewport, &mut chunks_deque);
+    }
 
-    // We also queue the chunk closest to the camera to make sure it will always spawn early
+    // We also queue the chunks closest to the camera to make sure they will always spawn early
     let chunk_at_camera = cam_pos / chunk::CHUNK_SIZE_I;
-    chunks_deque.push_back(chunk_at_camera);
+    for x in -1..=1 {
+        for y in -1..=1 {
+            for z in -1..=1 {
+                let queue_pos = chunk_at_camera + IVec3::new(x, y, z);
+                chunks_deque.push_back(queue_pos);
+            }
+        }
+    }
 
+    // Get config options
     let spawn_stratey = &configuration.chunk_spawn_strategy;
     let despawn_strategy = &configuration.chunk_despawn_strategy;
     let max_spawn_per_frame = configuration.max_spawn_per_frame;
 
-    // Then, when we have an initial queue of chunks, we do kind of a flood fill to spawn
-    // any new chunks we come across within the spawning distance.
+    // Then, when we have a queue of chunks, we can set them up for spawning
     while let Some(chunk_position) = chunks_deque.pop_front() {
         if visited.contains(&chunk_position) || chunks_deque.len() > max_spawn_per_frame {
             continue;
@@ -135,10 +148,7 @@ pub(crate) fn spawn_chunks(
             continue;
         }
 
-        let has_chunk = {
-            let chunk_map = (*chunk_map).read().unwrap();
-            chunk_map.contains_key(&chunk_position)
-        };
+        let has_chunk = chunk_map.contains_key(&chunk_position);
 
         if !has_chunk {
             let chunk = chunk::Chunk {
@@ -147,14 +157,14 @@ pub(crate) fn spawn_chunks(
             };
 
             {
-                let mut chunk_map_write = (*chunk_map).write().unwrap();
-                chunk_map_write.insert(
+                chunk_map.insert(
                     chunk_position,
                     chunk::ChunkData {
                         voxels: Arc::new(
                             [WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize],
                         ),
                         entity: chunk.entity,
+                        is_full: false,
                     },
                 );
             }
@@ -178,19 +188,6 @@ pub(crate) fn spawn_chunks(
         } else {
             // If the chunk was already spawned, we can move on without queueing any neighbors
             continue;
-        }
-
-        // If we get here, we queue the neighbors
-        for x in -1..=1 {
-            for y in -1..=1 {
-                for z in -1..=1 {
-                    let queue_pos = chunk_position + IVec3::new(x, y, z);
-                    if queue_pos == chunk_position {
-                        continue;
-                    }
-                    chunks_deque.push_back(queue_pos);
-                }
-            }
         }
     }
 }
@@ -313,8 +310,8 @@ pub fn flush_voxel_write_buffer(
     modified_voxels: ResMut<ModifiedVoxels>,
     chunk_map: Res<ChunkMap>,
 ) {
-    let mut chunk_map = (*chunk_map).write().unwrap();
-    let mut modified_voxels = (*modified_voxels).write().unwrap();
+    let mut chunk_map = chunk_map.write().unwrap();
+    let mut modified_voxels = modified_voxels.write().unwrap();
 
     for (position, voxel) in buffer.iter() {
         let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
@@ -337,6 +334,7 @@ pub fn flush_voxel_write_buffer(
                 chunk::ChunkData {
                     voxels: Arc::new([WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize]),
                     entity: chunk.entity,
+                    is_full: false,
                 },
             );
             commands.entity(chunk.entity).insert(chunk);
@@ -387,9 +385,10 @@ pub(crate) fn spawn_meshes(
                         entity: chunk.entity,
                     });
                 }
-                let mut chunk_map_write = (*chunk_map).write().unwrap();
+                let mut chunk_map_write = chunk_map.write().unwrap();
                 let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
                 chunk_data_mut.voxels = chunk_task.voxels;
+                chunk_data_mut.is_full = chunk_task.is_full;
             }
         }
 
