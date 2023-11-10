@@ -18,7 +18,7 @@ fn setup(mut commands: Commands) {
             transform: Transform::from_xyz(20.0, 20.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
-        // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera,
     ));
 
