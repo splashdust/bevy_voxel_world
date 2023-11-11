@@ -82,7 +82,7 @@ impl Default for VoxelWorldConfiguration {
             chunk_despawn_strategy: ChunkDespawnStrategy::default(),
             chunk_spawn_strategy: ChunkSpawnStrategy::default(),
             debug_draw_chunks: true,
-            max_spawn_per_frame: 1000,
+            max_spawn_per_frame: 10000,
             spawning_rays: 100,
             spawning_ray_margin: 25,
             texture_index_mapper: Arc::new(|mat| match mat {

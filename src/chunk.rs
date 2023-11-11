@@ -15,6 +15,8 @@ pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 pub(crate) type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
+pub(crate) type VoxelArray = [WorldVoxel; PaddedChunkShape::SIZE as usize];
+
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub(crate) struct ChunkThread(pub Task<ChunkTask>);
@@ -30,27 +32,42 @@ impl ChunkThread {
 pub struct NeedsRemesh;
 
 #[derive(Component)]
+#[component(storage = "SparseSet")]
+pub struct NeedsRegenerate;
+
+#[derive(Component)]
 pub struct NeedsDespawn;
 
+/// This is used to lookup voxel data from spawned chunks. Does not persist after
+/// the chunk is despawned.
 #[derive(Clone)]
 pub struct ChunkData {
-    pub voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
+    pub voxels: Arc<VoxelArray>,
     pub is_full: bool,
     pub entity: Entity,
 }
 
-/// The base structure for a chunk
+/// A marker component for chunks, with some helpful data
 #[derive(Component, Clone)]
 pub struct Chunk {
     pub position: IVec3,
     pub entity: Entity,
 }
 
+impl Chunk {
+    pub fn from(chunk: &Chunk) -> Self {
+        Self {
+            position: chunk.position,
+            entity: chunk.entity,
+        }
+    }
+}
+
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
 pub(crate) struct ChunkTask {
     pub position: IVec3,
-    pub voxels: Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>,
+    pub voxels: Arc<VoxelArray>,
     pub modified_voxels: ModifiedVoxels,
     pub is_empty: bool,
     pub is_full: bool,

@@ -11,7 +11,7 @@ use bevy::{
     },
 };
 
-#[derive(Resource)]
+#[derive(Resource, Deref, DerefMut)]
 pub(crate) struct StandardVoxelMaterialHandle(
     pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
 );

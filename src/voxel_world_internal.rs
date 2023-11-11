@@ -12,11 +12,12 @@ use futures_lite::future;
 use ndshape::ConstShape;
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, Weak},
 };
+use weak_table::WeakValueHashMap;
 
 use crate::{
-    chunk::{self, CHUNK_SIZE_F, CHUNK_SIZE_I},
+    chunk::{self, NeedsRemesh, VoxelArray, CHUNK_SIZE_F, CHUNK_SIZE_I},
     configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfiguration},
     voxel::WorldVoxel,
     voxel_material::{LoadingTexture, StandardVoxelMaterialHandle},
@@ -57,6 +58,44 @@ impl Default for ChunkMap {
     }
 }
 
+/// This is used to keep a reference to a mesh handle in each chunk entity. This ensures that the WeakMap
+/// we use to look up mesh handles can drop handles that no chunks are using anymore.
+#[derive(Component)]
+struct MeshRef(Arc<Handle<Mesh>>);
+
+type WeakMeshMap = WeakValueHashMap<VoxelArray, Weak<Handle<Mesh>>>;
+
+/// This map keeps track of mesh handles generated for a certain configuration of voxels.
+/// Using this map, we can avoid generating the same mesh multiple times, and reusing mesh handles
+/// should allow Bevy to automatically batch draw identical chunks (large flat areas for example)
+#[derive(Resource, Default, Clone)]
+pub(crate) struct MeshCache {
+    map: Arc<RwLock<WeakMeshMap>>,
+    insert_buffer: Vec<(VoxelArray, Arc<Handle<Mesh>>)>,
+}
+
+impl MeshCache {
+    pub fn insert_buffered(&mut self, voxels: VoxelArray, mesh: Arc<Handle<Mesh>>) {
+        self.insert_buffer.push((voxels, mesh));
+    }
+
+    pub fn flush_buffers(&mut self) {
+        let mut map = self.map.write().unwrap();
+        for (voxels, mesh) in self.insert_buffer.drain(..) {
+            map.insert(voxels, mesh);
+        }
+        map.remove_expired();
+    }
+
+    pub fn get_map(&self) -> Arc<RwLock<WeakMeshMap>> {
+        self.map.clone()
+    }
+
+    pub fn get(&self, voxels: &VoxelArray) -> Option<Arc<Handle<Mesh>>> {
+        self.map.read().unwrap().get(voxels)
+    }
+}
+
 /// A temporary buffer for voxel modifications that will get flushed to the `ModifiedVoxels` resource
 /// at the end of the frame.
 #[derive(Resource, Deref, DerefMut, Default)]
@@ -65,6 +104,7 @@ pub struct VoxelWriteBuffer(Vec<(IVec3, WorldVoxel)>);
 /// Init the resources used internally by bevy_voxel_world
 pub(crate) fn setup_internals(mut commands: Commands) {
     commands.init_resource::<ChunkMap>();
+    commands.init_resource::<MeshCache>();
     commands.init_resource::<ModifiedVoxels>();
     commands.init_resource::<VoxelWriteBuffer>();
 }
@@ -246,9 +286,9 @@ pub fn retire_chunks(
 }
 
 /// Despawns chunks that have been tagged for despawning
-pub fn despawn_retired_chunks(
+pub(crate) fn despawn_retired_chunks(
     mut commands: Commands,
-    chunk_map: Res<ChunkMap>,
+    chunk_map: ResMut<ChunkMap>,
     retired_chunks: Query<&chunk::Chunk, With<chunk::NeedsDespawn>>,
 ) {
     for chunk in retired_chunks.iter() {
@@ -260,10 +300,11 @@ pub fn despawn_retired_chunks(
 }
 
 /// Spawn a thread for each chunk that has been marked by NeedsRemesh
-pub fn remesh_dirty_chunks(
+pub(crate) fn remesh_dirty_chunks(
     mut commands: Commands,
     mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh>,
     dirty_chunks: Query<&chunk::Chunk, With<chunk::NeedsRemesh>>,
+    mesh_cache: Res<MeshCache>,
     chunk_map: Res<ChunkMap>,
     modified_voxels: Res<ModifiedVoxels>,
     configuration: Res<VoxelWorldConfiguration>,
@@ -275,7 +316,7 @@ pub fn remesh_dirty_chunks(
         let texture_index_mapper = configuration.texture_index_mapper.clone();
 
         let chunk_opt = {
-            let chunk_map = (*chunk_map).read().unwrap();
+            let chunk_map = chunk_map.read().unwrap();
             chunk_map.get(&chunk.position).cloned()
         };
 
@@ -289,9 +330,21 @@ pub fn remesh_dirty_chunks(
                 is_full: false,
             };
 
+            let mesh_map = mesh_cache.get_map();
             let thread = thread_pool.spawn(async move {
                 chunk_task.generate(voxel_data_fn);
-                chunk_task.mesh(texture_index_mapper);
+
+                // No need to mesh if the chunk is empty or full
+                if chunk_task.is_empty || chunk_task.is_full {
+                    return chunk_task;
+                }
+
+                // Also no need to mesh if a matching mesh is already cached
+                let mesh_cache_hit = mesh_map.read().unwrap().contains_key(&*chunk_task.voxels);
+                if !mesh_cache_hit {
+                    chunk_task.mesh(texture_index_mapper);
+                }
+
                 chunk_task
             });
 
@@ -305,6 +358,79 @@ pub fn remesh_dirty_chunks(
                 entity: chunk.entity,
             });
         }
+    }
+}
+
+/// Inserts new meshes for chunks that have just finished remeshing
+pub(crate) fn spawn_meshes(
+    mut commands: Commands,
+    mut chunking_threads: Query<
+        (&mut chunk::ChunkThread, &mut chunk::Chunk, &Transform),
+        Without<chunk::NeedsRemesh>,
+    >,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
+    mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
+    mut mesh_cache: ResMut<MeshCache>,
+    chunk_map: Res<ChunkMap>,
+    material_handle: (Res<StandardVoxelMaterialHandle>, Res<LoadingTexture>),
+) {
+    if !material_handle.1.is_loaded {
+        return;
+    }
+
+    for (mut thread, chunk, transform) in &mut chunking_threads {
+        let thread_result = future::block_on(future::poll_once(&mut thread.0));
+
+        if thread_result.is_none() {
+            continue;
+        }
+
+        let chunk_task = thread_result.unwrap();
+
+        if !chunk_task.is_empty {
+            if !chunk_task.is_full {
+                let mesh_handle = {
+                    if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels) {
+                        mesh_handle
+                    } else {
+                        if chunk_task.mesh.is_none() {
+                            commands
+                                .entity(chunk.entity)
+                                .insert(NeedsRemesh)
+                                .remove::<chunk::ChunkThread>();
+                            continue;
+                        }
+                        let mesh_ref = Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
+                        mesh_cache.insert_buffered(*chunk_task.voxels, mesh_ref.clone());
+                        mesh_ref
+                    }
+                };
+
+                commands
+                    .entity(chunk.entity)
+                    .insert((
+                        MaterialMeshBundle {
+                            mesh: (*mesh_handle).clone(),
+                            material: material_handle.0.clone(),
+                            transform: *transform,
+                            ..default()
+                        },
+                        MeshRef(mesh_handle),
+                    ))
+                    .remove::<bevy::render::primitives::Aabb>();
+
+                ev_chunk_will_spawn.send(ChunkWillSpawn {
+                    chunk_key: chunk_task.position,
+                    entity: chunk.entity,
+                });
+            }
+            let mut chunk_map_write = chunk_map.write().unwrap();
+            let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
+            chunk_data_mut.voxels = chunk_task.voxels;
+            chunk_data_mut.is_full = chunk_task.is_full;
+        }
+
+        commands.entity(chunk.entity).remove::<chunk::ChunkThread>();
     }
 }
 
@@ -347,57 +473,8 @@ pub fn flush_voxel_write_buffer(
     buffer.clear();
 }
 
-/// Inserts new meshes for chunks that have just finished remeshing
-pub(crate) fn spawn_meshes(
-    mut commands: Commands,
-    mut chunking_threads: Query<
-        (&mut chunk::ChunkThread, &mut chunk::Chunk, &Transform),
-        Without<chunk::NeedsRemesh>,
-    >,
-    mut mesh_assets: ResMut<Assets<Mesh>>,
-    mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
-    chunk_map: Res<ChunkMap>,
-    loading_texture: Res<LoadingTexture>,
-    material_handle: Res<StandardVoxelMaterialHandle>,
-) {
-    if !loading_texture.is_loaded {
-        return;
-    }
-
-    for (mut thread, chunk, transform) in &mut chunking_threads {
-        let thread_result = future::block_on(future::poll_once(&mut thread.0));
-
-        if thread_result.is_none() {
-            continue;
-        }
-
-        if let Some(chunk_task) = thread_result {
-            if !chunk_task.is_empty {
-                if !chunk_task.is_full {
-                    commands
-                        .entity(chunk.entity)
-                        .insert(MaterialMeshBundle {
-                            mesh: mesh_assets.add(chunk_task.mesh.unwrap()),
-                            material: material_handle.0.clone(),
-                            transform: *transform,
-                            ..default()
-                        })
-                        .remove::<bevy::render::primitives::Aabb>();
-
-                    ev_chunk_will_spawn.send(ChunkWillSpawn {
-                        chunk_key: chunk_task.position,
-                        entity: chunk.entity,
-                    });
-                }
-                let mut chunk_map_write = chunk_map.write().unwrap();
-                let chunk_data_mut = chunk_map_write.get_mut(&chunk.position).unwrap();
-                chunk_data_mut.voxels = chunk_task.voxels;
-                chunk_data_mut.is_full = chunk_task.is_full;
-            }
-        }
-
-        commands.entity(chunk.entity).remove::<chunk::ChunkThread>();
-    }
+pub(crate) fn flush_mesh_cache_buffers(mut mesh_cache: ResMut<MeshCache>) {
+    mesh_cache.flush_buffers();
 }
 
 /// Check if the given world point is within the camera's view

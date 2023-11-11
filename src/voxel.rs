@@ -1,6 +1,6 @@
 use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WorldVoxel {
     Unset,
     Air,
