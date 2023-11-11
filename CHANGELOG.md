@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Add lookup map for mesh handles. This allows `bevy_voxel_world` to re-use mesh handles for identical chunks and thereby utilising Bevy's automatic instancing while also avoiding redundant meshing.
+- Change the default chunk discovery algorith to only use ray cating. This uses less CPU than the previous flood fill method, and also works with larger spawn distances. The flood fill method can still be used by setting `ChunkSpawnStrategy::Close`
+- Add various config options for tuning spawning behaviour for different needs.
+
 ## 0.3.0
 
 - Update to Bevy 0.12
