@@ -12,6 +12,7 @@ use futures_lite::future;
 use ndshape::ConstShape;
 use std::{
     collections::VecDeque,
+    hash::{Hash, Hasher},
     sync::{Arc, RwLock, RwLockReadGuard, Weak},
 };
 use weak_table::WeakValueHashMap;
@@ -124,7 +125,7 @@ pub(crate) struct ChunkMapRemoveBuffer(Vec<IVec3>);
 #[derive(Component)]
 struct MeshRef(Arc<Handle<Mesh>>);
 
-type WeakMeshMap = WeakValueHashMap<VoxelArray, Weak<Handle<Mesh>>>;
+type WeakMeshMap = WeakValueHashMap<u64, Weak<Handle<Mesh>>>;
 
 /// This map keeps track of mesh handles generated for a certain configuration of voxels.
 /// Using this map, we can avoid generating the same mesh multiple times, and reusing mesh handles
@@ -148,8 +149,8 @@ impl MeshCache {
         }
     }
 
-    pub fn get(&self, voxels: &VoxelArray) -> Option<Arc<Handle<Mesh>>> {
-        self.map.read().unwrap().get(voxels)
+    pub fn get(&self, voxels_hash: &u64) -> Option<Arc<Handle<Mesh>>> {
+        self.map.read().unwrap().get(voxels_hash)
     }
 
     pub fn get_map(&self) -> Arc<RwLock<WeakMeshMap>> {
@@ -166,7 +167,7 @@ impl Default for MeshCache {
 }
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct MeshCacheInsertBuffer(Vec<(VoxelArray, Arc<Handle<Mesh>>)>);
+pub(crate) struct MeshCacheInsertBuffer(Vec<(u64, Arc<Handle<Mesh>>)>);
 
 /// A temporary buffer for voxel modifications that will get flushed to the `ModifiedVoxels` resource
 /// at the end of the frame.
@@ -271,18 +272,15 @@ pub(crate) fn spawn_chunks(
                 entity: commands.spawn(chunk::NeedsRemesh).id(),
             };
 
-            {
-                chunk_map_write_buffer.push((
-                    chunk_position,
-                    chunk::ChunkData {
-                        voxels: Arc::new(
-                            [WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize],
-                        ),
-                        entity: chunk.entity,
-                        is_full: false,
-                    },
-                ));
-            }
+            chunk_map_write_buffer.push((
+                chunk_position,
+                chunk::ChunkData {
+                    voxels: Arc::new([WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize]),
+                    voxels_hash: 0,
+                    entity: chunk.entity,
+                    is_full: false,
+                },
+            ));
 
             commands
                 .entity(chunk.entity)
@@ -396,6 +394,7 @@ pub(crate) fn remesh_dirty_chunks(
         let mut chunk_task = chunk::ChunkTask {
             position: chunk.position,
             voxels: Arc::new([WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize]),
+            voxels_hash: 0,
             modified_voxels: modified_voxels.clone(),
             mesh: None,
             is_empty: true,
@@ -411,8 +410,18 @@ pub(crate) fn remesh_dirty_chunks(
                 return chunk_task;
             }
 
+            // Pre-compute a hash for the voxels array
+            chunk_task.voxels_hash = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                chunk_task.voxels.hash(&mut hasher);
+                hasher.finish()
+            };
+
             // Also no need to mesh if a matching mesh is already cached
-            let mesh_cache_hit = mesh_map.read().unwrap().contains_key(&*chunk_task.voxels);
+            let mesh_cache_hit = mesh_map
+                .read()
+                .unwrap()
+                .contains_key(&chunk_task.voxels_hash);
             if !mesh_cache_hit {
                 chunk_task.mesh(texture_index_mapper);
             }
@@ -469,7 +478,7 @@ pub(crate) fn spawn_meshes(
         if !chunk_task.is_empty {
             if !chunk_task.is_full {
                 let mesh_handle = {
-                    if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels) {
+                    if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels_hash) {
                         mesh_handle
                     } else {
                         if chunk_task.mesh.is_none() {
@@ -480,7 +489,7 @@ pub(crate) fn spawn_meshes(
                             continue;
                         }
                         let mesh_ref = Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
-                        mesh_cache_insert_buffer.push((*chunk_task.voxels, mesh_ref.clone()));
+                        mesh_cache_insert_buffer.push((chunk_task.voxels_hash, mesh_ref.clone()));
                         mesh_ref
                     }
                 };
@@ -510,6 +519,7 @@ pub(crate) fn spawn_meshes(
                     chunk.position,
                     chunk::ChunkData {
                         voxels: chunk_task.voxels,
+                        voxels_hash: chunk_task.voxels_hash,
                         is_full: chunk_task.is_full,
                         entity: chunk_data.entity,
                     },
@@ -549,6 +559,7 @@ pub(crate) fn flush_voxel_write_buffer(
                 chunk_pos,
                 chunk::ChunkData {
                     voxels: Arc::new([WorldVoxel::Unset; chunk::PaddedChunkShape::SIZE as usize]),
+                    voxels_hash: 0,
                     entity: chunk.entity,
                     is_full: false,
                 },

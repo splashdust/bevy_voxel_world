@@ -39,6 +39,7 @@ pub struct NeedsDespawn;
 #[derive(Clone)]
 pub struct ChunkData {
     pub voxels: Arc<VoxelArray>,
+    pub voxels_hash: u64,
     pub is_full: bool,
     pub entity: Entity,
 }
@@ -64,6 +65,7 @@ impl Chunk {
 pub(crate) struct ChunkTask {
     pub position: IVec3,
     pub voxels: Arc<VoxelArray>,
+    pub voxels_hash: u64,
     pub modified_voxels: ModifiedVoxels,
     pub is_empty: bool,
     pub is_full: bool,
