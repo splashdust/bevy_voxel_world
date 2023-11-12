@@ -18,7 +18,7 @@ use std::{
 use weak_table::WeakValueHashMap;
 
 use crate::{
-    chunk::{self, NeedsRemesh, VoxelArray, CHUNK_SIZE_F, CHUNK_SIZE_I},
+    chunk::{self, NeedsRemesh, CHUNK_SIZE_F, CHUNK_SIZE_I},
     configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfiguration},
     voxel::WorldVoxel,
     voxel_material::{LoadingTexture, StandardVoxelMaterialHandle},
