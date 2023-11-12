@@ -1,5 +1,7 @@
 mod chunk;
+mod chunk_map;
 mod configuration;
+mod mesh_cache;
 mod meshing;
 mod plugin;
 mod voxel;

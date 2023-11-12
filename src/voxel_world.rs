@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use crate::{
     chunk,
+    chunk_map::ChunkMap,
     voxel::WorldVoxel,
-    voxel_world_internal::{get_chunk_voxel_position, ChunkMap, ModifiedVoxels, VoxelWriteBuffer},
+    voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };
 
 /// This component is used to mark the Camera that bevy_voxel_world should use to determine

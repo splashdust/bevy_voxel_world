@@ -44,6 +44,17 @@ pub struct ChunkData {
     pub entity: Entity,
 }
 
+impl ChunkData {
+    pub fn from(chunk: &Chunk) -> Self {
+        Self {
+            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+            voxels_hash: 0,
+            is_full: false,
+            entity: chunk.entity,
+        }
+    }
+}
+
 /// A marker component for chunks, with some helpful data
 #[derive(Component, Clone)]
 pub struct Chunk {
@@ -73,6 +84,17 @@ pub(crate) struct ChunkTask {
 }
 
 impl ChunkTask {
+    pub fn new(position: IVec3, modified_voxels: ModifiedVoxels) -> Self {
+        Self {
+            position,
+            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+            voxels_hash: 0,
+            modified_voxels,
+            is_empty: true,
+            is_full: false,
+            mesh: None,
+        }
+    }
     /// Generate voxel data for the chunk. The supplied `modified_voxels` map is first checked,
     /// and where no voxeles are modified, the `voxel_data_fn` is called to get data from the
     /// consumer.
