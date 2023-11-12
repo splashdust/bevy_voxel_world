@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- Performance improvements:
+  - More granular resources for more parallelization opportunities.
+  - Pre-calculate hash for voxels array for faster mesh cache lookups
+  - Buffered iserts/updates and removes for ChunkMap, to reduce time spent waiting to aquire RwLock.
+
 ## 0.3.1
 
 - Add lookup map for mesh handles. This allows `bevy_voxel_world` to re-use mesh handles for identical chunks and thereby utilising Bevy's automatic instancing while also avoiding redundant meshing.
