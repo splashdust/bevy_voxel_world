@@ -61,7 +61,7 @@ impl<'w> VoxelWorld<'w> {
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
     pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync> {
-        let chunk_map = self.chunk_map.clone();
+        let chunk_map = self.chunk_map.get_map();
         let write_buffer = self.voxel_write_buffer.clone();
         let modified_voxels = self.modified_voxels.clone();
 

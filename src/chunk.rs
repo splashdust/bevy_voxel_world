@@ -32,10 +32,6 @@ impl ChunkThread {
 pub struct NeedsRemesh;
 
 #[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct NeedsRegenerate;
-
-#[derive(Component)]
 pub struct NeedsDespawn;
 
 /// This is used to lookup voxel data from spawned chunks. Does not persist after

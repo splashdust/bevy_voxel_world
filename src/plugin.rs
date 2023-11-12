@@ -13,8 +13,9 @@ use crate::{
     },
     voxel_world::*,
     voxel_world_internal::{
-        despawn_retired_chunks, flush_mesh_cache_buffers, flush_voxel_write_buffer,
-        remesh_dirty_chunks, retire_chunks, setup_internals, spawn_chunks, spawn_meshes,
+        despawn_retired_chunks, flush_chunk_map_buffers, flush_mesh_cache_buffers,
+        flush_voxel_write_buffer, remesh_dirty_chunks, retire_chunks, setup_internals,
+        spawn_chunks, spawn_meshes,
     },
 };
 
@@ -63,6 +64,7 @@ impl Plugin for VoxelWorldPlugin {
                 (
                     flush_voxel_write_buffer,
                     remesh_dirty_chunks,
+                    flush_chunk_map_buffers,
                     despawn_retired_chunks,
                 ),
             )
@@ -129,7 +131,8 @@ impl Plugin for VoxelWorldPlugin {
             app.insert_resource(StandardVoxelMaterialHandle(mat_handle));
             app.insert_resource(TextureLayers(self.texture_layers));
 
-            app.add_systems(Update, (prepare_texture, spawn_meshes));
+            app.add_systems(First, spawn_meshes);
+            app.add_systems(Update, prepare_texture);
         }
     }
 }
