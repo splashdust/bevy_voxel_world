@@ -68,9 +68,9 @@ impl ChunkData {
         }
     }
 
-    pub fn with_entity(ent: Entity) -> Self {
+    pub fn with_entity(entity: Entity) -> Self {
         let new = Self::new();
-        Self { entity: ent, ..new }
+        Self { entity, ..new }
     }
 
     pub fn generate_hash(&mut self) {
@@ -82,12 +82,8 @@ impl ChunkData {
     }
 
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel {
-        let get = || {
-            self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
-        };
-
         if self.voxels.is_some() {
-            get()
+            self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
         } else {
             match self.fill_type {
                 FillType::Uniform(voxel) => voxel,
@@ -138,6 +134,7 @@ impl ChunkTask {
             mesh: None,
         }
     }
+
     /// Generate voxel data for the chunk. The supplied `modified_voxels` map is first checked,
     /// and where no voxeles are modified, the `voxel_data_fn` is called to get data from the
     /// consumer.

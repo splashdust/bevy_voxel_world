@@ -80,7 +80,8 @@ pub(crate) fn spawn_chunks(
     let viewport_size = camera.physical_viewport_size().unwrap_or_default();
 
     let mut visited = HashSet::new();
-    let mut chunks_deque = VecDeque::with_capacity((spawning_distance.pow(2) * 3) as usize);
+    let mut chunks_deque =
+        VecDeque::with_capacity(configuration.spawning_rays * spawning_distance as usize);
 
     let chunk_map_read_lock = chunk_map.get_read_lock();
 
@@ -89,7 +90,7 @@ pub(crate) fn spawn_chunks(
         let ray = camera.viewport_to_world(cam_gtf, point).unwrap_or_default();
         let mut current = ray.origin;
         let mut t = 0.0;
-        for _ in 0..spawning_distance {
+        while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
             if let Some(chunk) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
                 if chunk.is_full {
