@@ -41,6 +41,10 @@ impl ChunkMap {
         update_buffer: &mut ChunkMapUpdateBuffer,
         remove_buffer: &mut ChunkMapRemoveBuffer,
     ) {
+        if insert_buffer.is_empty() && update_buffer.is_empty() && remove_buffer.is_empty() {
+            return;
+        }
+
         if let Ok(mut write_lock) = self.map.try_write() {
             for (position, chunk_data) in insert_buffer.iter() {
                 write_lock.insert(*position, chunk_data.clone());

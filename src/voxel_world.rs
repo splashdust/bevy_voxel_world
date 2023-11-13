@@ -3,11 +3,9 @@
 /// This module implements most of the public API for bevy_voxel_world.
 ///
 use bevy::{ecs::system::SystemParam, prelude::*};
-use ndshape::ConstShape;
 use std::sync::Arc;
 
 use crate::{
-    chunk,
     chunk_map::ChunkMap,
     voxel::WorldVoxel,
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
@@ -89,8 +87,7 @@ impl<'w> VoxelWorld<'w> {
             };
 
             if let Some(chunk_data) = chunk_opt {
-                let i = chunk::PaddedChunkShape::linearize(vox_pos.to_array()) as usize;
-                chunk_data.voxels[i]
+                chunk_data.get_voxel(vox_pos)
             } else {
                 WorldVoxel::Unset
             }

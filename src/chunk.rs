@@ -1,6 +1,9 @@
-use bevy::{prelude::*, tasks::Task};
+use bevy::{prelude::*, tasks::Task, utils::HashSet};
 use ndshape::{ConstShape, ConstShape3u32};
-use std::sync::Arc;
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use crate::{meshing, voxel::WorldVoxel, voxel_world_internal::ModifiedVoxels};
 
@@ -34,24 +37,70 @@ pub struct NeedsRemesh;
 #[derive(Component)]
 pub struct NeedsDespawn;
 
+#[derive(Clone)]
+pub enum FillType {
+    Empty,
+    Mixed,
+    Uniform(WorldVoxel),
+}
+
 /// This is used to lookup voxel data from spawned chunks. Does not persist after
 /// the chunk is despawned.
 #[derive(Clone)]
 pub struct ChunkData {
-    pub voxels: Arc<VoxelArray>,
+    pub voxels: Option<Arc<VoxelArray>>,
     pub voxels_hash: u64,
     pub is_full: bool,
+    pub is_empty: bool,
+    pub fill_type: FillType,
     pub entity: Entity,
 }
 
 impl ChunkData {
-    pub fn from(chunk: &Chunk) -> Self {
+    pub fn new() -> Self {
         Self {
-            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
+            voxels: None,
             voxels_hash: 0,
             is_full: false,
-            entity: chunk.entity,
+            is_empty: true,
+            fill_type: FillType::Empty,
+            entity: Entity::PLACEHOLDER,
         }
+    }
+
+    pub fn with_entity(ent: Entity) -> Self {
+        let new = Self::new();
+        Self { entity: ent, ..new }
+    }
+
+    pub fn generate_hash(&mut self) {
+        if let Some(voxels) = &self.voxels {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            voxels.hash(&mut hasher);
+            self.voxels_hash = hasher.finish();
+        }
+    }
+
+    pub fn get_voxel(&self, position: UVec3) -> WorldVoxel {
+        let get = || {
+            self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
+        };
+
+        if self.voxels.is_some() {
+            get()
+        } else {
+            match self.fill_type {
+                FillType::Uniform(voxel) => voxel,
+                FillType::Empty => WorldVoxel::Unset,
+                FillType::Mixed => unreachable!(),
+            }
+        }
+    }
+}
+
+impl Default for ChunkData {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -75,23 +124,17 @@ impl Chunk {
 #[derive(Component)]
 pub(crate) struct ChunkTask {
     pub position: IVec3,
-    pub voxels: Arc<VoxelArray>,
-    pub voxels_hash: u64,
+    pub chunk_data: ChunkData,
     pub modified_voxels: ModifiedVoxels,
-    pub is_empty: bool,
-    pub is_full: bool,
     pub mesh: Option<Mesh>,
 }
 
 impl ChunkTask {
-    pub fn new(position: IVec3, modified_voxels: ModifiedVoxels) -> Self {
+    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels) -> Self {
         Self {
             position,
-            voxels: Arc::new([WorldVoxel::Unset; PaddedChunkShape::SIZE as usize]),
-            voxels_hash: 0,
+            chunk_data: ChunkData::with_entity(entity),
             modified_voxels,
-            is_empty: true,
-            is_full: false,
             mesh: None,
         }
     }
@@ -105,6 +148,7 @@ impl ChunkTask {
         let mut filled_count = 0;
         let modified_voxels = (*self.modified_voxels).read().unwrap();
         let mut voxels = [WorldVoxel::Unset; PaddedChunkShape::SIZE as usize];
+        let mut material_count = HashSet::new();
 
         for i in 0..PaddedChunkShape::SIZE {
             let chunk_block = PaddedChunkShape::delinearize(i);
@@ -127,25 +171,49 @@ impl ChunkTask {
 
             voxels[i as usize] = voxel;
 
-            if let WorldVoxel::Solid(_) = voxel {
+            if let WorldVoxel::Solid(m) = voxel {
                 filled_count += 1;
+                material_count.insert(m);
             }
         }
 
-        self.voxels = Arc::new(voxels);
+        self.chunk_data.is_empty = filled_count == 0;
+        self.chunk_data.is_full = filled_count == PaddedChunkShape::SIZE;
 
-        self.is_empty = filled_count == 0;
-        self.is_full = filled_count == PaddedChunkShape::SIZE;
+        if self.chunk_data.is_full && material_count.len() == 1 {
+            self.chunk_data.fill_type = FillType::Uniform(voxels[0]);
+            self.chunk_data.voxels = None;
+        } else if filled_count > 0 {
+            self.chunk_data.fill_type = FillType::Mixed;
+            self.chunk_data.voxels = Some(Arc::new(voxels));
+        } else {
+            self.chunk_data.fill_type = FillType::Empty;
+            self.chunk_data.voxels = None;
+        };
+
+        self.chunk_data.generate_hash();
     }
 
     /// Generate a mesh for the chunk based on the currect voxel data
     pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
-        if self.mesh.is_none() {
+        if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
             self.mesh = Some(meshing::generate_chunk_mesh(
-                self.voxels.clone(),
+                self.chunk_data.voxels.as_ref().unwrap().clone(),
                 self.position,
                 texture_index_mapper,
             ));
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunk_data.is_empty
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.chunk_data.is_full
+    }
+
+    pub fn voxels_hash(&self) -> u64 {
+        self.chunk_data.voxels_hash
     }
 }

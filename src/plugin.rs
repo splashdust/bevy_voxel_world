@@ -55,15 +55,13 @@ impl Plugin for VoxelWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelWorldConfiguration>()
             .add_systems(PreStartup, setup_internals)
-            .add_systems(
-                First,
-                (flush_mesh_cache_buffers, spawn_chunks, retire_chunks),
-            )
+            .add_systems(First, (spawn_chunks, retire_chunks))
             .add_systems(
                 Last,
                 (
                     flush_voxel_write_buffer,
                     remesh_dirty_chunks,
+                    flush_mesh_cache_buffers,
                     flush_chunk_map_buffers,
                     despawn_retired_chunks,
                 ),
@@ -131,7 +129,7 @@ impl Plugin for VoxelWorldPlugin {
             app.insert_resource(StandardVoxelMaterialHandle(mat_handle));
             app.insert_resource(TextureLayers(self.texture_layers));
 
-            app.add_systems(First, spawn_meshes);
+            app.add_systems(Update, spawn_meshes);
             app.add_systems(Update, prepare_texture);
         }
     }

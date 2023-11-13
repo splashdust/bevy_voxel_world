@@ -11,7 +11,6 @@ use bevy::{
 use futures_lite::future;
 use std::{
     collections::VecDeque,
-    hash::{Hash, Hasher},
     sync::{Arc, RwLock},
 };
 
@@ -150,7 +149,7 @@ pub(crate) fn spawn_chunks(
                 entity: commands.spawn(NeedsRemesh).id(),
             };
 
-            chunk_map_write_buffer.push((chunk_position, ChunkData::from(&chunk)));
+            chunk_map_write_buffer.push((chunk_position, ChunkData::with_entity(chunk.entity)));
 
             commands
                 .entity(chunk.entity)
@@ -261,29 +260,22 @@ pub(crate) fn remesh_dirty_chunks(
         let voxel_data_fn = (configuration.voxel_lookup_delegate)(chunk.position);
         let texture_index_mapper = configuration.texture_index_mapper.clone();
 
-        let mut chunk_task = ChunkTask::new(chunk.position, modified_voxels.clone());
+        let mut chunk_task = ChunkTask::new(chunk.entity, chunk.position, modified_voxels.clone());
 
         let mesh_map = Arc::new(mesh_cache.get_map());
         let thread = thread_pool.spawn(async move {
             chunk_task.generate(voxel_data_fn);
 
             // No need to mesh if the chunk is empty or full
-            if chunk_task.is_empty || chunk_task.is_full {
+            if chunk_task.is_empty() || chunk_task.is_full() {
                 return chunk_task;
             }
-
-            // Pre-compute a hash for the voxels array
-            chunk_task.voxels_hash = {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                chunk_task.voxels.hash(&mut hasher);
-                hasher.finish()
-            };
 
             // Also no need to mesh if a matching mesh is already cached
             let mesh_cache_hit = mesh_map
                 .read()
                 .unwrap()
-                .contains_key(&chunk_task.voxels_hash);
+                .contains_key(&chunk_task.voxels_hash());
             if !mesh_cache_hit {
                 chunk_task.mesh(texture_index_mapper);
             }
@@ -311,13 +303,12 @@ pub(crate) fn spawn_meshes(
     mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
     buffers: (ResMut<ChunkMapUpdateBuffer>, ResMut<MeshCacheInsertBuffer>),
     res: (
-        Res<ChunkMap>,
         Res<MeshCache>,
         Res<StandardVoxelMaterialHandle>,
         Res<LoadingTexture>,
     ),
 ) {
-    let (chunk_map, mesh_cache, material_handle, loading_texture) = res;
+    let (mesh_cache, material_handle, loading_texture) = res;
 
     if !loading_texture.is_loaded {
         return;
@@ -334,10 +325,10 @@ pub(crate) fn spawn_meshes(
 
         let chunk_task = thread_result.unwrap();
 
-        if !chunk_task.is_empty {
-            if !chunk_task.is_full {
+        if !chunk_task.is_empty() {
+            if !chunk_task.is_full() {
                 let mesh_handle = {
-                    if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels_hash) {
+                    if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels_hash()) {
                         mesh_handle
                     } else {
                         if chunk_task.mesh.is_none() {
@@ -347,8 +338,9 @@ pub(crate) fn spawn_meshes(
                                 .remove::<ChunkThread>();
                             continue;
                         }
+                        let hash = chunk_task.voxels_hash();
                         let mesh_ref = Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
-                        mesh_cache_insert_buffer.push((chunk_task.voxels_hash, mesh_ref.clone()));
+                        mesh_cache_insert_buffer.push((hash, mesh_ref.clone()));
                         mesh_ref
                     }
                 };
@@ -372,18 +364,7 @@ pub(crate) fn spawn_meshes(
                 });
             }
 
-            let chunk_map_read_lock = chunk_map.get_read_lock();
-            if let Some(chunk_data) = ChunkMap::get(&chunk.position, &chunk_map_read_lock) {
-                chunk_map_update_buffer.push((
-                    chunk.position,
-                    ChunkData {
-                        voxels: chunk_task.voxels,
-                        voxels_hash: chunk_task.voxels_hash,
-                        is_full: chunk_task.is_full,
-                        entity: chunk_data.entity,
-                    },
-                ));
-            }
+            chunk_map_update_buffer.push((chunk.position, chunk_task.chunk_data));
         }
 
         commands.entity(chunk.entity).remove::<ChunkThread>();
@@ -412,7 +393,7 @@ pub(crate) fn flush_voxel_write_buffer(
                 position: chunk_pos,
                 entity: commands.spawn(NeedsRemesh).id(),
             };
-            chunk_map_insert_buffer.push((chunk_pos, ChunkData::from(&chunk)));
+            chunk_map_insert_buffer.push((chunk_pos, ChunkData::with_entity(chunk.entity)));
             commands.entity(chunk.entity).insert(chunk);
         }
     }
