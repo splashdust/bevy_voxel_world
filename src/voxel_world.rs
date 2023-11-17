@@ -24,7 +24,7 @@ pub struct ChunkWillDespawn {
 }
 
 /// Fired when a chunk is about to be spawned.
-#[derive(Event)]
+#[derive(Event, Clone)]
 pub struct ChunkWillSpawn {
     pub chunk_key: IVec3,
     pub entity: Entity,

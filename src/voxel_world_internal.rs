@@ -235,12 +235,12 @@ pub(crate) fn despawn_retired_chunks(
     mut commands: Commands,
     mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer>,
     chunk_map: Res<ChunkMap>,
-    retired_chunks: Query<&Chunk, With<NeedsDespawn>>,
+    retired_chunks: Query<(Entity, &Chunk), With<NeedsDespawn>>,
 ) {
     let read_lock = chunk_map.get_read_lock();
-    for chunk in retired_chunks.iter() {
-        if let Some(chunk_data) = ChunkMap::get(&chunk.position, &read_lock) {
-            commands.entity(chunk_data.entity).despawn_recursive();
+    for (entity, chunk) in retired_chunks.iter() {
+        if ChunkMap::contains_chunk(&chunk.position, &read_lock) {
+            commands.entity(entity).despawn_recursive();
             chunk_map_remove_buffer.push(chunk.position);
         }
     }
@@ -299,9 +299,11 @@ pub(crate) fn remesh_dirty_chunks(
 /// Inserts new meshes for chunks that have just finished remeshing
 pub(crate) fn spawn_meshes(
     mut commands: Commands,
-    mut chunking_threads: Query<(&mut ChunkThread, &mut Chunk, &Transform), Without<NeedsRemesh>>,
+    mut chunking_threads: Query<
+        (Entity, &mut ChunkThread, &mut Chunk, &Transform),
+        Without<NeedsRemesh>,
+    >,
     mut mesh_assets: ResMut<Assets<Mesh>>,
-    mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
     buffers: (ResMut<ChunkMapUpdateBuffer>, ResMut<MeshCacheInsertBuffer>),
     res: (
         Res<MeshCache>,
@@ -317,7 +319,7 @@ pub(crate) fn spawn_meshes(
 
     let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
 
-    for (mut thread, chunk, transform) in &mut chunking_threads {
+    for (entity, mut thread, chunk, transform) in &mut chunking_threads {
         let thread_result = future::block_on(future::poll_once(&mut thread.0));
 
         if thread_result.is_none() {
@@ -347,7 +349,7 @@ pub(crate) fn spawn_meshes(
                 };
 
                 commands
-                    .entity(chunk.entity)
+                    .entity(entity)
                     .insert((
                         MaterialMeshBundle {
                             mesh: (*mesh_handle).clone(),
@@ -358,14 +360,16 @@ pub(crate) fn spawn_meshes(
                         MeshRef(mesh_handle),
                     ))
                     .remove::<bevy::render::primitives::Aabb>();
-
-                ev_chunk_will_spawn.send(ChunkWillSpawn {
-                    chunk_key: chunk_task.position,
-                    entity: chunk.entity,
-                });
             }
 
-            chunk_map_update_buffer.push((chunk.position, chunk_task.chunk_data));
+            chunk_map_update_buffer.push((
+                chunk.position,
+                chunk_task.chunk_data,
+                ChunkWillSpawn {
+                    chunk_key: chunk_task.position,
+                    entity,
+                },
+            ));
         }
 
         commands.entity(chunk.entity).remove::<ChunkThread>();
@@ -412,12 +416,14 @@ pub(crate) fn flush_chunk_map_buffers(
     mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer>,
     mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer>,
     mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer>,
+    mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
     chunk_map: Res<ChunkMap>,
 ) {
     chunk_map.apply_buffers(
         &mut chunk_map_insert_buffer,
         &mut chunk_map_update_buffer,
         &mut chunk_map_remove_buffer,
+        &mut ev_chunk_will_spawn,
     );
 }
 

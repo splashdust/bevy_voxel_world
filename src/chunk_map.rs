@@ -2,7 +2,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use bevy::{prelude::*, utils::hashbrown::HashMap};
 
-use crate::chunk;
+use crate::{chunk, voxel_world::ChunkWillSpawn};
 
 /// Holds a map of all chunks that are currently spawned spawned
 /// The chunks also exist as entities that can be queried in the ECS,
@@ -40,6 +40,7 @@ impl ChunkMap {
         insert_buffer: &mut ChunkMapInsertBuffer,
         update_buffer: &mut ChunkMapUpdateBuffer,
         remove_buffer: &mut ChunkMapRemoveBuffer,
+        ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn>,
     ) {
         if insert_buffer.is_empty() && update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
@@ -51,8 +52,9 @@ impl ChunkMap {
             }
             insert_buffer.clear();
 
-            for (position, chunk_data) in update_buffer.iter() {
+            for (position, chunk_data, evt) in update_buffer.iter() {
                 write_lock.insert(*position, chunk_data.clone());
+                ev_chunk_will_spawn.send((*evt).clone());
             }
             update_buffer.clear();
 
@@ -76,7 +78,7 @@ impl Default for ChunkMap {
 pub(crate) struct ChunkMapInsertBuffer(Vec<(IVec3, chunk::ChunkData)>);
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapUpdateBuffer(Vec<(IVec3, chunk::ChunkData)>);
+pub(crate) struct ChunkMapUpdateBuffer(Vec<(IVec3, chunk::ChunkData, ChunkWillSpawn)>);
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub(crate) struct ChunkMapRemoveBuffer(Vec<IVec3>);
