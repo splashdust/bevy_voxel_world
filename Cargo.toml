@@ -1,7 +1,7 @@
 [package]
 name = "bevy_voxel_world"
 description = "A voxel world plugin for Bevy"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["Joacim Magnusson <joacim@isogram.se>"]
 license = "MIT OR Apache-2.0"
@@ -30,4 +30,4 @@ weak-table = { version = "0.3.2", features = ["ahash"] }
 
 [dev-dependencies]
 noise = "0.8.2"
-bevy_flycam = "*"
+bevy_flycam = "0.12.0"

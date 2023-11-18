@@ -1,7 +1,7 @@
 use bevy::prelude::*;
+use bevy_flycam::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
-use bevy_flycam::prelude::*;
 
 // Declare materials as consts for convenience
 const SNOWY_BRICK: u8 = 0;
@@ -26,12 +26,10 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(VoxelWorldConfiguration {
         // To specify how the texture map to different kind of voxels we add this mapping callback
         // For each material type, we specify the texture coordinates for the top, side and bottom faces.
-        texture_index_mapper: Arc::new(|vox_mat: u8| {
-            match vox_mat {
-                SNOWY_BRICK => [0, 1, 2],
-                FULL_BRICK => [2, 2, 2],
-                GRASS | _ => [3, 3, 3],
-            }
+        texture_index_mapper: Arc::new(|vox_mat: u8| match vox_mat {
+            SNOWY_BRICK => [0, 1, 2],
+            FULL_BRICK => [2, 2, 2],
+            GRASS | _ => [3, 3, 3],
         }),
         ..Default::default()
     });
@@ -44,7 +42,7 @@ fn setup(mut commands: Commands) {
         },
         // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
         VoxelWorldCamera,
-        FlyCam
+        FlyCam,
     ));
 
     // Ambient light
@@ -72,7 +70,8 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld) {
     // 20 by 20 floor
     for x in -10..10 {
         for z in -10..10 {
-            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(GRASS)); // Grassy floor
+            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(GRASS));
+            // Grassy floor
         }
     }
 

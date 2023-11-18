@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Defer `ChunkWillSpawn` event until buffers are applied. Fixes issues caused by the event getting fired before the chunk data can actually be looked up.
+- Fix texture bleeding issue on negative Y faces (#10)
+
 ## 0.3.2
 
 - Performance improvements:
