@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
+use bevy_flycam::prelude::*;
 
 fn main() {
     App::new()
@@ -11,9 +12,9 @@ fn main() {
             "example_voxel_texture.png",
             4, // number of indexes in the texture
         ))
+        .add_plugins(NoCameraPlayerPlugin)
         .add_systems(Startup, setup)
         .add_systems(Update, create_voxel_scene)
-        .add_systems(Update, move_camera)
         .run();
 }
 
@@ -44,6 +45,7 @@ fn setup(mut commands: Commands) {
         },
         // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
         VoxelWorldCamera,
+        FlyCam
     ));
 
     // Ambient light
@@ -74,11 +76,11 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld, mut ran_once: Local<bool>) {
     // Then we just use the material type `u8` value to specify the type of voxel
 
     // 20 by 20 floor
-    for x in -10..10 {
-        for z in -10..10 {
-            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(2)); // Grassy floor
-        }
-    }
+    // for x in -10..10 {
+    //     for z in -10..10 {
+    //         voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(2)); // Grassy floor
+    //     }
+    // }
 
     // Some bricks
     voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(0));

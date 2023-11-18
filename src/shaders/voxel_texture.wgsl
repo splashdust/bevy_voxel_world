@@ -37,8 +37,6 @@ struct Vertex {
 };
 
 struct CustomVertexOutput {
-    // This is `clip position` when the struct is used as a vertex stage output
-    // and `frag coord` when used as a fragment stage input
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
@@ -122,23 +120,12 @@ fn fragment(
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
-    #ifdef PREPASS_PIPELINE
-    // in deferred mode we can't modify anything after that, as lighting is run in a separate fullscreen shader.
+#ifdef PREPASS_PIPELINE
     let out = deferred_output(in, pbr_input);
 #else
     var out: FragmentOutput;
-    // apply lighting
     out.color = apply_pbr_lighting(pbr_input);
-
-    // we can optionally modify the lit color before post-processing is applied
-    //out.color = vec4<f32>(vec4<u32>(out.color * f32(my_extended_material.quantize_steps))) / f32(my_extended_material.quantize_steps);
-
-    // apply in-shader post processing (fog, alpha-premultiply, and also tonemapping, debanding if the camera is non-hdr)
-    // note this does not include fullscreen postprocessing effects like bloom.
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-
-    // we can optionally modify the final result here
-    out.color = out.color * 2.0;
 #endif
 
     return out;   
