@@ -18,8 +18,7 @@ fn main() {
             4, // number of indexes in the texture
         ))
         .add_plugins(NoCameraPlayerPlugin)
-        .add_systems(Startup, setup)
-        .add_systems(Update, create_voxel_scene)
+        .add_systems(Startup, (setup, create_voxel_scene))
         .run();
 }
 
@@ -67,13 +66,8 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn create_voxel_scene(mut voxel_world: VoxelWorld, mut ran_once: Local<bool>) {
-    if *ran_once {
-        return;
-    }
-    *ran_once = true;
-
-    // Then we just use the material type `u8` value to specify the type of voxel
+fn create_voxel_scene(mut voxel_world: VoxelWorld) {
+    // Then we can use the `u8` consts to specify the type of voxel
 
     // 20 by 20 floor
     for x in -10..10 {
