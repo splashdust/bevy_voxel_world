@@ -3,6 +3,11 @@ use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 use bevy_flycam::prelude::*;
 
+// Declare materials as consts for convenience
+const SNOWY_BRICK: u8 = 0;
+const FULL_BRICK: u8 = 1;
+const GRASS: u8 = 2;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -24,14 +29,9 @@ fn setup(mut commands: Commands) {
         // For each material type, we specify the texture coordinates for the top, side and bottom faces.
         texture_index_mapper: Arc::new(|vox_mat: u8| {
             match vox_mat {
-                // Top brick
-                0 => [0, 1, 2],
-
-                // Full brick
-                1 => [2, 2, 2],
-
-                // Grass
-                2 | _ => [3, 3, 3],
+                SNOWY_BRICK => [0, 1, 2],
+                FULL_BRICK => [2, 2, 2],
+                GRASS | _ => [3, 3, 3],
             }
         }),
         ..Default::default()
@@ -78,18 +78,18 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld, mut ran_once: Local<bool>) {
     // 20 by 20 floor
     for x in -10..10 {
         for z in -10..10 {
-            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(2)); // Grassy floor
+            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(GRASS)); // Grassy floor
         }
     }
 
     // Some bricks
-    voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(1, 0, 0), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(0, 0, 1), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(0, 0, -1), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(-1, 0, 0), WorldVoxel::Solid(1));
-    voxel_world.set_voxel(IVec3::new(-2, 0, 0), WorldVoxel::Solid(1));
-    voxel_world.set_voxel(IVec3::new(-1, 1, 0), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(-2, 1, 0), WorldVoxel::Solid(0));
-    voxel_world.set_voxel(IVec3::new(0, 1, 0), WorldVoxel::Solid(0));
+    voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(1, 0, 0), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(0, 0, 1), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(0, 0, -1), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(-1, 0, 0), WorldVoxel::Solid(FULL_BRICK));
+    voxel_world.set_voxel(IVec3::new(-2, 0, 0), WorldVoxel::Solid(FULL_BRICK));
+    voxel_world.set_voxel(IVec3::new(-1, 1, 0), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(-2, 1, 0), WorldVoxel::Solid(SNOWY_BRICK));
+    voxel_world.set_voxel(IVec3::new(0, 1, 0), WorldVoxel::Solid(SNOWY_BRICK));
 }
