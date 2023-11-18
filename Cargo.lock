@@ -542,6 +542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_flycam"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ff8b60a0f7acbbbfc0af92f04fcb5e9fc1b44b873553ddb3f12ce5764326b4"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_gilrs"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1020,6 +1029,7 @@ name = "bevy_voxel_world"
 version = "0.3.2"
 dependencies = [
  "bevy",
+ "bevy_flycam",
  "block-mesh",
  "futures-lite 2.0.0",
  "ndshape",

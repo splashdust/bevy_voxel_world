@@ -76,11 +76,11 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld, mut ran_once: Local<bool>) {
     // Then we just use the material type `u8` value to specify the type of voxel
 
     // 20 by 20 floor
-    // for x in -10..10 {
-    //     for z in -10..10 {
-    //         voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(2)); // Grassy floor
-    //     }
-    // }
+    for x in -10..10 {
+        for z in -10..10 {
+            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(2)); // Grassy floor
+        }
+    }
 
     // Some bricks
     voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(0));
@@ -92,13 +92,4 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld, mut ran_once: Local<bool>) {
     voxel_world.set_voxel(IVec3::new(-1, 1, 0), WorldVoxel::Solid(0));
     voxel_world.set_voxel(IVec3::new(-2, 1, 0), WorldVoxel::Solid(0));
     voxel_world.set_voxel(IVec3::new(0, 1, 0), WorldVoxel::Solid(0));
-}
-
-// Rotate the camera around the origin
-fn move_camera(time: Res<Time>, mut query: Query<&mut Transform, With<VoxelWorldCamera>>) {
-    let mut transform = query.single_mut();
-    let time_seconds = time.elapsed_seconds();
-    transform.translation.x = 10.0 * (time_seconds * 0.1).sin();
-    transform.translation.z = 10.0 * (time_seconds * 0.1).cos();
-    transform.look_at(Vec3::ZERO, Vec3::Y);
 }
