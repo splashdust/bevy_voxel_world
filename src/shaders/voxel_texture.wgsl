@@ -109,9 +109,9 @@ fn fragment(
     var tex_face = 0;
 
     // determine texture index based on normal
-    if (in.world_normal.y == 0.0) {
+    if in.world_normal.y == 0.0 {
         tex_face = 1;
-    } else if (in.world_normal.y == -1.0) {
+    } else if in.world_normal.y < 0.0 {
         tex_face = 2;
     }
 
