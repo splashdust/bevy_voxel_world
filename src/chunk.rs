@@ -22,11 +22,11 @@ pub(crate) type VoxelArray = [WorldVoxel; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread(pub Task<ChunkTask>);
+pub(crate) struct ChunkThread(pub Task<ChunkTask>, pub IVec3);
 
 impl ChunkThread {
-    pub fn new(task: Task<ChunkTask>) -> Self {
-        Self(task)
+    pub fn new(task: Task<ChunkTask>, pos: IVec3) -> Self {
+        Self(task, pos)
     }
 }
 
