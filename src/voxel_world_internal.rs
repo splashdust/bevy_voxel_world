@@ -249,26 +249,12 @@ pub(crate) fn despawn_retired_chunks(
 pub(crate) fn remesh_dirty_chunks(
     mut commands: Commands,
     mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh>,
-    mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer>,
     dirty_chunks: Query<&Chunk, With<NeedsRemesh>>,
-    running_tasks: Query<(Entity, &ChunkThread)>,
     mesh_cache: Res<MeshCache>,
     modified_voxels: Res<ModifiedVoxels>,
     configuration: Res<VoxelWorldConfiguration>,
-    camera_info: CameraInfo,
 ) {
     let thread_pool = AsyncComputeTaskPool::get();
-
-    let (camera, cam_gtf) = camera_info.get_single().unwrap();
-
-    // Run though current threads and check if any are working on chunks that
-    // are no longer in viwe and can be cancelled
-    running_tasks.for_each(|(chunk_ent, task)| {
-        if !is_in_view(task.1.as_vec3(), camera, cam_gtf) {
-            commands.entity(chunk_ent).remove::<ChunkThread>();
-            chunk_map_remove_buffer.push(task.1);
-        }
-    });
 
     for chunk in dirty_chunks.iter() {
         let voxel_data_fn = (configuration.voxel_lookup_delegate)(chunk.position);
