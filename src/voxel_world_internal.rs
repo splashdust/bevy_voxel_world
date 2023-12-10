@@ -378,7 +378,6 @@ pub(crate) fn spawn_meshes(
 pub(crate) fn flush_voxel_write_buffer(
     mut commands: Commands,
     mut buffer: ResMut<VoxelWriteBuffer>,
-    mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer>,
     chunk_map: Res<ChunkMap>,
     modified_voxels: ResMut<ModifiedVoxels>,
 ) {
@@ -389,16 +388,11 @@ pub(crate) fn flush_voxel_write_buffer(
         let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
         modified_voxels.insert(*position, *voxel);
 
+        // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
         if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
-            // Mark the chunk as needing remeshing
-            commands.entity(chunk_data.entity).insert(NeedsRemesh);
-        } else {
-            let chunk = Chunk {
-                position: chunk_pos,
-                entity: commands.spawn(NeedsRemesh).id(),
-            };
-            chunk_map_insert_buffer.push((chunk_pos, ChunkData::with_entity(chunk.entity)));
-            commands.entity(chunk.entity).insert(chunk);
+            if let Some(mut entity) = commands.get_entity(chunk_data.entity) {
+                entity.insert(NeedsRemesh);
+            }
         }
     }
     buffer.clear();

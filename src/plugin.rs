@@ -56,7 +56,7 @@ impl Plugin for VoxelWorldPlugin {
         app.init_resource::<VoxelWorldConfiguration>()
             .add_systems(PreStartup, setup_internals)
             .add_systems(
-                Update,
+                PreUpdate,
                 ((spawn_chunks, retire_chunks).chain(), remesh_dirty_chunks).chain(),
             )
             .add_systems(
@@ -269,7 +269,6 @@ mod tests {
         });
 
         app.update();
-        app.update(); // Need two cycles for the write buffer to flush
 
         app.add_systems(
             Update,
