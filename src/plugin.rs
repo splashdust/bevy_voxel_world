@@ -55,16 +55,18 @@ impl Plugin for VoxelWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoxelWorldConfiguration>()
             .add_systems(PreStartup, setup_internals)
-            .add_systems(First, (spawn_chunks, retire_chunks))
             .add_systems(
-                Last,
+                Update,
+                ((spawn_chunks, retire_chunks).chain(), remesh_dirty_chunks).chain(),
+            )
+            .add_systems(
+                PostUpdate,
                 (
                     flush_voxel_write_buffer,
-                    remesh_dirty_chunks,
-                    flush_mesh_cache_buffers,
-                    flush_chunk_map_buffers,
                     despawn_retired_chunks,
-                ),
+                    (flush_chunk_map_buffers, flush_mesh_cache_buffers),
+                )
+                    .chain(),
             )
             .add_event::<ChunkWillSpawn>()
             .add_event::<ChunkWillDespawn>()
