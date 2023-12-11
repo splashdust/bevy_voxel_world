@@ -152,7 +152,7 @@ pub(crate) fn spawn_chunks(
 
             chunk_map_write_buffer.push((chunk_position, ChunkData::with_entity(chunk.entity)));
 
-            commands.entity(chunk.entity).insert((
+            commands.entity(chunk.entity).try_insert((
                 chunk,
                 Transform::from_translation(chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0),
             ));
@@ -219,7 +219,7 @@ pub fn retire_chunks(
     };
 
     for chunk in chunks_to_remove {
-        commands.entity(chunk.entity).insert(NeedsDespawn);
+        commands.entity(chunk.entity).try_insert(NeedsDespawn);
 
         ev_chunk_will_despawn.send(ChunkWillDespawn {
             chunk_key: chunk.position,
@@ -285,7 +285,7 @@ pub(crate) fn remesh_dirty_chunks(
 
         commands
             .entity(chunk.entity)
-            .insert(ChunkThread::new(thread, chunk.position))
+            .try_insert(ChunkThread::new(thread, chunk.position))
             .remove::<NeedsRemesh>();
 
         ev_chunk_will_remesh.send(ChunkWillRemesh {
@@ -336,7 +336,7 @@ pub(crate) fn spawn_meshes(
                         if chunk_task.mesh.is_none() {
                             commands
                                 .entity(chunk.entity)
-                                .insert(NeedsRemesh)
+                                .try_insert(NeedsRemesh)
                                 .remove::<ChunkThread>();
                             continue;
                         }
@@ -349,7 +349,7 @@ pub(crate) fn spawn_meshes(
 
                 commands
                     .entity(entity)
-                    .insert((
+                    .try_insert((
                         MaterialMeshBundle {
                             mesh: (*mesh_handle).clone(),
                             material: material_handle.0.clone(),
@@ -390,9 +390,7 @@ pub(crate) fn flush_voxel_write_buffer(
 
         // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
         if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
-            if let Some(mut entity) = commands.get_entity(chunk_data.entity) {
-                entity.insert(NeedsRemesh);
-            }
+            commands.entity(chunk_data.entity).try_insert(NeedsRemesh);
         }
     }
     buffer.clear();
