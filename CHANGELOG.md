@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Avoid issues with chuck entities that have already been despawned, by using `try_insert` instead of regular `insert`. #12 & #14
+
 ## 0.3.3
 
 - Defer `ChunkWillSpawn` event until buffers are applied. Fixes issues caused by the event getting fired before the chunk data can actually be looked up.
