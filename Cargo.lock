@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_voxel_world"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bevy",
  "bevy_flycam",
