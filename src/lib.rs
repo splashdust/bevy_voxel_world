@@ -17,3 +17,9 @@ pub mod prelude {
     pub use crate::voxel_world::{ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn};
     pub use crate::voxel_world::{VoxelWorld, VoxelWorldCamera};
 }
+
+pub mod rendering {
+    pub use crate::plugin::{VoxelWorldMaterialHandle, VoxelWorldMaterialPlugin};
+    pub use crate::voxel_material::vertex_layout;
+    pub use crate::voxel_material::VOXEL_TEXTURE_SHADER_HANDLE;
+}

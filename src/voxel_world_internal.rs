@@ -19,8 +19,9 @@ use crate::{
     chunk_map::*,
     configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfiguration},
     mesh_cache::*,
+    plugin::VoxelWorldMaterialHandle,
     voxel::WorldVoxel,
-    voxel_material::{LoadingTexture, StandardVoxelMaterialHandle},
+    voxel_material::LoadingTexture,
     voxel_world::{ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, VoxelWorldCamera},
 };
 
@@ -295,6 +296,9 @@ pub(crate) fn remesh_dirty_chunks(
     }
 }
 
+#[derive(Component)]
+pub(crate) struct NeedsMaterial;
+
 /// Inserts new meshes for chunks that have just finished remeshing
 pub(crate) fn spawn_meshes(
     mut commands: Commands,
@@ -304,13 +308,9 @@ pub(crate) fn spawn_meshes(
     >,
     mut mesh_assets: ResMut<Assets<Mesh>>,
     buffers: (ResMut<ChunkMapUpdateBuffer>, ResMut<MeshCacheInsertBuffer>),
-    res: (
-        Res<MeshCache>,
-        Res<StandardVoxelMaterialHandle>,
-        Res<LoadingTexture>,
-    ),
+    res: (Res<MeshCache>, Res<LoadingTexture>),
 ) {
-    let (mesh_cache, material_handle, loading_texture) = res;
+    let (mesh_cache, loading_texture) = res;
 
     if !loading_texture.is_loaded {
         return;
@@ -349,15 +349,7 @@ pub(crate) fn spawn_meshes(
 
                 commands
                     .entity(entity)
-                    .try_insert((
-                        MaterialMeshBundle {
-                            mesh: (*mesh_handle).clone(),
-                            material: material_handle.0.clone(),
-                            transform: *transform,
-                            ..default()
-                        },
-                        MeshRef(mesh_handle),
-                    ))
+                    .try_insert((*transform, MeshRef(mesh_handle), NeedsMaterial))
                     .remove::<bevy::render::primitives::Aabb>();
             }
 
@@ -372,6 +364,24 @@ pub(crate) fn spawn_meshes(
         }
 
         commands.entity(chunk.entity).remove::<ChunkThread>();
+    }
+}
+
+pub(crate) fn assign_material<M: Material>(
+    mut commands: Commands,
+    mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial>>,
+    material_handle: Res<VoxelWorldMaterialHandle<M>>,
+) {
+    for (entity, mesh_ref, transform) in needs_material.iter_mut() {
+        commands
+            .entity(entity)
+            .try_insert(MaterialMeshBundle {
+                mesh: (*mesh_ref.0).clone(),
+                material: material_handle.handle.clone(),
+                transform: *transform,
+                ..default()
+            })
+            .remove::<NeedsMaterial>();
     }
 }
 
