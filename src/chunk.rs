@@ -114,6 +114,10 @@ impl Chunk {
             entity: chunk.entity,
         }
     }
+
+    pub fn get_world_position(&self) -> Vec3 {
+        self.position.as_vec3() * CHUNK_SIZE_F
+    }
 }
 
 /// Holds all data needed to generate and mesh a chunk
