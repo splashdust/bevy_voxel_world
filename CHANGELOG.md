@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5
+
+- Add support for using custom Bevy materials. This makes it easy to use custom shaders with `bevy_voxel_world`.
+- Add a built-in method for ray casting into the world. Usefull if you want to know which voxe is under the mouse cursor for instance.
+
 ## 0.3.4
 
 - Avoid issues with chuck entities that have already been despawned, by using `try_insert` instead of regular `insert`. #12 & #14
