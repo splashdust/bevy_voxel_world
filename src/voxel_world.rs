@@ -168,11 +168,23 @@ impl<'w> VoxelWorld<'w> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct VoxelRaycastResult {
     pub position: Vec3,
     pub normal: Vec3,
     pub voxel: WorldVoxel,
+}
+
+impl VoxelRaycastResult {
+    /// Get the voxel position of the raycast result
+    pub fn voxel_pos(&self) -> IVec3 {
+        self.position.floor().as_ivec3()
+    }
+
+    /// Get the face normal of the ray hit
+    pub fn voxel_normal(&self) -> IVec3 {
+        self.normal.floor().as_ivec3()
+    }
 }
 
 /// SystemParam helper for raycasting into the voxel world
@@ -182,6 +194,8 @@ pub struct VoxelWorldRaycast<'w> {
     chunk_map: Res<'w, ChunkMap>,
     voxel_world: VoxelWorld<'w>,
 }
+
+const STEP_SIZE: f32 = 0.01;
 
 impl<'w> VoxelWorldRaycast<'w> {
     /// Get the first solid voxel intersecting with the given ray.
@@ -248,7 +262,7 @@ impl<'w> VoxelWorldRaycast<'w> {
                                 steps += 1;
                                 voxel = adjacent_vox;
                                 voxel_pos += normal.as_ivec3();
-                                normal = get_hit_normal(voxel_pos, ray).unwrap();
+                                normal = get_hit_normal(voxel_pos, ray).unwrap_or(normal);
                                 adjacent_vox =
                                     self.voxel_world.get_voxel(voxel_pos + normal.as_ivec3());
                             }
@@ -261,13 +275,13 @@ impl<'w> VoxelWorldRaycast<'w> {
                                 });
                             }
                         }
-                        t += 0.01;
+                        t += STEP_SIZE;
                         current = ray.origin + ray.direction * t;
                     }
                 }
             }
 
-            t += 1.0;
+            t += STEP_SIZE;
             current = ray.origin + ray.direction * t;
         }
 

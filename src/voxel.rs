@@ -1,8 +1,9 @@
 use bevy::{prelude::*, render::primitives::Aabb};
 use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub enum WorldVoxel {
+    #[default]
     Unset,
     Air,
     Solid(u8),
