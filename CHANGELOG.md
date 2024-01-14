@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6
+
+- Fix some issues with ray casting
+
 ## 0.3.5
 
 - Add support for using custom Bevy materials. This makes it easy to use custom shaders with `bevy_voxel_world`.
