@@ -200,7 +200,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     /// use bevy::prelude::*;
     /// use bevy_voxel_world::prelude::*;
     ///
-    /// fn update_mouse_voxel_pos(
+    /// fn do_raycast(
     ///     voxel_world_raycast: VoxelWorldRaycast,
     ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
