@@ -184,10 +184,14 @@ impl Plugin for VoxelWorldPlugin {
 // -------- TESTS --------
 #[cfg(test)]
 mod tests {
-    use bevy::prelude::*;
+    use bevy::{prelude::*, render::view};
 
     use super::VoxelWorldPlugin;
-    use crate::{prelude::VoxelWorldCamera, voxel_world::*};
+    use crate::{
+        chunk::{ChunkData, FillType},
+        prelude::VoxelWorldCamera,
+        voxel_world::*,
+    };
 
     fn _test_setup_app() -> App {
         let mut app = App::new();
@@ -349,6 +353,81 @@ mod tests {
             |mut ev_chunk_will_despawn: EventReader<ChunkWillDespawn>| {
                 let count = ev_chunk_will_despawn.read().count();
                 assert!(count > 0)
+            },
+        );
+
+        app.update();
+    }
+
+    #[test]
+    fn raycast_finds_voxel() {
+        let mut app = _test_setup_app();
+
+        // Set up vector och positions to test
+        let positions = vec![IVec3::new(0, 0, -1), IVec3::new(0, 0, 0)];
+
+        let make_pos = positions.clone();
+
+        app.add_systems(
+            Startup,
+            move |mut voxel_world: crate::prelude::VoxelWorld,
+                  buffers: (
+                ResMut<crate::chunk_map::ChunkMapUpdateBuffer>,
+                ResMut<crate::mesh_cache::MeshCacheInsertBuffer>,
+            )| {
+                let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+
+                for pos in make_pos.clone() {
+                    voxel_world.set_voxel(pos, test_voxel);
+                }
+
+                let (mut chunk_map_update_buffer, _) = buffers;
+
+                chunk_map_update_buffer.push((
+                    IVec3::new(0, 0, 0),
+                    ChunkData {
+                        position: IVec3::new(0, 0, 0),
+                        voxels: Some(std::sync::Arc::new(
+                            [crate::prelude::WorldVoxel::Unset; 39304],
+                        )),
+                        voxels_hash: 0,
+                        is_full: false,
+                        is_empty: false,
+                        fill_type: FillType::Mixed,
+                        entity: Entity::PLACEHOLDER,
+                    },
+                    ChunkWillSpawn {
+                        chunk_key: IVec3::new(0, 0, 0),
+                        entity: Entity::PLACEHOLDER,
+                    },
+                ));
+            },
+        );
+
+        app.update();
+
+        app.add_systems(
+            Update,
+            move |voxel_world_raycast: crate::prelude::VoxelWorldRaycast| {
+                let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+
+                let ray = Ray {
+                    origin: Vec3::new(0.5, 0.5, 70.0),
+                    direction: -Vec3::Z,
+                };
+
+                let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) else {
+                    panic!("No voxel found")
+                };
+
+                assert_eq!(
+                    result,
+                    crate::voxel_world::VoxelRaycastResult {
+                        position: Vec3::ZERO,
+                        normal: Vec3::new(0.0, 0.0, 1.0),
+                        voxel: test_voxel
+                    }
+                )
             },
         );
 

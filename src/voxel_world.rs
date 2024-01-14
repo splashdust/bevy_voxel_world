@@ -2,12 +2,14 @@
 /// VoxelWorld
 /// This module implements most of the public API for bevy_voxel_world.
 ///
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{ecs::system::SystemParam, prelude::*, render::primitives::Aabb};
 use std::sync::Arc;
 
 use crate::{
+    chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
     chunk_map::ChunkMap,
-    voxel::WorldVoxel,
+    configuration::VoxelWorldConfiguration,
+    voxel::{VoxelAabb, WorldVoxel},
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };
 
@@ -46,7 +48,7 @@ pub struct VoxelWorld<'w> {
 }
 
 impl<'w> VoxelWorld<'w> {
-    /// Get the voxel at the given position, or None if there is no voxel at that position
+    /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
         self.get_voxel_fn()(position)
     }
@@ -164,4 +166,121 @@ impl<'w> VoxelWorld<'w> {
             z: pos_2d.y.floor() as i32,
         })
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct VoxelRaycastResult {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub voxel: WorldVoxel,
+}
+
+/// SystemParam helper for raycasting into the voxel world
+#[derive(SystemParam)]
+pub struct VoxelWorldRaycast<'w> {
+    configuration: Res<'w, VoxelWorldConfiguration>,
+    chunk_map: Res<'w, ChunkMap>,
+    voxel_world: VoxelWorld<'w>,
+}
+
+impl<'w> VoxelWorldRaycast<'w> {
+    /// Get the first solid voxel intersecting with the given ray.
+    /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
+    ///
+    /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
+    /// Returns `None` if no voxel was intersected
+    ///
+    /// Note: The method used for raycasting here is not 100% accurate. It is possible for the ray to miss a voxel
+    /// if the ray is very close to the edge. This is because the raycast is done in steps of 0.01 units.
+    /// If you need 100% accuracy, it may be better to cast against the mesh instead, using something like `bevy_mod_raycast`
+    /// or some physics plugin.
+    ///
+    /// # Example
+    /// ```
+    /// use bevy::prelude::*;
+    /// use bevy_voxel_world::prelude::*;
+    ///
+    /// fn update_mouse_voxel_pos(
+    ///     voxel_world_raycast: VoxelWorldRaycast,
+    ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    ///     mut cursor_evr: EventReader<CursorMoved>,
+    /// ) {
+    ///     for ev in cursor_evr.read() {
+    ///         // Get a ray from the cursor position into the world
+    ///         let (camera, cam_gtf) = camera_info.single();
+    ///         let ray = camera.viewport_to_world(cam_gtf, ev.position).unwrap_or_default();
+    ///
+    ///         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
+    ///             println!("vox_pos: {:?}, normal: {:?}, vox: {:?}", result.position, result.normal, result.voxel);
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub fn raycast(
+        &self,
+        ray: Ray,
+        filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
+    ) -> Option<VoxelRaycastResult> {
+        let spawning_distance = self.configuration.spawning_distance as i32;
+        let chunk_map_read_lock = self.chunk_map.get_read_lock();
+        let mut current = ray.origin;
+        let mut t = 0.0;
+
+        while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
+            let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
+
+            if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
+                if !chunk_data.is_empty {
+                    let mut voxel = WorldVoxel::Unset;
+                    while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {
+                        let mut voxel_pos = current.floor().as_ivec3();
+                        voxel = self.voxel_world.get_voxel(voxel_pos);
+                        if voxel.is_solid() {
+                            let mut normal = get_hit_normal(voxel_pos, ray).unwrap();
+
+                            let mut adjacent_vox =
+                                self.voxel_world.get_voxel(voxel_pos + normal.as_ivec3());
+
+                            // When we get here we have an approximate hit position and normal,
+                            // so we refine until the position adjacent to the normal is empty.
+                            let mut steps = 0;
+                            while adjacent_vox.is_solid() && steps < 3 {
+                                steps += 1;
+                                voxel = adjacent_vox;
+                                voxel_pos += normal.as_ivec3();
+                                normal = get_hit_normal(voxel_pos, ray).unwrap();
+                                adjacent_vox =
+                                    self.voxel_world.get_voxel(voxel_pos + normal.as_ivec3());
+                            }
+
+                            if filter((voxel_pos.as_vec3(), voxel)) {
+                                return Some(VoxelRaycastResult {
+                                    position: voxel_pos.as_vec3(),
+                                    normal,
+                                    voxel,
+                                });
+                            }
+                        }
+                        t += 0.01;
+                        current = ray.origin + ray.direction * t;
+                    }
+                }
+            }
+
+            t += 1.0;
+            current = ray.origin + ray.direction * t;
+        }
+
+        None
+    }
+}
+
+fn get_hit_normal(vox_pos: IVec3, ray: Ray) -> Option<Vec3> {
+    let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
+
+    let Some((_, normal)) = voxel_aabb.ray_intersection(ray) else {
+        return None;
+    };
+
+    Some(normal)
 }

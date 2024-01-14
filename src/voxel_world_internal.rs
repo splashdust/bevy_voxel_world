@@ -72,7 +72,7 @@ pub(crate) fn spawn_chunks(
     configuration: Res<VoxelWorldConfiguration>,
     camera_info: CameraInfo,
 ) {
-    let (camera, cam_gtf) = camera_info.get_single().unwrap();
+    let (camera, cam_gtf) = camera_info.single();
     let cam_pos = cam_gtf.translation().as_ivec3();
 
     let spawning_distance = configuration.spawning_distance as i32;
@@ -404,7 +404,9 @@ pub(crate) fn flush_voxel_write_buffer(
 
         // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
         if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
-            commands.entity(chunk_data.entity).try_insert(NeedsRemesh);
+            if let Some(mut ent) = commands.get_entity(chunk_data.entity) {
+                ent.try_insert(NeedsRemesh);
+            }
         }
     }
     buffer.clear();

@@ -2,7 +2,10 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use bevy::{prelude::*, utils::hashbrown::HashMap};
 
-use crate::{chunk, voxel_world::ChunkWillSpawn};
+use crate::{
+    chunk::{self, ChunkData},
+    voxel_world::ChunkWillSpawn,
+};
 
 /// Holds a map of all chunks that are currently spawned spawned
 /// The chunks also exist as entities that can be queried in the ECS,
@@ -48,12 +51,24 @@ impl ChunkMap {
 
         if let Ok(mut write_lock) = self.map.try_write() {
             for (position, chunk_data) in insert_buffer.iter() {
-                write_lock.insert(*position, chunk_data.clone());
+                write_lock.insert(
+                    *position,
+                    ChunkData {
+                        position: *position,
+                        ..chunk_data.clone()
+                    },
+                );
             }
             insert_buffer.clear();
 
             for (position, chunk_data, evt) in update_buffer.iter() {
-                write_lock.insert(*position, chunk_data.clone());
+                write_lock.insert(
+                    *position,
+                    ChunkData {
+                        position: *position,
+                        ..chunk_data.clone()
+                    },
+                );
                 ev_chunk_will_spawn.send((*evt).clone());
             }
             update_buffer.clear();
@@ -74,7 +89,7 @@ impl Default for ChunkMap {
     }
 }
 
-#[derive(Resource, Deref, DerefMut, Default)]
+#[derive(Resource, Deref, DerefMut, Default, Debug)]
 pub(crate) struct ChunkMapInsertBuffer(Vec<(IVec3, chunk::ChunkData)>);
 
 #[derive(Resource, Deref, DerefMut, Default)]

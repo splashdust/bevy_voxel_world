@@ -1,4 +1,4 @@
-use bevy::{prelude::*, tasks::Task, utils::HashSet};
+use bevy::{prelude::*, render::primitives::Aabb, tasks::Task, utils::HashSet};
 use ndshape::{ConstShape, ConstShape3u32};
 use std::{
     hash::{Hash, Hasher},
@@ -37,7 +37,7 @@ pub struct NeedsRemesh;
 #[derive(Component)]
 pub struct NeedsDespawn;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum FillType {
     Empty,
     Mixed,
@@ -46,8 +46,9 @@ pub enum FillType {
 
 /// This is used to lookup voxel data from spawned chunks. Does not persist after
 /// the chunk is despawned.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChunkData {
+    pub position: IVec3,
     pub voxels: Option<Arc<VoxelArray>>,
     pub voxels_hash: u64,
     pub is_full: bool,
@@ -59,6 +60,7 @@ pub struct ChunkData {
 impl ChunkData {
     pub fn new() -> Self {
         Self {
+            position: IVec3::ZERO,
             voxels: None,
             voxels_hash: 0,
             is_full: false,
@@ -92,6 +94,29 @@ impl ChunkData {
             }
         }
     }
+
+    pub fn world_position(&self) -> Vec3 {
+        self.position.as_vec3() * CHUNK_SIZE_F
+    }
+
+    pub fn aabb(&self) -> Aabb {
+        let min = Vec3::ZERO;
+        let max = min + Vec3::splat(CHUNK_SIZE_F);
+        Aabb::from_min_max(min, max)
+    }
+
+    pub fn encloses_point(&self, point: Vec3) -> bool {
+        let local_point = point - self.world_position();
+        let aabb = self.aabb();
+        let min = aabb.min();
+        let max = aabb.max();
+        local_point.x >= min.x
+            && local_point.y >= min.y
+            && local_point.z >= min.z
+            && local_point.x <= max.x
+            && local_point.y <= max.y
+            && local_point.z <= max.z
+    }
 }
 
 impl Default for ChunkData {
@@ -115,8 +140,10 @@ impl Chunk {
         }
     }
 
-    pub fn get_world_position(&self) -> Vec3 {
-        self.position.as_vec3() * CHUNK_SIZE_F
+    pub fn aabb(&self) -> Aabb {
+        let min = Vec3::ZERO;
+        let max = min + Vec3::splat(CHUNK_SIZE_F);
+        Aabb::from_min_max(min, max)
     }
 }
 
