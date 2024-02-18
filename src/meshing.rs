@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         mesh::{Indices, VertexAttributeValues},
+        render_asset::RenderAssetUsages,
         render_resource::PrimitiveTopology,
     },
 };
@@ -93,7 +94,10 @@ fn mesh_from_quads(
         }
     }
 
-    let mut render_mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
 
     render_mesh.insert_attribute(
         Mesh::ATTRIBUTE_POSITION,
@@ -128,7 +132,7 @@ fn mesh_from_quads(
         render_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     }
 
-    render_mesh.set_indices(Some(Indices::U32(indices.clone())));
+    render_mesh.insert_indices(Indices::U32(indices.clone()));
 
     render_mesh
 }

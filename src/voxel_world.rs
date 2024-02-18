@@ -232,7 +232,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     /// ```
     pub fn raycast(
         &self,
-        ray: Ray,
+        ray: Ray3d,
         filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
     ) -> Option<VoxelRaycastResult> {
         let spawning_distance = self.configuration.spawning_distance as i32;
@@ -289,7 +289,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     }
 }
 
-fn get_hit_normal(vox_pos: IVec3, ray: Ray) -> Option<Vec3> {
+fn get_hit_normal(vox_pos: IVec3, ray: Ray3d) -> Option<Vec3> {
     let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
 
     let Some((_, normal)) = voxel_aabb.ray_intersection(ray) else {

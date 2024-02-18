@@ -2,7 +2,10 @@ use bevy::{
     asset::load_internal_asset,
     pbr::ExtendedMaterial,
     prelude::*,
-    render::texture::{CompressedImageFormats, ImageSampler, ImageType},
+    render::{
+        render_asset::RenderAssetUsages,
+        texture::{CompressedImageFormats, ImageSampler, ImageType},
+    },
 };
 
 use crate::{
@@ -131,6 +134,7 @@ impl Plugin for VoxelWorldPlugin {
                     CompressedImageFormats::default(),
                     false,
                     ImageSampler::Default,
+                    RenderAssetUsages::default(),
                 )
                 .unwrap();
                 image.reinterpret_stacked_2d_as_array(4);

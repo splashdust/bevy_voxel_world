@@ -18,10 +18,10 @@
 }
 #endif
 
-@group(1) @binding(100)
+@group(2) @binding(100)
 var mat_array_texture: texture_2d_array<f32>;
 
-@group(1) @binding(101)
+@group(2) @binding(101)
 var mat_array_texture_sampler: sampler;
 
 struct Vertex {
@@ -62,7 +62,7 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     var model =  mesh_functions::get_model_matrix(vertex.instance_index);
 
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
-        vertex.normal, get_instance_index(vertex.instance_index));
+        vertex.normal, vertex.instance_index);
 
     out.world_position = mesh_functions::mesh_position_local_to_world(
         model, vec4<f32>(vertex.position, 1.0));
@@ -77,14 +77,14 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         model,
         vertex.tangent,
-        get_instance_index(vertex.instance_index)
+        vertex.instance_index
     );
 #endif
 
     out.color = vertex.color;
 
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    out.instance_index = get_instance_index(vertex.instance_index);
+    out.instance_index = vertex.instance_index;
 #endif
 
     out.tex_idx = vertex.tex_idx;

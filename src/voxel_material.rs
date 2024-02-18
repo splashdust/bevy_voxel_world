@@ -1,7 +1,7 @@
 use bevy::{
     pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     prelude::*,
-    reflect::{TypePath, TypeUuid},
+    reflect::TypePath,
     render::{
         mesh::{MeshVertexAttribute, MeshVertexBufferLayout, VertexAttributeDescriptor},
         render_resource::{
@@ -34,11 +34,11 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
         //Mesh::ATTRIBUTE_TANGENT.at_shader_location(4),
         Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
         Mesh::ATTRIBUTE_COLOR.at_shader_location(6),
+        Mesh::ATTRIBUTE_COLOR.at_shader_location(7),
         ATTRIBUTE_TEX_INDEX.at_shader_location(8),
     ]
 }
-#[derive(Asset, AsBindGroup, Debug, Clone, TypeUuid, TypePath)]
-#[uuid = "303bc6fc-605d-45b9-9fe5-b3fae5a566b7"]
+#[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
 pub(crate) struct StandardVoxelMaterial {
     #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
