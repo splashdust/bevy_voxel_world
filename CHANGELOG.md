@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Update to Bevy 0.13
+
 ## 0.3.6
 
 - Fix some issues with ray casting
