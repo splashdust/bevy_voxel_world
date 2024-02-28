@@ -30,4 +30,3 @@ weak-table = { version = "0.3.2", features = ["ahash"] }
 
 [dev-dependencies]
 noise = "0.8.2"
-bevy_flycam = "0.12.0"

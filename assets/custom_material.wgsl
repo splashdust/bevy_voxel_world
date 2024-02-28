@@ -3,7 +3,7 @@
 @fragment
 fn fragment(
     in: VertexOutput,
-    @location(6) tex_idx: vec3<u32>,
+    @location(8) tex_idx: vec3<u32>,
 ) -> FragmentOutput {
     var out: FragmentOutput;
 

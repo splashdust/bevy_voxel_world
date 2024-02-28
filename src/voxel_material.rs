@@ -33,8 +33,9 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
         Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
         //Mesh::ATTRIBUTE_TANGENT.at_shader_location(4),
         Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
-        Mesh::ATTRIBUTE_COLOR.at_shader_location(6),
         Mesh::ATTRIBUTE_COLOR.at_shader_location(7),
+        //Mesh::ATTRIBUTE_JOINT_INDEX.at_shader_location(6),
+        //Mesh::ATTRIBUTE_JOINT_WEIGHT.at_shader_location(7),
         ATTRIBUTE_TEX_INDEX.at_shader_location(8),
     ]
 }

@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy_flycam::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 
@@ -17,8 +16,7 @@ fn main() {
             "example_voxel_texture.png",
             4, // number of indexes in the texture
         ))
-        .add_plugins(NoCameraPlayerPlugin)
-        .add_systems(Startup, (setup, create_voxel_scene))
+        .add_systems(Startup, (setup, create_voxel_scene).chain())
         .run();
 }
 
@@ -37,29 +35,20 @@ fn setup(mut commands: Commands) {
     // Camera
     commands.spawn((
         Camera3dBundle {
-            transform: Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
-        // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera,
-        FlyCam,
     ));
 
-    // Ambient light
-    commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.98, 0.95, 0.82),
-        brightness: 1.0,
-    });
-
-    // Point light
+    // light
     commands.spawn(PointLightBundle {
-        transform: Transform::from_xyz(0.0, 5.0, 0.0),
         point_light: PointLight {
-            color: Color::rgb(0.98, 0.95, 0.82),
-            intensity: 100.0,
-            range: 40.0,
+            shadows_enabled: true,
             ..default()
         },
+        transform: Transform::from_xyz(4.0, 8.0, 4.0),
         ..default()
     });
 }
