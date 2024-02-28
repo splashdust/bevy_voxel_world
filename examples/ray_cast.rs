@@ -46,7 +46,7 @@ fn setup(
     commands.spawn((
         PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-            material: materials.add(Color::rgba_u8(124, 144, 255, 128).into()),
+            material: materials.add(Color::rgba_u8(124, 144, 255, 128)),
             transform: Transform::from_xyz(0.0, -10.0, 0.0),
             ..default()
         },
@@ -58,28 +58,20 @@ fn setup(
     // Camera
     commands.spawn((
         Camera3dBundle {
-            transform: Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
         // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
         VoxelWorldCamera,
     ));
 
-    // Ambient light
-    commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.98, 0.95, 0.82),
-        brightness: 1.0,
-    });
-
-    // Point light
+    // light
     commands.spawn(PointLightBundle {
-        transform: Transform::from_xyz(0.0, 5.0, 0.0),
         point_light: PointLight {
-            color: Color::rgb(0.98, 0.95, 0.82),
-            intensity: 100.0,
-            range: 40.0,
+            shadows_enabled: true,
             ..default()
         },
+        transform: Transform::from_xyz(4.0, 8.0, 4.0),
         ..default()
     });
 }
@@ -116,9 +108,9 @@ fn update_cursor_cube(
     for ev in cursor_evr.read() {
         // Get a ray from the cursor position into the world
         let (camera, cam_gtf) = camera_info.single();
-        let ray = camera
-            .viewport_to_world(cam_gtf, ev.position)
-            .unwrap_or_default();
+        let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+            return;
+        };
 
         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
             let (mut transform, mut cursor_cube) = cursor_cube.single_mut();
@@ -131,7 +123,7 @@ fn update_cursor_cube(
 }
 
 fn mouse_button_input(
-    buttons: Res<Input<MouseButton>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     mut voxel_world: VoxelWorld,
     cursor_cube: Query<&CursorCube>,
 ) {

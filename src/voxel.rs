@@ -45,11 +45,11 @@ impl MergeVoxel for WorldVoxel {
 }
 
 pub(crate) trait VoxelAabb {
-    fn ray_intersection(&self, ray: Ray) -> Option<(Vec3, Vec3)>;
+    fn ray_intersection(&self, ray: Ray3d) -> Option<(Vec3, Vec3)>;
 }
 
 impl VoxelAabb for Aabb {
-    fn ray_intersection(&self, ray: Ray) -> Option<(Vec3, Vec3)> {
+    fn ray_intersection(&self, ray: Ray3d) -> Option<(Vec3, Vec3)> {
         let min = self.min();
         let max = self.max();
 

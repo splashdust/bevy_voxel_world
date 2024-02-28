@@ -8,7 +8,6 @@ use bevy::{
         },
     },
 };
-use bevy_flycam::prelude::*;
 use bevy_voxel_world::{
     prelude::*,
     rendering::{
@@ -37,7 +36,6 @@ fn main() {
         // Don't forget to Register the material with Bevy too.
         .add_plugins(MaterialPlugin::<CustomVoxelMaterial>::default())
         //
-        .add_plugins(NoCameraPlayerPlugin)
         .add_systems(Startup, (setup, create_voxel_scene))
         .run();
 }
@@ -66,7 +64,6 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<CustomVoxelMateria
             ..default()
         },
         VoxelWorldCamera,
-        FlyCam,
     ));
 }
 

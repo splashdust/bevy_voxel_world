@@ -15,16 +15,9 @@ pub struct ChunkAabbGizmo {
     pub color: Option<Color>,
 }
 
-fn draw_aabbs(
-    query: Query<(&Chunk, &GlobalTransform, &ChunkAabbGizmo)>,
-    config: Res<GizmoConfig>,
-    mut gizmos: Gizmos,
-) {
+fn draw_aabbs(query: Query<(&Chunk, &GlobalTransform, &ChunkAabbGizmo)>, mut gizmos: Gizmos) {
     for (chunk, &transform, gizmo) in &query {
-        let color = gizmo
-            .color
-            .or(config.aabb.default_color)
-            .unwrap_or(Color::WHITE);
+        let color = gizmo.color.unwrap_or(Color::WHITE);
         gizmos.cuboid(aabb_transform(chunk.aabb(), transform), color);
     }
 }

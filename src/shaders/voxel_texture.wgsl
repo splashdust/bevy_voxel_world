@@ -18,21 +18,40 @@
 }
 #endif
 
-@group(1) @binding(100)
+@group(2) @binding(100)
 var mat_array_texture: texture_2d_array<f32>;
 
-@group(1) @binding(101)
+@group(2) @binding(101)
 var mat_array_texture_sampler: sampler;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
+#ifdef VERTEX_POSITIONS
     @location(0) position: vec3<f32>,
+#endif
+#ifdef VERTEX_NORMALS
     @location(1) normal: vec3<f32>,
+#endif
+#ifdef VERTEX_UVS
     @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
 #ifdef VERTEX_TANGENTS
     @location(4) tangent: vec4<f32>,
 #endif
+#ifdef VERTEX_COLORS
     @location(5) color: vec4<f32>,
+#endif
+// #ifdef SKINNED
+//     @location(6) joint_indices: vec4<u32>,
+//     @location(7) joint_weights: vec4<f32>,
+// #endif
+#ifdef MORPH_TARGETS
+    @builtin(vertex_index) index: u32,
+#endif
+
     @location(8) tex_idx: vec3<u32>
 };
 
@@ -43,17 +62,20 @@ struct CustomVertexOutput {
 #ifdef VERTEX_UVS
     @location(2) uv: vec2<f32>,
 #endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
 #ifdef VERTEX_TANGENTS
-    @location(3) world_tangent: vec4<f32>,
+    @location(4) world_tangent: vec4<f32>,
 #endif
 #ifdef VERTEX_COLORS
-    @location(4) color: vec4<f32>,
+    @location(5) color: vec4<f32>,
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    @location(5) @interpolate(flat) instance_index: u32,
+    @location(6) @interpolate(flat) instance_index: u32,
 #endif
 
-    @location(6) tex_idx: vec3<u32>,
+    @location(8) tex_idx: vec3<u32>,
 }
 
 @vertex
@@ -62,7 +84,7 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     var model =  mesh_functions::get_model_matrix(vertex.instance_index);
 
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
-        vertex.normal, get_instance_index(vertex.instance_index));
+        vertex.normal, vertex.instance_index);
 
     out.world_position = mesh_functions::mesh_position_local_to_world(
         model, vec4<f32>(vertex.position, 1.0));
@@ -77,14 +99,14 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         model,
         vertex.tangent,
-        get_instance_index(vertex.instance_index)
+        vertex.instance_index
     );
 #endif
 
     out.color = vertex.color;
 
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    out.instance_index = get_instance_index(vertex.instance_index);
+    out.instance_index = vertex.instance_index;
 #endif
 
     out.tex_idx = vertex.tex_idx;

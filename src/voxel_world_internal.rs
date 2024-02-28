@@ -88,7 +88,9 @@ pub(crate) fn spawn_chunks(
 
     // Shoots a ray from the given point, and queue all (non-spawned) chunks intersecting the ray
     let queue_chunks_intersecting_ray_from_point = |point: Vec2, queue: &mut VecDeque<IVec3>| {
-        let ray = camera.viewport_to_world(cam_gtf, point).unwrap_or_default();
+        let Some(ray) = camera.viewport_to_world(cam_gtf, point) else {
+            return;
+        };
         let mut current = ray.origin;
         let mut t = 0.0;
         while t < (spawning_distance * CHUNK_SIZE_I) as f32 {

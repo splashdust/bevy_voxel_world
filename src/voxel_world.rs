@@ -222,7 +222,9 @@ impl<'w> VoxelWorldRaycast<'w> {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
     ///         let (camera, cam_gtf) = camera_info.single();
-    ///         let ray = camera.viewport_to_world(cam_gtf, ev.position).unwrap_or_default();
+    ///         let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+    ///            return;
+    ///         };
     ///
     ///         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
     ///             println!("vox_pos: {:?}, normal: {:?}, vox: {:?}", result.position, result.normal, result.voxel);
@@ -232,7 +234,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     /// ```
     pub fn raycast(
         &self,
-        ray: Ray,
+        ray: Ray3d,
         filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
     ) -> Option<VoxelRaycastResult> {
         let spawning_distance = self.configuration.spawning_distance as i32;
@@ -289,7 +291,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     }
 }
 
-fn get_hit_normal(vox_pos: IVec3, ray: Ray) -> Option<Vec3> {
+fn get_hit_normal(vox_pos: IVec3, ray: Ray3d) -> Option<Vec3> {
     let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
 
     let Some((_, normal)) = voxel_aabb.ray_intersection(ray) else {
