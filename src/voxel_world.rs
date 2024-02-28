@@ -222,7 +222,9 @@ impl<'w> VoxelWorldRaycast<'w> {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
     ///         let (camera, cam_gtf) = camera_info.single();
-    ///         let ray = camera.viewport_to_world(cam_gtf, ev.position).unwrap_or_default();
+    ///         let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+    ///            return;
+    ///         };
     ///
     ///         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
     ///             println!("vox_pos: {:?}, normal: {:?}, vox: {:?}", result.position, result.normal, result.voxel);
