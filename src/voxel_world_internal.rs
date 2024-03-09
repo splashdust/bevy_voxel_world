@@ -11,6 +11,7 @@ use bevy::{
 use futures_lite::future;
 use std::{
     collections::VecDeque,
+    marker::PhantomData,
     sync::{Arc, RwLock},
 };
 
@@ -32,17 +33,20 @@ pub struct CameraInfo<'w, 's>(
 
 /// Holds a map of modified voxels that will persist between chunk spawn/despawn
 #[derive(Resource, Deref, DerefMut, Clone)]
-pub struct ModifiedVoxels(Arc<RwLock<HashMap<IVec3, WorldVoxel>>>);
+pub struct ModifiedVoxels<I: Clone>(
+    #[deref] Arc<RwLock<HashMap<IVec3, WorldVoxel>>>,
+    PhantomData<I>,
+);
 
-impl Default for ModifiedVoxels {
+impl<I: Clone + Send + Sync + 'static> Default for ModifiedVoxels<I> {
     fn default() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
+        Self(Arc::new(RwLock::new(HashMap::new())), PhantomData)
     }
 }
 
-impl ModifiedVoxels {
+impl<I: Clone + Send + Sync + 'static> ModifiedVoxels<I> {
     pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel> {
-        let modified_voxels = self.read().unwrap();
+        let modified_voxels = self.0.read().unwrap();
         modified_voxels.get(position).cloned()
     }
 }
@@ -50,26 +54,26 @@ impl ModifiedVoxels {
 /// A temporary buffer for voxel modifications that will get flushed to the `ModifiedVoxels` resource
 /// at the end of the frame.
 #[derive(Resource, Deref, DerefMut, Default)]
-pub struct VoxelWriteBuffer(Vec<(IVec3, WorldVoxel)>);
+pub struct VoxelWriteBuffer<I>(#[deref] Vec<(IVec3, WorldVoxel)>, PhantomData<I>);
 
 /// Init the resources used internally by bevy_voxel_world
-pub(crate) fn setup_internals(mut commands: Commands) {
-    commands.init_resource::<ChunkMap>();
-    commands.init_resource::<ChunkMapInsertBuffer>();
-    commands.init_resource::<ChunkMapUpdateBuffer>();
-    commands.init_resource::<ChunkMapRemoveBuffer>();
-    commands.init_resource::<MeshCache>();
-    commands.init_resource::<MeshCacheInsertBuffer>();
-    commands.init_resource::<ModifiedVoxels>();
-    commands.init_resource::<VoxelWriteBuffer>();
+pub(crate) fn setup_internals<I: Clone + Send + Sync + Default + 'static>(mut commands: Commands) {
+    commands.init_resource::<ChunkMap<I>>();
+    commands.init_resource::<ChunkMapInsertBuffer<I>>();
+    commands.init_resource::<ChunkMapUpdateBuffer<I>>();
+    commands.init_resource::<ChunkMapRemoveBuffer<I>>();
+    commands.init_resource::<MeshCache<I>>();
+    commands.init_resource::<MeshCacheInsertBuffer<I>>();
+    commands.init_resource::<ModifiedVoxels<I>>();
+    commands.init_resource::<VoxelWriteBuffer<I>>();
 }
 
 /// Find and spawn chunks in need of spawning
-pub(crate) fn spawn_chunks(
+pub(crate) fn spawn_chunks<I: Send + Sync + 'static>(
     mut commands: Commands,
-    mut chunk_map_write_buffer: ResMut<ChunkMapInsertBuffer>,
-    chunk_map: Res<ChunkMap>,
-    configuration: Res<VoxelWorldConfiguration>,
+    mut chunk_map_write_buffer: ResMut<ChunkMapInsertBuffer<I>>,
+    chunk_map: Res<ChunkMap<I>>,
+    configuration: Res<VoxelWorldConfiguration<I>>,
     camera_info: CameraInfo,
 ) {
     let (camera, cam_gtf) = camera_info.single();
@@ -95,7 +99,7 @@ pub(crate) fn spawn_chunks(
         let mut t = 0.0;
         while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-            if let Some(chunk) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
+            if let Some(chunk) = ChunkMap::<I>::get(&chunk_pos, &chunk_map_read_lock) {
                 if chunk.is_full {
                     // If we hit a full chunk, we can stop the ray early
                     break;
@@ -145,13 +149,10 @@ pub(crate) fn spawn_chunks(
             continue;
         }
 
-        let has_chunk = ChunkMap::contains_chunk(&chunk_position, &chunk_map_read_lock);
+        let has_chunk = ChunkMap::<I>::contains_chunk(&chunk_position, &chunk_map_read_lock);
 
         if !has_chunk {
-            let chunk = Chunk {
-                position: chunk_position,
-                entity: commands.spawn(NeedsRemesh).id(),
-            };
+            let chunk = Chunk::<I>::new(chunk_position, commands.spawn(NeedsRemesh).id());
 
             chunk_map_write_buffer.push((chunk_position, ChunkData::with_entity(chunk.entity)));
 
@@ -183,10 +184,10 @@ pub(crate) fn spawn_chunks(
 }
 
 /// Tags chunks that are eligible for despawning
-pub fn retire_chunks(
+pub fn retire_chunks<I: Send + Sync + 'static>(
     mut commands: Commands,
-    all_chunks: Query<(&Chunk, Option<&ViewVisibility>)>,
-    configuration: Res<VoxelWorldConfiguration>,
+    all_chunks: Query<(&Chunk<I>, Option<&ViewVisibility>)>,
+    configuration: Res<VoxelWorldConfiguration<I>>,
     camera_info: CameraInfo,
     mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn>,
 ) {
@@ -232,15 +233,15 @@ pub fn retire_chunks(
 }
 
 /// Despawns chunks that have been tagged for despawning
-pub(crate) fn despawn_retired_chunks(
+pub(crate) fn despawn_retired_chunks<I: Send + Sync + 'static>(
     mut commands: Commands,
-    mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer>,
-    chunk_map: Res<ChunkMap>,
-    retired_chunks: Query<(Entity, &Chunk), With<NeedsDespawn>>,
+    mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<I>>,
+    chunk_map: Res<ChunkMap<I>>,
+    retired_chunks: Query<(Entity, &Chunk<I>), With<NeedsDespawn>>,
 ) {
     let read_lock = chunk_map.get_read_lock();
     for (entity, chunk) in retired_chunks.iter() {
-        if ChunkMap::contains_chunk(&chunk.position, &read_lock) {
+        if ChunkMap::<I>::contains_chunk(&chunk.position, &read_lock) {
             commands.entity(entity).despawn_recursive();
             chunk_map_remove_buffer.push(chunk.position);
         }
@@ -249,13 +250,13 @@ pub(crate) fn despawn_retired_chunks(
 
 /// Spawn a thread for each chunk that has been marked by NeedsRemesh
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn remesh_dirty_chunks(
+pub(crate) fn remesh_dirty_chunks<I: Clone + Send + Sync + 'static>(
     mut commands: Commands,
     mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh>,
-    dirty_chunks: Query<&Chunk, With<NeedsRemesh>>,
-    mesh_cache: Res<MeshCache>,
-    modified_voxels: Res<ModifiedVoxels>,
-    configuration: Res<VoxelWorldConfiguration>,
+    dirty_chunks: Query<&Chunk<I>, With<NeedsRemesh>>,
+    mesh_cache: Res<MeshCache<I>>,
+    modified_voxels: Res<ModifiedVoxels<I>>,
+    configuration: Res<VoxelWorldConfiguration<I>>,
 ) {
     let thread_pool = AsyncComputeTaskPool::get();
 
@@ -263,7 +264,8 @@ pub(crate) fn remesh_dirty_chunks(
         let voxel_data_fn = (configuration.voxel_lookup_delegate)(chunk.position);
         let texture_index_mapper = configuration.texture_index_mapper.clone();
 
-        let mut chunk_task = ChunkTask::new(chunk.entity, chunk.position, modified_voxels.clone());
+        let mut chunk_task =
+            ChunkTask::<I>::new(chunk.entity, chunk.position, modified_voxels.clone());
 
         let mesh_map = Arc::new(mesh_cache.get_map());
         let thread = thread_pool.spawn(async move {
@@ -288,7 +290,7 @@ pub(crate) fn remesh_dirty_chunks(
 
         commands
             .entity(chunk.entity)
-            .try_insert(ChunkThread::new(thread, chunk.position))
+            .try_insert(ChunkThread::<I>::new(thread, chunk.position))
             .remove::<NeedsRemesh>();
 
         ev_chunk_will_remesh.send(ChunkWillRemesh {
@@ -302,15 +304,18 @@ pub(crate) fn remesh_dirty_chunks(
 pub(crate) struct NeedsMaterial;
 
 /// Inserts new meshes for chunks that have just finished remeshing
-pub(crate) fn spawn_meshes(
+pub(crate) fn spawn_meshes<I: Clone + Send + Sync + 'static>(
     mut commands: Commands,
     mut chunking_threads: Query<
-        (Entity, &mut ChunkThread, &mut Chunk, &Transform),
+        (Entity, &mut ChunkThread<I>, &mut Chunk<I>, &Transform),
         Without<NeedsRemesh>,
     >,
     mut mesh_assets: ResMut<Assets<Mesh>>,
-    buffers: (ResMut<ChunkMapUpdateBuffer>, ResMut<MeshCacheInsertBuffer>),
-    res: (Res<MeshCache>, Res<LoadingTexture>),
+    buffers: (
+        ResMut<ChunkMapUpdateBuffer<I>>,
+        ResMut<MeshCacheInsertBuffer<I>>,
+    ),
+    res: (Res<MeshCache<I>>, Res<LoadingTexture>),
 ) {
     let (mesh_cache, loading_texture) = res;
 
@@ -339,7 +344,7 @@ pub(crate) fn spawn_meshes(
                             commands
                                 .entity(chunk.entity)
                                 .try_insert(NeedsRemesh)
-                                .remove::<ChunkThread>();
+                                .remove::<ChunkThread<I>>();
                             continue;
                         }
                         let hash = chunk_task.voxels_hash();
@@ -365,7 +370,7 @@ pub(crate) fn spawn_meshes(
             ));
         }
 
-        commands.entity(chunk.entity).remove::<ChunkThread>();
+        commands.entity(chunk.entity).remove::<ChunkThread<I>>();
     }
 }
 
@@ -391,11 +396,11 @@ pub(crate) fn assign_material<M: Material>(
     }
 }
 
-pub(crate) fn flush_voxel_write_buffer(
+pub(crate) fn flush_voxel_write_buffer<I: Clone + Send + Sync + 'static>(
     mut commands: Commands,
-    mut buffer: ResMut<VoxelWriteBuffer>,
-    chunk_map: Res<ChunkMap>,
-    modified_voxels: ResMut<ModifiedVoxels>,
+    mut buffer: ResMut<VoxelWriteBuffer<I>>,
+    chunk_map: Res<ChunkMap<I>>,
+    modified_voxels: ResMut<ModifiedVoxels<I>>,
 ) {
     let chunk_map_read_lock = chunk_map.get_read_lock();
     let mut modified_voxels = modified_voxels.write().unwrap();
@@ -405,7 +410,7 @@ pub(crate) fn flush_voxel_write_buffer(
         modified_voxels.insert(*position, *voxel);
 
         // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
-        if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
+        if let Some(chunk_data) = ChunkMap::<I>::get(&chunk_pos, &chunk_map_read_lock) {
             if let Some(mut ent) = commands.get_entity(chunk_data.entity) {
                 ent.try_insert(NeedsRemesh);
             }
@@ -414,19 +419,19 @@ pub(crate) fn flush_voxel_write_buffer(
     buffer.clear();
 }
 
-pub(crate) fn flush_mesh_cache_buffers(
-    mut mesh_cache_insert_buffer: ResMut<MeshCacheInsertBuffer>,
-    mesh_cache: Res<MeshCache>,
+pub(crate) fn flush_mesh_cache_buffers<I: Send + Sync + 'static>(
+    mut mesh_cache_insert_buffer: ResMut<MeshCacheInsertBuffer<I>>,
+    mesh_cache: Res<MeshCache<I>>,
 ) {
     mesh_cache.apply_buffers(&mut mesh_cache_insert_buffer);
 }
 
-pub(crate) fn flush_chunk_map_buffers(
-    mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer>,
-    mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer>,
-    mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer>,
+pub(crate) fn flush_chunk_map_buffers<I: Send + Sync + 'static>(
+    mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<I>>,
+    mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<I>>,
+    mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<I>>,
     mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
-    chunk_map: Res<ChunkMap>,
+    chunk_map: Res<ChunkMap<I>>,
 ) {
     chunk_map.apply_buffers(
         &mut chunk_map_insert_buffer,

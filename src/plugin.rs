@@ -45,20 +45,22 @@ impl<M: Material> Default for VoxelWorldMaterialPlugin<M> {
     }
 }
 
-pub struct VoxelWorldPlugin {
+pub struct VoxelWorldPlugin<I> {
     spawn_meshes: bool,
     voxel_texture: String,
     texture_layers: u32,
     use_custom_material: bool,
+    _marker: std::marker::PhantomData<I>,
 }
 
-impl VoxelWorldPlugin {
+impl<I> VoxelWorldPlugin<I> {
     pub fn minimal() -> Self {
         Self {
             spawn_meshes: false,
             voxel_texture: "".to_string(),
             texture_layers: 0,
             use_custom_material: false,
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -74,29 +76,37 @@ impl VoxelWorldPlugin {
     }
 }
 
-impl Default for VoxelWorldPlugin {
+impl<I> Default for VoxelWorldPlugin<I> {
     fn default() -> Self {
         Self {
             spawn_meshes: true,
             voxel_texture: "".to_string(),
             texture_layers: 0,
             use_custom_material: false,
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
-impl Plugin for VoxelWorldPlugin {
+impl<I> Plugin for VoxelWorldPlugin<I>
+where
+    I: Clone + Default + Send + Sync + 'static,
+{
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelWorldConfiguration>()
-            .add_systems(PreStartup, setup_internals)
+        app.init_resource::<VoxelWorldConfiguration<I>>()
+            .add_systems(PreStartup, setup_internals::<I>)
             .add_systems(
                 PreUpdate,
                 (
-                    ((spawn_chunks, retire_chunks).chain(), remesh_dirty_chunks).chain(),
                     (
-                        flush_voxel_write_buffer,
-                        despawn_retired_chunks,
-                        (flush_chunk_map_buffers, flush_mesh_cache_buffers),
+                        (spawn_chunks::<I>, retire_chunks::<I>).chain(),
+                        remesh_dirty_chunks::<I>,
+                    )
+                        .chain(),
+                    (
+                        flush_voxel_write_buffer::<I>,
+                        despawn_retired_chunks::<I>,
+                        (flush_chunk_map_buffers::<I>, flush_mesh_cache_buffers::<I>),
                     )
                         .chain(),
                 ),
@@ -115,13 +125,18 @@ impl Plugin for VoxelWorldPlugin {
                 Shader::from_wgsl
             );
 
-            app.add_systems(Update, spawn_meshes);
+            app.add_systems(Update, spawn_meshes::<I>);
         }
 
         if !self.use_custom_material && self.spawn_meshes {
-            app.add_plugins(MaterialPlugin::<
-                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-            >::default());
+            let mat_plugins = app.get_added_plugins::<MaterialPlugin::<
+                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>();
+
+            if mat_plugins.is_empty() {
+                app.add_plugins(MaterialPlugin::<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >::default());
+            }
 
             let mut preloaded_texture = true;
 
@@ -170,9 +185,17 @@ impl Plugin for VoxelWorldPlugin {
             app.insert_resource(TextureLayers(self.texture_layers));
 
             app.add_systems(Update, prepare_texture);
-            app.add_plugins(VoxelWorldMaterialPlugin::<
-                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-            >::default());
+
+            let voxel_mat_plugins =
+                app.get_added_plugins::<VoxelWorldMaterialPlugin<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >>();
+
+            if voxel_mat_plugins.is_empty() {
+                app.add_plugins(VoxelWorldMaterialPlugin::<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >::default());
+            }
         }
 
         if self.use_custom_material {

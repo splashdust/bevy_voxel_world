@@ -33,7 +33,7 @@ pub enum ChunkSpawnStrategy {
 
 /// Configuration resource for bevy_voxel_world
 #[derive(Resource)]
-pub struct VoxelWorldConfiguration {
+pub struct VoxelWorldConfiguration<I> {
     /// Distance in chunks to spawn chunks around the camera
     pub spawning_distance: u32,
 
@@ -73,9 +73,11 @@ pub struct VoxelWorldConfiguration {
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
     pub voxel_lookup_delegate: VoxelLookupDelegate,
+
+    pub _marker: std::marker::PhantomData<I>,
 }
 
-impl Default for VoxelWorldConfiguration {
+impl<I> Default for VoxelWorldConfiguration<I> {
     fn default() -> Self {
         Self {
             spawning_distance: 10,
@@ -93,6 +95,7 @@ impl Default for VoxelWorldConfiguration {
                 _ => [0, 0, 0],
             }),
             voxel_lookup_delegate: Box::new(|_| Box::new(|_| WorldVoxel::Unset)),
+            _marker: std::marker::PhantomData,
         }
     }
 }

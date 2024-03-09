@@ -2,6 +2,7 @@ use bevy::{prelude::*, render::primitives::Aabb, tasks::Task, utils::HashSet};
 use ndshape::{ConstShape, ConstShape3u32};
 use std::{
     hash::{Hash, Hasher},
+    marker::PhantomData,
     sync::Arc,
 };
 
@@ -22,11 +23,14 @@ pub(crate) type VoxelArray = [WorldVoxel; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread(pub Task<ChunkTask>, pub IVec3);
+pub(crate) struct ChunkThread<I: Clone>(pub Task<ChunkTask<I>>, pub IVec3, PhantomData<I>);
 
-impl ChunkThread {
-    pub fn new(task: Task<ChunkTask>, pos: IVec3) -> Self {
-        Self(task, pos)
+impl<I> ChunkThread<I>
+where
+    I: Clone + Send + Sync + 'static,
+{
+    pub fn new(task: Task<ChunkTask<I>>, pos: IVec3) -> Self {
+        Self(task, pos, PhantomData)
     }
 }
 
@@ -127,16 +131,26 @@ impl Default for ChunkData {
 
 /// A marker component for chunks, with some helpful data
 #[derive(Component, Clone)]
-pub struct Chunk {
+pub struct Chunk<I> {
     pub position: IVec3,
     pub entity: Entity,
+    _marker: PhantomData<I>,
 }
 
-impl Chunk {
-    pub fn from(chunk: &Chunk) -> Self {
+impl<I> Chunk<I> {
+    pub fn new(position: IVec3, entity: Entity) -> Self {
+        Self {
+            position,
+            entity,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn from(chunk: &Chunk<I>) -> Self {
         Self {
             position: chunk.position,
             entity: chunk.entity,
+            _marker: PhantomData,
         }
     }
 
@@ -149,20 +163,22 @@ impl Chunk {
 
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
-pub(crate) struct ChunkTask {
+pub(crate) struct ChunkTask<I: Clone> {
     pub position: IVec3,
     pub chunk_data: ChunkData,
-    pub modified_voxels: ModifiedVoxels,
+    pub modified_voxels: ModifiedVoxels<I>,
     pub mesh: Option<Mesh>,
+    _marker: PhantomData<I>,
 }
 
-impl ChunkTask {
-    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels) -> Self {
+impl<I: Clone + Send + Sync + 'static> ChunkTask<I> {
+    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<I>) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),
             modified_voxels,
             mesh: None,
+            _marker: PhantomData,
         }
     }
 

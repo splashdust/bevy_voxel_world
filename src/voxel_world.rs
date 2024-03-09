@@ -41,13 +41,13 @@ pub struct ChunkWillRemesh {
 
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
-pub struct VoxelWorld<'w> {
-    chunk_map: Res<'w, ChunkMap>,
-    modified_voxels: Res<'w, ModifiedVoxels>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
+pub struct VoxelWorld<'w, I: Clone + Send + Sync + 'static> {
+    chunk_map: Res<'w, ChunkMap<I>>,
+    modified_voxels: Res<'w, ModifiedVoxels<I>>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<I>>,
 }
 
-impl<'w> VoxelWorld<'w> {
+impl<'w, I: Clone + Send + Sync + 'static> VoxelWorld<'w, I> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
         self.get_voxel_fn()(position)
@@ -189,15 +189,15 @@ impl VoxelRaycastResult {
 
 /// SystemParam helper for raycasting into the voxel world
 #[derive(SystemParam)]
-pub struct VoxelWorldRaycast<'w> {
-    configuration: Res<'w, VoxelWorldConfiguration>,
-    chunk_map: Res<'w, ChunkMap>,
-    voxel_world: VoxelWorld<'w>,
+pub struct VoxelWorldRaycast<'w, I: Clone + Send + Sync + 'static> {
+    configuration: Res<'w, VoxelWorldConfiguration<I>>,
+    chunk_map: Res<'w, ChunkMap<I>>,
+    voxel_world: VoxelWorld<'w, I>,
 }
 
 const STEP_SIZE: f32 = 0.01;
 
-impl<'w> VoxelWorldRaycast<'w> {
+impl<'w, I: Clone + Send + Sync + 'static> VoxelWorldRaycast<'w, I> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
@@ -245,7 +245,7 @@ impl<'w> VoxelWorldRaycast<'w> {
         while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
 
-            if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
+            if let Some(chunk_data) = ChunkMap::<I>::get(&chunk_pos, &chunk_map_read_lock) {
                 if !chunk_data.is_empty {
                     let mut voxel = WorldVoxel::Unset;
                     while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {
