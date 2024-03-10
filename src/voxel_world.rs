@@ -215,7 +215,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
     /// use bevy_voxel_world::prelude::*;
     ///
     /// fn do_raycast(
-    ///     voxel_world_raycast: VoxelWorldRaycast,
+    ///     voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>,
     ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
     /// ) {
