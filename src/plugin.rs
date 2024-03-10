@@ -65,6 +65,12 @@ where
     C: VoxelWorldConfig,
     M: Material,
 {
+    /// Use this to tell `bevy_voxel_world` to use a custom material. This can be any material that
+    /// implements `bevy::pbr::Material`. You can use this to create custom shaders for your voxel
+    /// world. You can set this up like any other material in Bevy.
+    ///
+    /// `bevy_voxel_world` will add the material as an asset, so you can query for it later using
+    /// `Res<Assets<MyCustomVoxelMaterialType>>`.
     pub fn with_material<CustomMaterial: Material>(
         self,
         material: CustomMaterial,

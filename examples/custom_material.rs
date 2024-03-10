@@ -41,6 +41,8 @@ fn main() {
         .add_plugins(MaterialPlugin::<CustomVoxelMaterial>::default())
         //
         // Then we can tell `bevy_voxel_world` to use that material when adding the plugin.
+        // bevy_voxel_world will add the material as an asset, so you can query for it later using
+        // `Res<Assets<CustomVoxelMaterial>>`.
         .add_plugins(
             VoxelWorldPlugin::with_config(MyMainWorld)
                 .with_material(CustomVoxelMaterial { _unused: 0 }),
