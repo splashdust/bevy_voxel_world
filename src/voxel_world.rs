@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
     chunk_map::ChunkMap,
-    configuration::{DefaultWorld, VoxelWorldConfig},
+    configuration::VoxelWorldConfig,
     voxel::{VoxelAabb, WorldVoxel},
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };

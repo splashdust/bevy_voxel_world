@@ -308,6 +308,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
     }
 
     /// Inserts new meshes for chunks that have just finished remeshing
+    #[allow(clippy::type_complexity)]
     pub fn spawn_meshes(
         mut commands: Commands,
         mut chunking_threads: Query<

@@ -1,5 +1,4 @@
 use bevy::{
-    app::Plugins,
     asset::load_internal_asset,
     pbr::ExtendedMaterial,
     prelude::*,
@@ -89,7 +88,7 @@ impl Default for VoxelWorldPlugin<DefaultWorld, StandardMaterial> {
         Self {
             spawn_meshes: true,
             use_custom_material: false,
-            config: DefaultWorld::default(),
+            config: DefaultWorld,
             material: StandardMaterial::default(),
         }
     }
