@@ -56,6 +56,9 @@ impl<C: VoxelWorldConfig> ModifiedVoxels<C> {
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct VoxelWriteBuffer<C>(#[deref] Vec<(IVec3, WorldVoxel)>, PhantomData<C>);
 
+#[derive(Component)]
+pub(crate) struct NeedsMaterial;
+
 pub(crate) struct Internals<C>(PhantomData<C>);
 
 impl<C: VoxelWorldConfig> Internals<C> {
@@ -419,30 +422,27 @@ impl<C: VoxelWorldConfig> Internals<C> {
             &mut ev_chunk_will_spawn,
         );
     }
-}
 
-#[derive(Component)]
-pub(crate) struct NeedsMaterial;
+    pub(crate) fn assign_material<M: Material>(
+        mut commands: Commands,
+        mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial>>,
+        material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
+    ) {
+        let Some(material_handle) = material_handle else {
+            return;
+        };
 
-pub(crate) fn assign_material<M: Material>(
-    mut commands: Commands,
-    mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial>>,
-    material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
-) {
-    let Some(material_handle) = material_handle else {
-        return;
-    };
-
-    for (entity, mesh_ref, transform) in needs_material.iter_mut() {
-        commands
-            .entity(entity)
-            .try_insert(MaterialMeshBundle {
-                mesh: (*mesh_ref.0).clone(),
-                material: material_handle.handle.clone(),
-                transform: *transform,
-                ..default()
-            })
-            .remove::<NeedsMaterial>();
+        for (entity, mesh_ref, transform) in needs_material.iter_mut() {
+            commands
+                .entity(entity)
+                .try_insert(MaterialMeshBundle {
+                    mesh: (*mesh_ref.0).clone(),
+                    material: material_handle.handle.clone(),
+                    transform: *transform,
+                    ..default()
+                })
+                .remove::<NeedsMaterial>();
+        }
     }
 }
 

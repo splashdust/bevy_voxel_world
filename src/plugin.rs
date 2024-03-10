@@ -1,4 +1,5 @@
 use bevy::{
+    app::Plugins,
     asset::load_internal_asset,
     pbr::ExtendedMaterial,
     prelude::*,
@@ -15,7 +16,7 @@ use crate::{
         VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
-    voxel_world_internal::{assign_material, Internals},
+    voxel_world_internal::Internals,
 };
 
 #[derive(Resource)]
@@ -23,33 +24,20 @@ pub struct VoxelWorldMaterialHandle<M: Material> {
     pub handle: Handle<M>,
 }
 
-pub struct VoxelWorldMaterialPlugin<M: Material> {
-    _marker: std::marker::PhantomData<M>,
-}
-
-impl<M: Material> Plugin for VoxelWorldMaterialPlugin<M> {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Update, assign_material::<M>);
-    }
-}
-
-impl<M: Material> Default for VoxelWorldMaterialPlugin<M> {
-    fn default() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
 /// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
 /// The type parameter `C` is used to differentiate between different voxel worlds with different configs.
-pub struct VoxelWorldPlugin<C: VoxelWorldConfig = DefaultWorld> {
+pub struct VoxelWorldPlugin<C, M = StandardMaterial>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
     spawn_meshes: bool,
     use_custom_material: bool,
     config: C,
+    material: M,
 }
 
-impl<C> VoxelWorldPlugin<C>
+impl<C> VoxelWorldPlugin<C, StandardMaterial>
 where
     C: VoxelWorldConfig,
 {
@@ -58,6 +46,7 @@ where
             config,
             spawn_meshes: true,
             use_custom_material: false,
+            material: StandardMaterial::default(),
         }
     }
 
@@ -66,28 +55,44 @@ where
             spawn_meshes: false,
             use_custom_material: false,
             config: C::default(),
+            material: StandardMaterial::default(),
         }
-    }
-
-    pub fn without_default_material(mut self) -> Self {
-        self.use_custom_material = true;
-        self
     }
 }
 
-impl Default for VoxelWorldPlugin<DefaultWorld> {
+impl<C, M> VoxelWorldPlugin<C, M>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
+    pub fn with_material<CustomMaterial: Material>(
+        self,
+        material: CustomMaterial,
+    ) -> VoxelWorldPlugin<C, CustomMaterial> {
+        VoxelWorldPlugin {
+            spawn_meshes: self.spawn_meshes,
+            use_custom_material: true,
+            config: self.config,
+            material,
+        }
+    }
+}
+
+impl Default for VoxelWorldPlugin<DefaultWorld, StandardMaterial> {
     fn default() -> Self {
         Self {
             spawn_meshes: true,
             use_custom_material: false,
             config: DefaultWorld::default(),
+            material: StandardMaterial::default(),
         }
     }
 }
 
-impl<C> Plugin for VoxelWorldPlugin<C>
+impl<C, M> Plugin for VoxelWorldPlugin<C, M>
 where
     C: VoxelWorldConfig,
+    M: Material,
 {
     fn build(&self, app: &mut App) {
         app.init_resource::<C>()
@@ -192,23 +197,26 @@ where
 
             app.add_systems(Update, prepare_texture);
 
-            let voxel_mat_plugins =
-                app.get_added_plugins::<VoxelWorldMaterialPlugin<
+            app.add_systems(
+                Update,
+                Internals::<C>::assign_material::<
                     ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-                >>();
-
-            if voxel_mat_plugins.is_empty() {
-                app.add_plugins(VoxelWorldMaterialPlugin::<
-                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-                >::default());
-            }
+                >,
+            );
         }
 
         if self.use_custom_material {
+            let mut custom_material_assets = app.world.resource_mut::<Assets<M>>();
+
+            let handle = custom_material_assets.add(self.material.clone());
+            app.insert_resource(VoxelWorldMaterialHandle { handle });
+
             app.insert_resource(LoadingTexture {
                 is_loaded: true,
                 handle: Handle::default(),
             });
+
+            app.add_systems(Update, Internals::<C>::assign_material::<M>);
         }
     }
 }

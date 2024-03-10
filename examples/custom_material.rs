@@ -10,10 +10,7 @@ use bevy::{
 };
 use bevy_voxel_world::{
     prelude::*,
-    rendering::{
-        vertex_layout, VoxelWorldMaterialHandle, VoxelWorldMaterialPlugin,
-        VOXEL_TEXTURE_SHADER_HANDLE,
-    },
+    rendering::{vertex_layout, VOXEL_TEXTURE_SHADER_HANDLE},
 };
 use std::sync::Arc;
 
@@ -22,41 +19,38 @@ const RED: u8 = 0;
 const GREEN: u8 = 1;
 const BLUE: u8 = 2;
 
+#[derive(Resource, Clone, Default)]
+struct MyMainWorld;
+
+impl VoxelWorldConfig for MyMainWorld {
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
+        Arc::new(|vox_mat: u8| match vox_mat {
+            RED => [1, 1, 1],
+            GREEN => [2, 2, 2],
+            BLUE | _ => [3, 3, 3],
+        })
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         //
-        // We can tell `bevy_voxel_world` to skip setting up the default material, so that we can use our own
-        .add_plugins(VoxelWorldPlugin::default().without_default_material())
-        //
-        // We also need to tell `bevy_voxel_world` which material to assign.
-        // This can be any Bevy material, including ExtendedMaterial.
-        .add_plugins(VoxelWorldMaterialPlugin::<CustomVoxelMaterial>::default())
-        //
-        // Don't forget to Register the material with Bevy too.
+        // First we need to register the material with Bevy. This needs to be done before we add the
+        // `VoxelWorldPlugin` so that the plugin can find the material.
         .add_plugins(MaterialPlugin::<CustomVoxelMaterial>::default())
+        //
+        // Then we can tell `bevy_voxel_world` to use that material when adding the plugin.
+        .add_plugins(
+            VoxelWorldPlugin::with_config(MyMainWorld)
+                .with_material(CustomVoxelMaterial { _unused: 0 }),
+        )
         //
         .add_systems(Startup, (setup, create_voxel_scene))
         .run();
 }
 
-fn setup(mut commands: Commands, mut materials: ResMut<Assets<CustomVoxelMaterial>>) {
-    // Register our custom material
-    let handle = materials.add(CustomVoxelMaterial { _unused: 0 });
-
-    // This resource is used to find the correct material handle
-    commands.insert_resource(VoxelWorldMaterialHandle { handle });
-
-    commands.insert_resource(VoxelWorldConfiguration {
-        // The arrays produces here can be read in the shader
-        texture_index_mapper: Arc::new(|vox_mat: u8| match vox_mat {
-            RED => [1, 1, 1],
-            GREEN => [2, 2, 2],
-            BLUE | _ => [3, 3, 3],
-        }),
-        ..Default::default()
-    });
-
+fn setup(mut commands: Commands) {
     // Camera
     commands.spawn((
         Camera3dBundle {
@@ -67,7 +61,7 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<CustomVoxelMateria
     ));
 }
 
-fn create_voxel_scene(mut voxel_world: VoxelWorld) {
+fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
     // 20 by 20 floor
     for x in -10..10 {
         for z in -10..10 {
