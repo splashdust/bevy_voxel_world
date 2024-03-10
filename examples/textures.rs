@@ -18,6 +18,10 @@ impl VoxelWorldConfig for MyMainWorld {
             GRASS | _ => [3, 3, 3],
         })
     }
+
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        Some(("example_voxel_texture.png".into(), 4))
+    }
 }
 
 fn main() {
@@ -25,12 +29,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         // We can specify a custom texture when initializing the plugin.
         // This should just be a path to an image in your assets folder.
-        .add_plugins(
-            VoxelWorldPlugin::with_config(MyMainWorld).with_voxel_texture(
-                "example_voxel_texture.png",
-                4, // number of indexes in the texture
-            ),
-        )
+        .add_plugins(VoxelWorldPlugin::with_config(MyMainWorld))
         .add_systems(Startup, (setup, create_voxel_scene).chain())
         .run();
 }

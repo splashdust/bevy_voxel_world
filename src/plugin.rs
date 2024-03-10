@@ -45,8 +45,6 @@ impl<M: Material> Default for VoxelWorldMaterialPlugin<M> {
 /// The type parameter `C` is used to differentiate between different voxel worlds with different configs.
 pub struct VoxelWorldPlugin<C: VoxelWorldConfig = DefaultWorld> {
     spawn_meshes: bool,
-    voxel_texture: String,
-    texture_layers: u32,
     use_custom_material: bool,
     config: C,
 }
@@ -59,8 +57,6 @@ where
         Self {
             config,
             spawn_meshes: true,
-            voxel_texture: "".to_string(),
-            texture_layers: 0,
             use_custom_material: false,
         }
     }
@@ -68,17 +64,9 @@ where
     pub fn minimal() -> Self {
         Self {
             spawn_meshes: false,
-            voxel_texture: "".to_string(),
-            texture_layers: 0,
             use_custom_material: false,
             config: C::default(),
         }
-    }
-
-    pub fn with_voxel_texture(mut self, texture: &str, layers: u32) -> Self {
-        self.voxel_texture = texture.to_string();
-        self.texture_layers = layers;
-        self
     }
 
     pub fn without_default_material(mut self) -> Self {
@@ -91,8 +79,6 @@ impl Default for VoxelWorldPlugin<DefaultWorld> {
     fn default() -> Self {
         Self {
             spawn_meshes: true,
-            voxel_texture: "".to_string(),
-            texture_layers: 0,
             use_custom_material: false,
             config: DefaultWorld::default(),
         }
@@ -153,9 +139,11 @@ where
             }
 
             let mut preloaded_texture = true;
+            let texture_conf = self.config.voxel_texture();
+            let mut texture_layers = 0;
 
             // Use built-in default texture if no texture is specified.
-            let image_handle = if self.voxel_texture.is_empty() {
+            let image_handle = if texture_conf.is_none() {
                 let mut image = Image::from_buffer(
                     include_bytes!("shaders/default_texture.png"),
                     ImageType::MimeType("image/png"),
@@ -169,9 +157,11 @@ where
                 let mut image_assets = app.world.resource_mut::<Assets<Image>>();
                 image_assets.add(image)
             } else {
+                let (img_path, layers) = texture_conf.unwrap();
+                texture_layers = layers;
                 let asset_server = app.world.get_resource::<AssetServer>().unwrap();
                 preloaded_texture = false;
-                asset_server.load(self.voxel_texture.clone())
+                asset_server.load(img_path)
             };
 
             let mut material_assets = app
@@ -196,7 +186,7 @@ where
                 handle: image_handle,
             });
             app.insert_resource(VoxelWorldMaterialHandle { handle: mat_handle });
-            app.insert_resource(TextureLayers(self.texture_layers));
+            app.insert_resource(TextureLayers(texture_layers));
 
             app.insert_resource(self.config.clone());
 

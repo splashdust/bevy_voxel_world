@@ -96,6 +96,11 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
         Box::new(|_| Box::new(|_| WorldVoxel::Unset))
     }
+
+    /// A tuple of the path to the texture and the number of indexes in the texture. `None` if no texture is used.
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        None
+    }
 }
 
 #[derive(Resource, Clone, Default)]
