@@ -7,15 +7,29 @@ const SNOWY_BRICK: u8 = 0;
 const FULL_BRICK: u8 = 1;
 const GRASS: u8 = 2;
 
+#[derive(Resource, Clone, Default)]
+struct MyMainWorld;
+
+impl VoxelWorldConfig for MyMainWorld {
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
+        Arc::new(|vox_mat: u8| match vox_mat {
+            SNOWY_BRICK => [0, 1, 2],
+            FULL_BRICK => [2, 2, 2],
+            GRASS | _ => [3, 3, 3],
+        })
+    }
+
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        Some(("example_voxel_texture.png".into(), 4))
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         // We can specify a custom texture when initializing the plugin.
         // This should just be a path to an image in your assets folder.
-        .add_plugins(VoxelWorldPlugin::default().with_voxel_texture(
-            "example_voxel_texture.png",
-            4, // number of indexes in the texture
-        ))
+        .add_plugins(VoxelWorldPlugin::with_config(MyMainWorld))
         .add_systems(Startup, (setup, create_voxel_scene))
         .add_systems(Update, (update_cursor_cube, mouse_button_input))
         .run();
@@ -31,17 +45,6 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.insert_resource(VoxelWorldConfiguration {
-        // To specify how the texture map to different kind of voxels we add this mapping callback
-        // For each material type, we specify the texture coordinates for the top, side and bottom faces.
-        texture_index_mapper: Arc::new(|vox_mat: u8| match vox_mat {
-            SNOWY_BRICK => [0, 1, 2],
-            FULL_BRICK => [2, 2, 2],
-            GRASS | _ => [3, 3, 3],
-        }),
-        ..Default::default()
-    });
-
     // Cursor cube
     commands.spawn((
         PbrBundle {
@@ -76,7 +79,7 @@ fn setup(
     });
 }
 
-fn create_voxel_scene(mut voxel_world: VoxelWorld) {
+fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
     // Then we can use the `u8` consts to specify the type of voxel
 
     // 20 by 20 floor
@@ -100,7 +103,7 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld) {
 }
 
 fn update_cursor_cube(
-    voxel_world_raycast: VoxelWorldRaycast,
+    voxel_world_raycast: VoxelWorldRaycast<MyMainWorld>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     mut cursor_evr: EventReader<CursorMoved>,
     mut cursor_cube: Query<(&mut Transform, &mut CursorCube)>,
@@ -124,7 +127,7 @@ fn update_cursor_cube(
 
 fn mouse_button_input(
     buttons: Res<ButtonInput<MouseButton>>,
-    mut voxel_world: VoxelWorld,
+    mut voxel_world: VoxelWorld<MyMainWorld>,
     cursor_cube: Query<&CursorCube>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {

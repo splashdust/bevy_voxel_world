@@ -189,7 +189,7 @@ impl VoxelRaycastResult {
 
 /// SystemParam helper for raycasting into the voxel world
 #[derive(SystemParam)]
-pub struct VoxelWorldRaycast<'w, C: VoxelWorldConfig = DefaultWorld> {
+pub struct VoxelWorldRaycast<'w, C: VoxelWorldConfig> {
     configuration: Res<'w, C>,
     chunk_map: Res<'w, ChunkMap<C>>,
     voxel_world: VoxelWorld<'w, C>,
