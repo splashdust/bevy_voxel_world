@@ -57,7 +57,7 @@ impl<C: VoxelWorldConfig> ModifiedVoxels<C> {
 pub struct VoxelWriteBuffer<C>(#[deref] Vec<(IVec3, WorldVoxel)>, PhantomData<C>);
 
 #[derive(Component)]
-pub(crate) struct NeedsMaterial;
+pub(crate) struct NeedsMaterial<C>(PhantomData<C>);
 
 pub(crate) struct Internals<C>(PhantomData<C>);
 
@@ -361,7 +361,11 @@ impl<C: VoxelWorldConfig> Internals<C> {
 
                     commands
                         .entity(entity)
-                        .try_insert((*transform, MeshRef(mesh_handle), NeedsMaterial))
+                        .try_insert((
+                            *transform,
+                            MeshRef(mesh_handle),
+                            NeedsMaterial::<C>(PhantomData),
+                        ))
                         .remove::<bevy::render::primitives::Aabb>();
                 }
 
@@ -426,7 +430,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
 
     pub(crate) fn assign_material<M: Material>(
         mut commands: Commands,
-        mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial>>,
+        mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial<C>>>,
         material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
     ) {
         let Some(material_handle) = material_handle else {
@@ -442,7 +446,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
                     transform: *transform,
                     ..default()
                 })
-                .remove::<NeedsMaterial>();
+                .remove::<NeedsMaterial<C>>();
         }
     }
 }

@@ -101,6 +101,15 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     fn voxel_texture(&self) -> Option<(String, u32)> {
         None
     }
+
+    /// Custom material will not get initialized if this returns false. When this is false,
+    /// `VoxelWorldMaterialHandle` needs to be manually added with a reference to the material handle.
+    ///
+    /// This can be used for example if you need to wait for a texture image to load before
+    /// the material can be used.
+    fn init_custom_materials(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Resource, Clone, Default)]

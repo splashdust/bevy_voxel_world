@@ -211,10 +211,11 @@ where
         }
 
         if self.use_custom_material {
-            let mut custom_material_assets = app.world.resource_mut::<Assets<M>>();
-
-            let handle = custom_material_assets.add(self.material.clone());
-            app.insert_resource(VoxelWorldMaterialHandle { handle });
+            if self.config.init_custom_materials() {
+                let mut custom_material_assets = app.world.resource_mut::<Assets<M>>();
+                let handle = custom_material_assets.add(self.material.clone());
+                app.insert_resource(VoxelWorldMaterialHandle { handle });
+            }
 
             app.insert_resource(LoadingTexture {
                 is_loaded: true,
