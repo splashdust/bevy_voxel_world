@@ -14,12 +14,12 @@ use crate::{
 /// The chunks also exist as entities that can be queried in the ECS,
 /// but having this map in addition allows for faster spatial lookups
 #[derive(Resource)]
-pub struct ChunkMap<I> {
+pub struct ChunkMap<C> {
     map: Arc<RwLock<HashMap<IVec3, chunk::ChunkData>>>,
-    _marker: PhantomData<I>,
+    _marker: PhantomData<C>,
 }
 
-impl<I: Send + Sync + 'static> ChunkMap<I> {
+impl<C: Send + Sync + 'static> ChunkMap<C> {
     pub fn get(
         position: &IVec3,
         read_lock: &RwLockReadGuard<HashMap<IVec3, chunk::ChunkData>>,
@@ -44,9 +44,9 @@ impl<I: Send + Sync + 'static> ChunkMap<I> {
 
     pub(crate) fn apply_buffers(
         &self,
-        insert_buffer: &mut ChunkMapInsertBuffer<I>,
-        update_buffer: &mut ChunkMapUpdateBuffer<I>,
-        remove_buffer: &mut ChunkMapRemoveBuffer<I>,
+        insert_buffer: &mut ChunkMapInsertBuffer<C>,
+        update_buffer: &mut ChunkMapUpdateBuffer<C>,
+        remove_buffer: &mut ChunkMapRemoveBuffer<C>,
         ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn>,
     ) {
         if insert_buffer.is_empty() && update_buffer.is_empty() && remove_buffer.is_empty() {
@@ -85,7 +85,7 @@ impl<I: Send + Sync + 'static> ChunkMap<I> {
     }
 }
 
-impl<I> Default for ChunkMap<I> {
+impl<C> Default for ChunkMap<C> {
     fn default() -> Self {
         Self {
             map: Arc::new(RwLock::new(HashMap::with_capacity(1000))),
@@ -95,13 +95,13 @@ impl<I> Default for ChunkMap<I> {
 }
 
 #[derive(Resource, Deref, DerefMut, Default, Debug)]
-pub(crate) struct ChunkMapInsertBuffer<I>(#[deref] Vec<(IVec3, chunk::ChunkData)>, PhantomData<I>);
+pub(crate) struct ChunkMapInsertBuffer<C>(#[deref] Vec<(IVec3, chunk::ChunkData)>, PhantomData<C>);
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapUpdateBuffer<I>(
+pub(crate) struct ChunkMapUpdateBuffer<C>(
     #[deref] Vec<(IVec3, chunk::ChunkData, ChunkWillSpawn)>,
-    PhantomData<I>,
+    PhantomData<C>,
 );
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapRemoveBuffer<I>(#[deref] Vec<IVec3>, PhantomData<I>);
+pub(crate) struct ChunkMapRemoveBuffer<C>(#[deref] Vec<IVec3>, PhantomData<C>);

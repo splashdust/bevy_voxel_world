@@ -4,11 +4,11 @@ use bevy::{prelude::*, render::primitives::Aabb};
 
 use crate::chunk::Chunk;
 
-pub struct VoxelWorldGizmoPlugin<I>(PhantomData<I>);
+pub struct VoxelWorldGizmoPlugin<C>(PhantomData<C>);
 
-impl<I: Send + Sync + 'static> Plugin for VoxelWorldGizmoPlugin<I> {
+impl<C: Send + Sync + 'static> Plugin for VoxelWorldGizmoPlugin<C> {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, draw_aabbs::<I>);
+        app.add_systems(Update, draw_aabbs::<C>);
     }
 }
 
@@ -17,8 +17,8 @@ pub struct ChunkAabbGizmo {
     pub color: Option<Color>,
 }
 
-fn draw_aabbs<I: Send + Sync + 'static>(
-    query: Query<(&Chunk<I>, &GlobalTransform, &ChunkAabbGizmo)>,
+fn draw_aabbs<C: Send + Sync + 'static>(
+    query: Query<(&Chunk<C>, &GlobalTransform, &ChunkAabbGizmo)>,
     mut gizmos: Gizmos,
 ) {
     for (chunk, &transform, gizmo) in &query {

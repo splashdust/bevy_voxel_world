@@ -9,17 +9,13 @@ use bevy::{
 };
 
 use crate::{
-    configuration::VoxelWorldConfiguration,
+    configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
         prepare_texture, LoadingTexture, StandardVoxelMaterial, TextureLayers,
         VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
-    voxel_world_internal::{
-        assign_material, despawn_retired_chunks, flush_chunk_map_buffers, flush_mesh_cache_buffers,
-        flush_voxel_write_buffer, remesh_dirty_chunks, retire_chunks, setup_internals,
-        spawn_chunks, spawn_meshes,
-    },
+    voxel_world_internal::{assign_material, Internals},
 };
 
 #[derive(Resource)]
@@ -45,22 +41,37 @@ impl<M: Material> Default for VoxelWorldMaterialPlugin<M> {
     }
 }
 
-pub struct VoxelWorldPlugin<I> {
+/// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
+/// The type parameter `C` is used to differentiate between different voxel worlds with different configs.
+pub struct VoxelWorldPlugin<C: VoxelWorldConfig = DefaultWorld> {
     spawn_meshes: bool,
     voxel_texture: String,
     texture_layers: u32,
     use_custom_material: bool,
-    _marker: std::marker::PhantomData<I>,
+    config: C,
 }
 
-impl<I> VoxelWorldPlugin<I> {
+impl<C> VoxelWorldPlugin<C>
+where
+    C: VoxelWorldConfig,
+{
+    pub fn with_config(config: C) -> Self {
+        Self {
+            config,
+            spawn_meshes: true,
+            voxel_texture: "".to_string(),
+            texture_layers: 0,
+            use_custom_material: false,
+        }
+    }
+
     pub fn minimal() -> Self {
         Self {
             spawn_meshes: false,
             voxel_texture: "".to_string(),
             texture_layers: 0,
             use_custom_material: false,
-            _marker: std::marker::PhantomData,
+            config: C::default(),
         }
     }
 
@@ -76,37 +87,40 @@ impl<I> VoxelWorldPlugin<I> {
     }
 }
 
-impl<I> Default for VoxelWorldPlugin<I> {
+impl Default for VoxelWorldPlugin<DefaultWorld> {
     fn default() -> Self {
         Self {
             spawn_meshes: true,
             voxel_texture: "".to_string(),
             texture_layers: 0,
             use_custom_material: false,
-            _marker: std::marker::PhantomData,
+            config: DefaultWorld::default(),
         }
     }
 }
 
-impl<I> Plugin for VoxelWorldPlugin<I>
+impl<C> Plugin for VoxelWorldPlugin<C>
 where
-    I: Clone + Default + Send + Sync + 'static,
+    C: VoxelWorldConfig,
 {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelWorldConfiguration<I>>()
-            .add_systems(PreStartup, setup_internals::<I>)
+        app.init_resource::<C>()
+            .add_systems(PreStartup, Internals::<C>::setup)
             .add_systems(
                 PreUpdate,
                 (
                     (
-                        (spawn_chunks::<I>, retire_chunks::<I>).chain(),
-                        remesh_dirty_chunks::<I>,
+                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks).chain(),
+                        Internals::<C>::remesh_dirty_chunks,
                     )
                         .chain(),
                     (
-                        flush_voxel_write_buffer::<I>,
-                        despawn_retired_chunks::<I>,
-                        (flush_chunk_map_buffers::<I>, flush_mesh_cache_buffers::<I>),
+                        Internals::<C>::flush_voxel_write_buffer,
+                        Internals::<C>::despawn_retired_chunks,
+                        (
+                            Internals::<C>::flush_chunk_map_buffers,
+                            Internals::<C>::flush_mesh_cache_buffers,
+                        ),
                     )
                         .chain(),
                 ),
@@ -125,7 +139,7 @@ where
                 Shader::from_wgsl
             );
 
-            app.add_systems(Update, spawn_meshes::<I>);
+            app.add_systems(Update, Internals::<C>::spawn_meshes);
         }
 
         if !self.use_custom_material && self.spawn_meshes {
@@ -183,6 +197,8 @@ where
             });
             app.insert_resource(VoxelWorldMaterialHandle { handle: mat_handle });
             app.insert_resource(TextureLayers(self.texture_layers));
+
+            app.insert_resource(self.config.clone());
 
             app.add_systems(Update, prepare_texture);
 

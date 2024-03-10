@@ -23,13 +23,13 @@ pub(crate) type VoxelArray = [WorldVoxel; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<I: Clone>(pub Task<ChunkTask<I>>, pub IVec3, PhantomData<I>);
+pub(crate) struct ChunkThread<C>(pub Task<ChunkTask<C>>, pub IVec3, PhantomData<C>);
 
-impl<I> ChunkThread<I>
+impl<C> ChunkThread<C>
 where
-    I: Clone + Send + Sync + 'static,
+    C: Send + Sync + 'static,
 {
-    pub fn new(task: Task<ChunkTask<I>>, pos: IVec3) -> Self {
+    pub fn new(task: Task<ChunkTask<C>>, pos: IVec3) -> Self {
         Self(task, pos, PhantomData)
     }
 }
@@ -131,13 +131,13 @@ impl Default for ChunkData {
 
 /// A marker component for chunks, with some helpful data
 #[derive(Component, Clone)]
-pub struct Chunk<I> {
+pub struct Chunk<C> {
     pub position: IVec3,
     pub entity: Entity,
-    _marker: PhantomData<I>,
+    _marker: PhantomData<C>,
 }
 
-impl<I> Chunk<I> {
+impl<C> Chunk<C> {
     pub fn new(position: IVec3, entity: Entity) -> Self {
         Self {
             position,
@@ -146,7 +146,7 @@ impl<I> Chunk<I> {
         }
     }
 
-    pub fn from(chunk: &Chunk<I>) -> Self {
+    pub fn from(chunk: &Chunk<C>) -> Self {
         Self {
             position: chunk.position,
             entity: chunk.entity,
@@ -163,16 +163,16 @@ impl<I> Chunk<I> {
 
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
-pub(crate) struct ChunkTask<I: Clone> {
+pub(crate) struct ChunkTask<C> {
     pub position: IVec3,
     pub chunk_data: ChunkData,
-    pub modified_voxels: ModifiedVoxels<I>,
+    pub modified_voxels: ModifiedVoxels<C>,
     pub mesh: Option<Mesh>,
-    _marker: PhantomData<I>,
+    _marker: PhantomData<C>,
 }
 
-impl<I: Clone + Send + Sync + 'static> ChunkTask<I> {
-    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<I>) -> Self {
+impl<C: Send + Sync + 'static> ChunkTask<C> {
+    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C>) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),

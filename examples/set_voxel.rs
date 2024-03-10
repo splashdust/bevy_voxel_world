@@ -25,11 +25,11 @@ fn setup(mut commands: Commands) {
     // Ambient light
     commands.insert_resource(AmbientLight {
         color: Color::rgb(0.98, 0.95, 0.82),
-        brightness: 1.0,
+        brightness: 1000.0,
     });
 }
 
-fn set_solid_voxel(mut voxel_world: VoxelWorld) {
+fn set_solid_voxel(mut voxel_world: VoxelWorld<DefaultWorld>) {
     // Generate some random values
     let size = 10;
     let mut rng = rand::thread_rng();

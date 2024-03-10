@@ -2,18 +2,37 @@ use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*, utils::HashMap};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 use std::time::Duration;
-
-#[derive(Clone, Default)]
+#[derive(Resource, Clone, Default)]
 struct MainWorld;
 
-#[derive(Clone, Default)]
+impl VoxelWorldConfig for MainWorld {
+    fn spawning_distance(&self) -> u32 {
+        15
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+        Box::new(move |_chunk_pos| get_voxel_fn())
+    }
+}
+
+#[derive(Resource, Clone, Default)]
 struct SecondWorld;
+
+impl VoxelWorldConfig for SecondWorld {
+    fn spawning_distance(&self) -> u32 {
+        10
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+        Box::new(move |_chunk_pos| get_voxel_fn_2())
+    }
+}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(VoxelWorldPlugin::<MainWorld>::default())
-        .add_plugins(VoxelWorldPlugin::<SecondWorld>::default())
+        .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
+        .add_plugins(VoxelWorldPlugin::with_config(SecondWorld))
         .add_systems(Startup, setup)
         .add_systems(Update, move_camera)
         .add_systems(Update, explosion)
@@ -26,28 +45,6 @@ struct ExplosionTimeout {
 }
 
 fn setup(mut commands: Commands) {
-    commands.insert_resource(VoxelWorldConfiguration::<MainWorld> {
-        // This is the spawn distance (in 32 meter chunks), centered around the camera.
-        spawning_distance: 15,
-
-        // Here we supply a closure that returns another closure that returns a voxel value for a given position.
-        // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
-        // to a differrent thread for the meshing process. A new closure is fetched for each chunk.
-        voxel_lookup_delegate: Box::new(move |_chunk_pos| get_voxel_fn()), // `get_voxel_fn` is defined below
-        ..Default::default()
-    });
-
-    commands.insert_resource(VoxelWorldConfiguration::<SecondWorld> {
-        // This is the spawn distance (in 32 meter chunks), centered around the camera.
-        spawning_distance: 10,
-
-        // Here we supply a closure that returns another closure that returns a voxel value for a given position.
-        // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
-        // to a differrent thread for the meshing process. A new closure is fetched for each chunk.
-        voxel_lookup_delegate: Box::new(move |_chunk_pos| get_voxel_fn_2()), // `get_voxel_fn` is defined below
-        ..Default::default()
-    });
-
     commands.spawn(ExplosionTimeout {
         timer: Timer::from_seconds(0.25, TimerMode::Repeating),
     });
@@ -147,11 +144,6 @@ fn get_voxel_fn_2() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     // Then we return this boxed closure that captures the noise and the cache
     // This will get sent off to a separate thread for meshing by bevy_voxel_world
     Box::new(move |pos: IVec3| {
-        // Sea level
-        if pos.y < 1 {
-            return WorldVoxel::Solid(3);
-        }
-
         let [x, y, z] = pos.as_dvec3().to_array();
 
         let sample = match cache.get(&(pos.x, pos.z)) {
