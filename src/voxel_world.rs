@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
     chunk_map::ChunkMap,
-    configuration::VoxelWorldConfiguration,
+    configuration::VoxelWorldConfig,
     voxel::{VoxelAabb, WorldVoxel},
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };
@@ -41,13 +41,13 @@ pub struct ChunkWillRemesh {
 
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
-pub struct VoxelWorld<'w> {
-    chunk_map: Res<'w, ChunkMap>,
-    modified_voxels: Res<'w, ModifiedVoxels>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer>,
+pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
+    chunk_map: Res<'w, ChunkMap<C>>,
+    modified_voxels: Res<'w, ModifiedVoxels<C>>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C>>,
 }
 
-impl<'w> VoxelWorld<'w> {
+impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
         self.get_voxel_fn()(position)
@@ -189,15 +189,15 @@ impl VoxelRaycastResult {
 
 /// SystemParam helper for raycasting into the voxel world
 #[derive(SystemParam)]
-pub struct VoxelWorldRaycast<'w> {
-    configuration: Res<'w, VoxelWorldConfiguration>,
-    chunk_map: Res<'w, ChunkMap>,
-    voxel_world: VoxelWorld<'w>,
+pub struct VoxelWorldRaycast<'w, C: VoxelWorldConfig> {
+    configuration: Res<'w, C>,
+    chunk_map: Res<'w, ChunkMap<C>>,
+    voxel_world: VoxelWorld<'w, C>,
 }
 
 const STEP_SIZE: f32 = 0.01;
 
-impl<'w> VoxelWorldRaycast<'w> {
+impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
@@ -215,7 +215,7 @@ impl<'w> VoxelWorldRaycast<'w> {
     /// use bevy_voxel_world::prelude::*;
     ///
     /// fn do_raycast(
-    ///     voxel_world_raycast: VoxelWorldRaycast,
+    ///     voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>,
     ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
     /// ) {
@@ -237,7 +237,7 @@ impl<'w> VoxelWorldRaycast<'w> {
         ray: Ray3d,
         filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
     ) -> Option<VoxelRaycastResult> {
-        let spawning_distance = self.configuration.spawning_distance as i32;
+        let spawning_distance = self.configuration.spawning_distance() as i32;
         let chunk_map_read_lock = self.chunk_map.get_read_lock();
         let mut current = ray.origin;
         let mut t = 0.0;
@@ -245,7 +245,7 @@ impl<'w> VoxelWorldRaycast<'w> {
         while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
 
-            if let Some(chunk_data) = ChunkMap::get(&chunk_pos, &chunk_map_read_lock) {
+            if let Some(chunk_data) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
                 if !chunk_data.is_empty {
                     let mut voxel = WorldVoxel::Unset;
                     while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {

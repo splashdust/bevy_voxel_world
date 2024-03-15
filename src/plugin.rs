@@ -9,17 +9,13 @@ use bevy::{
 };
 
 use crate::{
-    configuration::VoxelWorldConfiguration,
+    configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
         prepare_texture, LoadingTexture, StandardVoxelMaterial, TextureLayers,
         VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
-    voxel_world_internal::{
-        assign_material, despawn_retired_chunks, flush_chunk_map_buffers, flush_mesh_cache_buffers,
-        flush_voxel_write_buffer, remesh_dirty_chunks, retire_chunks, setup_internals,
-        spawn_chunks, spawn_meshes,
-    },
+    voxel_world_internal::Internals,
 };
 
 #[derive(Resource)]
@@ -27,76 +23,100 @@ pub struct VoxelWorldMaterialHandle<M: Material> {
     pub handle: Handle<M>,
 }
 
-pub struct VoxelWorldMaterialPlugin<M: Material> {
-    _marker: std::marker::PhantomData<M>,
+/// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
+/// The type parameter `C` is used to differentiate between different voxel worlds with different configs.
+pub struct VoxelWorldPlugin<C, M = StandardMaterial>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
+    spawn_meshes: bool,
+    use_custom_material: bool,
+    config: C,
+    material: M,
 }
 
-impl<M: Material> Plugin for VoxelWorldMaterialPlugin<M> {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Update, assign_material::<M>);
-    }
-}
-
-impl<M: Material> Default for VoxelWorldMaterialPlugin<M> {
-    fn default() -> Self {
+impl<C> VoxelWorldPlugin<C, StandardMaterial>
+where
+    C: VoxelWorldConfig,
+{
+    pub fn with_config(config: C) -> Self {
         Self {
-            _marker: std::marker::PhantomData,
+            config,
+            spawn_meshes: true,
+            use_custom_material: false,
+            material: StandardMaterial::default(),
         }
     }
-}
 
-pub struct VoxelWorldPlugin {
-    spawn_meshes: bool,
-    voxel_texture: String,
-    texture_layers: u32,
-    use_custom_material: bool,
-}
-
-impl VoxelWorldPlugin {
     pub fn minimal() -> Self {
         Self {
             spawn_meshes: false,
-            voxel_texture: "".to_string(),
-            texture_layers: 0,
             use_custom_material: false,
+            config: C::default(),
+            material: StandardMaterial::default(),
         }
-    }
-
-    pub fn with_voxel_texture(mut self, texture: &str, layers: u32) -> Self {
-        self.voxel_texture = texture.to_string();
-        self.texture_layers = layers;
-        self
-    }
-
-    pub fn without_default_material(mut self) -> Self {
-        self.use_custom_material = true;
-        self
     }
 }
 
-impl Default for VoxelWorldPlugin {
+impl<C, M> VoxelWorldPlugin<C, M>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
+    /// Use this to tell `bevy_voxel_world` to use a custom material. This can be any material that
+    /// implements `bevy::pbr::Material`. You can use this to create custom shaders for your voxel
+    /// world. You can set this up like any other material in Bevy.
+    ///
+    /// `bevy_voxel_world` will add the material as an asset, so you can query for it later using
+    /// `Res<Assets<MyCustomVoxelMaterialType>>`.
+    pub fn with_material<CustomMaterial: Material>(
+        self,
+        material: CustomMaterial,
+    ) -> VoxelWorldPlugin<C, CustomMaterial> {
+        VoxelWorldPlugin {
+            spawn_meshes: self.spawn_meshes,
+            use_custom_material: true,
+            config: self.config,
+            material,
+        }
+    }
+}
+
+impl Default for VoxelWorldPlugin<DefaultWorld, StandardMaterial> {
     fn default() -> Self {
         Self {
             spawn_meshes: true,
-            voxel_texture: "".to_string(),
-            texture_layers: 0,
             use_custom_material: false,
+            config: DefaultWorld,
+            material: StandardMaterial::default(),
         }
     }
 }
 
-impl Plugin for VoxelWorldPlugin {
+impl<C, M> Plugin for VoxelWorldPlugin<C, M>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelWorldConfiguration>()
-            .add_systems(PreStartup, setup_internals)
+        app.init_resource::<C>()
+            .add_systems(PreStartup, Internals::<C>::setup)
             .add_systems(
                 PreUpdate,
                 (
-                    ((spawn_chunks, retire_chunks).chain(), remesh_dirty_chunks).chain(),
                     (
-                        flush_voxel_write_buffer,
-                        despawn_retired_chunks,
-                        (flush_chunk_map_buffers, flush_mesh_cache_buffers),
+                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks).chain(),
+                        Internals::<C>::remesh_dirty_chunks,
+                    )
+                        .chain(),
+                    (
+                        Internals::<C>::flush_voxel_write_buffer,
+                        Internals::<C>::despawn_retired_chunks,
+                        (
+                            Internals::<C>::flush_chunk_map_buffers,
+                            Internals::<C>::flush_mesh_cache_buffers,
+                        ),
                     )
                         .chain(),
                 ),
@@ -115,18 +135,25 @@ impl Plugin for VoxelWorldPlugin {
                 Shader::from_wgsl
             );
 
-            app.add_systems(Update, spawn_meshes);
+            app.add_systems(Update, Internals::<C>::spawn_meshes);
         }
 
         if !self.use_custom_material && self.spawn_meshes {
-            app.add_plugins(MaterialPlugin::<
-                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-            >::default());
+            let mat_plugins = app.get_added_plugins::<MaterialPlugin::<
+                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>();
+
+            if mat_plugins.is_empty() {
+                app.add_plugins(MaterialPlugin::<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >::default());
+            }
 
             let mut preloaded_texture = true;
+            let texture_conf = self.config.voxel_texture();
+            let mut texture_layers = 0;
 
             // Use built-in default texture if no texture is specified.
-            let image_handle = if self.voxel_texture.is_empty() {
+            let image_handle = if texture_conf.is_none() {
                 let mut image = Image::from_buffer(
                     include_bytes!("shaders/default_texture.png"),
                     ImageType::MimeType("image/png"),
@@ -140,9 +167,11 @@ impl Plugin for VoxelWorldPlugin {
                 let mut image_assets = app.world.resource_mut::<Assets<Image>>();
                 image_assets.add(image)
             } else {
+                let (img_path, layers) = texture_conf.unwrap();
+                texture_layers = layers;
                 let asset_server = app.world.get_resource::<AssetServer>().unwrap();
                 preloaded_texture = false;
-                asset_server.load(self.voxel_texture.clone())
+                asset_server.load(img_path)
             };
 
             let mut material_assets = app
@@ -167,19 +196,33 @@ impl Plugin for VoxelWorldPlugin {
                 handle: image_handle,
             });
             app.insert_resource(VoxelWorldMaterialHandle { handle: mat_handle });
-            app.insert_resource(TextureLayers(self.texture_layers));
+            app.insert_resource(TextureLayers(texture_layers));
+
+            app.insert_resource(self.config.clone());
 
             app.add_systems(Update, prepare_texture);
-            app.add_plugins(VoxelWorldMaterialPlugin::<
-                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-            >::default());
+
+            app.add_systems(
+                Update,
+                Internals::<C>::assign_material::<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >,
+            );
         }
 
         if self.use_custom_material {
+            if self.config.init_custom_materials() {
+                let mut custom_material_assets = app.world.resource_mut::<Assets<M>>();
+                let handle = custom_material_assets.add(self.material.clone());
+                app.insert_resource(VoxelWorldMaterialHandle { handle });
+            }
+
             app.insert_resource(LoadingTexture {
                 is_loaded: true,
                 handle: Handle::default(),
             });
+
+            app.add_systems(Update, Internals::<C>::assign_material::<M>);
         }
     }
 }

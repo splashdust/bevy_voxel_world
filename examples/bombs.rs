@@ -2,11 +2,23 @@ use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*, utils::HashMap};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 use std::time::Duration;
+#[derive(Resource, Clone, Default)]
+struct MainWorld;
+
+impl VoxelWorldConfig for MainWorld {
+    fn spawning_distance(&self) -> u32 {
+        15
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+        Box::new(move |_chunk_pos| get_voxel_fn())
+    }
+}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(VoxelWorldPlugin::default())
+        .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
         .add_systems(Startup, setup)
         .add_systems(Update, move_camera)
         .add_systems(Update, explosion)
@@ -19,17 +31,6 @@ struct ExplosionTimeout {
 }
 
 fn setup(mut commands: Commands) {
-    commands.insert_resource(VoxelWorldConfiguration {
-        // This is the spawn distance (in 32 meter chunks), centered around the camera.
-        spawning_distance: 15,
-
-        // Here we supply a closure that returns another closure that returns a voxel value for a given position.
-        // This may seem a bit convoluted, but it allows us to capture data in a sendable closure to be sent off
-        // to a differrent thread for the meshing process. A new closure is fetched for each chunk.
-        voxel_lookup_delegate: Box::new(move |_chunk_pos| get_voxel_fn()), // `get_voxel_fn` is defined below
-        ..Default::default()
-    });
-
     commands.spawn(ExplosionTimeout {
         timer: Timer::from_seconds(0.25, TimerMode::Repeating),
     });
@@ -63,7 +64,7 @@ fn setup(mut commands: Commands) {
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {
         color: Color::rgb(0.98, 0.95, 0.82),
-        brightness: 0.3,
+        brightness: 100.0,
     });
 }
 
@@ -92,7 +93,7 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
         let sample = match cache.get(&(pos.x, pos.z)) {
             Some(sample) => *sample,
             None => {
-                let sample = noise.get([x / 800.0, z / 800.0]) * 50.0;
+                let sample = noise.get([x / 800.0, z / 800.0]) * 25.0;
                 cache.insert((pos.x, pos.z), sample);
                 sample
             }
@@ -120,7 +121,7 @@ fn move_camera(time: Res<Time>, mut cam_transform: Query<&mut Transform, With<Vo
 }
 
 fn explosion(
-    mut voxel_world: VoxelWorld,
+    mut voxel_world: VoxelWorld<MainWorld>,
     camera: Query<&Transform, With<VoxelWorldCamera>>,
     mut timeout: Query<&mut ExplosionTimeout>,
     time: Res<Time>,

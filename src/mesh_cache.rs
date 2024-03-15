@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock, Weak};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, RwLock, Weak},
+};
 
 use bevy::prelude::*;
 use weak_table::WeakValueHashMap;
@@ -14,12 +17,13 @@ type WeakMeshMap = WeakValueHashMap<u64, Weak<Handle<Mesh>>>;
 /// Using this map, we can avoid generating the same mesh multiple times, and reusing mesh handles
 /// should allow Bevy to automatically batch draw identical chunks (large flat areas for example)
 #[derive(Resource, Clone)]
-pub(crate) struct MeshCache {
+pub(crate) struct MeshCache<C> {
     map: Arc<RwLock<WeakMeshMap>>,
+    _marker: std::marker::PhantomData<C>,
 }
 
-impl MeshCache {
-    pub fn apply_buffers(&self, insert_buffer: &mut MeshCacheInsertBuffer) {
+impl<C: Send + Sync + 'static> MeshCache<C> {
+    pub fn apply_buffers(&self, insert_buffer: &mut MeshCacheInsertBuffer<C>) {
         if insert_buffer.len() == 0 {
             return;
         }
@@ -41,13 +45,14 @@ impl MeshCache {
     }
 }
 
-impl Default for MeshCache {
+impl<C> Default for MeshCache<C> {
     fn default() -> Self {
         Self {
             map: Arc::new(RwLock::new(WeakMeshMap::with_capacity(2000))),
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct MeshCacheInsertBuffer(Vec<(u64, Arc<Handle<Mesh>>)>);
+pub(crate) struct MeshCacheInsertBuffer<C>(#[deref] Vec<(u64, Arc<Handle<Mesh>>)>, PhantomData<C>);

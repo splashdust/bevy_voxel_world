@@ -11,7 +11,7 @@ use crate::{
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::minimal()));
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
     app.add_systems(Startup, |mut commands: Commands| {
         commands.spawn((
             Camera3dBundle {
@@ -30,7 +30,7 @@ fn can_set_get_voxels() {
     let mut app = _test_setup_app();
 
     // Set and get some voxels
-    app.add_systems(Update, |mut voxel_world: VoxelWorld| {
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
         let positions = vec![
             IVec3::new(0, 100, 0),
             IVec3::new(0, 0, 0),
@@ -72,7 +72,7 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
 
     let make_pos = positions.clone();
 
-    app.add_systems(Update, move |mut voxel_world: VoxelWorld| {
+    app.add_systems(Update, move |mut voxel_world: VoxelWorld<DefaultWorld>| {
         let test_voxel = WorldVoxel::Solid(1);
 
         for pos in make_pos.clone() {
@@ -84,16 +84,19 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
 
     let check_pos = positions.clone();
 
-    app.add_systems(Update, move |voxel_world: crate::prelude::VoxelWorld| {
-        let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+    app.add_systems(
+        Update,
+        move |voxel_world: crate::prelude::VoxelWorld<DefaultWorld>| {
+            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
-        for pos in check_pos.clone() {
-            assert_eq!(
-                voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(pos.x as f32, pos.z as f32)),
-                Some((pos, test_voxel))
-            )
-        }
-    });
+            for pos in check_pos.clone() {
+                assert_eq!(
+                    voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(pos.x as f32, pos.z as f32)),
+                    Some((pos, test_voxel))
+                )
+            }
+        },
+    );
 
     app.update();
 }
@@ -124,7 +127,7 @@ fn chunk_will_remesh_event_after_set_voxel() {
         app.update();
     }
 
-    app.add_systems(Update, |mut voxel_world: VoxelWorld| {
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
         voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
     });
 
@@ -182,8 +185,11 @@ fn raycast_finds_voxel() {
 
     app.add_systems(
         Startup,
-        move |mut voxel_world: VoxelWorld,
-              buffers: (ResMut<ChunkMapUpdateBuffer>, ResMut<MeshCacheInsertBuffer>)| {
+        move |mut voxel_world: VoxelWorld<DefaultWorld>,
+              buffers: (
+            ResMut<ChunkMapUpdateBuffer<DefaultWorld>>,
+            ResMut<MeshCacheInsertBuffer<DefaultWorld>>,
+        )| {
             let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
             for pos in make_pos.clone() {
@@ -213,27 +219,30 @@ fn raycast_finds_voxel() {
 
     app.update();
 
-    app.add_systems(Update, move |voxel_world_raycast: VoxelWorldRaycast| {
-        let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+    app.add_systems(
+        Update,
+        move |voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>| {
+            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
-        let ray = Ray3d {
-            origin: Vec3::new(0.5, 0.5, 70.0),
-            direction: -Direction3d::Z,
-        };
+            let ray = Ray3d {
+                origin: Vec3::new(0.5, 0.5, 70.0),
+                direction: -Direction3d::Z,
+            };
 
-        let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) else {
-            panic!("No voxel found")
-        };
+            let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) else {
+                panic!("No voxel found")
+            };
 
-        assert_eq!(
-            result,
-            VoxelRaycastResult {
-                position: Vec3::ZERO,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                voxel: test_voxel
-            }
-        )
-    });
+            assert_eq!(
+                result,
+                VoxelRaycastResult {
+                    position: Vec3::ZERO,
+                    normal: Vec3::new(0.0, 0.0, 1.0),
+                    voxel: test_voxel
+                }
+            )
+        },
+    );
 
     app.update();
 }
