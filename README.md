@@ -96,7 +96,7 @@ See the [textures example](https://github.com/splashdust/bevy_voxel_world/blob/m
 
 ### Custom shader support
 
-If you need to customize materials futher, you can use `VoxelWorldMaterialPlugin` to register your own Bevy material. This allows you to use your own custom shader with `bevy_voxel_world`. See [this example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/custom_material.rs) for more details.
+If you need to customize materials futher, you can use `.with_material(MyCustomVoxelMaterial)`, when adding the plugin, to register your own Bevy material. This allows you to use your own custom shader with `bevy_voxel_world`. See [this example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/custom_material.rs) for more details.
 
 ## Ray casting
 
