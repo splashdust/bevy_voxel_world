@@ -20,12 +20,41 @@ The world can be controlled in two main ways: through a terrain lookup function,
 
 For an example on how to use a terrain lookup function, see [this example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/noise_terrain.rs).
 
-## Modifying the world
+## Basic setup
 
-The `set_voxel` and `get_voxel` access functions are easily reached from any normal Bevy system:
+Create a configuration struct for your world:
 
 ```rust
-fn my_system(mut voxel_world: VoxelWorld) {
+#[derive(Resource, Clone, Default)]
+struct MyWorld;
+
+impl VoxelWorldConfig for MyWorld {
+    // All options have defaults, so you only need to add the ones you want to modify. For a full list, see src/configuration.rs
+    fn spawning_distance(&self) -> u32 {
+        25
+    }
+}
+```
+
+Then add the plugin with your config:
+
+```rust
+.add_plugins(VoxelWorldPlugin::with_config(MyWorld))
+```
+
+The config struct does two things:
+
+- It supplies the configuration value
+- Its type also acts as a world instance identifier. This means that you can create multiple worlds by adding multiple instances of the plugin as long as each instance has a unique configuration struct.
+
+## Accessing the world
+
+To access a voxel world instance in a system, you can use the `VoxelWorld` system param. `VoxelWorld` take one type parameter, which is the configuration struct for the world you want to access.
+
+The `set_voxel` and `get_voxel` access functions can be used to manipulate the voxel data in the world.
+
+```rust
+fn my_system(mut voxel_world: VoxelWorld<MyWorld>) {
     voxel_world.set_voxel(IVec3 { ... }, WorldVoxel::Solid(0));
 }
 ```
@@ -38,33 +67,24 @@ Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. 
 
 `Solid` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback.
 
-A custom array texture can be supplied when initializing the plugin:
-
-```rust
-VoxelWorldPlugin::default()
-    .with_voxel_texture("images/materials.png", 6)
-```
-
-This should be image with a size of `W x (W * n)`, where `n` is the number of indexes. So an array of 4 16x16 px textures would be 16x64 px in size. The number of indexes is specified in the second parameter (6 in the example above).
+A custom array texture can be supplied in the config. It should be image with a size of `W x (W * n)`, where `n` is the number of indexes. So an array of 4 16x16 px textures would be 16x64 px in size. The number of indexes is specified in the second parameter.
 
 Then, to map out which indexes belong to which material type, you can supply a `texture_index_mapper` callback:
 
 ```rust
-commands.insert_resource(VoxelWorldConfiguration {
-    texture_index_mapper: Arc::new(|vox_mat: u8| {
-        match vox_mat {
-            // Top brick
-            0 => [0, 1, 2],
+impl VoxelWorldConfig for MyWorld {
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
+        Arc::new(|vox_mat: u8| match vox_mat {
+            SNOWY_BRICK => [0, 1, 2],
+            FULL_BRICK => [2, 2, 2],
+            GRASS | _ => [3, 3, 3],
+        })
+    }
 
-            // Full brick
-            1 => [2, 2, 2],
-
-            // Grass
-            2 | _ => [3, 3, 3],
-        }
-    }),
-    ..Default::default()
-});
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        Some(("example_voxel_texture.png".into(), 4)) // Array texture with 4 indexes
+    }
+}
 ```
 
 The `texture_index_mapper` callback is supplied with a material type and should return an array with three values. The values indicate which texture index maps to `[top, sides, bottom]` of a voxel.
@@ -76,6 +96,34 @@ See the [textures example](https://github.com/splashdust/bevy_voxel_world/blob/m
 ### Custom shader support
 
 If you need to customize materials futher, you can use `VoxelWorldMaterialPlugin` to register your own Bevy material. This allows you to use your own custom shader with `bevy_voxel_world`. See [this example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/custom_material.rs) for more details.
+
+## Ray casting
+
+To find a voxel location in the world from a pixel location on the screen, for example the mouse location, you can ray cast into the voxel world.
+
+```rust
+fn update_cursor_cube(
+    voxel_world_raycast: VoxelWorldRaycast<MyWorld>,
+    camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    mut cursor_evr: EventReader<CursorMoved>,
+) {
+    for ev in cursor_evr.read() {
+        // Get a ray from the cursor position into the world
+        let (camera, cam_gtf) = camera_info.single();
+        let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+            return;
+        };
+
+        if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
+            // result.position will be the world location of the voxel as a Vec3
+            // To get the empty location next to the voxel in the direction of the surface where the ray intersected you can use result.normal:
+            // let empty_pos = result.position + result.normal;
+        }
+    }
+}
+```
+
+See this [full example of ray casting](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/ray_cast.rs) for more details.
 
 ## Gotchas
 
