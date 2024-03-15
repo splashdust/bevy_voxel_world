@@ -15,24 +15,10 @@ impl VoxelWorldConfig for MainWorld {
     }
 }
 
-#[derive(Resource, Clone, Default)]
-struct SecondWorld;
-
-impl VoxelWorldConfig for SecondWorld {
-    fn spawning_distance(&self) -> u32 {
-        10
-    }
-
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
-        Box::new(move |_chunk_pos| get_voxel_fn_2())
-    }
-}
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
-        .add_plugins(VoxelWorldPlugin::with_config(SecondWorld))
         .add_systems(Startup, setup)
         .add_systems(Update, move_camera)
         .add_systems(Update, explosion)
@@ -123,48 +109,6 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
         } else if is_sub_surface {
             // Solid voxel of material type 1
             WorldVoxel::Solid(1)
-        } else {
-            WorldVoxel::Air
-        }
-    })
-}
-
-fn get_voxel_fn_2() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
-    // Set up some noise to use as the terrain height map
-    let mut noise = HybridMulti::<Perlin>::new(1234);
-    noise.octaves = 4;
-    noise.frequency = 1.0;
-    noise.lacunarity = 2.2;
-    noise.persistence = 0.5;
-
-    // We use this to cache the noise value for each y column so we only need
-    // to calculate it once per x/z coordinate
-    let mut cache = HashMap::<(i32, i32), f64>::new();
-
-    // Then we return this boxed closure that captures the noise and the cache
-    // This will get sent off to a separate thread for meshing by bevy_voxel_world
-    Box::new(move |pos: IVec3| {
-        let [x, y, z] = pos.as_dvec3().to_array();
-
-        let sample = match cache.get(&(pos.x, pos.z)) {
-            Some(sample) => *sample,
-            None => {
-                let sample = noise.get([x / 400.0, z / 400.0]) * 50.0;
-                cache.insert((pos.x, pos.z), sample);
-                sample
-            }
-        };
-
-        // If y is less than the noise sample, we will set the voxel to solid
-        let is_surface = y < sample;
-        let is_sub_surface = y < sample - 1.0;
-
-        if is_surface && !is_sub_surface {
-            // Solid voxel of material type 0
-            WorldVoxel::Solid(1)
-        } else if is_sub_surface {
-            // Solid voxel of material type 1
-            WorldVoxel::Solid(0)
         } else {
             WorldVoxel::Air
         }
