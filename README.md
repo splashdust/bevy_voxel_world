@@ -103,7 +103,7 @@ If you need to customize materials futher, you can use `.with_material(MyCustomV
 To find a voxel location in the world from a pixel location on the screen, for example the mouse location, you can ray cast into the voxel world.
 
 ```rust
-fn update_cursor_cube(
+fn do_something_with_mouse_voxel_pos(
     voxel_world_raycast: VoxelWorldRaycast<MyWorld>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     mut cursor_evr: EventReader<CursorMoved>,
