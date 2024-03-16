@@ -377,6 +377,11 @@ impl<C: VoxelWorldConfig> Internals<C> {
                         entity,
                     },
                 ));
+            } else {
+                commands
+                    .entity(entity)
+                    .remove::<Handle<Mesh>>()
+                    .remove::<MeshRef>();
             }
 
             commands.entity(chunk.entity).remove::<ChunkThread<C>>();
