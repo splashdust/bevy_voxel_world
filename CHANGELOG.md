@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+Fix lingering meshes when an existing chunk is emptied of voxels
+
 ## 0.5.0
 
 Add support for multiple parallell world instances
