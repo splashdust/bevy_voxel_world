@@ -168,7 +168,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     }
 }
 
-trait FilterFn {
+pub trait FilterFn {
     fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
 }
 
@@ -178,7 +178,7 @@ impl<F: Fn((Vec3, WorldVoxel)) -> bool> FilterFn for F {
     }
 }
 
-type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync;
+pub type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync;
 
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct VoxelRaycastResult {
@@ -254,7 +254,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
     }
 
     /// Get a sendable closure that can be used to raycast into the voxel world
-    fn raycast_fn(&self) -> Arc<RaycastFn> {
+    pub fn raycast_fn(&self) -> Arc<RaycastFn> {
         let chunk_map = self.chunk_map.get_map();
         let spawning_distance = self.configuration.spawning_distance() as i32;
         let get_voxel = self.voxel_world.get_voxel_fn();
