@@ -168,6 +168,16 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     }
 }
 
+trait FilterFn {
+    fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
+}
+
+impl<F: Fn((Vec3, WorldVoxel)) -> bool> FilterFn for F {
+    fn call(&self, input: (Vec3, WorldVoxel)) -> bool {
+        self(input)
+    }
+}
+
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct VoxelRaycastResult {
     pub position: Vec3,
@@ -237,57 +247,67 @@ impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
         ray: Ray3d,
         filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
     ) -> Option<VoxelRaycastResult> {
+        let raycast_fn = self.raycast_fn();
+        raycast_fn(ray, filter)
+    }
+
+    /// Get a sendable closure that can be used to raycast into the voxel world
+    fn raycast_fn(
+        &self,
+    ) -> Arc<dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync> {
+        let chunk_map = self.chunk_map.get_map();
         let spawning_distance = self.configuration.spawning_distance() as i32;
-        let chunk_map_read_lock = self.chunk_map.get_read_lock();
-        let mut current = ray.origin;
-        let mut t = 0.0;
+        let get_voxel = self.voxel_world.get_voxel_fn();
 
-        while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
-            let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
+        Arc::new(move |ray, filter| {
+            let chunk_map_read_lock = chunk_map.read().unwrap();
+            let mut current = ray.origin;
+            let mut t = 0.0;
 
-            if let Some(chunk_data) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
-                if !chunk_data.is_empty {
-                    let mut voxel = WorldVoxel::Unset;
-                    while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {
-                        let mut voxel_pos = current.floor().as_ivec3();
-                        voxel = self.voxel_world.get_voxel(voxel_pos);
-                        if voxel.is_solid() {
-                            let mut normal = get_hit_normal(voxel_pos, ray).unwrap();
+            while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
+                let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
 
-                            let mut adjacent_vox =
-                                self.voxel_world.get_voxel(voxel_pos + normal.as_ivec3());
+                if let Some(chunk_data) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
+                    if !chunk_data.is_empty {
+                        let mut voxel = WorldVoxel::Unset;
+                        while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {
+                            let mut voxel_pos = current.floor().as_ivec3();
+                            voxel = get_voxel(voxel_pos);
+                            if voxel.is_solid() {
+                                let mut normal = get_hit_normal(voxel_pos, ray).unwrap();
 
-                            // When we get here we have an approximate hit position and normal,
-                            // so we refine until the position adjacent to the normal is empty.
-                            let mut steps = 0;
-                            while adjacent_vox.is_solid() && steps < 3 {
-                                steps += 1;
-                                voxel = adjacent_vox;
-                                voxel_pos += normal.as_ivec3();
-                                normal = get_hit_normal(voxel_pos, ray).unwrap_or(normal);
-                                adjacent_vox =
-                                    self.voxel_world.get_voxel(voxel_pos + normal.as_ivec3());
+                                let mut adjacent_vox = get_voxel(voxel_pos + normal.as_ivec3());
+
+                                // When we get here we have an approximate hit position and normal,
+                                // so we refine until the position adjacent to the normal is empty.
+                                let mut steps = 0;
+                                while adjacent_vox.is_solid() && steps < 3 {
+                                    steps += 1;
+                                    voxel = adjacent_vox;
+                                    voxel_pos += normal.as_ivec3();
+                                    normal = get_hit_normal(voxel_pos, ray).unwrap_or(normal);
+                                    adjacent_vox = get_voxel(voxel_pos + normal.as_ivec3());
+                                }
+
+                                if filter.call((voxel_pos.as_vec3(), voxel)) {
+                                    return Some(VoxelRaycastResult {
+                                        position: voxel_pos.as_vec3(),
+                                        normal,
+                                        voxel,
+                                    });
+                                }
                             }
-
-                            if filter((voxel_pos.as_vec3(), voxel)) {
-                                return Some(VoxelRaycastResult {
-                                    position: voxel_pos.as_vec3(),
-                                    normal,
-                                    voxel,
-                                });
-                            }
+                            t += STEP_SIZE;
+                            current = ray.origin + ray.direction * t;
                         }
-                        t += STEP_SIZE;
-                        current = ray.origin + ray.direction * t;
                     }
                 }
+
+                t += STEP_SIZE;
+                current = ray.origin + ray.direction * t;
             }
-
-            t += STEP_SIZE;
-            current = ray.origin + ray.direction * t;
-        }
-
-        None
+            None
+        })
     }
 }
 
