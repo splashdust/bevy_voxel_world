@@ -39,12 +39,46 @@ pub struct ChunkWillRemesh {
     pub entity: Entity,
 }
 
+pub trait FilterFn {
+    fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
+}
+
+impl<F: Fn((Vec3, WorldVoxel)) -> bool> FilterFn for F {
+    fn call(&self, input: (Vec3, WorldVoxel)) -> bool {
+        self(input)
+    }
+}
+
+pub type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync;
+
+#[derive(Default, Debug, PartialEq, Clone)]
+pub struct VoxelRaycastResult {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub voxel: WorldVoxel,
+}
+
+impl VoxelRaycastResult {
+    /// Get the voxel position of the raycast result
+    pub fn voxel_pos(&self) -> IVec3 {
+        self.position.floor().as_ivec3()
+    }
+
+    /// Get the face normal of the ray hit
+    pub fn voxel_normal(&self) -> IVec3 {
+        self.normal.floor().as_ivec3()
+    }
+}
+
+const STEP_SIZE: f32 = 0.01;
+
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     chunk_map: Res<'w, ChunkMap<C>>,
     modified_voxels: Res<'w, ModifiedVoxels<C>>,
     voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C>>,
+    configuration: Res<'w, C>,
 }
 
 impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
@@ -166,50 +200,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
             z: pos_2d.y.floor() as i32,
         })
     }
-}
 
-pub trait FilterFn {
-    fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
-}
-
-impl<F: Fn((Vec3, WorldVoxel)) -> bool> FilterFn for F {
-    fn call(&self, input: (Vec3, WorldVoxel)) -> bool {
-        self(input)
-    }
-}
-
-pub type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync;
-
-#[derive(Default, Debug, PartialEq, Clone)]
-pub struct VoxelRaycastResult {
-    pub position: Vec3,
-    pub normal: Vec3,
-    pub voxel: WorldVoxel,
-}
-
-impl VoxelRaycastResult {
-    /// Get the voxel position of the raycast result
-    pub fn voxel_pos(&self) -> IVec3 {
-        self.position.floor().as_ivec3()
-    }
-
-    /// Get the face normal of the ray hit
-    pub fn voxel_normal(&self) -> IVec3 {
-        self.normal.floor().as_ivec3()
-    }
-}
-
-/// SystemParam helper for raycasting into the voxel world
-#[derive(SystemParam)]
-pub struct VoxelWorldRaycast<'w, C: VoxelWorldConfig> {
-    configuration: Res<'w, C>,
-    chunk_map: Res<'w, ChunkMap<C>>,
-    voxel_world: VoxelWorld<'w, C>,
-}
-
-const STEP_SIZE: f32 = 0.01;
-
-impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
@@ -257,7 +248,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorldRaycast<'w, C> {
     pub fn raycast_fn(&self) -> Arc<RaycastFn> {
         let chunk_map = self.chunk_map.get_map();
         let spawning_distance = self.configuration.spawning_distance() as i32;
-        let get_voxel = self.voxel_world.get_voxel_fn();
+        let get_voxel = self.get_voxel_fn();
 
         Arc::new(move |ray, filter| {
             let chunk_map_read_lock = chunk_map.read().unwrap();

@@ -105,7 +105,7 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
 }
 
 fn update_cursor_cube(
-    voxel_world_raycast: VoxelWorldRaycast<MyMainWorld>,
+    voxel_world_raycast: VoxelWorld<MyMainWorld>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
     mut cursor_evr: EventReader<CursorMoved>,
     mut cursor_cube: Query<(&mut Transform, &mut CursorCube)>,

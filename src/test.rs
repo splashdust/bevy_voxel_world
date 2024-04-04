@@ -219,30 +219,27 @@ fn raycast_finds_voxel() {
 
     app.update();
 
-    app.add_systems(
-        Update,
-        move |voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>| {
-            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
+    app.add_systems(Update, move |voxel_world: VoxelWorld<DefaultWorld>| {
+        let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
-            let ray = Ray3d {
-                origin: Vec3::new(0.5, 0.5, 70.0),
-                direction: -Direction3d::Z,
-            };
+        let ray = Ray3d {
+            origin: Vec3::new(0.5, 0.5, 70.0),
+            direction: -Direction3d::Z,
+        };
 
-            let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) else {
-                panic!("No voxel found")
-            };
+        let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) else {
+            panic!("No voxel found")
+        };
 
-            assert_eq!(
-                result,
-                VoxelRaycastResult {
-                    position: Vec3::ZERO,
-                    normal: Vec3::new(0.0, 0.0, 1.0),
-                    voxel: test_voxel
-                }
-            )
-        },
-    );
+        assert_eq!(
+            result,
+            VoxelRaycastResult {
+                position: Vec3::ZERO,
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                voxel: test_voxel
+            }
+        )
+    });
 
     app.update();
 }

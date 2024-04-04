@@ -17,9 +17,7 @@ pub mod prelude {
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::WorldVoxel;
     pub use crate::voxel_world::{ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn};
-    pub use crate::voxel_world::{
-        VoxelRaycastResult, VoxelWorld, VoxelWorldCamera, VoxelWorldRaycast,
-    };
+    pub use crate::voxel_world::{VoxelRaycastResult, VoxelWorld, VoxelWorldCamera};
 }
 
 pub mod rendering {
