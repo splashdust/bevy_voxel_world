@@ -4,6 +4,7 @@
 ///
 use bevy::{ecs::system::SystemParam, prelude::*, render::primitives::Aabb};
 use std::sync::Arc;
+use std::marker::PhantomData;
 
 use crate::{
     chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
@@ -20,23 +21,48 @@ pub struct VoxelWorldCamera;
 
 /// Fired when a chunk is about to be despawned.
 #[derive(Event)]
-pub struct ChunkWillDespawn {
+pub struct ChunkWillDespawn<C> {
     pub chunk_key: IVec3,
     pub entity: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C> ChunkWillDespawn<C> {
+    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+        Self { chunk_key, entity, _marker: PhantomData }
+    }
 }
 
 /// Fired when a chunk is about to be spawned.
 #[derive(Event, Clone)]
-pub struct ChunkWillSpawn {
+pub struct ChunkWillSpawn<C> {
     pub chunk_key: IVec3,
     pub entity: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C> ChunkWillSpawn<C> {
+    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+        Self { chunk_key, entity, _marker: PhantomData }
+    }
+
+    pub fn clone(&self) -> Self {
+        Self { chunk_key: self.chunk_key.clone(), entity: self.entity.clone(), _marker: PhantomData }
+    }
 }
 
 /// Fired when a chunk is about to be remeshed.
 #[derive(Event)]
-pub struct ChunkWillRemesh {
+pub struct ChunkWillRemesh<C> {
     pub chunk_key: IVec3,
     pub entity: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C> ChunkWillRemesh<C> {
+    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+        Self { chunk_key, entity, _marker: PhantomData }
+    }
 }
 
 pub trait FilterFn {

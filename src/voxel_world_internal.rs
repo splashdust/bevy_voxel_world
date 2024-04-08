@@ -196,7 +196,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
         all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
         configuration: Res<C>,
         camera_info: CameraInfo,
-        mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn>,
+        mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
     ) {
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
@@ -232,10 +232,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
         for chunk in chunks_to_remove {
             commands.entity(chunk.entity).try_insert(NeedsDespawn);
 
-            ev_chunk_will_despawn.send(ChunkWillDespawn {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
+            ev_chunk_will_despawn.send(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -259,7 +256,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
-        mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh>,
+        mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh<C>>,
         dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C>>,
@@ -300,10 +297,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
                 .try_insert(ChunkThread::<C>::new(thread, chunk.position))
                 .remove::<NeedsRemesh>();
 
-            ev_chunk_will_remesh.send(ChunkWillRemesh {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
+            ev_chunk_will_remesh.send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -372,10 +366,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
                 chunk_map_update_buffer.push((
                     chunk.position,
                     chunk_task.chunk_data,
-                    ChunkWillSpawn {
-                        chunk_key: chunk_task.position,
-                        entity,
-                    },
+                    ChunkWillSpawn::<C>::new(chunk_task.position, entity)
                 ));
             } else {
                 commands
@@ -422,7 +413,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
         mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C>>,
         mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
+        mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C>>,
     ) {
         chunk_map.apply_buffers(
