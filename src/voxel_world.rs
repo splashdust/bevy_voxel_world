@@ -19,29 +19,14 @@ use crate::{
 #[derive(Component)]
 pub struct VoxelWorldCamera;
 
-/// Fired when a chunk is about to be despawned.
 #[derive(Event)]
-pub struct ChunkWillDespawn<C> {
+pub struct ChunkEvent<C> {
     pub chunk_key: IVec3,
     pub entity: Entity,
     _marker: PhantomData<C>,
 }
 
-impl<C> ChunkWillDespawn<C> {
-    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
-        Self { chunk_key, entity, _marker: PhantomData }
-    }
-}
-
-/// Fired when a chunk is about to be spawned.
-#[derive(Event, Clone)]
-pub struct ChunkWillSpawn<C> {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-    _marker: PhantomData<C>,
-}
-
-impl<C> ChunkWillSpawn<C> {
+impl<C> ChunkEvent<C> {
     pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
         Self { chunk_key, entity, _marker: PhantomData }
     }
@@ -51,19 +36,14 @@ impl<C> ChunkWillSpawn<C> {
     }
 }
 
-/// Fired when a chunk is about to be remeshed.
-#[derive(Event)]
-pub struct ChunkWillRemesh<C> {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-    _marker: PhantomData<C>,
-}
+/// Fired when a chunk is about to be despawned.
+pub type ChunkWillDespawn<C> = ChunkEvent<C>;
 
-impl<C> ChunkWillRemesh<C> {
-    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
-        Self { chunk_key, entity, _marker: PhantomData }
-    }
-}
+/// Fired when a chunk is about to be spawned.
+pub type ChunkWillSpawn<C> = ChunkEvent<C>;
+
+/// Fired when a chunk is about to be remeshed.
+pub type ChunkWillRemesh<C> = ChunkEvent<C>;
 
 pub trait FilterFn {
     fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
