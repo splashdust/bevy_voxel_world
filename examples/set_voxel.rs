@@ -19,7 +19,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-        VoxelWorldCamera,
+        VoxelWorldCamera::<DefaultWorld>::default(),
     ));
 
     // Ambient light
@@ -46,7 +46,7 @@ fn set_solid_voxel(mut voxel_world: VoxelWorld<DefaultWorld>) {
 }
 
 // Rotate the camera around the origin
-fn move_camera(time: Res<Time>, mut query: Query<&mut Transform, With<VoxelWorldCamera>>) {
+fn move_camera(time: Res<Time>, mut query: Query<&mut Transform, With<VoxelWorldCamera<DefaultWorld>>>) {
     let mut transform = query.single_mut();
     let time_seconds = time.elapsed_seconds();
     transform.translation.x = 25.0 * (time_seconds * 0.1).sin();

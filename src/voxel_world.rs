@@ -17,7 +17,17 @@ use crate::{
 /// This component is used to mark the Camera that bevy_voxel_world should use to determine
 /// which chunks to spawn and despawn.
 #[derive(Component)]
-pub struct VoxelWorldCamera;
+pub struct VoxelWorldCamera<C> {
+    _marker: PhantomData<C>,
+}
+
+impl<C> Default for VoxelWorldCamera<C> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
 
 #[derive(Event)]
 pub struct ChunkEvent<C> {
@@ -225,7 +235,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     ///
     /// fn do_raycast(
     ///     voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>,
-    ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<DefaultWorld>>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
     /// ) {
     ///     for ev in cursor_evr.read() {

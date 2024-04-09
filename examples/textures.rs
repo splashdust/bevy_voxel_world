@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
+use bevy::render::MainWorld;
 
 // Declare materials as consts for convenience
 const SNOWY_BRICK: u8 = 0;
@@ -42,7 +43,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-        VoxelWorldCamera,
+        VoxelWorldCamera::<MainWorld>::default(),
     ));
 
     // light

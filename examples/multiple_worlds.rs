@@ -72,8 +72,9 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
             transform: Transform::from_xyz(-10.0, 10.0, -10.0).looking_at(Vec3::Y * 4.0, Vec3::Y),
             ..default()
         },
-        // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
-        VoxelWorldCamera,
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
+        VoxelWorldCamera::<MainWorld>::default(),
+        VoxelWorldCamera::<SecondWorld>::default(),
     ));
 
     // Sun

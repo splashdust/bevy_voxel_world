@@ -27,8 +27,8 @@ use crate::{
 };
 
 #[derive(SystemParam, Deref)]
-pub struct CameraInfo<'w, 's>(
-    Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
+pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
+    Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera<C>>>,
 );
 
 /// Holds a map of modified voxels that will persist between chunk spawn/despawn
@@ -80,7 +80,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
         mut chunk_map_write_buffer: ResMut<ChunkMapInsertBuffer<C>>,
         chunk_map: Res<ChunkMap<C>>,
         configuration: Res<C>,
-        camera_info: CameraInfo,
+        camera_info: CameraInfo<C>,
     ) {
         let (camera, cam_gtf) = camera_info.single();
         let cam_pos = cam_gtf.translation().as_ivec3();
@@ -195,7 +195,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
         mut commands: Commands,
         all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
         configuration: Res<C>,
-        camera_info: CameraInfo,
+        camera_info: CameraInfo<C>,
         mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
     ) {
         let spawning_distance = configuration.spawning_distance() as i32;
