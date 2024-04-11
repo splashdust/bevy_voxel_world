@@ -67,7 +67,7 @@ pub struct WorldRoot<C>(PhantomData<C>);
 impl<C: VoxelWorldConfig> Internals<C> {
     /// Init the resources used internally by bevy_voxel_world
     pub fn setup(mut commands: Commands) {
-        commands.spawn(WorldRoot::<C>(PhantomData));
+        commands.spawn((WorldRoot::<C>(PhantomData), VisibilityBundle::default(), TransformBundle::default()));
         commands.init_resource::<ChunkMap<C>>();
         commands.init_resource::<ChunkMapInsertBuffer<C>>();
         commands.init_resource::<ChunkMapUpdateBuffer<C>>();
@@ -89,7 +89,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
     ) {
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.get_single().unwrap();
-
+    
         let (camera, cam_gtf) = camera_info.single();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
@@ -167,7 +167,9 @@ impl<C: VoxelWorldConfig> Internals<C> {
             let has_chunk = ChunkMap::<C>::contains_chunk(&chunk_position, &chunk_map_read_lock);
 
             if !has_chunk {
-                let chunk = Chunk::<C>::new(chunk_position, commands.entity(world_root).insert(NeedsRemesh).id());
+                let chunk_entity = commands.spawn(NeedsRemesh).id();
+                commands.entity(world_root).add_child(chunk_entity);
+                let chunk = Chunk::<C>::new(chunk_position, chunk_entity);
 
                 chunk_map_write_buffer.push((chunk_position, ChunkData::with_entity(chunk.entity)));
 
