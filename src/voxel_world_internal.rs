@@ -64,10 +64,12 @@ pub(crate) struct Internals<C>(PhantomData<C>);
 #[derive(Component)]
 pub struct WorldRoot<C>(PhantomData<C>);
 
-impl<C: VoxelWorldConfig> Internals<C> {
+impl<C: VoxelWorldConfig> Internals<C>
+where
+C: VoxelWorldConfig,
+{
     /// Init the resources used internally by bevy_voxel_world
-    pub fn setup(mut commands: Commands) {
-        commands.spawn((WorldRoot::<C>(PhantomData), VisibilityBundle::default(), TransformBundle::default()));
+    pub fn setup(mut commands: Commands, configuration: Res<C>) {
         commands.init_resource::<ChunkMap<C>>();
         commands.init_resource::<ChunkMapInsertBuffer<C>>();
         commands.init_resource::<ChunkMapUpdateBuffer<C>>();
@@ -76,6 +78,10 @@ impl<C: VoxelWorldConfig> Internals<C> {
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
         commands.init_resource::<ModifiedVoxels<C>>();
         commands.init_resource::<VoxelWriteBuffer<C>>();
+        
+        // Create the root node and allow to modify it by the configuration.
+        let world_root = commands.spawn((WorldRoot::<C>(PhantomData), VisibilityBundle::default(), TransformBundle::default())).id();
+        configuration.init_root(commands, world_root)
     }
 
     /// Find and spawn chunks in need of spawning

@@ -110,6 +110,8 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     fn init_custom_materials(&self) -> bool {
         true
     }
+
+    fn init_root(&self, mut _commands: Commands, _root: Entity) {}
 }
 
 #[derive(Resource, Clone, Default)]
