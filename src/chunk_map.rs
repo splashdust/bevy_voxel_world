@@ -47,7 +47,7 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
         insert_buffer: &mut ChunkMapInsertBuffer<C>,
         update_buffer: &mut ChunkMapUpdateBuffer<C>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
-        ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn>,
+        ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn<C>>,
     ) {
         if insert_buffer.is_empty() && update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
@@ -99,7 +99,7 @@ pub(crate) struct ChunkMapInsertBuffer<C>(#[deref] Vec<(IVec3, chunk::ChunkData)
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub(crate) struct ChunkMapUpdateBuffer<C>(
-    #[deref] Vec<(IVec3, chunk::ChunkData, ChunkWillSpawn)>,
+    #[deref] Vec<(IVec3, chunk::ChunkData, ChunkWillSpawn<C>)>,
     PhantomData<C>,
 );
 

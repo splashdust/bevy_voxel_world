@@ -18,7 +18,7 @@ fn _test_setup_app() -> App {
                 transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
                 ..default()
             },
-            VoxelWorldCamera,
+            VoxelWorldCamera::<DefaultWorld>::default(),
         ));
     });
 
@@ -109,7 +109,7 @@ fn chunk_will_spawn_events() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_spawn: EventReader<ChunkWillSpawn>| {
+        |mut ev_chunk_will_spawn: EventReader<ChunkWillSpawn<DefaultWorld>>| {
             let spawn_count = ev_chunk_will_spawn.read().count();
             assert!(spawn_count > 0);
         },
@@ -135,7 +135,7 @@ fn chunk_will_remesh_event_after_set_voxel() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_remesh: EventReader<ChunkWillRemesh>| {
+        |mut ev_chunk_will_remesh: EventReader<ChunkWillRemesh<DefaultWorld>>| {
             let count = ev_chunk_will_remesh.read().count();
             assert!(count > 0)
         },
@@ -151,7 +151,7 @@ fn chunk_will_despawn_event() {
     // move camera to simulate chunks going out of view
     app.add_systems(
         Update,
-        |mut query: Query<&mut GlobalTransform, With<VoxelWorldCamera>>| {
+        |mut query: Query<&mut GlobalTransform, With<VoxelWorldCamera<DefaultWorld>>>| {
             for mut transform in query.iter_mut() {
                 // Not sure why, but when running tests, bevy won't update the GlobalTransform
                 // when a Transform has changed, so as a workaround we set it here directly.
@@ -165,7 +165,7 @@ fn chunk_will_despawn_event() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_despawn: EventReader<ChunkWillDespawn>| {
+        |mut ev_chunk_will_despawn: EventReader<ChunkWillDespawn<DefaultWorld>>| {
             let count = ev_chunk_will_despawn.read().count();
             assert!(count > 0)
         },
@@ -209,10 +209,7 @@ fn raycast_finds_voxel() {
                     fill_type: FillType::Mixed,
                     entity: Entity::PLACEHOLDER,
                 },
-                ChunkWillSpawn {
-                    chunk_key: IVec3::new(0, 0, 0),
-                    entity: Entity::PLACEHOLDER,
-                },
+                ChunkWillSpawn::<DefaultWorld>::new(IVec3::new(0, 0, 0), Entity::PLACEHOLDER),
             ));
         },
     );

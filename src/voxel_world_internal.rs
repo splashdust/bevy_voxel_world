@@ -27,8 +27,8 @@ use crate::{
 };
 
 #[derive(SystemParam, Deref)]
-pub struct CameraInfo<'w, 's>(
-    Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera>>,
+pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
+    Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera<C>>>,
 );
 
 /// Holds a map of modified voxels that will persist between chunk spawn/despawn
@@ -91,7 +91,7 @@ C: VoxelWorldConfig,
         world_root: Query<Entity, With<WorldRoot<C>>>,
         chunk_map: Res<ChunkMap<C>>,
         configuration: Res<C>,
-        camera_info: CameraInfo,
+        camera_info: CameraInfo<C>,
     ) {
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.get_single().unwrap();
@@ -211,8 +211,8 @@ C: VoxelWorldConfig,
         mut commands: Commands,
         all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
         configuration: Res<C>,
-        camera_info: CameraInfo,
-        mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn>,
+        camera_info: CameraInfo<C>,
+        mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
     ) {
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
@@ -248,10 +248,7 @@ C: VoxelWorldConfig,
         for chunk in chunks_to_remove {
             commands.entity(chunk.entity).try_insert(NeedsDespawn);
 
-            ev_chunk_will_despawn.send(ChunkWillDespawn {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
+            ev_chunk_will_despawn.send(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -275,7 +272,7 @@ C: VoxelWorldConfig,
     #[allow(clippy::too_many_arguments)]
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
-        mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh>,
+        mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh<C>>,
         dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C>>,
@@ -316,10 +313,7 @@ C: VoxelWorldConfig,
                 .try_insert(ChunkThread::<C>::new(thread, chunk.position))
                 .remove::<NeedsRemesh>();
 
-            ev_chunk_will_remesh.send(ChunkWillRemesh {
-                chunk_key: chunk.position,
-                entity: chunk.entity,
-            });
+            ev_chunk_will_remesh.send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -388,10 +382,7 @@ C: VoxelWorldConfig,
                 chunk_map_update_buffer.push((
                     chunk.position,
                     chunk_task.chunk_data,
-                    ChunkWillSpawn {
-                        chunk_key: chunk_task.position,
-                        entity,
-                    },
+                    ChunkWillSpawn::<C>::new(chunk_task.position, entity),
                 ));
             } else {
                 commands
@@ -438,7 +429,7 @@ C: VoxelWorldConfig,
         mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C>>,
         mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn>,
+        mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C>>,
     ) {
         chunk_map.apply_buffers(

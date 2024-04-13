@@ -121,9 +121,9 @@ where
                         .chain(),
                 ),
             )
-            .add_event::<ChunkWillSpawn>()
-            .add_event::<ChunkWillDespawn>()
-            .add_event::<ChunkWillRemesh>();
+            .add_event::<ChunkWillSpawn<C>>()
+            .add_event::<ChunkWillDespawn<C>>()
+            .add_event::<ChunkWillRemesh<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
         // This makes voxel_world work with a MinimalPlugins setup.

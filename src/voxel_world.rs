@@ -3,6 +3,7 @@
 /// This module implements most of the public API for bevy_voxel_world.
 ///
 use bevy::{ecs::system::SystemParam, prelude::*, render::primitives::Aabb};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{
@@ -16,28 +17,51 @@ use crate::{
 /// This component is used to mark the Camera that bevy_voxel_world should use to determine
 /// which chunks to spawn and despawn.
 #[derive(Component)]
-pub struct VoxelWorldCamera;
+pub struct VoxelWorldCamera<C> {
+    _marker: PhantomData<C>,
+}
+
+impl<C> Default for VoxelWorldCamera<C> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[derive(Event)]
+pub struct ChunkEvent<C> {
+    pub chunk_key: IVec3,
+    pub entity: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C> ChunkEvent<C> {
+    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+        Self {
+            chunk_key,
+            entity,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn clone(&self) -> Self {
+        Self {
+            chunk_key: self.chunk_key,
+            entity: self.entity,
+            _marker: PhantomData,
+        }
+    }
+}
 
 /// Fired when a chunk is about to be despawned.
-#[derive(Event)]
-pub struct ChunkWillDespawn {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
+pub type ChunkWillDespawn<C> = ChunkEvent<C>;
 
 /// Fired when a chunk is about to be spawned.
-#[derive(Event, Clone)]
-pub struct ChunkWillSpawn {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
+pub type ChunkWillSpawn<C> = ChunkEvent<C>;
 
 /// Fired when a chunk is about to be remeshed.
-#[derive(Event)]
-pub struct ChunkWillRemesh {
-    pub chunk_key: IVec3,
-    pub entity: Entity,
-}
+pub type ChunkWillRemesh<C> = ChunkEvent<C>;
 
 pub trait FilterFn {
     fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
@@ -218,8 +242,8 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// use bevy_voxel_world::prelude::*;
     ///
     /// fn do_raycast(
-    ///     voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>,
-    ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    ///     voxel_world: VoxelWorld<DefaultWorld>,
+    ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<DefaultWorld>>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
     /// ) {
     ///     for ev in cursor_evr.read() {
@@ -229,7 +253,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     ///            return;
     ///         };
     ///
-    ///         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
+    ///         if let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) {
     ///             println!("vox_pos: {:?}, normal: {:?}, vox: {:?}", result.position, result.normal, result.voxel);
     ///         }
     ///     }
@@ -305,9 +329,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
 fn get_hit_normal(vox_pos: IVec3, ray: Ray3d) -> Option<Vec3> {
     let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
 
-    let Some((_, normal)) = voxel_aabb.ray_intersection(ray) else {
-        return None;
-    };
+    let (_, normal) = voxel_aabb.ray_intersection(ray)?;
 
     Some(normal)
 }

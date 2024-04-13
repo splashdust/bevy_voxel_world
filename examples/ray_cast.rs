@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::render::MainWorld;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 
@@ -66,8 +67,8 @@ fn setup(
             transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
-        // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
-        VoxelWorldCamera,
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
+        VoxelWorldCamera::<MainWorld>::default(),
     ));
 
     // light
@@ -106,7 +107,7 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
 
 fn update_cursor_cube(
     voxel_world_raycast: VoxelWorld<MyMainWorld>,
-    camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MainWorld>>>,
     mut cursor_evr: EventReader<CursorMoved>,
     mut cursor_cube: Query<(&mut Transform, &mut CursorCube)>,
 ) {
