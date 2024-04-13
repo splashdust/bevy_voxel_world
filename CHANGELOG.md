@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+New features:
+
+- Add function that returns a sendable raycast function (3335f30)
+- Add WorldConfig constraint to the Chunk events (ebbd03d)
+- Add World Config type parameter to the VoxelWorldCamera and CameraInfo (0349632)
+- Spawn chunks on a root node and add `init_root`callback (6e5df25, f1fc4c6, a0fc663)
+
+Breaking changes:
+
+- Move raycast functions to main VoxelWorld system param (262b124)
+
+Thanks to @aligator for contributing to this release!
+
 ## 0.5.1
 
 Fix lingering meshes when an existing chunk is emptied of voxels
