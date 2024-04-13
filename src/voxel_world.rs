@@ -242,7 +242,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// use bevy_voxel_world::prelude::*;
     ///
     /// fn do_raycast(
-    ///     voxel_world_raycast: VoxelWorldRaycast<DefaultWorld>,
+    ///     voxel_world: VoxelWorld<DefaultWorld>,
     ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<DefaultWorld>>>,
     ///     mut cursor_evr: EventReader<CursorMoved>,
     /// ) {
@@ -253,7 +253,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     ///            return;
     ///         };
     ///
-    ///         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
+    ///         if let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) {
     ///             println!("vox_pos: {:?}, normal: {:?}, vox: {:?}", result.position, result.normal, result.voxel);
     ///         }
     ///     }
