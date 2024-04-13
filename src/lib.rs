@@ -26,5 +26,9 @@ pub mod rendering {
     pub use crate::voxel_material::VOXEL_TEXTURE_SHADER_HANDLE;
 }
 
+pub mod mesh {
+    pub use crate::meshing::generate_chunk_mesh;
+}
+
 #[cfg(test)]
 mod test;
