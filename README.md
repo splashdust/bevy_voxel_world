@@ -105,7 +105,7 @@ To find a voxel location in the world from a pixel location on the screen, for e
 ```rust
 fn do_something_with_mouse_voxel_pos(
     voxel_world_raycast: VoxelWorldRaycast<MyWorld>,
-    camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera>>,
+    camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MyWorld>>>,
     mut cursor_evr: EventReader<CursorMoved>,
 ) {
     for ev in cursor_evr.read() {
