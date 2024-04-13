@@ -66,7 +66,7 @@ pub struct WorldRoot<C>(PhantomData<C>);
 
 impl<C: VoxelWorldConfig> Internals<C>
 where
-C: VoxelWorldConfig,
+    C: VoxelWorldConfig,
 {
     /// Init the resources used internally by bevy_voxel_world
     pub fn setup(mut commands: Commands, configuration: Res<C>) {
@@ -78,9 +78,15 @@ C: VoxelWorldConfig,
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
         commands.init_resource::<ModifiedVoxels<C>>();
         commands.init_resource::<VoxelWriteBuffer<C>>();
-        
+
         // Create the root node and allow to modify it by the configuration.
-        let world_root = commands.spawn((WorldRoot::<C>(PhantomData), VisibilityBundle::default(), TransformBundle::default())).id();
+        let world_root = commands
+            .spawn((
+                WorldRoot::<C>(PhantomData),
+                VisibilityBundle::default(),
+                TransformBundle::default(),
+            ))
+            .id();
         configuration.init_root(commands, world_root)
     }
 
@@ -95,7 +101,7 @@ C: VoxelWorldConfig,
     ) {
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.get_single().unwrap();
-    
+
         let (camera, cam_gtf) = camera_info.single();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
