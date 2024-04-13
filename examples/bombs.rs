@@ -43,8 +43,8 @@ fn setup(mut commands: Commands) {
             transform: Transform::from_xyz(-120.0, 150.0, -120.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
-        // This tells bevy_voxel_world tos use this cameras transform to calculate spawning area
-        VoxelWorldCamera,
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
+        VoxelWorldCamera::<MainWorld>::default(),
     ));
 
     // Sun
@@ -115,14 +115,17 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     })
 }
 
-fn move_camera(time: Res<Time>, mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera>>) {
+fn move_camera(
+    time: Res<Time>,
+    mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
+) {
     cam_transform.single_mut().translation.x += time.delta_seconds() * 7.0;
     cam_transform.single_mut().translation.z += time.delta_seconds() * 12.0;
 }
 
 fn explosion(
     mut voxel_world: VoxelWorld<MainWorld>,
-    camera: Query<&Transform, With<VoxelWorldCamera>>,
+    camera: Query<&Transform, With<VoxelWorldCamera<MainWorld>>>,
     mut timeout: Query<&mut ExplosionTimeout>,
     time: Res<Time>,
 ) {
