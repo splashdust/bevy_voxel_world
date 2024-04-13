@@ -329,9 +329,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
 fn get_hit_normal(vox_pos: IVec3, ray: Ray3d) -> Option<Vec3> {
     let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
 
-    let Some((_, normal)) = voxel_aabb.ray_intersection(ray) else {
-        return None;
-    };
+    let (_, normal) = voxel_aabb.ray_intersection(ray)?;
 
     Some(normal)
 }
