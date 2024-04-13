@@ -104,7 +104,7 @@ To find a voxel location in the world from a pixel location on the screen, for e
 
 ```rust
 fn do_something_with_mouse_voxel_pos(
-    voxel_world_raycast: VoxelWorldRaycast<MyWorld>,
+    voxel_world: VoxelWorld<MyWorld>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MyWorld>>>,
     mut cursor_evr: EventReader<CursorMoved>,
 ) {
@@ -115,7 +115,7 @@ fn do_something_with_mouse_voxel_pos(
             return;
         };
 
-        if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
+        if let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) {
             // result.position will be the world location of the voxel as a Vec3
             // To get the empty location next to the voxel in the direction of the surface where the ray intersected you can use result.normal:
             // let empty_pos = result.position + result.normal;
