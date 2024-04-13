@@ -366,7 +366,7 @@ impl<C: VoxelWorldConfig> Internals<C> {
                 chunk_map_update_buffer.push((
                     chunk.position,
                     chunk_task.chunk_data,
-                    ChunkWillSpawn::<C>::new(chunk_task.position, entity)
+                    ChunkWillSpawn::<C>::new(chunk_task.position, entity),
                 ));
             } else {
                 commands

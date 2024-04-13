@@ -115,7 +115,10 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     })
 }
 
-fn move_camera(time: Res<Time>, mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>) {
+fn move_camera(
+    time: Res<Time>,
+    mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
+) {
     cam_transform.single_mut().translation.x += time.delta_seconds() * 7.0;
     cam_transform.single_mut().translation.z += time.delta_seconds() * 12.0;
 }

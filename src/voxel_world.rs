@@ -3,8 +3,8 @@
 /// This module implements most of the public API for bevy_voxel_world.
 ///
 use bevy::{ecs::system::SystemParam, prelude::*, render::primitives::Aabb};
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use crate::{
     chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
@@ -38,11 +38,19 @@ pub struct ChunkEvent<C> {
 
 impl<C> ChunkEvent<C> {
     pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
-        Self { chunk_key, entity, _marker: PhantomData }
+        Self {
+            chunk_key,
+            entity,
+            _marker: PhantomData,
+        }
     }
 
     pub fn clone(&self) -> Self {
-        Self { chunk_key: self.chunk_key.clone(), entity: self.entity.clone(), _marker: PhantomData }
+        Self {
+            chunk_key: self.chunk_key,
+            entity: self.entity,
+            _marker: PhantomData,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
+use bevy::render::MainWorld;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
-use bevy::render::MainWorld;
 
 // Declare materials as consts for convenience
 const SNOWY_BRICK: u8 = 0;
