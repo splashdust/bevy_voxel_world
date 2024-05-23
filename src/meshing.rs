@@ -24,7 +24,7 @@ use crate::{
 type VoxelArray = Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>;
 
 /// Generate a mesh for the given chunks, or None of the chunk is empty
-pub(super) fn generate_chunk_mesh(
+pub fn generate_chunk_mesh(
     voxels: VoxelArray,
     _pos: IVec3,
     texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>,

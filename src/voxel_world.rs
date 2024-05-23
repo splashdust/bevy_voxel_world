@@ -13,6 +13,7 @@ use crate::{
     voxel::{VoxelAabb, WorldVoxel},
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };
+use crate::chunk::ChunkData;
 
 /// This component is used to mark the Camera that bevy_voxel_world should use to determine
 /// which chunks to spawn and despawn.
@@ -115,6 +116,12 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// the given position.
     pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel) {
         self.voxel_write_buffer.push((position, voxel));
+    }
+
+    pub fn get_chunk(&self, position: IVec3) -> Option<ChunkData> {
+        let chunk_map = self.chunk_map.get_map();
+        let chunk_map_read = chunk_map.read().unwrap();
+        chunk_map_read.get(&position).cloned()
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position

@@ -183,7 +183,7 @@ impl<C: Send + Sync + 'static> ChunkTask<C> {
     }
 
     /// Generate voxel data for the chunk. The supplied `modified_voxels` map is first checked,
-    /// and where no voxeles are modified, the `voxel_data_fn` is called to get data from the
+    /// and where no voxels are modified, the `voxel_data_fn` is called to get data from the
     /// consumer.
     pub fn generate<F>(&mut self, mut voxel_data_fn: F)
     where
@@ -238,7 +238,7 @@ impl<C: Send + Sync + 'static> ChunkTask<C> {
         self.chunk_data.generate_hash();
     }
 
-    /// Generate a mesh for the chunk based on the currect voxel data
+    /// Generate a mesh for the chunk based on the correct voxel data
     pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
             self.mesh = Some(meshing::generate_chunk_mesh(
