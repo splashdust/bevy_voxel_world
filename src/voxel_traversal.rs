@@ -1,6 +1,6 @@
+use crate::voxel::{VoxelFace, VOXEL_SIZE};
 use bevy::math::{IVec3, Vec3};
-use bevy::prelude::{Struct, FromReflect};
-use crate::voxel::{VOXEL_SIZE, VoxelFace};
+use bevy::prelude::{FromReflect, Struct};
 
 /// Traverses the voxel grid along a fixed, grid-aligned direction, applying `visit_voxel` to
 /// every voxel along the way (from `start` included to `end` **excluded**).
@@ -12,7 +12,15 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
     let delta = end - start;
 
     // Make sure one and only one component of the direction we follow is non-zero
-    debug_assert!(delta.signum().abs().iter_fields().map(|f| { i32::from_reflect(f).unwrap() }).sum::<i32>() == 1);
+    debug_assert!(
+        delta
+            .signum()
+            .abs()
+            .iter_fields()
+            .map(|f| { i32::from_reflect(f).unwrap() })
+            .sum::<i32>()
+            == 1
+    );
 
     let distance = delta.abs().max_element();
     let direction = delta / distance;
@@ -135,9 +143,21 @@ pub fn voxel_line_traversal<F: FnMut(IVec3, f32, VoxelFace) -> bool + Sized>(
     let mut reached_end = voxel == end_voxel;
     let mut keep_going = visit_voxel(voxel, time, face);
 
-    let x_face = if step.x > 0 { VoxelFace::Left } else { VoxelFace::Right };
-    let y_face = if step.y > 0 { VoxelFace::Bottom } else { VoxelFace::Top };
-    let z_face = if step.z > 0 { VoxelFace::Back } else { VoxelFace::Forward };
+    let x_face = if step.x > 0 {
+        VoxelFace::Left
+    } else {
+        VoxelFace::Right
+    };
+    let y_face = if step.y > 0 {
+        VoxelFace::Bottom
+    } else {
+        VoxelFace::Top
+    };
+    let z_face = if step.z > 0 {
+        VoxelFace::Back
+    } else {
+        VoxelFace::Forward
+    };
 
     while keep_going && !reached_end {
         if max_t.x < max_t.y && max_t.x < max_t.z {

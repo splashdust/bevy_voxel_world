@@ -144,10 +144,7 @@ fn update_cursor_cube(
     }
 }
 
-fn draw_trace(
-    trace: Res<VoxelTrace>,
-    mut gizmos: Gizmos,
-) {
+fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
     if let Some(trace_start) = trace.start {
         gizmos.line(trace_start, trace.end, Color::RED);
 
@@ -165,13 +162,15 @@ fn draw_trace(
                     voxel_center + (normal * VOXEL_SIZE / 2.),
                     Direction3d::new(normal).unwrap(),
                     0.8 * VOXEL_SIZE / 2.,
-                    Color::RED.with_a(0.5));
+                    Color::RED.with_a(0.5),
+                );
 
                 gizmos.sphere(
                     trace_start + (trace.end - trace_start) * time,
                     Quat::IDENTITY,
                     0.1,
-                    Color::BLACK);
+                    Color::BLACK,
+                );
             }
 
             // Keep drawing until trace has finished visiting all voxels along the way
@@ -194,13 +193,17 @@ fn inputs(
         let cursor = cursor_cube.single();
         let trace_end = cursor.voxel_pos.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 
-        voxel_line_traversal(trace.start.unwrap(), trace_end, |voxel_coords, _time, _face| {
-            voxel_world.set_voxel(voxel_coords, WorldVoxel::Air);
+        voxel_line_traversal(
+            trace.start.unwrap(),
+            trace_end,
+            |voxel_coords, _time, _face| {
+                voxel_world.set_voxel(voxel_coords, WorldVoxel::Air);
 
-            // Keep erasing until trace has finished visiting all voxels along the way
-            const NEVER_STOP: bool = true;
-            NEVER_STOP
-        });
+                // Keep erasing until trace has finished visiting all voxels along the way
+                const NEVER_STOP: bool = true;
+                NEVER_STOP
+            },
+        );
     }
 
     if buttons.just_pressed(MouseButton::Left) {
