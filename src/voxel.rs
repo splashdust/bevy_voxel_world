@@ -1,6 +1,8 @@
 use bevy::{prelude::*, render::primitives::Aabb};
 use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 
+pub const VOXEL_SIZE: f32 = 1.;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub enum WorldVoxel {
     #[default]
@@ -40,6 +42,31 @@ impl MergeVoxel for WorldVoxel {
         match self {
             WorldVoxel::Solid(v) => *v,
             _ => 0,
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+pub enum VoxelFace {
+    None,
+    Bottom,
+    Top,
+    Left,
+    Right,
+    Back,
+    Forward,
+}
+
+impl From<VoxelFace> for Vec3 {
+    fn from(face: VoxelFace) -> Self {
+        match face {
+            VoxelFace::None => panic!("VoxelFace::None has no normal"),
+            VoxelFace::Bottom => -Vec3::Y,
+            VoxelFace::Top => Vec3::Y,
+            VoxelFace::Left => -Vec3::X,
+            VoxelFace::Right => Vec3::X,
+            VoxelFace::Back => -Vec3::Z,
+            VoxelFace::Forward => Vec3::Z,
         }
     }
 }
