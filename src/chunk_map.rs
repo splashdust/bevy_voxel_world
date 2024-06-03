@@ -111,11 +111,8 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
             for position in remove_buffer.iter() {
                 write_lock.data.remove(position);
 
-                if write_lock.bounds.min.floor().as_ivec3() == *position {
-                    need_rebuild_aabb = true;
-                } else if write_lock.bounds.max.floor().as_ivec3() == *position {
-                    need_rebuild_aabb = true;
-                }
+                need_rebuild_aabb = write_lock.bounds.min.floor().as_ivec3() == *position
+                    || write_lock.bounds.max.floor().as_ivec3() == *position;
             }
             remove_buffer.clear();
 
