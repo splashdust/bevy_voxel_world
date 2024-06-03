@@ -156,8 +156,7 @@ fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
                 Color::PINK,
             );
 
-            if face != VoxelFace::None {
-                let normal: Vec3 = face.into();
+            if let Ok(normal) = face.try_into() {
                 gizmos.circle(
                     voxel_center + (normal * VOXEL_SIZE / 2.),
                     Direction3d::new(normal).unwrap(),

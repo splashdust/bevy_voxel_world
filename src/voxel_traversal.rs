@@ -71,8 +71,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///
 ///         // If this is not the very first voxel visited (ie, the one including `start`), draw
 ///         // a debug circle on the face through which the trace entered the current voxel
-///         if face != VoxelFace::None {
-///             let entered_face_normal: Vec3 = face.into();
+///         if let Ok(entered_face_normal) = face.try_into() {
 ///             gizmos.circle(
 ///                 voxel_center + (entered_face_normal * VOXEL_SIZE / 2.),
 ///                 Direction3d::new(entered_face_normal).unwrap(),

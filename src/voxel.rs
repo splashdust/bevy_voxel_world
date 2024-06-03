@@ -46,7 +46,7 @@ impl MergeVoxel for WorldVoxel {
     }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone)]
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum VoxelFace {
     None,
     Bottom,
@@ -57,16 +57,18 @@ pub enum VoxelFace {
     Forward,
 }
 
-impl From<VoxelFace> for Vec3 {
-    fn from(face: VoxelFace) -> Self {
-        match face {
-            VoxelFace::None => panic!("VoxelFace::None has no normal"),
-            VoxelFace::Bottom => -Vec3::Y,
-            VoxelFace::Top => Vec3::Y,
-            VoxelFace::Left => -Vec3::X,
-            VoxelFace::Right => Vec3::X,
-            VoxelFace::Back => -Vec3::Z,
-            VoxelFace::Forward => Vec3::Z,
+impl TryFrom<VoxelFace> for Vec3 {
+    type Error = ();
+
+    fn try_from(value: VoxelFace) -> Result<Self, Self::Error> {
+        match value {
+            VoxelFace::None => Err(()),
+            VoxelFace::Bottom => Ok(-Vec3::Y),
+            VoxelFace::Top => Ok(Vec3::Y),
+            VoxelFace::Left => Ok(-Vec3::X),
+            VoxelFace::Right => Ok(Vec3::X),
+            VoxelFace::Back => Ok(-Vec3::Z),
+            VoxelFace::Forward => Ok(Vec3::Z),
         }
     }
 }
