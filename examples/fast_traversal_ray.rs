@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use smooth_bevy_cameras::{
+    controllers::unreal::{UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin},
+    LookTransformPlugin,
+};
 
-use bevy_voxel_world::prelude::*;
-use bevy_voxel_world::traversal_alg::*;
+use bevy_voxel_world::{prelude::*, traversal_alg::*};
 
 // Declare materials as consts for convenience
 const SNOWY_BRICK: u8 = 0;
@@ -33,12 +36,23 @@ impl VoxelWorldConfig for MyMainWorld {
     }
 }
 
+/// Controls:
+/// - Left-click to place a voxel somewhere
+/// - Ctrl + Left click to place the source of a voxel line trace
+///     - Hold Ctrl to see the trace end follow the cursor
+///     - Hold Ctrl and hit E to erase all solid voxels intersecting the trace
+///     - Release Ctrl to stop tracing
+/// - Unreal controls to move the camera around
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         // We can specify a custom texture when initializing the plugin.
         // This should just be a path to an image in your assets folder.
-        .add_plugins(VoxelWorldPlugin::with_config(MyMainWorld))
+        .add_plugins((
+            VoxelWorldPlugin::with_config(MyMainWorld),
+            LookTransformPlugin,
+            UnrealCameraPlugin::default(),
+        ))
         .init_resource::<VoxelTrace>()
         .add_systems(Startup, (setup, create_voxel_scene))
         .add_systems(Update, (inputs, update_cursor_cube, draw_trace))
@@ -73,14 +87,18 @@ fn setup(
     ));
 
     // Camera
-    commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ..default()
-        },
-        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-        VoxelWorldCamera::<MyMainWorld>::default(),
-    ));
+    commands
+        .spawn((
+            Camera3dBundle::default(),
+            // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
+            VoxelWorldCamera::<MyMainWorld>::default(),
+        ))
+        .insert(UnrealCameraBundle::new(
+            UnrealCameraController::default(),
+            Vec3::new(10.0, 10.0, 10.0),
+            Vec3::ZERO,
+            Vec3::Y,
+        ));
 
     // light
     commands.spawn(PointLightBundle {
