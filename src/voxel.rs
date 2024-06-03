@@ -73,6 +73,7 @@ impl TryFrom<VoxelFace> for Vec3 {
     }
 }
 
+#[allow(unused)]
 pub(crate) trait VoxelAabb {
     fn ray_intersection(&self, ray: Ray3d) -> Option<(Vec3, Vec3)>;
 }

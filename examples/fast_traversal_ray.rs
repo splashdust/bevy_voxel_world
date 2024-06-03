@@ -151,13 +151,16 @@ fn update_cursor_cube(
         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
             let (mut transform, mut cursor_cube) = cursor_cube.single_mut();
 
-            // Move the cursor cube to the position of the voxel we hit
-            let voxel_pos = result.position + result.normal;
-            transform.translation = voxel_pos + Vec3::splat(VOXEL_SIZE / 2.);
-            cursor_cube.voxel_pos = voxel_pos.as_ivec3();
+            // Camera could end up inside geometry - in that case just ignore the trace
+            if let Some(normal) = result.normal {
+                // Move the cursor cube to the position of the voxel we hit
+                let voxel_pos = result.position + normal;
+                transform.translation = voxel_pos + Vec3::splat(VOXEL_SIZE / 2.);
+                cursor_cube.voxel_pos = voxel_pos.as_ivec3();
 
-            // Update current trace end to the cursor cube position
-            trace.end = transform.translation;
+                // Update current trace end to the cursor cube position
+                trace.end = transform.translation;
+            }
         }
     }
 }
