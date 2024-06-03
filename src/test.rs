@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::chunk_map::ChunkMapUpdateBuffer;
 use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::prelude::*;
+use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{ChunkData, FillType},
     prelude::VoxelWorldCamera,
@@ -239,4 +240,238 @@ fn raycast_finds_voxel() {
     });
 
     app.update();
+}
+
+struct VisitVoxelTestState<'a> {
+    test_name: &'a str,
+    expected_path: &'a [IVec3],
+    expected_face: Option<VoxelFace>,
+    path_step_index: usize,
+    traversal_time_out: Timer,
+}
+
+impl<'a> VisitVoxelTestState<'a> {
+    fn new(
+        test_name: &'a str,
+        expected_path: &'a [IVec3],
+        expected_face: Option<VoxelFace>,
+    ) -> Self {
+        VisitVoxelTestState {
+            test_name,
+            expected_path,
+            expected_face,
+            path_step_index: 0,
+            traversal_time_out: Timer::from_seconds(1., TimerMode::Once),
+        }
+    }
+}
+
+fn visit_voxel_check(
+    test_state: &mut VisitVoxelTestState,
+    voxel_coords: IVec3,
+    time: f32,
+    face: VoxelFace,
+) -> bool {
+    // println!(
+    //     "Traversed {:?} at {} through {:?}",
+    //     voxel_coords, time, face
+    // );
+
+    assert!(
+        0. <= time,
+        "{}: Time must always be >= 0",
+        test_state.test_name
+    );
+    assert!(
+        time <= 1.,
+        "{}: Time must always be <= 1",
+        test_state.test_name
+    );
+    assert!(
+        !test_state.traversal_time_out.finished(),
+        "{}: Infinite loop detected (bc. such a simple trace should be much faster than 1s)",
+        test_state.test_name
+    );
+    assert!(
+        test_state.path_step_index == 0 || test_state.expected_face.unwrap_or(face) == face,
+        "{}: Expected entering through {:?}",
+        test_state.test_name,
+        test_state.expected_face
+    );
+    assert!(
+        test_state.path_step_index < test_state.expected_path.len(),
+        "{}: Expected path is not same length",
+        test_state.test_name
+    );
+    assert_eq!(
+        voxel_coords, test_state.expected_path[test_state.path_step_index],
+        "{}: Found unexpected step in path",
+        test_state.test_name
+    );
+    test_state.path_step_index += 1;
+
+    true
+}
+
+#[test]
+fn voxel_line_traversal_along_cartesian_axes() {
+    let start = Vec3::splat(VOXEL_SIZE / 2.);
+
+    {
+        let end = Vec3::new(
+            2. * VOXEL_SIZE + VOXEL_SIZE / 2.,
+            VOXEL_SIZE / 2.,
+            VOXEL_SIZE / 2.,
+        );
+        let expected_path = [
+            IVec3::new(0, 0, 0),
+            IVec3::new(1, 0, 0),
+            IVec3::new(2, 0, 0),
+        ];
+
+        let mut test_state = VisitVoxelTestState::new(
+            "Aligned with cartesian X",
+            &expected_path,
+            Some(VoxelFace::Left),
+        );
+        voxel_line_traversal(start, end, |voxel_coords, time, face| {
+            visit_voxel_check(&mut test_state, voxel_coords, time, face)
+        });
+        assert_eq!(
+            test_state.path_step_index,
+            expected_path.len(),
+            "{}: Expected end voxel reached",
+            test_state.test_name
+        );
+    }
+
+    {
+        let end = Vec3::new(
+            VOXEL_SIZE / 2.,
+            2. * VOXEL_SIZE + VOXEL_SIZE / 2.,
+            VOXEL_SIZE / 2.,
+        );
+        let expected_path = [
+            IVec3::new(0, 0, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, 2, 0),
+        ];
+
+        let mut test_state = VisitVoxelTestState::new(
+            "Aligned with cartesian Y",
+            &expected_path,
+            Some(VoxelFace::Bottom),
+        );
+        voxel_line_traversal(start, end, |voxel_coords, time, face| {
+            visit_voxel_check(&mut test_state, voxel_coords, time, face)
+        });
+        assert_eq!(
+            test_state.path_step_index,
+            expected_path.len(),
+            "{}: Expected end voxel reached",
+            test_state.test_name
+        );
+    }
+
+    {
+        let end = Vec3::new(
+            VOXEL_SIZE / 2.,
+            VOXEL_SIZE / 2.,
+            2. * VOXEL_SIZE + VOXEL_SIZE / 2.,
+        );
+        let expected_path = [
+            IVec3::new(0, 0, 0),
+            IVec3::new(0, 0, 1),
+            IVec3::new(0, 0, 2),
+        ];
+
+        let mut test_state = VisitVoxelTestState::new(
+            "Aligned with cartesian Z",
+            &expected_path,
+            Some(VoxelFace::Back),
+        );
+        voxel_line_traversal(start, end, |voxel_coords, time, face| {
+            visit_voxel_check(&mut test_state, voxel_coords, time, face)
+        });
+        assert_eq!(
+            test_state.path_step_index,
+            expected_path.len(),
+            "{}: Expected end voxel reached",
+            test_state.test_name
+        );
+    }
+}
+
+#[test]
+fn voxel_line_traversal_ending_on_voxel_boundary() {
+    let start = Vec3::new(-5. * VOXEL_SIZE, VOXEL_SIZE / 2., 1.9815);
+    let end = Vec3::new(0., 0., 50. * VOXEL_SIZE);
+    let expected_path = [
+        IVec3::new(-5, 0, 1),
+        IVec3::new(-5, 0, 2),
+        IVec3::new(-5, 0, 3),
+        IVec3::new(-5, 0, 4),
+        IVec3::new(-5, 0, 5),
+        IVec3::new(-5, 0, 6),
+        IVec3::new(-5, 0, 7),
+        IVec3::new(-5, 0, 8),
+        IVec3::new(-5, 0, 9),
+        IVec3::new(-5, 0, 10),
+        IVec3::new(-5, 0, 11),
+        IVec3::new(-4, 0, 11),
+        IVec3::new(-4, 0, 12),
+        IVec3::new(-4, 0, 13),
+        IVec3::new(-4, 0, 14),
+        IVec3::new(-4, 0, 15),
+        IVec3::new(-4, 0, 16),
+        IVec3::new(-4, 0, 17),
+        IVec3::new(-4, 0, 18),
+        IVec3::new(-4, 0, 19),
+        IVec3::new(-4, 0, 20),
+        IVec3::new(-4, 0, 21),
+        IVec3::new(-3, 0, 21),
+        IVec3::new(-3, 0, 22),
+        IVec3::new(-3, 0, 23),
+        IVec3::new(-3, 0, 24),
+        IVec3::new(-3, 0, 25),
+        IVec3::new(-3, 0, 26),
+        IVec3::new(-3, 0, 27),
+        IVec3::new(-3, 0, 28),
+        IVec3::new(-3, 0, 29),
+        IVec3::new(-3, 0, 30),
+        IVec3::new(-2, 0, 30),
+        IVec3::new(-2, 0, 31),
+        IVec3::new(-2, 0, 32),
+        IVec3::new(-2, 0, 33),
+        IVec3::new(-2, 0, 34),
+        IVec3::new(-2, 0, 35),
+        IVec3::new(-2, 0, 36),
+        IVec3::new(-2, 0, 37),
+        IVec3::new(-2, 0, 38),
+        IVec3::new(-2, 0, 39),
+        IVec3::new(-2, 0, 40),
+        IVec3::new(-1, 0, 40),
+        IVec3::new(-1, 0, 41),
+        IVec3::new(-1, 0, 42),
+        IVec3::new(-1, 0, 43),
+        IVec3::new(-1, 0, 44),
+        IVec3::new(-1, 0, 45),
+        IVec3::new(-1, 0, 46),
+        IVec3::new(-1, 0, 47),
+        IVec3::new(-1, 0, 48),
+        IVec3::new(-1, 0, 49),
+        IVec3::new(-1, 0, 50),
+        IVec3::new(0, 0, 50),
+    ];
+
+    let mut test_state = VisitVoxelTestState::new("Ending on voxel boundary", &expected_path, None);
+    voxel_line_traversal(start, end, |voxel_coords, time, face| {
+        visit_voxel_check(&mut test_state, voxel_coords, time, face)
+    });
+    assert_eq!(
+        test_state.path_step_index,
+        expected_path.len(),
+        "{}: Expected end voxel reached",
+        test_state.test_name
+    );
 }
