@@ -1038,6 +1038,7 @@ dependencies = [
  "ndshape",
  "noise",
  "rand 0.8.5",
+ "smooth-bevy-cameras",
  "weak-table",
 ]
 
@@ -3287,6 +3288,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74212e6bbe9a4352329b2f68ba3130c15a3f26fe88ff22dbdc6cdd58fa85e99c"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smooth-bevy-cameras"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fd87c41a0df786a4f89ef25506520d5b7d89baa295c7f06d084913e09863a32"
+dependencies = [
+ "approx",
+ "bevy",
 ]
 
 [[package]]
