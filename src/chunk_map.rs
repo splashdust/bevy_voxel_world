@@ -84,6 +84,13 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
                         ..chunk_data.clone()
                     },
                 );
+
+                let position_f = position.as_vec3();
+                if position_f.cmplt(write_lock.bounds.min).any() {
+                    write_lock.bounds.min = position_f.min(write_lock.bounds.min);
+                } else if position_f.cmpgt(write_lock.bounds.max).any() {
+                    write_lock.bounds.max = position_f.max(write_lock.bounds.max);
+                }
             }
             insert_buffer.clear();
 
@@ -98,9 +105,9 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
 
                 let position_f = position.as_vec3();
                 if position_f.cmplt(write_lock.bounds.min).any() {
-                    write_lock.bounds.min = position_f;
+                    write_lock.bounds.min = position_f.min(write_lock.bounds.min);
                 } else if position_f.cmpgt(write_lock.bounds.max).any() {
-                    write_lock.bounds.max = position_f;
+                    write_lock.bounds.max = position_f.max(write_lock.bounds.max);
                 }
 
                 ev_chunk_will_spawn.send((*evt).clone());
