@@ -2,15 +2,16 @@
 /// VoxelWorld
 /// This module implements most of the public API for bevy_voxel_world.
 ///
-use bevy::{ecs::system::SystemParam, prelude::*, render::primitives::Aabb};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use bevy::{ecs::system::SystemParam, math::bounding::RayCast3d, prelude::*};
+
 use crate::{
-    chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
-    voxel::{VoxelAabb, WorldVoxel},
+    traversal_alg::voxel_line_traversal,
+    voxel::WorldVoxel,
     voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
 };
 
@@ -78,7 +79,7 @@ pub type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> 
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct VoxelRaycastResult {
     pub position: Vec3,
-    pub normal: Vec3,
+    pub normal: Option<Vec3>,
     pub voxel: WorldVoxel,
 }
 
@@ -89,12 +90,10 @@ impl VoxelRaycastResult {
     }
 
     /// Get the face normal of the ray hit
-    pub fn voxel_normal(&self) -> IVec3 {
-        self.normal.floor().as_ivec3()
+    pub fn voxel_normal(&self) -> Option<IVec3> {
+        self.normal.map(|n| n.floor().as_ivec3())
     }
 }
-
-const STEP_SIZE: f32 = 0.01;
 
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
@@ -102,6 +101,7 @@ pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     chunk_map: Res<'w, ChunkMap<C>>,
     modified_voxels: Res<'w, ModifiedVoxels<C>>,
     voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C>>,
+    #[allow(unused)]
     configuration: Res<'w, C>,
 }
 
@@ -231,11 +231,6 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
     /// Returns `None` if no voxel was intersected
     ///
-    /// Note: The method used for raycasting here is not 100% accurate. It is possible for the ray to miss a voxel
-    /// if the ray is very close to the edge. This is because the raycast is done in steps of 0.01 units.
-    /// If you need 100% accuracy, it may be better to cast against the mesh instead, using something like `bevy_mod_raycast`
-    /// or some physics plugin.
-    ///
     /// # Example
     /// ```
     /// use bevy::prelude::*;
@@ -271,65 +266,60 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Get a sendable closure that can be used to raycast into the voxel world
     pub fn raycast_fn(&self) -> Arc<RaycastFn> {
         let chunk_map = self.chunk_map.get_map();
-        let spawning_distance = self.configuration.spawning_distance() as i32;
         let get_voxel = self.get_voxel_fn();
 
         Arc::new(move |ray, filter| {
-            let chunk_map_read_lock = chunk_map.read().unwrap();
-            let mut current = ray.origin;
-            let mut t = 0.0;
+            let p = ray.origin;
+            let d = *ray.direction;
 
-            while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
-                let chunk_pos = (current / CHUNK_SIZE_F).floor().as_ivec3();
-
-                if let Some(chunk_data) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
-                    if !chunk_data.is_empty {
-                        let mut voxel = WorldVoxel::Unset;
-                        while voxel == WorldVoxel::Unset && chunk_data.encloses_point(current) {
-                            let mut voxel_pos = current.floor().as_ivec3();
-                            voxel = get_voxel(voxel_pos);
-                            if voxel.is_solid() {
-                                let mut normal = get_hit_normal(voxel_pos, ray).unwrap();
-
-                                let mut adjacent_vox = get_voxel(voxel_pos + normal.as_ivec3());
-
-                                // When we get here we have an approximate hit position and normal,
-                                // so we refine until the position adjacent to the normal is empty.
-                                let mut steps = 0;
-                                while adjacent_vox.is_solid() && steps < 3 {
-                                    steps += 1;
-                                    voxel = adjacent_vox;
-                                    voxel_pos += normal.as_ivec3();
-                                    normal = get_hit_normal(voxel_pos, ray).unwrap_or(normal);
-                                    adjacent_vox = get_voxel(voxel_pos + normal.as_ivec3());
-                                }
-
-                                if filter.call((voxel_pos.as_vec3(), voxel)) {
-                                    return Some(VoxelRaycastResult {
-                                        position: voxel_pos.as_vec3(),
-                                        normal,
-                                        voxel,
-                                    });
-                                }
-                            }
-                            t += STEP_SIZE;
-                            current = ray.origin + ray.direction * t;
-                        }
-                    }
+            let loaded_aabb = ChunkMap::<C>::get_world_bounds(&chunk_map.read().unwrap());
+            let trace_start = if p.cmplt(loaded_aabb.min).any() || p.cmpgt(loaded_aabb.max).any() {
+                if let Some(trace_start_t) =
+                    RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)
+                {
+                    ray.get_point(trace_start_t)
+                } else {
+                    return None;
                 }
+            } else {
+                p
+            };
 
-                t += STEP_SIZE;
-                current = ray.origin + ray.direction * t;
-            }
-            None
+            // To find where we get out of the loaded cuboid, we can intersect from a point
+            // guaranteed to be on the other side of the cube and in the opposite direction
+            // of the ray.
+            let trace_end_orig =
+                trace_start + d * loaded_aabb.min.distance_squared(loaded_aabb.max);
+            let trace_end_t = RayCast3d::new(trace_end_orig, -ray.direction, f32::MAX)
+                .aabb_intersection_at(&loaded_aabb)
+                .unwrap();
+            let trace_end = Ray3d::new(trace_end_orig, -d).get_point(trace_end_t);
+
+            let mut raycast_result = None;
+            voxel_line_traversal(trace_start, trace_end, |voxel_coords, _time, face| {
+                let voxel = get_voxel(voxel_coords);
+
+                if !voxel.is_unset() && filter.call((voxel_coords.as_vec3(), voxel)) {
+                    if voxel.is_solid() {
+                        raycast_result = Some(VoxelRaycastResult {
+                            position: voxel_coords.as_vec3(),
+                            normal: face.try_into().ok(),
+                            voxel,
+                        });
+
+                        // Found solid voxel - stop traversing
+                        false
+                    } else {
+                        // Voxel is not solid - continue traversing
+                        true
+                    }
+                } else {
+                    // Ignoring this voxel bc of filter - continue traversing
+                    true
+                }
+            });
+
+            raycast_result
         })
     }
-}
-
-fn get_hit_normal(vox_pos: IVec3, ray: Ray3d) -> Option<Vec3> {
-    let voxel_aabb = Aabb::from_min_max(vox_pos.as_vec3(), vox_pos.as_vec3() + Vec3::ONE);
-
-    let (_, normal) = voxel_aabb.ray_intersection(ray)?;
-
-    Some(normal)
 }

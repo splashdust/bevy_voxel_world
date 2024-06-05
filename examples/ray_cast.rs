@@ -1,6 +1,8 @@
-use bevy::prelude::*;
-use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
+
+use bevy::prelude::*;
+
+use bevy_voxel_world::prelude::*;
 
 // Declare materials as consts for convenience
 const SNOWY_BRICK: u8 = 0;
@@ -120,7 +122,8 @@ fn update_cursor_cube(
         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
             let (mut transform, mut cursor_cube) = cursor_cube.single_mut();
             // Move the cursor cube to the position of the voxel we hit
-            let voxel_pos = result.position + result.normal;
+            // Camera is by construction not in a solid voxel, so result.normal must be Some(...)
+            let voxel_pos = result.position + result.normal.unwrap();
             transform.translation = voxel_pos + Vec3::new(0.5, 0.5, 0.5);
             cursor_cube.voxel_pos = voxel_pos.as_ivec3();
         }

@@ -93,7 +93,7 @@ where
     /// Find and spawn chunks in need of spawning
     pub fn spawn_chunks(
         mut commands: Commands,
-        mut chunk_map_write_buffer: ResMut<ChunkMapInsertBuffer<C>>,
+        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C>>,
         world_root: Query<Entity, With<WorldRoot<C>>>,
         chunk_map: Res<ChunkMap<C>>,
         configuration: Res<C>,
@@ -183,7 +183,8 @@ where
                 commands.entity(world_root).add_child(chunk_entity);
                 let chunk = Chunk::<C>::new(chunk_position, chunk_entity);
 
-                chunk_map_write_buffer.push((chunk_position, ChunkData::with_entity(chunk.entity)));
+                chunk_map_insert_buffer
+                    .push((chunk_position, ChunkData::with_entity(chunk.entity)));
 
                 commands.entity(chunk.entity).try_insert((
                     chunk,

@@ -233,8 +233,8 @@ fn raycast_finds_voxel() {
             result,
             VoxelRaycastResult {
                 position: Vec3::ZERO,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                voxel: test_voxel
+                normal: Some(Vec3::new(0.0, 0.0, 1.0)),
+                voxel: test_voxel,
             }
         )
     });
