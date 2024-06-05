@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+New features:
+
+- Added `voxel_line_traversal` and `voxel_cartesian_traversal` for versatile and fast traversal of the voxel grid (#24)
+- Created a new bevy_voxel_world::traversal_alg module to make it easy for crate users to import those algorithms (#24)
+- Rewrite of `raycast` using the traversal algorithm. (#25)
+
+Breaking changes:
+
+- `VoxelRaycastResult.normal` is now wrapped in an `Option<Vec3>`
+
+Thanks to @dtaralla for contributing to this release!
+
 ## 0.6.0
 
 New features:
