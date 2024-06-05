@@ -231,11 +231,6 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
     /// Returns `None` if no voxel was intersected
     ///
-    /// Note: The method used for raycasting here is not 100% accurate. It is possible for the ray to miss a voxel
-    /// if the ray is very close to the edge. This is because the raycast is done in steps of 0.01 units.
-    /// If you need 100% accuracy, it may be better to cast against the mesh instead, using something like `bevy_mod_raycast`
-    /// or some physics plugin.
-    ///
     /// # Example
     /// ```
     /// use bevy::prelude::*;
