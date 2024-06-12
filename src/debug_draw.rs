@@ -13,7 +13,7 @@ pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
 impl<C: VoxelWorldConfig> Plugin for VoxelWorldDebugDrawPlugin<C> {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup::<C>)
-            .add_systems(Update, draw_voxel_gizmos::<C>);
+            .add_systems(Update, (draw_voxel_gizmos::<C>, draw_ray_gizmos::<C>));
     }
 }
 
@@ -28,9 +28,21 @@ struct VoxelGizmos<C: VoxelWorldConfig> {
     _marker: std::marker::PhantomData<C>,
 }
 
+pub struct RayGizmo {
+    pub ray: Ray3d,
+    pub color: Color,
+}
+
+#[derive(Resource)]
+struct RayGizmos<C: VoxelWorldConfig> {
+    gizmos: Arc<RwLock<Vec<RayGizmo>>>,
+    _marker: std::marker::PhantomData<C>,
+}
+
 #[derive(SystemParam)]
 pub struct VoxelWorldDebugDraw<'w, C: VoxelWorldConfig> {
     voxel_gizmos: Res<'w, VoxelGizmos<C>>,
+    ray_gizmos: Res<'w, RayGizmos<C>>,
 }
 
 impl<'w, C: VoxelWorldConfig> VoxelWorldDebugDraw<'w, C> {
@@ -66,10 +78,47 @@ impl<'w, C: VoxelWorldConfig> VoxelWorldDebugDraw<'w, C> {
             gizmos.write().unwrap().clear();
         })
     }
+
+    pub fn set_ray_gizmo(&self, gizmo: RayGizmo) {
+        self.set_ray_gizmo_fn()(gizmo);
+    }
+
+    pub fn set_ray_gizmo_fn(&self) -> Arc<dyn Fn(RayGizmo) + Send + Sync> {
+        let gizmos = self.ray_gizmos.gizmos.clone();
+        Arc::new(move |gizmo| {
+            gizmos.write().unwrap().push(gizmo);
+        })
+    }
+
+    pub fn clear_ray_gizmo(&self, ray: Ray3d) {
+        self.clear_ray_gizmo_fn()(ray);
+    }
+
+    pub fn clear_ray_gizmo_fn(&self) -> Arc<dyn Fn(Ray3d) + Send + Sync> {
+        let gizmos = self.ray_gizmos.gizmos.clone();
+        Arc::new(move |ray| {
+            gizmos.write().unwrap().retain(|gizmo| gizmo.ray != ray);
+        })
+    }
+
+    pub fn clear_all_ray_gizmos(&self) {
+        self.clear_all_ray_gizmos_fn()();
+    }
+
+    pub fn clear_all_ray_gizmos_fn(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let gizmos = self.ray_gizmos.gizmos.clone();
+        Arc::new(move || {
+            gizmos.write().unwrap().clear();
+        })
+    }
 }
 
 fn setup<C: VoxelWorldConfig>(mut commands: Commands) {
     commands.insert_resource(VoxelGizmos {
+        gizmos: Arc::new(RwLock::new(Vec::new())),
+        _marker: std::marker::PhantomData::<C>,
+    });
+    commands.insert_resource(RayGizmos {
         gizmos: Arc::new(RwLock::new(Vec::new())),
         _marker: std::marker::PhantomData::<C>,
     });
@@ -95,5 +144,11 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
                 color,
             );
         });
+    }
+}
+
+fn draw_ray_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, ray_gizmos: Res<RayGizmos<C>>) {
+    for gizmo in ray_gizmos.gizmos.read().unwrap().iter() {
+        gizmos.line(gizmo.ray.origin, gizmo.ray.get_point(10.0), gizmo.color);
     }
 }
