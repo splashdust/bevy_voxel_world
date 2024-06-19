@@ -1,7 +1,7 @@
 mod chunk;
 mod chunk_map;
 mod configuration;
-mod debug;
+mod debug_draw;
 mod mesh_cache;
 mod meshing;
 mod plugin;
@@ -14,11 +14,14 @@ mod voxel_world_internal;
 pub mod prelude {
     pub use crate::chunk::{Chunk, NeedsDespawn};
     pub use crate::configuration::*;
-    pub use crate::debug::{ChunkAabbGizmo, VoxelWorldGizmoPlugin};
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn};
     pub use crate::voxel_world::{VoxelRaycastResult, VoxelWorld, VoxelWorldCamera};
+}
+
+pub mod debug {
+    pub use crate::debug_draw::*;
 }
 
 pub mod rendering {
