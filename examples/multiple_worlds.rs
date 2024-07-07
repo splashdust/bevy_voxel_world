@@ -81,7 +81,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
     let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            color: Color::rgb(0.98, 0.95, 0.82),
+            color: Color::srgb(0.98, 0.95, 0.82),
             shadows_enabled: true,
             ..default()
         },
@@ -93,7 +93,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
 
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.98, 0.95, 0.82),
+        color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
     });
 

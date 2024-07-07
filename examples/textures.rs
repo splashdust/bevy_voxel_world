@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::render::MainWorld;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 

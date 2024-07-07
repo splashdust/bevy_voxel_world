@@ -53,7 +53,7 @@ fn setup(
             mesh: meshes.add(Mesh::from(Cuboid {
                 half_size: Vec3::splat(0.5),
             })),
-            material: materials.add(Color::rgba_u8(124, 144, 255, 128)),
+            material: materials.add(Color::srgba_u8(124, 144, 255, 128)),
             transform: Transform::from_xyz(0.0, -10.0, 0.0),
             ..default()
         },

@@ -24,7 +24,7 @@ fn setup(mut commands: Commands) {
 
     // Ambient light
     commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.98, 0.95, 0.82),
+        color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 1000.0,
     });
 }
