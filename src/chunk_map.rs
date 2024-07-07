@@ -3,8 +3,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
-use bevy::{math::bounding::Aabb3d, prelude::*, utils::hashbrown::HashMap};
-
+use bevy::{math::{Vec3A, bounding::Aabb3d}, prelude::*, utils::hashbrown::HashMap};
 use crate::{
     chunk::{self, ChunkData, CHUNK_SIZE_F},
     voxel::VOXEL_SIZE,
@@ -52,7 +51,7 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
     pub fn get_world_bounds(read_lock: &RwLockReadGuard<ChunkMapData>) -> Aabb3d {
         let mut world_bounds = ChunkMap::<C>::get_bounds(read_lock);
         world_bounds.min *= CHUNK_SIZE_F * VOXEL_SIZE;
-        world_bounds.max = (world_bounds.max + Vec3::ONE) * CHUNK_SIZE_F * VOXEL_SIZE;
+        world_bounds.max = (world_bounds.max + Vec3A::ONE) * CHUNK_SIZE_F * VOXEL_SIZE;
         world_bounds
     }
 
@@ -85,7 +84,7 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
                     },
                 );
 
-                let position_f = position.as_vec3();
+                let position_f = Vec3A::from(position.as_vec3());
                 if position_f.cmplt(write_lock.bounds.min).any() {
                     write_lock.bounds.min = position_f.min(write_lock.bounds.min);
                 } else if position_f.cmpgt(write_lock.bounds.max).any() {
@@ -103,7 +102,7 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
                     },
                 );
 
-                let position_f = position.as_vec3();
+                let position_f = Vec3A::from(position.as_vec3());
                 if position_f.cmplt(write_lock.bounds.min).any() {
                     write_lock.bounds.min = position_f.min(write_lock.bounds.min);
                 } else if position_f.cmpgt(write_lock.bounds.max).any() {
@@ -126,9 +125,9 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
             if need_rebuild_aabb {
                 let mut tmp_vec = Vec::with_capacity(write_lock.data.len());
                 for v in write_lock.data.keys() {
-                    tmp_vec.push(v.as_vec3());
+                    tmp_vec.push(Vec3A::from(v.as_vec3()));
                 }
-                write_lock.bounds = Aabb3d::from_point_cloud(Vec3::ZERO, Quat::IDENTITY, &tmp_vec);
+                write_lock.bounds = Aabb3d::from_point_cloud(Vec3A::ZERO, Quat::IDENTITY, tmp_vec.drain(0..));
             }
         }
     }

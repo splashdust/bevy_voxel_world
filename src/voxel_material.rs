@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
     reflect::TypePath,
     render::{
-        mesh::{MeshVertexAttribute, MeshVertexBufferLayout, VertexAttributeDescriptor},
+        mesh::{MeshVertexBufferLayoutRef, MeshVertexAttribute, VertexAttributeDescriptor},
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
             VertexFormat,
@@ -58,10 +58,10 @@ impl MaterialExtension for StandardVoxelMaterial {
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayout,
+        layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        let vertex_layout = layout.get_layout(&vertex_layout())?;
+        let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }
@@ -74,7 +74,7 @@ pub(crate) fn prepare_texture(
     mut images: ResMut<Assets<Image>>,
 ) {
     if loading_texture.is_loaded
-        || asset_server.get_load_state(loading_texture.handle.clone())
+        || asset_server.get_load_state(loading_texture.handle.clone().id())
             != Some(bevy::asset::LoadState::Loaded)
     {
         return;

@@ -2,7 +2,7 @@ use bevy::{
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::{
-        mesh::MeshVertexBufferLayout,
+        mesh::MeshVertexBufferLayoutRef,
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
         },
@@ -102,11 +102,11 @@ impl Material for CustomVoxelMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayout,
+        layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         // Use `vertex_layout()` from `bevy_voxel_world` to get the correct vertex layout
-        let vertex_layout = layout.get_layout(&vertex_layout())?;
+        let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }

@@ -273,7 +273,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
             let d = *ray.direction;
 
             let loaded_aabb = ChunkMap::<C>::get_world_bounds(&chunk_map.read().unwrap());
-            let trace_start = if p.cmplt(loaded_aabb.min).any() || p.cmpgt(loaded_aabb.max).any() {
+            let trace_start = if p.cmplt(loaded_aabb.min.into()).any() || p.cmpgt(loaded_aabb.max.into()).any() {
                 if let Some(trace_start_t) =
                     RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)
                 {
