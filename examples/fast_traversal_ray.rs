@@ -1,5 +1,5 @@
 use std::sync::Arc;
-
+use bevy::color::palettes::css;
 use bevy::prelude::*;
 use smooth_bevy_cameras::{
     controllers::unreal::{UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin},
@@ -167,22 +167,22 @@ fn update_cursor_cube(
 
 fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
     if let Some(trace_start) = trace.start {
-        gizmos.line(trace_start, trace.end, Color::RED);
+        gizmos.line(trace_start, trace.end, css::RED);
 
         voxel_line_traversal(trace_start, trace.end, |voxel_coord, time, face| {
             let voxel_center = voxel_coord.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 
             gizmos.cuboid(
                 Transform::from_translation(voxel_center).with_scale(Vec3::splat(VOXEL_SIZE)),
-                Color::PINK,
+                css::PINK,
             );
 
             if let Ok(normal) = face.try_into() {
                 gizmos.circle(
                     voxel_center + (normal * VOXEL_SIZE / 2.),
-                    Direction3d::new(normal).unwrap(),
+                    Dir3::new(normal).unwrap(),
                     0.8 * VOXEL_SIZE / 2.,
-                    Color::RED.with_a(0.5),
+                    css::RED.with_alpha(0.5),
                 );
 
                 gizmos.sphere(
