@@ -43,7 +43,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-        VoxelWorldCamera::<MainWorld>::default(),
+        VoxelWorldCamera::<MyMainWorld>::default(),
     ));
 
     // light
