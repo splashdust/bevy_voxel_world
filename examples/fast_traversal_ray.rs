@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use bevy::color::palettes::css;
 use bevy::prelude::*;
 use smooth_bevy_cameras::{
     controllers::unreal::{UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin},
     LookTransformPlugin,
 };
+use std::sync::Arc;
 
 use bevy_voxel_world::{prelude::*, traversal_alg::*};
 

@@ -3,11 +3,15 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
-use bevy::{math::{Vec3A, bounding::Aabb3d}, prelude::*, utils::hashbrown::HashMap};
 use crate::{
     chunk::{self, ChunkData, CHUNK_SIZE_F},
     voxel::VOXEL_SIZE,
     voxel_world::ChunkWillSpawn,
+};
+use bevy::{
+    math::{bounding::Aabb3d, Vec3A},
+    prelude::*,
+    utils::hashbrown::HashMap,
 };
 
 #[derive(Deref, DerefMut)]
@@ -127,7 +131,8 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
                 for v in write_lock.data.keys() {
                     tmp_vec.push(Vec3A::from(v.as_vec3()));
                 }
-                write_lock.bounds = Aabb3d::from_point_cloud(Vec3A::ZERO, Quat::IDENTITY, tmp_vec.drain(0..));
+                write_lock.bounds =
+                    Aabb3d::from_point_cloud(Vec3A::ZERO, Quat::IDENTITY, tmp_vec.drain(0..));
             }
         }
     }
