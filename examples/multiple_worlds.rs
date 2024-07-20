@@ -4,7 +4,7 @@ use bevy::{
     pbr::{CascadeShadowConfigBuilder, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::{
-        mesh::MeshVertexBufferLayout,
+        mesh::MeshVertexBufferLayoutRef,
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
         },
@@ -81,7 +81,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
     let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            color: Color::rgb(0.98, 0.95, 0.82),
+            color: Color::srgb(0.98, 0.95, 0.82),
             shadows_enabled: true,
             ..default()
         },
@@ -93,7 +93,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
 
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.98, 0.95, 0.82),
+        color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
     });
 
@@ -176,11 +176,11 @@ impl Material for CustomVoxelMaterial {
     fn specialize(
         _pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayout,
+        layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         // Use `vertex_layout()` from `bevy_voxel_world` to get the correct vertex layout
-        let vertex_layout = layout.get_layout(&vertex_layout())?;
+        let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }
