@@ -29,7 +29,7 @@ rand = "0.8.5"
 ahash = "0.8.11"
 weak-table = { version = "0.3.2", features = ["ahash"] }
 noise = { version = "0.9.0", optional = true }
-smooth-bevy-cameras = { version = "0.11.0", optional = true }
+smooth-bevy-cameras = { version = "0.12.0", optional = true }
 
 [dev-dependencies]
 
