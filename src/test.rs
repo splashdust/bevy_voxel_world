@@ -222,7 +222,7 @@ fn raycast_finds_voxel() {
 
         let ray = Ray3d {
             origin: Vec3::new(0.5, 0.5, 70.0),
-            direction: -Direction3d::Z,
+            direction: -Dir3::Z,
         };
 
         let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) else {

@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::render::MainWorld;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 
@@ -43,7 +42,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-        VoxelWorldCamera::<MainWorld>::default(),
+        VoxelWorldCamera::<MyMainWorld>::default(),
     ));
 
     // light

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+Upgrade to Bevy 0.14
+
+Thanks to @JohnathanFL for contributing this release
+
 ## 0.7.0
 
 New features:

@@ -46,12 +46,13 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///
 /// # Example
 /// ```
+/// use bevy::color::palettes::css;
 /// use bevy::prelude::*;
 /// use bevy_voxel_world::prelude::*;
 /// use bevy_voxel_world::traversal_alg::*;
 ///
 /// fn draw_trace(trace_start: Vec3, trace_end: Vec3, mut gizmos: Gizmos) {
-///     gizmos.line(trace_start, trace_end, Color::RED);
+///     gizmos.line(trace_start, trace_end, css::RED);
 ///
 ///     voxel_line_traversal(trace_start, trace_end, |voxel_coord, time, face| {
 ///         let voxel_center = voxel_coord.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
@@ -59,7 +60,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///         // Draw a debug cube for the currently visited voxel
 ///         gizmos.cuboid(
 ///             Transform::from_translation(voxel_center).with_scale(Vec3::splat(VOXEL_SIZE)),
-///             Color::PINK,
+///             css::PINK,
 ///         );
 ///
 ///         // Draw a debug dot where the ray entered this voxel
@@ -74,9 +75,9 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///         if let Ok(entered_face_normal) = face.try_into() {
 ///             gizmos.circle(
 ///                 voxel_center + (entered_face_normal * VOXEL_SIZE / 2.),
-///                 Direction3d::new(entered_face_normal).unwrap(),
+///                 Dir3::new(entered_face_normal).unwrap(),
 ///                 0.8 * VOXEL_SIZE / 2.,
-///                 Color::RED.with_a(0.5));
+///                 css::RED.with_alpha(0.5));
 ///         }
 ///
 ///         // Keep drawing until trace has finished visiting all voxels along the way
