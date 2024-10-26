@@ -18,7 +18,7 @@ impl<C: VoxelWorldConfig> Plugin for VoxelWorldDebugDrawPlugin<C> {
 }
 
 pub struct VoxelGizmo {
-    pub color: Color,
+    pub color: Srgba,
     pub pos: IVec3,
 }
 
@@ -30,7 +30,7 @@ struct VoxelGizmos<C: VoxelWorldConfig> {
 
 pub struct RayGizmo {
     pub ray: Ray3d,
-    pub color: Color,
+    pub color: Srgba,
 }
 
 #[derive(Resource)]
@@ -133,13 +133,13 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
         Vec3::AXES.iter().for_each(|&axis| {
             gizmos.circle(
                 pos - (axis * 0.5) + (Vec3::ONE * 0.5),
-                Direction3d::new(axis).unwrap(),
+                Dir3::new(axis).unwrap(),
                 radius,
                 color,
             );
             gizmos.circle(
                 pos + (axis * 0.5) + (Vec3::ONE * 0.5),
-                Direction3d::new(-axis).unwrap(),
+                Dir3::new(-axis).unwrap(),
                 radius,
                 color,
             );
