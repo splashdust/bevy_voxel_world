@@ -32,7 +32,7 @@ impl VoxelWorldConfig for MainWorld {
         10
     }
 
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::Index> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 }
@@ -42,6 +42,8 @@ impl VoxelWorldConfig for MainWorld {
 struct SecondWorld;
 
 impl VoxelWorldConfig for SecondWorld {
+    type Index = u8;
+
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
             RED => [1, 1, 1],
@@ -111,7 +113,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
     second_world.set_voxel(IVec3::new(0, 3, 0), WorldVoxel::Solid(RED));
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<u8> + Send + Sync> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 4;

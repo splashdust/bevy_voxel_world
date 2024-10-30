@@ -11,7 +11,7 @@ impl VoxelWorldConfig for MainWorld {
         15
     }
 
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::Index> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 }
@@ -69,7 +69,7 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<u8> + Send + Sync> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 4;
