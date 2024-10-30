@@ -33,19 +33,19 @@ pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
 
 /// Holds a map of modified voxels that will persist between chunk spawn/despawn
 #[derive(Resource, Deref, DerefMut, Clone)]
-pub struct ModifiedVoxels<C>(
-    #[deref] Arc<RwLock<HashMap<IVec3, WorldVoxel>>>,
+pub struct ModifiedVoxels<C, I>(
+    #[deref] Arc<RwLock<HashMap<IVec3, WorldVoxel<I>>>>,
     PhantomData<C>,
 );
 
-impl<C: VoxelWorldConfig> Default for ModifiedVoxels<C> {
+impl<C: VoxelWorldConfig> Default for ModifiedVoxels<C, C::Index> {
     fn default() -> Self {
         Self(Arc::new(RwLock::new(HashMap::new())), PhantomData)
     }
 }
 
-impl<C: VoxelWorldConfig> ModifiedVoxels<C> {
-    pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel> {
+impl<C: VoxelWorldConfig> ModifiedVoxels<C, C::Index> {
+    pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel<C::Index>> {
         let modified_voxels = self.0.read().unwrap();
         modified_voxels.get(position).cloned()
     }
@@ -54,7 +54,7 @@ impl<C: VoxelWorldConfig> ModifiedVoxels<C> {
 /// A temporary buffer for voxel modifications that will get flushed to the `ModifiedVoxels` resource
 /// at the end of the frame.
 #[derive(Resource, Deref, DerefMut, Default)]
-pub struct VoxelWriteBuffer<C>(#[deref] Vec<(IVec3, WorldVoxel)>, PhantomData<C>);
+pub struct VoxelWriteBuffer<C, I>(#[deref] Vec<(IVec3, WorldVoxel<I>)>, PhantomData<C>);
 
 #[derive(Component)]
 pub(crate) struct NeedsMaterial<C>(PhantomData<C>);
@@ -70,14 +70,14 @@ where
 {
     /// Init the resources used internally by bevy_voxel_world
     pub fn setup(mut commands: Commands, configuration: Res<C>) {
-        commands.init_resource::<ChunkMap<C>>();
-        commands.init_resource::<ChunkMapInsertBuffer<C>>();
-        commands.init_resource::<ChunkMapUpdateBuffer<C>>();
+        commands.init_resource::<ChunkMap<C, C::Index>>();
+        commands.init_resource::<ChunkMapInsertBuffer<C, C::Index>>();
+        commands.init_resource::<ChunkMapUpdateBuffer<C, C::Index>>();
         commands.init_resource::<ChunkMapRemoveBuffer<C>>();
         commands.init_resource::<MeshCache<C>>();
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
-        commands.init_resource::<ModifiedVoxels<C>>();
-        commands.init_resource::<VoxelWriteBuffer<C>>();
+        commands.init_resource::<ModifiedVoxels<C, C::Index>>();
+        commands.init_resource::<VoxelWriteBuffer<C, C::Index>>();
 
         // Create the root node and allow to modify it by the configuration.
         let world_root = commands
@@ -93,9 +93,9 @@ where
     /// Find and spawn chunks in need of spawning
     pub fn spawn_chunks(
         mut commands: Commands,
-        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C>>,
+        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C, C::Index>>,
         world_root: Query<Entity, With<WorldRoot<C>>>,
-        chunk_map: Res<ChunkMap<C>>,
+        chunk_map: Res<ChunkMap<C, C::Index>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
@@ -126,7 +126,9 @@ where
                 let mut t = 0.0;
                 while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
                     let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-                    if let Some(chunk) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
+                    if let Some(chunk) =
+                        ChunkMap::<C, C::Index>::get(&chunk_pos, &chunk_map_read_lock)
+                    {
                         if chunk.is_full {
                             // If we hit a full chunk, we can stop the ray early
                             break;
@@ -176,7 +178,8 @@ where
                 continue;
             }
 
-            let has_chunk = ChunkMap::<C>::contains_chunk(&chunk_position, &chunk_map_read_lock);
+            let has_chunk =
+                ChunkMap::<C, C::Index>::contains_chunk(&chunk_position, &chunk_map_read_lock);
 
             if !has_chunk {
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
@@ -263,12 +266,12 @@ where
     pub fn despawn_retired_chunks(
         mut commands: Commands,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        chunk_map: Res<ChunkMap<C>>,
+        chunk_map: Res<ChunkMap<C, C::Index>>,
         retired_chunks: Query<(Entity, &Chunk<C>), With<NeedsDespawn>>,
     ) {
         let read_lock = chunk_map.get_read_lock();
         for (entity, chunk) in retired_chunks.iter() {
-            if ChunkMap::<C>::contains_chunk(&chunk.position, &read_lock) {
+            if ChunkMap::<C, C::Index>::contains_chunk(&chunk.position, &read_lock) {
                 commands.entity(entity).despawn_recursive();
                 chunk_map_remove_buffer.push(chunk.position);
             }
@@ -282,7 +285,7 @@ where
         mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh<C>>,
         dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
         mesh_cache: Res<MeshCache<C>>,
-        modified_voxels: Res<ModifiedVoxels<C>>,
+        modified_voxels: Res<ModifiedVoxels<C, C::Index>>,
         configuration: Res<C>,
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
@@ -291,8 +294,11 @@ where
             let voxel_data_fn = (configuration.voxel_lookup_delegate())(chunk.position);
             let texture_index_mapper = configuration.texture_index_mapper().clone();
 
-            let mut chunk_task =
-                ChunkTask::<C>::new(chunk.entity, chunk.position, modified_voxels.clone());
+            let mut chunk_task = ChunkTask::<C, C::Index>::new(
+                chunk.entity,
+                chunk.position,
+                modified_voxels.clone(),
+            );
 
             let mesh_map = Arc::new(mesh_cache.get_map());
             let thread = thread_pool.spawn(async move {
@@ -317,7 +323,7 @@ where
 
             commands
                 .entity(chunk.entity)
-                .try_insert(ChunkThread::<C>::new(thread, chunk.position))
+                .try_insert(ChunkThread::<C, C::Index>::new(thread, chunk.position))
                 .remove::<NeedsRemesh>();
 
             ev_chunk_will_remesh.send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
@@ -329,12 +335,17 @@ where
     pub fn spawn_meshes(
         mut commands: Commands,
         mut chunking_threads: Query<
-            (Entity, &mut ChunkThread<C>, &mut Chunk<C>, &Transform),
+            (
+                Entity,
+                &mut ChunkThread<C, C::Index>,
+                &mut Chunk<C>,
+                &Transform,
+            ),
             Without<NeedsRemesh>,
         >,
         mut mesh_assets: ResMut<Assets<Mesh>>,
         buffers: (
-            ResMut<ChunkMapUpdateBuffer<C>>,
+            ResMut<ChunkMapUpdateBuffer<C, C::Index>>,
             ResMut<MeshCacheInsertBuffer<C>>,
         ),
         res: (Res<MeshCache<C>>, Res<LoadingTexture>),
@@ -366,7 +377,7 @@ where
                                 commands
                                     .entity(chunk.entity)
                                     .try_insert(NeedsRemesh)
-                                    .remove::<ChunkThread<C>>();
+                                    .remove::<ChunkThread<C, C::Index>>();
                                 continue;
                             }
                             let hash = chunk_task.voxels_hash();
@@ -398,15 +409,17 @@ where
                     .remove::<MeshRef>();
             }
 
-            commands.entity(chunk.entity).remove::<ChunkThread<C>>();
+            commands
+                .entity(chunk.entity)
+                .remove::<ChunkThread<C, C::Index>>();
         }
     }
 
     pub fn flush_voxel_write_buffer(
         mut commands: Commands,
-        mut buffer: ResMut<VoxelWriteBuffer<C>>,
-        chunk_map: Res<ChunkMap<C>>,
-        modified_voxels: ResMut<ModifiedVoxels<C>>,
+        mut buffer: ResMut<VoxelWriteBuffer<C, C::Index>>,
+        chunk_map: Res<ChunkMap<C, C::Index>>,
+        modified_voxels: ResMut<ModifiedVoxels<C, C::Index>>,
     ) {
         let chunk_map_read_lock = chunk_map.get_read_lock();
         let mut modified_voxels = modified_voxels.write().unwrap();
@@ -416,7 +429,8 @@ where
             modified_voxels.insert(*position, *voxel);
 
             // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
-            if let Some(chunk_data) = ChunkMap::<C>::get(&chunk_pos, &chunk_map_read_lock) {
+            if let Some(chunk_data) = ChunkMap::<C, C::Index>::get(&chunk_pos, &chunk_map_read_lock)
+            {
                 if let Some(mut ent) = commands.get_entity(chunk_data.entity) {
                     ent.try_insert(NeedsRemesh);
                 }
@@ -433,11 +447,11 @@ where
     }
 
     pub fn flush_chunk_map_buffers(
-        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C>>,
-        mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C>>,
+        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C, C::Index>>,
+        mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C, C::Index>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
         mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn<C>>,
-        chunk_map: Res<ChunkMap<C>>,
+        chunk_map: Res<ChunkMap<C, C::Index>>,
     ) {
         chunk_map.apply_buffers(
             &mut chunk_map_insert_buffer,

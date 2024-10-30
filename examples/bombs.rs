@@ -6,6 +6,7 @@ use std::time::Duration;
 struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
+    type Index = u8;
     fn spawning_distance(&self) -> u32 {
         15
     }

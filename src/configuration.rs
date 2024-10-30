@@ -1,10 +1,11 @@
+use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
-pub type VoxelLookupFn = Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync>;
-pub type VoxelLookupDelegate = Box<dyn Fn(IVec3) -> VoxelLookupFn + Send + Sync>;
+pub type VoxelLookupFn<I> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
+pub type VoxelLookupDelegate<I> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -33,6 +34,8 @@ pub enum ChunkSpawnStrategy {
 
 /// `bevy_voxel_world` configuation structs need to implement this trait
 pub trait VoxelWorldConfig: Resource + Default + Clone {
+    type Index: Copy + Hash + PartialEq + Eq + Default + Send + Sync;
+
     /// Distance in chunks to spawn chunks around the camera
     fn spawning_distance(&self) -> u32 {
         10
@@ -79,12 +82,8 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The three values correspond to the top, sides and bottom of the voxel. For example,
     /// if the slice is `[1,2,2]`, the top will use texture index 1 and the sides and bottom will use texture
     /// index 2.
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::Index) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {
-            0 => [0, 0, 0],
-            1 => [1, 1, 1],
-            2 => [2, 2, 2],
-            3 => [3, 3, 3],
             _ => [0, 0, 0],
         })
     }
@@ -93,7 +92,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The delegate will be called every time a new chunk needs to be computed. The delegate should
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::Index> {
         Box::new(|_| Box::new(|_| WorldVoxel::Unset))
     }
 
@@ -119,4 +118,6 @@ pub struct DefaultWorld;
 
 impl DefaultWorld {}
 
-impl VoxelWorldConfig for DefaultWorld {}
+impl VoxelWorldConfig for DefaultWorld {
+    type Index = u8;
+}

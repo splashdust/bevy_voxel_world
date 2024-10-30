@@ -23,6 +23,8 @@ struct VoxelTrace {
 }
 
 impl VoxelWorldConfig for MyMainWorld {
+    type Index = u8;
+
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
             SNOWY_BRICK => [0, 1, 2],

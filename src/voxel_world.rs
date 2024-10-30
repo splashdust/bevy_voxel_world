@@ -64,26 +64,27 @@ pub type ChunkWillSpawn<C> = ChunkEvent<C>;
 /// Fired when a chunk is about to be remeshed.
 pub type ChunkWillRemesh<C> = ChunkEvent<C>;
 
-pub trait FilterFn {
-    fn call(&self, input: (Vec3, WorldVoxel)) -> bool;
+pub trait FilterFn<I> {
+    fn call(&self, input: (Vec3, WorldVoxel<I>)) -> bool;
 }
 
-impl<F: Fn((Vec3, WorldVoxel)) -> bool> FilterFn for F {
-    fn call(&self, input: (Vec3, WorldVoxel)) -> bool {
+impl<F: Fn((Vec3, WorldVoxel<I>)) -> bool, I> FilterFn<I> for F {
+    fn call(&self, input: (Vec3, WorldVoxel<I>)) -> bool {
         self(input)
     }
 }
 
-pub type RaycastFn = dyn Fn(Ray3d, &dyn FilterFn) -> Option<VoxelRaycastResult> + Send + Sync;
+pub type RaycastFn<I> =
+    dyn Fn(Ray3d, &dyn FilterFn<I>) -> Option<VoxelRaycastResult<I>> + Send + Sync;
 
 #[derive(Default, Debug, PartialEq, Clone)]
-pub struct VoxelRaycastResult {
+pub struct VoxelRaycastResult<I> {
     pub position: Vec3,
     pub normal: Option<Vec3>,
-    pub voxel: WorldVoxel,
+    pub voxel: WorldVoxel<I>,
 }
 
-impl VoxelRaycastResult {
+impl<I> VoxelRaycastResult<I> {
     /// Get the voxel position of the raycast result
     pub fn voxel_pos(&self) -> IVec3 {
         self.position.floor().as_ivec3()
@@ -98,28 +99,28 @@ impl VoxelRaycastResult {
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
-    chunk_map: Res<'w, ChunkMap<C>>,
-    modified_voxels: Res<'w, ModifiedVoxels<C>>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C>>,
+    chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::Index>>,
+    modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::Index>>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::Index>>,
     #[allow(unused)]
     configuration: Res<'w, C>,
 }
 
 impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
-    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel {
+    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::Index> {
         self.get_voxel_fn()(position)
     }
 
     /// Set the voxel at the given position. This will create a new chunk if one does not exist at
     /// the given position.
-    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel) {
+    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::Index>) {
         self.voxel_write_buffer.push((position, voxel));
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
-    pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync> {
+    pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::Index> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
         let write_buffer = self.voxel_write_buffer.clone();
         let modified_voxels = self.modified_voxels.clone();
@@ -156,7 +157,10 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
 
     /// Get the closes surface voxel to the given position
     /// Returns None if there is no surface voxel at or below the given position
-    pub fn get_closest_surface_voxel(&self, position: IVec3) -> Option<(IVec3, WorldVoxel)> {
+    pub fn get_closest_surface_voxel(
+        &self,
+        position: IVec3,
+    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
         let get_voxel = self.get_voxel_fn();
         let mut current_pos = position;
         let current_voxel = get_voxel(current_pos);
@@ -187,7 +191,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
         &self,
         position: IVec3,
         radius: u32,
-    ) -> Option<(IVec3, WorldVoxel)> {
+    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
         let mut tries = 0;
 
         while tries < 100 {
@@ -217,7 +221,10 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     }
 
     /// Get first surface voxel at the given Vec2 position
-    pub fn get_surface_voxel_at_2d_pos(&self, pos_2d: Vec2) -> Option<(IVec3, WorldVoxel)> {
+    pub fn get_surface_voxel_at_2d_pos(
+        &self,
+        pos_2d: Vec2,
+    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
         self.get_closest_surface_voxel(IVec3 {
             x: pos_2d.x.floor() as i32,
             y: 256,
@@ -257,14 +264,14 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     pub fn raycast(
         &self,
         ray: Ray3d,
-        filter: &impl Fn((Vec3, WorldVoxel)) -> bool,
-    ) -> Option<VoxelRaycastResult> {
+        filter: &impl Fn((Vec3, WorldVoxel<C::Index>)) -> bool,
+    ) -> Option<VoxelRaycastResult<C::Index>> {
         let raycast_fn = self.raycast_fn();
         raycast_fn(ray, filter)
     }
 
     /// Get a sendable closure that can be used to raycast into the voxel world
-    pub fn raycast_fn(&self) -> Arc<RaycastFn> {
+    pub fn raycast_fn(&self) -> Arc<RaycastFn<C::Index>> {
         let chunk_map = self.chunk_map.get_map();
         let get_voxel = self.get_voxel_fn();
 
@@ -272,7 +279,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
             let p = ray.origin;
             let d = *ray.direction;
 
-            let loaded_aabb = ChunkMap::<C>::get_world_bounds(&chunk_map.read().unwrap());
+            let loaded_aabb = ChunkMap::<C, C::Index>::get_world_bounds(&chunk_map.read().unwrap());
             let trace_start =
                 if p.cmplt(loaded_aabb.min.into()).any() || p.cmpgt(loaded_aabb.max.into()).any() {
                     if let Some(trace_start_t) =

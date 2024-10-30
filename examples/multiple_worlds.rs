@@ -26,6 +26,8 @@ const BLUE: u8 = 2;
 struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
+    type Index = u8;
+
     fn spawning_distance(&self) -> u32 {
         10
     }
