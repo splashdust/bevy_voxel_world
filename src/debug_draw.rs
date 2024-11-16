@@ -1,9 +1,7 @@
-use bevy::transform::commands;
 use bevy::{ecs::system::SystemParam, prelude::*};
 use std::sync::{Arc, RwLock};
 
 use crate::configuration::VoxelWorldConfig;
-use crate::voxel_world::VoxelWorld;
 
 #[derive(Default)]
 pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
