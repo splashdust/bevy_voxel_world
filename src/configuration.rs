@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
-pub type VoxelLookupFn<I> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
-pub type VoxelLookupDelegate<I> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
+pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
+pub type VoxelLookupDelegate<I = u8> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {

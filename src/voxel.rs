@@ -4,7 +4,7 @@ use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 pub const VOXEL_SIZE: f32 = 1.;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub enum WorldVoxel<I> {
+pub enum WorldVoxel<I = u8> {
     #[default]
     Unset,
     Air,

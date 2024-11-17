@@ -78,7 +78,7 @@ pub type RaycastFn<I> =
     dyn Fn(Ray3d, &dyn FilterFn<I>) -> Option<VoxelRaycastResult<I>> + Send + Sync;
 
 #[derive(Default, Debug, PartialEq, Clone)]
-pub struct VoxelRaycastResult<I> {
+pub struct VoxelRaycastResult<I = u8> {
     pub position: Vec3,
     pub normal: Option<Vec3>,
     pub voxel: WorldVoxel<I>,

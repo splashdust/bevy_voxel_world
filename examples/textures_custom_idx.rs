@@ -30,7 +30,7 @@ impl VoxelWorldConfig for MyMainWorld {
 }
 
 fn main() {
-    assert_eq!(size_of::<WorldVoxel<u8>>(), 2);
+    assert_eq!(size_of::<WorldVoxel>(), 2);
     assert_eq!(size_of::<WorldVoxel<BlockTexture>>(), 1);
 
     App::new()

@@ -113,7 +113,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
     second_world.set_voxel(IVec3::new(0, 3, 0), WorldVoxel::Solid(RED));
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<u8> + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 4;
