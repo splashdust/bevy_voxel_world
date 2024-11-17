@@ -83,9 +83,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// if the slice is `[1,2,2]`, the top will use texture index 1 and the sides and bottom will use texture
     /// index 2.
     fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
-        Arc::new(|mat| match mat {
-            _ => [0, 0, 0],
-        })
+        Arc::new(|_mat| [0, 0, 0])
     }
 
     /// A function that returns a function that returns true if a voxel exists at the given position
