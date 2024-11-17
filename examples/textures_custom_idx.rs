@@ -14,9 +14,9 @@ enum BlockTexture {
 struct MyMainWorld;
 
 impl VoxelWorldConfig for MyMainWorld {
-    type Index = BlockTexture;
+    type MaterialIndex = BlockTexture;
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::Index) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat| match vox_mat {
             BlockTexture::SnowyBrick => [0, 1, 2],
             BlockTexture::FullBrick => [2, 2, 2],

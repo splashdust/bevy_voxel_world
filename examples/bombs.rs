@@ -6,12 +6,12 @@ use std::time::Duration;
 struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
-    type Index = u8;
+    type MaterialIndex = u8;
     fn spawning_distance(&self) -> u32 {
         15
     }
 
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::Index> {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 }
@@ -69,7 +69,7 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<u8> + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 4;

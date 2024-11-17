@@ -99,28 +99,28 @@ impl<I> VoxelRaycastResult<I> {
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
-    chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::Index>>,
-    modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::Index>>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::Index>>,
+    chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     #[allow(unused)]
     configuration: Res<'w, C>,
 }
 
 impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
-    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::Index> {
+    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
         self.get_voxel_fn()(position)
     }
 
     /// Set the voxel at the given position. This will create a new chunk if one does not exist at
     /// the given position.
-    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::Index>) {
+    pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::MaterialIndex>) {
         self.voxel_write_buffer.push((position, voxel));
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
-    pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::Index> + Send + Sync> {
+    pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
         let write_buffer = self.voxel_write_buffer.clone();
         let modified_voxels = self.modified_voxels.clone();
@@ -160,7 +160,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     pub fn get_closest_surface_voxel(
         &self,
         position: IVec3,
-    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
+    ) -> Option<(IVec3, WorldVoxel<C::MaterialIndex>)> {
         let get_voxel = self.get_voxel_fn();
         let mut current_pos = position;
         let current_voxel = get_voxel(current_pos);
@@ -191,7 +191,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
         &self,
         position: IVec3,
         radius: u32,
-    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
+    ) -> Option<(IVec3, WorldVoxel<C::MaterialIndex>)> {
         let mut tries = 0;
 
         while tries < 100 {
@@ -224,7 +224,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     pub fn get_surface_voxel_at_2d_pos(
         &self,
         pos_2d: Vec2,
-    ) -> Option<(IVec3, WorldVoxel<C::Index>)> {
+    ) -> Option<(IVec3, WorldVoxel<C::MaterialIndex>)> {
         self.get_closest_surface_voxel(IVec3 {
             x: pos_2d.x.floor() as i32,
             y: 256,
@@ -264,14 +264,14 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     pub fn raycast(
         &self,
         ray: Ray3d,
-        filter: &impl Fn((Vec3, WorldVoxel<C::Index>)) -> bool,
-    ) -> Option<VoxelRaycastResult<C::Index>> {
+        filter: &impl Fn((Vec3, WorldVoxel<C::MaterialIndex>)) -> bool,
+    ) -> Option<VoxelRaycastResult<C::MaterialIndex>> {
         let raycast_fn = self.raycast_fn();
         raycast_fn(ray, filter)
     }
 
     /// Get a sendable closure that can be used to raycast into the voxel world
-    pub fn raycast_fn(&self) -> Arc<RaycastFn<C::Index>> {
+    pub fn raycast_fn(&self) -> Arc<RaycastFn<C::MaterialIndex>> {
         let chunk_map = self.chunk_map.get_map();
         let get_voxel = self.get_voxel_fn();
 
@@ -279,7 +279,8 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
             let p = ray.origin;
             let d = *ray.direction;
 
-            let loaded_aabb = ChunkMap::<C, C::Index>::get_world_bounds(&chunk_map.read().unwrap());
+            let loaded_aabb =
+                ChunkMap::<C, C::MaterialIndex>::get_world_bounds(&chunk_map.read().unwrap());
             let trace_start =
                 if p.cmplt(loaded_aabb.min.into()).any() || p.cmpgt(loaded_aabb.max.into()).any() {
                     if let Some(trace_start_t) =

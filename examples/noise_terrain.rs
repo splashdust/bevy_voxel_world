@@ -6,13 +6,13 @@ use noise::{HybridMulti, NoiseFn, Perlin};
 struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
-    type Index = u8;
+    type MaterialIndex = u8;
 
     fn spawning_distance(&self) -> u32 {
         25
     }
 
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::Index> {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 }
