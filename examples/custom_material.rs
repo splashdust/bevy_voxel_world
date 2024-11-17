@@ -23,7 +23,8 @@ const BLUE: u8 = 2;
 struct MyMainWorld;
 
 impl VoxelWorldConfig for MyMainWorld {
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
+    type MaterialIndex = u8;
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
             RED => [1, 1, 1],
             GREEN => [2, 2, 2],

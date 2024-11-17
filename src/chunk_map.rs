@@ -15,9 +15,9 @@ use bevy::{
 };
 
 #[derive(Deref, DerefMut)]
-pub struct ChunkMapData {
+pub struct ChunkMapData<I> {
     #[deref]
-    data: HashMap<IVec3, chunk::ChunkData>,
+    data: HashMap<IVec3, chunk::ChunkData<I>>,
     bounds: Aabb3d,
 }
 
@@ -25,52 +25,52 @@ pub struct ChunkMapData {
 /// The chunks also exist as entities that can be queried in the ECS,
 /// but having this map in addition allows for faster spatial lookups
 #[derive(Resource)]
-pub struct ChunkMap<C> {
-    map: Arc<RwLock<ChunkMapData>>,
+pub struct ChunkMap<C, I> {
+    map: Arc<RwLock<ChunkMapData<I>>>,
     _marker: PhantomData<C>,
 }
 
-impl<C: Send + Sync + 'static> ChunkMap<C> {
+impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
     pub fn get(
         position: &IVec3,
-        read_lock: &RwLockReadGuard<ChunkMapData>,
-    ) -> Option<chunk::ChunkData> {
+        read_lock: &RwLockReadGuard<ChunkMapData<I>>,
+    ) -> Option<chunk::ChunkData<I>> {
         read_lock.data.get(position).cloned()
     }
 
-    pub fn contains_chunk(position: &IVec3, read_lock: &RwLockReadGuard<ChunkMapData>) -> bool {
+    pub fn contains_chunk(position: &IVec3, read_lock: &RwLockReadGuard<ChunkMapData<I>>) -> bool {
         read_lock.data.contains_key(position)
     }
 
     /// Get the current bounding box of loaded chunks in this map.
     ///
     /// Expressed in **chunk coordinates**. Bounds are **inclusive**.
-    pub fn get_bounds(read_lock: &RwLockReadGuard<ChunkMapData>) -> Aabb3d {
+    pub fn get_bounds(read_lock: &RwLockReadGuard<ChunkMapData<I>>) -> Aabb3d {
         read_lock.bounds
     }
 
     /// Get the current bounding box of loaded chunks in this map.
     ///
     /// Expressed in **world units**. Bounds are **inclusive**.
-    pub fn get_world_bounds(read_lock: &RwLockReadGuard<ChunkMapData>) -> Aabb3d {
-        let mut world_bounds = ChunkMap::<C>::get_bounds(read_lock);
+    pub fn get_world_bounds(read_lock: &RwLockReadGuard<ChunkMapData<I>>) -> Aabb3d {
+        let mut world_bounds = ChunkMap::<C, I>::get_bounds(read_lock);
         world_bounds.min *= CHUNK_SIZE_F * VOXEL_SIZE;
         world_bounds.max = (world_bounds.max + Vec3A::ONE) * CHUNK_SIZE_F * VOXEL_SIZE;
         world_bounds
     }
 
-    pub fn get_read_lock(&self) -> RwLockReadGuard<ChunkMapData> {
+    pub fn get_read_lock(&self) -> RwLockReadGuard<ChunkMapData<I>> {
         self.map.read().unwrap()
     }
 
-    pub fn get_map(&self) -> Arc<RwLock<ChunkMapData>> {
+    pub fn get_map(&self) -> Arc<RwLock<ChunkMapData<I>>> {
         self.map.clone()
     }
 
     pub(crate) fn apply_buffers(
         &self,
-        insert_buffer: &mut ChunkMapInsertBuffer<C>,
-        update_buffer: &mut ChunkMapUpdateBuffer<C>,
+        insert_buffer: &mut ChunkMapInsertBuffer<C, I>,
+        update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
         ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn<C>>,
     ) {
@@ -138,7 +138,7 @@ impl<C: Send + Sync + 'static> ChunkMap<C> {
     }
 }
 
-impl<C> Default for ChunkMap<C> {
+impl<C, I> Default for ChunkMap<C, I> {
     fn default() -> Self {
         Self {
             map: Arc::new(RwLock::new(ChunkMapData {
@@ -151,11 +151,14 @@ impl<C> Default for ChunkMap<C> {
 }
 
 #[derive(Resource, Deref, DerefMut, Default, Debug)]
-pub(crate) struct ChunkMapInsertBuffer<C>(#[deref] Vec<(IVec3, chunk::ChunkData)>, PhantomData<C>);
+pub(crate) struct ChunkMapInsertBuffer<C, I>(
+    #[deref] Vec<(IVec3, chunk::ChunkData<I>)>,
+    PhantomData<C>,
+);
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapUpdateBuffer<C>(
-    #[deref] Vec<(IVec3, chunk::ChunkData, ChunkWillSpawn<C>)>,
+pub(crate) struct ChunkMapUpdateBuffer<C, I>(
+    #[deref] Vec<(IVec3, chunk::ChunkData<I>, ChunkWillSpawn<C>)>,
     PhantomData<C>,
 );
 

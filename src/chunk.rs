@@ -19,17 +19,17 @@ pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 pub(crate) type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
-pub(crate) type VoxelArray = [WorldVoxel; PaddedChunkShape::SIZE as usize];
+pub(crate) type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<C>(pub Task<ChunkTask<C>>, PhantomData<C>);
+pub(crate) struct ChunkThread<C, I>(pub Task<ChunkTask<C, I>>, PhantomData<C>);
 
-impl<C> ChunkThread<C>
+impl<C, I> ChunkThread<C, I>
 where
     C: Send + Sync + 'static,
 {
-    pub fn new(task: Task<ChunkTask<C>>, _pos: IVec3) -> Self {
+    pub fn new(task: Task<ChunkTask<C, I>>, _pos: IVec3) -> Self {
         Self(task, PhantomData)
     }
 }
@@ -42,26 +42,26 @@ pub struct NeedsRemesh;
 pub struct NeedsDespawn;
 
 #[derive(Clone, Debug)]
-pub enum FillType {
+pub enum FillType<I> {
     Empty,
     Mixed,
-    Uniform(WorldVoxel),
+    Uniform(WorldVoxel<I>),
 }
 
 /// This is used to lookup voxel data from spawned chunks. Does not persist after
 /// the chunk is despawned.
 #[derive(Clone, Debug)]
-pub struct ChunkData {
+pub struct ChunkData<I> {
     pub position: IVec3,
-    pub voxels: Option<Arc<VoxelArray>>,
+    pub voxels: Option<Arc<VoxelArray<I>>>,
     pub voxels_hash: u64,
     pub is_full: bool,
     pub is_empty: bool,
-    pub fill_type: FillType,
+    pub fill_type: FillType<I>,
     pub entity: Entity,
 }
 
-impl ChunkData {
+impl<I: Hash + Copy> ChunkData<I> {
     pub fn new() -> Self {
         Self {
             position: IVec3::ZERO,
@@ -87,7 +87,7 @@ impl ChunkData {
         }
     }
 
-    pub fn get_voxel(&self, position: UVec3) -> WorldVoxel {
+    pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if self.voxels.is_some() {
             self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
         } else {
@@ -123,7 +123,7 @@ impl ChunkData {
     }
 }
 
-impl Default for ChunkData {
+impl<I: Hash + Copy> Default for ChunkData<I> {
     fn default() -> Self {
         Self::new()
     }
@@ -163,16 +163,16 @@ impl<C> Chunk<C> {
 
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
-pub(crate) struct ChunkTask<C> {
+pub(crate) struct ChunkTask<C, I> {
     pub position: IVec3,
-    pub chunk_data: ChunkData,
-    pub modified_voxels: ModifiedVoxels<C>,
+    pub chunk_data: ChunkData<I>,
+    pub modified_voxels: ModifiedVoxels<C, I>,
     pub mesh: Option<Mesh>,
     _marker: PhantomData<C>,
 }
 
-impl<C: Send + Sync + 'static> ChunkTask<C> {
-    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C>) -> Self {
+impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
+    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C, I>) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),
@@ -187,7 +187,7 @@ impl<C: Send + Sync + 'static> ChunkTask<C> {
     /// consumer.
     pub fn generate<F>(&mut self, mut voxel_data_fn: F)
     where
-        F: FnMut(IVec3) -> WorldVoxel + Send + 'static,
+        F: FnMut(IVec3) -> WorldVoxel<I> + Send + 'static,
     {
         let mut filled_count = 0;
         let modified_voxels = (*self.modified_voxels).read().unwrap();
@@ -239,7 +239,7 @@ impl<C: Send + Sync + 'static> ChunkTask<C> {
     }
 
     /// Generate a mesh for the chunk based on the currect voxel data
-    pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>) {
+    pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
             self.mesh = Some(meshing::generate_chunk_mesh(
                 self.chunk_data.voxels.as_ref().unwrap().clone(),

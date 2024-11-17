@@ -26,11 +26,13 @@ const BLUE: u8 = 2;
 struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
+    type MaterialIndex = u8;
+
     fn spawning_distance(&self) -> u32 {
         10
     }
 
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate {
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 }
@@ -40,6 +42,8 @@ impl VoxelWorldConfig for MainWorld {
 struct SecondWorld;
 
 impl VoxelWorldConfig for SecondWorld {
+    type MaterialIndex = u8;
+
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
             RED => [1, 1, 1],

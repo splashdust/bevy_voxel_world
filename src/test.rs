@@ -188,7 +188,12 @@ fn raycast_finds_voxel() {
         Startup,
         move |mut voxel_world: VoxelWorld<DefaultWorld>,
               buffers: (
-            ResMut<ChunkMapUpdateBuffer<DefaultWorld>>,
+            ResMut<
+                ChunkMapUpdateBuffer<
+                    DefaultWorld,
+                    <DefaultWorld as VoxelWorldConfig>::MaterialIndex,
+                >,
+            >,
             ResMut<MeshCacheInsertBuffer<DefaultWorld>>,
         )| {
             let test_voxel = crate::voxel::WorldVoxel::Solid(1);

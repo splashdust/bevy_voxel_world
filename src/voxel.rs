@@ -4,14 +4,14 @@ use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 pub const VOXEL_SIZE: f32 = 1.;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub enum WorldVoxel {
+pub enum WorldVoxel<I = u8> {
     #[default]
     Unset,
     Air,
-    Solid(u8),
+    Solid(I),
 }
 
-impl WorldVoxel {
+impl<I: PartialEq> WorldVoxel<I> {
     pub fn is_unset(&self) -> bool {
         *self == WorldVoxel::Unset
     }
@@ -25,7 +25,7 @@ impl WorldVoxel {
     }
 }
 
-impl Voxel for WorldVoxel {
+impl<I: PartialEq> Voxel for WorldVoxel<I> {
     fn get_visibility(&self) -> VoxelVisibility {
         if *self == WorldVoxel::Air || *self == WorldVoxel::Unset {
             VoxelVisibility::Empty
@@ -35,13 +35,13 @@ impl Voxel for WorldVoxel {
     }
 }
 
-impl MergeVoxel for WorldVoxel {
-    type MergeValue = u8;
+impl<I: PartialEq + Eq + Default + Copy> MergeVoxel for WorldVoxel<I> {
+    type MergeValue = I;
 
     fn merge_value(&self) -> Self::MergeValue {
         match self {
             WorldVoxel::Solid(v) => *v,
-            _ => 0,
+            _ => I::default(),
         }
     }
 }

@@ -21,13 +21,13 @@ use crate::{
     voxel_material::ATTRIBUTE_TEX_INDEX,
 };
 
-type VoxelArray = Arc<[WorldVoxel; PaddedChunkShape::SIZE as usize]>;
+type VoxelArray<I> = Arc<[WorldVoxel<I>; PaddedChunkShape::SIZE as usize]>;
 
 /// Generate a mesh for the given chunks, or None of the chunk is empty
-pub(super) fn generate_chunk_mesh(
-    voxels: VoxelArray,
+pub(super) fn generate_chunk_mesh<I: PartialEq + Copy>(
+    voxels: VoxelArray<I>,
     _pos: IVec3,
-    texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>,
+    texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
 ) -> Mesh {
     let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
     let mut buffer = UnitQuadBuffer::new();
@@ -45,11 +45,11 @@ pub(super) fn generate_chunk_mesh(
 }
 
 /// Convert a QuadBuffer into a Bevy Mesh
-fn mesh_from_quads(
+fn mesh_from_quads<I: PartialEq + Copy>(
     quads: UnitQuadBuffer,
     faces: [OrientedBlockFace; 6],
-    voxels: VoxelArray,
-    texture_index_mapper: Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync>,
+    voxels: VoxelArray<I>,
+    texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
 ) -> Mesh {
     let num_indices = quads.num_quads() * 6;
     let num_vertices = quads.num_quads() * 4;
@@ -146,7 +146,7 @@ fn ao_value(side1: bool, corner: bool, side2: bool) -> u32 {
     }
 }
 
-fn side_aos(neighbours: [WorldVoxel; 8]) -> [u32; 4] {
+fn side_aos<I: PartialEq>(neighbours: [WorldVoxel<I>; 8]) -> [u32; 4] {
     let ns = [
         neighbours[0].get_visibility() == VoxelVisibility::Opaque,
         neighbours[1].get_visibility() == VoxelVisibility::Opaque,
@@ -166,7 +166,11 @@ fn side_aos(neighbours: [WorldVoxel; 8]) -> [u32; 4] {
     ]
 }
 
-fn face_aos(voxel_pos: &[u32; 3], face_normal: &IVec3, voxels: &VoxelArray) -> [u32; 4] {
+fn face_aos<I: PartialEq + Copy>(
+    voxel_pos: &[u32; 3],
+    face_normal: &IVec3,
+    voxels: &VoxelArray<I>,
+) -> [u32; 4] {
     let [x, y, z] = *voxel_pos;
 
     match *face_normal {
