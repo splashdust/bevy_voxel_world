@@ -41,7 +41,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 /// traversed by the ray. `visit_voxel` will be called with:
 /// - The current voxel coordinates on the grid
 /// - The normalized time `t` along the ray at the moment the ray intersects with the current
-/// voxel (such that `IntersectionPoint = t * (end - start)`)
+///   voxel (such that `IntersectionPoint = t * (end - start)`)
 /// - The face through which the voxel was entered by the ray
 ///
 /// # Example
