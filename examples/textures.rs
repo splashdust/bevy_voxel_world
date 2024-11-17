@@ -3,6 +3,7 @@ use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 
 // Declare materials as consts for convenience
+// This can also be an enum or other type, see the `textures_custom_idx.rs` example
 const SNOWY_BRICK: u8 = 0;
 const FULL_BRICK: u8 = 1;
 const GRASS: u8 = 2;

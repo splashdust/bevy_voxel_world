@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;
 
+// Using enum for material index allows for more than u8::MAX number of materials.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Default)]
 enum BlockTexture {
     #[default]
