@@ -1,7 +1,7 @@
 use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*, utils::HashMap};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 #[derive(Resource, Clone, Default)]
 struct MainWorld;
 
@@ -13,6 +13,16 @@ impl VoxelWorldConfig for MainWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos| get_voxel_fn())
+    }
+
+    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+        Arc::new(|mat| match mat {
+            0 => [0, 0, 0],
+            1 => [1, 1, 1],
+            2 => [2, 2, 2],
+            3 => [3, 3, 3],
+            _ => [0, 0, 0],
+        })
     }
 }
 
