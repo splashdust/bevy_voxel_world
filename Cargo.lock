@@ -261,7 +261,7 @@ dependencies = [
  "async-task",
  "concurrent-queue",
  "fastrand",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
  "slab",
 ]
 
@@ -273,7 +273,7 @@ checksum = "bc19683171f287921f2405677dd2ed2549c3b3bda697a563ebc3a121ace2aba1"
 dependencies = [
  "async-lock 3.3.0",
  "blocking",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
 ]
 
 [[package]]
@@ -415,7 +415,7 @@ dependencies = [
  "crossbeam-channel",
  "downcast-rs",
  "futures-io",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
  "js-sys",
  "parking_lot",
  "ron",
@@ -879,7 +879,7 @@ dependencies = [
  "codespan-reporting",
  "downcast-rs",
  "encase",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
  "hexasphere",
  "image",
  "js-sys",
@@ -990,7 +990,7 @@ dependencies = [
  "async-channel 2.2.0",
  "async-executor",
  "concurrent-queue",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
  "wasm-bindgen-futures",
 ]
 
@@ -1108,7 +1108,7 @@ dependencies = [
  "ahash 0.8.11",
  "bevy",
  "block-mesh",
- "futures-lite 2.3.0",
+ "futures-lite 2.5.0",
  "ndshape",
  "noise",
  "rand",
@@ -1864,9 +1864,9 @@ dependencies = [
 
 [[package]]
 name = "futures-lite"
-version = "2.3.0"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52527eb5074e35e9339c6b4e8d12600c7128b68fb25dcb9fa9dec18f7c25f3a5"
+checksum = "cef40d21ae2c515b51041df9ed313ed21e572df340ea58a922a0aefe7e8891a1"
 dependencies = [
  "fastrand",
  "futures-core",
