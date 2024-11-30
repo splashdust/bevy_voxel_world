@@ -82,10 +82,8 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
 
     // camera
     commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(-10.0, 10.0, -10.0).looking_at(Vec3::Y * 4.0, Vec3::Y),
-            ..default()
-        },
+        Camera3d::default(),
+        Transform::from_xyz(-10.0, 10.0, -10.0).looking_at(Vec3::Y * 4.0, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
         VoxelWorldCamera::<SecondWorld>::default(),
@@ -93,17 +91,16 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
 
     // Sun
     let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
+    commands.spawn(
+        (DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(0.0, 0.0, 0.0)
+        Transform::from_xyz(0.0, 0.0, 0.0)
             .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
-        cascade_shadow_config,
-        ..default()
-    });
+        cascade_shadow_config,)
+    );
 
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {

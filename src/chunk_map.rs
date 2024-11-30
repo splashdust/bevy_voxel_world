@@ -132,7 +132,7 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
                     tmp_vec.push(Vec3A::from(v.as_vec3()));
                 }
                 write_lock.bounds =
-                    Aabb3d::from_point_cloud(Vec3A::ZERO, Quat::IDENTITY, tmp_vec.drain(0..));
+                    Aabb3d::from_point_cloud(Isometry3d::IDENTITY, tmp_vec.drain(0..));
             }
         }
     }

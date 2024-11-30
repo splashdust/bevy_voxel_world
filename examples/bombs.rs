@@ -50,27 +50,24 @@ fn setup(mut commands: Commands) {
 
     // camera
     commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(-120.0, 150.0, -120.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ..default()
-        },
+        Camera3d::default(),
+        Transform::from_xyz(-120.0, 150.0, -120.0),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
 
     // Sun
     let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
+    commands.spawn(
+        (DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(0.0, 0.0, 0.0)
+        Transform::from_xyz(0.0, 0.0, 0.0)
             .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
-        cascade_shadow_config,
-        ..default()
-    });
+        cascade_shadow_config,)
+    );
 
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {
@@ -130,8 +127,8 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    cam_transform.single_mut().translation.x += time.delta_seconds() * 7.0;
-    cam_transform.single_mut().translation.z += time.delta_seconds() * 12.0;
+    cam_transform.single_mut().translation.x += time.delta_secs() * 7.0;
+    cam_transform.single_mut().translation.z += time.delta_secs() * 12.0;
 }
 
 fn explosion(
@@ -143,7 +140,7 @@ fn explosion(
     let mut timeout = timeout.get_single_mut().unwrap();
     timeout
         .timer
-        .tick(Duration::from_secs_f32(time.delta_seconds()));
+        .tick(Duration::from_secs_f32(time.delta_secs()));
 
     if !timeout.timer.finished() {
         return;

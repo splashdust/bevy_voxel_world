@@ -83,8 +83,8 @@ where
         let world_root = commands
             .spawn((
                 WorldRoot::<C>(PhantomData),
-                VisibilityBundle::default(),
-                TransformBundle::default(),
+                Visibility::default(),
+                Transform::default(),
             ))
             .id();
         configuration.init_root(commands, world_root)
@@ -119,7 +119,7 @@ where
         // Shoots a ray from the given point, and queue all (non-spawned) chunks intersecting the ray
         let queue_chunks_intersecting_ray_from_point =
             |point: Vec2, queue: &mut VecDeque<IVec3>| {
-                let Some(ray) = camera.viewport_to_world(cam_gtf, point) else {
+                let Ok(ray) = camera.viewport_to_world(cam_gtf, point) else {
                     return;
                 };
                 let mut current = ray.origin;
@@ -410,7 +410,7 @@ where
             } else {
                 commands
                     .entity(entity)
-                    .remove::<Handle<Mesh>>()
+                    .remove::<Mesh3d>()
                     .remove::<MeshRef>();
             }
 
@@ -479,12 +479,9 @@ where
         for (entity, mesh_ref, transform) in needs_material.iter_mut() {
             commands
                 .entity(entity)
-                .try_insert(MaterialMeshBundle {
-                    mesh: (*mesh_ref.0).clone(),
-                    material: material_handle.handle.clone(),
-                    transform: *transform,
-                    ..default()
-                })
+                .insert(Mesh3d((*mesh_ref.0).clone()))
+                .insert(MeshMaterial3d(material_handle.handle.clone()))
+                .insert(*transform)
                 .remove::<NeedsMaterial<C>>();
         }
     }

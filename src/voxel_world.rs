@@ -277,7 +277,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
 
         Arc::new(move |ray, filter| {
             let p = ray.origin;
-            let d = *ray.direction;
+            let d = ray.direction;
 
             let loaded_aabb =
                 ChunkMap::<C, C::MaterialIndex>::get_world_bounds(&chunk_map.read().unwrap());
