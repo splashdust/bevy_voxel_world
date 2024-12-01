@@ -1,8 +1,5 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
-use std::{
-    f32::consts::{FRAC_PI_2, PI},
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 use crate::configuration::VoxelWorldConfig;
 
@@ -131,51 +128,18 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
         let radius = 0.45;
         let color = gizmo.color;
 
-        // Vec3::AXES.iter().for_each(|&axis| {
-        //     gizmos.circle(
-        //         pos - (axis * 0.5) + (Vec3::ONE * 0.5),
-        //         Dir3::new(axis).unwrap(),
-        //         radius,
-        //         color,
-        //     );
-        //     gizmos.circle(
-        //         pos + (axis * 0.5) + (Vec3::ONE * 0.5),
-        //         Dir3::new(-axis).unwrap(),
-        //         radius,
-        //         color,
-        //     );
-        //});
-
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::IDENTITY),
-            radius,
-            color,
-        );
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_z(PI)),
-            radius,
-            color,
-        );
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_x(FRAC_PI_2)),
-            radius,
-            color,
-        );
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_x(-FRAC_PI_2)),
-            radius,
-            color,
-        );
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_y(FRAC_PI_2)),
-            radius,
-            color,
-        );
-        gizmos.circle(
-            Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_y(-FRAC_PI_2)),
-            radius,
-            color,
-        );
+        Vec3::AXES.iter().for_each(|&axis| {
+            gizmos.circle(
+                Isometry3d::new(pos - Vec3::ONE * 0.5, Quat::from_rotation_arc(Vec3::Z, axis)),
+                radius,
+                color,
+            );
+            gizmos.circle(
+                Isometry3d::new(pos + Vec3::ONE * 0.5, Quat::from_rotation_arc(Vec3::Z, -axis)),
+                radius,
+                color,
+            );
+        });
     }
 }
 

@@ -251,7 +251,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
     ///         let (camera, cam_gtf) = camera_info.single();
-    ///         let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+    ///         let Ok(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
     ///            return;
     ///         };
     ///
