@@ -106,7 +106,7 @@ pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     configuration: Res<'w, C>,
 }
 
-impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
+impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
         self.get_voxel_fn()(position)

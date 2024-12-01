@@ -58,16 +58,15 @@ fn setup(mut commands: Commands) {
 
     // Sun
     let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
-    commands.spawn(
-        (DirectionalLight {
+    commands.spawn((
+        DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 0.0)
-            .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
-        cascade_shadow_config,)
-    );
+        Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
+        cascade_shadow_config,
+    ));
 
     // Ambient light, same color as sun
     commands.insert_resource(AmbientLight {
