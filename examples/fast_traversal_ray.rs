@@ -177,8 +177,10 @@ fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
 
             if let Ok(normal) = face.try_into() {
                 gizmos.circle(
-                    voxel_center + (normal * VOXEL_SIZE / 2.),
-                    Dir3::new(normal).unwrap(),
+                    Isometry3d::new(
+                        voxel_center + (normal * VOXEL_SIZE / 2.),
+                        Quat::from_rotation_arc(Vec3::Z, normal),
+                    ),
                     0.8 * VOXEL_SIZE / 2.,
                     css::RED.with_alpha(0.5),
                 );
