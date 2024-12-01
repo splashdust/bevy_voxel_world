@@ -100,13 +100,13 @@ fn setup(
         ));
 
     // light
-    commands.spawn(
-    (PointLight {
-        shadows_enabled: true,
-        ..default()
-    },Transform::from_xyz(4.0, 8.0, 4.0)
-    )
-);
+    commands.spawn((
+        PointLight {
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
 }
 
 fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
@@ -184,7 +184,10 @@ fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
                 );
 
                 gizmos.sphere(
-                    Isometry3d::new(trace_start + (trace.end - trace_start) * time,Quat::IDENTITY),
+                    Isometry3d::new(
+                        trace_start + (trace.end - trace_start) * time,
+                        Quat::IDENTITY,
+                    ),
                     0.1,
                     Color::BLACK,
                 );

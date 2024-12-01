@@ -65,8 +65,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///
 ///         // Draw a debug dot where the ray entered this voxel
 ///         gizmos.sphere(
-///             trace_start + (trace_end - trace_start) * time,
-///             Quat::IDENTITY,
+///             Isometry3d::new(trace_start + (trace_end - trace_start) * time,Quat::IDENTITY),
 ///             0.1,
 ///             Color::BLACK);
 ///
@@ -74,8 +73,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///         // a debug circle on the face through which the trace entered the current voxel
 ///         if let Ok(entered_face_normal) = face.try_into() {
 ///             gizmos.circle(
-///                 voxel_center + (entered_face_normal * VOXEL_SIZE / 2.),
-///                 Dir3::new(entered_face_normal).unwrap(),
+///                 Isometry3d::new(voxel_center + (entered_face_normal * VOXEL_SIZE / 2.), Quat::from_rotation_arc(Vec3::Z, entered_face_normal)),
 ///                 0.8 * VOXEL_SIZE / 2.,
 ///                 css::RED.with_alpha(0.5));
 ///         }
