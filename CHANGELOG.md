@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+Upgrade to Bevy 0.15
+
+Thanks to @Touma-Kazusa2 for contributing this release
+
 ## 0.9.0
 
 Use a generic type for voxel material index. See the `textures_custom_idx.rs` example for details on how this can be used.
