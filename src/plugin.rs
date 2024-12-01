@@ -1,11 +1,9 @@
 use bevy::{
     asset::load_internal_asset,
+    image::{CompressedImageFormats, ImageSampler, ImageType},
     pbr::ExtendedMaterial,
     prelude::*,
-    render::{
-        render_asset::RenderAssetUsages,
-        texture::{CompressedImageFormats, ImageSampler, ImageType},
-    },
+    render::render_asset::RenderAssetUsages,
 };
 
 use crate::{

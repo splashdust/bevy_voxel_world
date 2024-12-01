@@ -15,10 +15,8 @@ fn _test_setup_app() -> App {
     app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
     app.add_systems(Startup, |mut commands: Commands| {
         commands.spawn((
-            Camera3dBundle {
-                transform: Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-                ..default()
-            },
+            Camera3d::default(),
+            Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
             VoxelWorldCamera::<DefaultWorld>::default(),
         ));
     });

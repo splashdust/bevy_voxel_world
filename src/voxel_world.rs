@@ -106,7 +106,7 @@ pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     configuration: Res<'w, C>,
 }
 
-impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
+impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
         self.get_voxel_fn()(position)
@@ -251,7 +251,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
     ///         let (camera, cam_gtf) = camera_info.single();
-    ///         let Some(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
+    ///         let Ok(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
     ///            return;
     ///         };
     ///
@@ -277,7 +277,7 @@ impl<'w, C: VoxelWorldConfig> VoxelWorld<'w, C> {
 
         Arc::new(move |ray, filter| {
             let p = ray.origin;
-            let d = *ray.direction;
+            let d = ray.direction;
 
             let loaded_aabb =
                 ChunkMap::<C, C::MaterialIndex>::get_world_bounds(&chunk_map.read().unwrap());

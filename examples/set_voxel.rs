@@ -14,10 +14,8 @@ fn main() {
 fn setup(mut commands: Commands) {
     // Camera
     commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(20.0, 20.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ..default()
-        },
+        Camera3d::default(),
+        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<DefaultWorld>::default(),
     ));
@@ -51,7 +49,7 @@ fn move_camera(
     mut query: Query<&mut Transform, With<VoxelWorldCamera<DefaultWorld>>>,
 ) {
     let mut transform = query.single_mut();
-    let time_seconds = time.elapsed_seconds();
+    let time_seconds = time.elapsed_secs();
     transform.translation.x = 25.0 * (time_seconds * 0.1).sin();
     transform.translation.z = 25.0 * (time_seconds * 0.1).cos();
     transform.look_at(Vec3::ZERO, Vec3::Y);

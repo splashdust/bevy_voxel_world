@@ -74,8 +74,10 @@ pub(crate) fn prepare_texture(
     mut images: ResMut<Assets<Image>>,
 ) {
     if loading_texture.is_loaded
-        || asset_server.get_load_state(loading_texture.handle.clone().id())
-            != Some(bevy::asset::LoadState::Loaded)
+        || !matches!(
+            asset_server.get_load_state(loading_texture.handle.clone().id()),
+            Some(bevy::asset::LoadState::Loaded)
+        )
     {
         return;
     }

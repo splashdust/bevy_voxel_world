@@ -43,7 +43,7 @@ pub struct VoxelWorldDebugDraw<'w, C: VoxelWorldConfig> {
     ray_gizmos: Res<'w, RayGizmos<C>>,
 }
 
-impl<'w, C: VoxelWorldConfig> VoxelWorldDebugDraw<'w, C> {
+impl<C: VoxelWorldConfig> VoxelWorldDebugDraw<'_, C> {
     pub fn set_voxel_gizmo(&self, gizmo: VoxelGizmo) {
         self.set_voxel_gizmo_fn()(gizmo);
     }
@@ -130,14 +130,18 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
 
         Vec3::AXES.iter().for_each(|&axis| {
             gizmos.circle(
-                pos - (axis * 0.5) + (Vec3::ONE * 0.5),
-                Dir3::new(axis).unwrap(),
+                Isometry3d::new(
+                    pos - Vec3::ONE * 0.5,
+                    Quat::from_rotation_arc(Vec3::Z, axis),
+                ),
                 radius,
                 color,
             );
             gizmos.circle(
-                pos + (axis * 0.5) + (Vec3::ONE * 0.5),
-                Dir3::new(-axis).unwrap(),
+                Isometry3d::new(
+                    pos + Vec3::ONE * 0.5,
+                    Quat::from_rotation_arc(Vec3::Z, -axis),
+                ),
                 radius,
                 color,
             );
