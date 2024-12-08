@@ -5,8 +5,8 @@ use bevy::{
     render::{
         mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
-            VertexFormat,
+            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
+            SpecializedMeshPipelineError, VertexFormat,
         },
     },
 };
@@ -61,6 +61,14 @@ impl MaterialExtension for StandardVoxelMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        if descriptor
+            .vertex
+            .shader_defs
+            .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+        {
+            return Ok(());
+        }
+
         let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
