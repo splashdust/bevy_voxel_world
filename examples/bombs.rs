@@ -51,7 +51,7 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-120.0, 150.0, -120.0),
+        Transform::from_xyz(-120.0, 150.0, -120.0).looking_at(Vec3::ZERO, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
