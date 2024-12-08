@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1
+
+Fix crash on macOS (#43)
+
 ## 0.10.0
 
 Upgrade to Bevy 0.15
