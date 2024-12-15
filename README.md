@@ -66,7 +66,7 @@ Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. 
 
 ## Voxel materials
 
-`Solid` voxels holds a `u8` material type value. Thus, a maximum of 256 material types are supported. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback.
+`Solid` voxels holds a material type value. You can configure the type of the material index, but it's advisable to keep it small (like `u8`), since each voxel will hold one of these values. Material types can easily be mapped to indexes in a 2d texture array though a mapping callback. The mapping callback always returns a `[u32; 3]` which is passed along to the shader.
 
 A custom array texture can be supplied in the config. It should be image with a size of `W x (W * n)`, where `n` is the number of indexes. So an array of 4 16x16 px textures would be 16x64 px in size. The number of indexes is specified in the second parameter.
 
@@ -74,6 +74,9 @@ Then, to map out which indexes belong to which material type, you can supply a `
 
 ```rust
 impl VoxelWorldConfig for MyWorld {
+    // In this example we use a `u8` for the index.
+    type MaterialIndex = u8;
+
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
             SNOWY_BRICK => [0, 1, 2],
