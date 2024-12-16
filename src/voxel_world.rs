@@ -221,6 +221,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
             let z = rand::random::<f32>() * r * 2.0 - r;
 
             let pos = position + IVec3::new(x as i32, position.y, z as i32);
+            #[allow(deprecated)]
             if let Some(result) = self.get_closest_surface_voxel(pos) {
                 return Some(result);
             }
@@ -230,10 +231,12 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     }
 
     /// Get first surface voxel at the given Vec2 position
+    #[deprecated(since = "0.11.0", note = "Use raycast to find a surface instead")]
     pub fn get_surface_voxel_at_2d_pos(
         &self,
         pos_2d: Vec2,
     ) -> Option<(IVec3, WorldVoxel<C::MaterialIndex>)> {
+        #[allow(deprecated)]
         self.get_closest_surface_voxel(IVec3 {
             x: pos_2d.x.floor() as i32,
             y: 256,
