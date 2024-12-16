@@ -174,6 +174,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
 
     /// Get the closes surface voxel to the given position
     /// Returns None if there is no surface voxel at or below the given position
+    #[deprecated(since = "0.11.0", note = "Use raycast to find a surface instead")]
     pub fn get_closest_surface_voxel(
         &self,
         position: IVec3,
@@ -204,6 +205,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
 
     /// Get a randowm surface voxel within the given radius of the given position
     /// Returns None if no surface voxel was found within the given radius
+    #[deprecated(since = "0.11.0", note = "Use raycast to find a surface instead")]
     pub fn get_random_surface_voxel(
         &self,
         position: IVec3,
