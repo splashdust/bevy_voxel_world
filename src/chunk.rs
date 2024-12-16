@@ -52,17 +52,17 @@ pub enum FillType<I> {
 /// the chunk is despawned.
 #[derive(Clone, Debug)]
 pub struct ChunkData<I> {
-    pub position: IVec3,
-    pub voxels: Option<Arc<VoxelArray<I>>>,
-    pub voxels_hash: u64,
-    pub is_full: bool,
-    pub is_empty: bool,
-    pub fill_type: FillType<I>,
-    pub entity: Entity,
+    pub(crate) position: IVec3,
+    pub(crate) voxels: Option<Arc<VoxelArray<I>>>,
+    pub(crate) voxels_hash: u64,
+    pub(crate) is_full: bool,
+    pub(crate) is_empty: bool,
+    pub(crate) fill_type: FillType<I>,
+    pub(crate) entity: Entity,
 }
 
 impl<I: Hash + Copy> ChunkData<I> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             position: IVec3::ZERO,
             voxels: None,
@@ -74,12 +74,12 @@ impl<I: Hash + Copy> ChunkData<I> {
         }
     }
 
-    pub fn with_entity(entity: Entity) -> Self {
+    pub(crate) fn with_entity(entity: Entity) -> Self {
         let new = Self::new();
         Self { entity, ..new }
     }
 
-    pub fn generate_hash(&mut self) {
+    pub(crate) fn generate_hash(&mut self) {
         if let Some(voxels) = &self.voxels {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             voxels.hash(&mut hasher);
@@ -87,6 +87,8 @@ impl<I: Hash + Copy> ChunkData<I> {
         }
     }
 
+    /// Get the voxel at the given position in the chunk
+    /// The position is given in local chunk coordinates
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if self.voxels.is_some() {
             self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
@@ -99,16 +101,45 @@ impl<I: Hash + Copy> ChunkData<I> {
         }
     }
 
+    /// Returns true if the chunk is full. No mesh will be generated for full chunks.
+    pub fn is_full(&self) -> bool {
+        self.is_full
+    }
+
+    /// Returns true if the chunk is empty. No mesh will be generated for empty chunks.
+    pub fn is_empty(&self) -> bool {
+        self.is_empty
+    }
+
+    /// Returns the fill type of the chunk.
+    /// This is used to determine the type of content in the chunk.
+    ///
+    /// - FillType::Empty - The chunk is completely empty
+    /// - FillType::Mixed - The chunk contains a mix of different voxels, either different materials or air
+    /// - FillType::Uniform(WorldVoxel) - The chunk is full and contains only one type of voxel. The type can be retrieved from contained WorldVoxel
+    pub fn get_fill_type(&self) -> &FillType<I> {
+        &self.fill_type
+    }
+
+    /// Returns the entity of the corresponding Chunk
+    pub fn get_entity(&self) -> Entity {
+        self.entity
+    }
+
+    /// Rteurns the position of the chunk in world coordinates
     pub fn world_position(&self) -> Vec3 {
         self.position.as_vec3() * CHUNK_SIZE_F
     }
 
+    /// Returns the AABB of the chunk
     pub fn aabb(&self) -> Aabb {
         let min = Vec3::ZERO;
         let max = min + Vec3::splat(CHUNK_SIZE_F);
         Aabb::from_min_max(min, max)
     }
 
+    /// Returns true if the given point is inside the chunk
+    /// The point is given in world coordinates
     pub fn encloses_point(&self, point: Vec3) -> bool {
         let local_point = point - self.world_position();
         let aabb = self.aabb();

@@ -478,3 +478,21 @@ fn voxel_line_traversal_ending_on_voxel_boundary() {
         test_state.test_name
     );
 }
+
+#[test]
+fn can_get_chunk_data() {
+    let mut app = _test_setup_app();
+
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
+        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+    });
+
+    app.update();
+
+    app.add_systems(Update, |voxel_world: VoxelWorld<DefaultWorld>| {
+        let chunk_data = voxel_world.get_chunk_data(IVec3::ZERO);
+        assert!(chunk_data.is_some());
+    });
+
+    app.update();
+}

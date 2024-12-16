@@ -8,6 +8,7 @@ use std::sync::Arc;
 use bevy::{ecs::system::SystemParam, math::bounding::RayCast3d, prelude::*};
 
 use crate::{
+    chunk::ChunkData,
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
     traversal_alg::voxel_line_traversal,
@@ -155,6 +156,22 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
         })
     }
 
+    pub fn get_chunk_data(&self, chunk_pos: IVec3) -> Option<ChunkData<C::MaterialIndex>> {
+        self.chunk_map
+            .get_map()
+            .read()
+            .unwrap()
+            .get(&chunk_pos)
+            .cloned()
+    }
+
+    pub fn get_chunk_data_fn(
+        &self,
+    ) -> Arc<dyn Fn(IVec3) -> Option<ChunkData<C::MaterialIndex>> + Send + Sync> {
+        let chunk_map = self.chunk_map.get_map();
+        Arc::new(move |chunk_pos| chunk_map.read().unwrap().get(&chunk_pos).cloned())
+    }
+
     /// Get the closes surface voxel to the given position
     /// Returns None if there is no surface voxel at or below the given position
     pub fn get_closest_surface_voxel(
@@ -199,19 +216,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
 
             let r = radius as f32;
             let x = rand::random::<f32>() * r * 2.0 - r;
-            let y = rand::random::<f32>() * r * 2.0 - r;
             let z = rand::random::<f32>() * r * 2.0 - r;
 
-            if y < 0.0 {
-                continue;
-            }
-
-            let d = x * x + y * y + z * z;
-            if d > r * r {
-                continue;
-            }
-
-            let pos = position + IVec3::new(x as i32, y as i32, z as i32);
+            let pos = position + IVec3::new(x as i32, position.y, z as i32);
             if let Some(result) = self.get_closest_surface_voxel(pos) {
                 return Some(result);
             }
