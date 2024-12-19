@@ -4,7 +4,8 @@ use bevy::{
     render::{
         mesh::MeshVertexBufferLayoutRef,
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
+            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
+            SpecializedMeshPipelineError,
         },
     },
 };
@@ -104,6 +105,16 @@ impl Material for CustomVoxelMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // Skip specialization if this is the prepass pipeline
+        // This is necessary in some cases because the prepass pipeline expects a different vertex layout
+        if descriptor
+            .vertex
+            .shader_defs
+            .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+        {
+            return Ok(());
+        }
+
         // Use `vertex_layout()` from `bevy_voxel_world` to get the correct vertex layout
         let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
