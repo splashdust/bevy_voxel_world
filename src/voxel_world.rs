@@ -156,6 +156,11 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
         })
     }
 
+    /// Get the ChunkData for the given chunk position
+    ///
+    /// The position should be the chunk position, measured in CHUNK_SIZE units (32 by default)
+    ///
+    /// You can `floor(voxel_position / CHUNK_SIZE)` to get the chunk position from a voxel position
     pub fn get_chunk_data(&self, chunk_pos: IVec3) -> Option<ChunkData<C::MaterialIndex>> {
         self.chunk_map
             .get_map()

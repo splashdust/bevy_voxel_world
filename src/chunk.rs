@@ -61,7 +61,7 @@ pub struct ChunkData<I> {
     pub(crate) entity: Entity,
 }
 
-impl<I: Hash + Copy> ChunkData<I> {
+impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     pub(crate) fn new() -> Self {
         Self {
             position: IVec3::ZERO,
@@ -126,7 +126,7 @@ impl<I: Hash + Copy> ChunkData<I> {
         self.entity
     }
 
-    /// Rteurns the position of the chunk in world coordinates
+    /// Returns the position of the chunk in world coordinates
     pub fn world_position(&self) -> Vec3 {
         self.position.as_vec3() * CHUNK_SIZE_F
     }
@@ -152,9 +152,19 @@ impl<I: Hash + Copy> ChunkData<I> {
             && local_point.y <= max.y
             && local_point.z <= max.z
     }
+
+    /// Returns true if the given voxel is within the bounds of the chunk
+    /// and the voxel data at the given position matcheso the given voxel
+    pub fn has_voxel(&self, voxel_pos: IVec3, voxel: WorldVoxel<I>) -> bool {
+        let chunk_pos = voxel_pos / CHUNK_SIZE_I;
+        if self.position != chunk_pos {
+            return false;
+        }
+        self.get_voxel(voxel_pos.as_uvec3() % CHUNK_SIZE_U) == voxel
+    }
 }
 
-impl<I: Hash + Copy> Default for ChunkData<I> {
+impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
     fn default() -> Self {
         Self::new()
     }
