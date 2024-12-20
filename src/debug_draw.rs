@@ -171,7 +171,7 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
 ) {
     for (chunk, transform) in chunks.iter() {
         let size = Vec3::ONE * CHUNK_SIZE_F;
-        let color = Srgba::new(0.0, 1.0, 1.0, 1.0);
+        let color = Srgba::new(0.0, 1.0, 0.0, 1.0);
 
         let Some(chunk_data) = voxel_world.get_chunk_data(chunk.position) else {
             continue;
