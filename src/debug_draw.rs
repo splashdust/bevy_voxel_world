@@ -1,7 +1,11 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use std::sync::{Arc, RwLock};
 
-use crate::configuration::VoxelWorldConfig;
+use crate::{
+    chunk::{Chunk, CHUNK_SIZE_F},
+    configuration::VoxelWorldConfig,
+    prelude::VoxelWorld,
+};
 
 #[derive(Default)]
 pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
@@ -10,7 +14,8 @@ pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
 
 impl<C: VoxelWorldConfig> Plugin for VoxelWorldDebugDrawPlugin<C> {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup::<C>)
+        app.init_gizmo_group::<ChunkGizmos>()
+            .add_systems(Startup, setup::<C>)
             .add_systems(Update, (draw_voxel_gizmos::<C>, draw_ray_gizmos::<C>));
     }
 }
@@ -152,5 +157,35 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
 fn draw_ray_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, ray_gizmos: Res<RayGizmos<C>>) {
     for gizmo in ray_gizmos.gizmos.read().unwrap().iter() {
         gizmos.line(gizmo.ray.origin, gizmo.ray.get_point(10.0), gizmo.color);
+    }
+}
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct ChunkGizmos;
+
+/// Add this system to your app to draw cuboid gizmos for non-empy chunks
+pub fn debug_draw_chunks<C: VoxelWorldConfig>(
+    mut gizmos: Gizmos<ChunkGizmos>,
+    chunks: Query<(&Chunk<C>, &GlobalTransform)>,
+    voxel_world: VoxelWorld<C>,
+) {
+    for (chunk, transform) in chunks.iter() {
+        let size = Vec3::ONE * CHUNK_SIZE_F;
+        let color = Srgba::new(0.0, 1.0, 1.0, 1.0);
+
+        let Some(chunk_data) = voxel_world.get_chunk_data(chunk.position) else {
+            continue;
+        };
+
+        if chunk_data.is_empty() {
+            continue;
+        }
+
+        gizmos.cuboid(
+            Transform::from(*transform)
+                .with_scale(size)
+                .with_translation(transform.translation() + 15.0),
+            color,
+        );
     }
 }
