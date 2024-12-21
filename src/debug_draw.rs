@@ -184,7 +184,7 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
         gizmos.cuboid(
             Transform::from(*transform)
                 .with_scale(size)
-                .with_translation(transform.translation() + 15.0),
+                .with_translation(transform.translation() + (CHUNK_SIZE_F / 2.0) + 1.0),
             color,
         );
     }
