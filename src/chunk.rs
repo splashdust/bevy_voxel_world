@@ -59,6 +59,7 @@ pub struct ChunkData<I> {
     pub(crate) is_empty: bool,
     pub(crate) fill_type: FillType<I>,
     pub(crate) entity: Entity,
+    pub(crate) has_generated: bool,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -71,6 +72,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             is_empty: true,
             fill_type: FillType::Empty,
             entity: Entity::PLACEHOLDER,
+            has_generated: false,
         }
     }
 
@@ -162,6 +164,12 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
         self.get_voxel(voxel_pos.as_uvec3() % CHUNK_SIZE_U) == voxel
     }
+
+    /// Returns true if this chunk has been processed by the voxel generation system (typically to generate terrain)
+    /// Before generation has happened, voxel data in the chunk is not initialized.
+    pub fn has_generated(&self) -> bool {
+        self.has_generated
+    }
 }
 
 impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
@@ -234,6 +242,8 @@ impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
         let modified_voxels = (*self.modified_voxels).read().unwrap();
         let mut voxels = [WorldVoxel::Unset; PaddedChunkShape::SIZE as usize];
         let mut material_count = HashSet::new();
+
+        self.chunk_data.has_generated = true;
 
         for i in 0..PaddedChunkShape::SIZE {
             let chunk_block = PaddedChunkShape::delinearize(i);
