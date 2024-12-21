@@ -23,7 +23,9 @@ use crate::{
     plugin::VoxelWorldMaterialHandle,
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
-    voxel_world::{ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, VoxelWorldCamera},
+    voxel_world::{
+        ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
+    },
 };
 
 #[derive(SystemParam, Deref)]
@@ -423,11 +425,14 @@ where
     pub fn flush_voxel_write_buffer(
         mut commands: Commands,
         mut buffer: ResMut<VoxelWriteBuffer<C, C::MaterialIndex>>,
+        mut ev_chunk_will_update: EventWriter<ChunkWillUpdate<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
     ) {
         let chunk_map_read_lock = chunk_map.get_read_lock();
         let mut modified_voxels = modified_voxels.write().unwrap();
+
+        let mut updated_chunks = HashSet::<(Entity, IVec3)>::new();
 
         for (position, voxel) in buffer.iter() {
             let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
@@ -439,9 +444,15 @@ where
             {
                 if let Some(mut ent) = commands.get_entity(chunk_data.entity) {
                     ent.try_insert(NeedsRemesh);
+                    updated_chunks.insert((chunk_data.entity, chunk_pos));
                 }
             }
         }
+
+        for (entity, chunk_pos) in updated_chunks {
+            ev_chunk_will_update.send(ChunkWillUpdate::<C>::new(chunk_pos, entity));
+        }
+
         buffer.clear();
     }
 

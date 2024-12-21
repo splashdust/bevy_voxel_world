@@ -121,7 +121,8 @@ where
             )
             .add_event::<ChunkWillSpawn<C>>()
             .add_event::<ChunkWillDespawn<C>>()
-            .add_event::<ChunkWillRemesh<C>>();
+            .add_event::<ChunkWillRemesh<C>>()
+            .add_event::<ChunkWillUpdate<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
         // This makes voxel_world work with a MinimalPlugins setup.

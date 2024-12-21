@@ -31,19 +31,21 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
+pub trait ChunkEventType {}
+
 #[derive(Event)]
-pub struct ChunkEvent<C> {
+pub struct ChunkEvent<C, E: ChunkEventType> {
     pub chunk_key: IVec3,
     pub entity: Entity,
-    _marker: PhantomData<C>,
+    _marker: (PhantomData<C>, PhantomData<E>),
 }
 
-impl<C> ChunkEvent<C> {
+impl<C, E: ChunkEventType> ChunkEvent<C, E> {
     pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
         Self {
             chunk_key,
             entity,
-            _marker: PhantomData,
+            _marker: (PhantomData, PhantomData),
         }
     }
 
@@ -51,19 +53,31 @@ impl<C> ChunkEvent<C> {
         Self {
             chunk_key: self.chunk_key,
             entity: self.entity,
-            _marker: PhantomData,
+            _marker: (PhantomData, PhantomData),
         }
     }
 }
 
 /// Fired when a chunk is about to be despawned.
-pub type ChunkWillDespawn<C> = ChunkEvent<C>;
+pub type ChunkWillDespawn<C> = ChunkEvent<C, WillDespawn>;
+pub struct WillDespawn;
+impl ChunkEventType for WillDespawn {}
 
 /// Fired when a chunk is about to be spawned.
-pub type ChunkWillSpawn<C> = ChunkEvent<C>;
+pub type ChunkWillSpawn<C> = ChunkEvent<C, WillSpawn>;
+pub struct WillSpawn;
+impl ChunkEventType for WillSpawn {}
 
 /// Fired when a chunk is about to be remeshed.
-pub type ChunkWillRemesh<C> = ChunkEvent<C>;
+pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;
+pub struct WillRemesh;
+impl ChunkEventType for WillRemesh {}
+
+/// Fired when a chunk is about to be updated, typically when `set_voxel` was called on a voxel
+/// within the chunk.
+pub type ChunkWillUpdate<C> = ChunkEvent<C, WillUpdate>;
+pub struct WillUpdate;
+impl ChunkEventType for WillUpdate {}
 
 pub trait FilterFn<I> {
     fn call(&self, input: (Vec3, WorldVoxel<I>)) -> bool;
