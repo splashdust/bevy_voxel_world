@@ -401,18 +401,18 @@ where
                         ))
                         .remove::<bevy::render::primitives::Aabb>();
                 }
-
-                chunk_map_update_buffer.push((
-                    chunk.position,
-                    chunk_task.chunk_data,
-                    ChunkWillSpawn::<C>::new(chunk_task.position, entity),
-                ));
             } else {
                 commands
                     .entity(entity)
                     .remove::<Mesh3d>()
                     .remove::<MeshRef>();
             }
+
+            chunk_map_update_buffer.push((
+                chunk.position,
+                chunk_task.chunk_data,
+                ChunkWillSpawn::<C>::new(chunk_task.position, entity),
+            ));
 
             commands
                 .entity(chunk.entity)
