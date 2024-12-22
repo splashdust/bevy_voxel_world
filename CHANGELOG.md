@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.2
+
+- `ChunkData` is now public. You can get the data for a chunk by calling `voxel_world.get_chunk_data(chunk_pos)`
+- `get_closest_surface_voxel`, `get_random_surface_voxel` and `get_surface_voxel_at_2d_pos` have been deprecated. It's better to use ray-casting instead to find voxels according to your needs.
+- A system for debug-drawing chunks have been added. This can be used to visualize chunk boundaries in the world.
+- Add `ChunkWillUpdate` event which is fired when `set_voxel` has been called
+- Fix an error in the events that caused events to fire incorrectly.
+
 ## 0.10.1
 
 Fix crash on macOS (#43)
