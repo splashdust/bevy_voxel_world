@@ -174,6 +174,27 @@ fn chunk_will_despawn_event() {
 }
 
 #[test]
+fn chunk_will_update_event() {
+    let mut app = _test_setup_app();
+
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
+        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+    });
+
+    app.update();
+
+    app.add_systems(
+        Update,
+        |mut ev_chunk_will_update: EventReader<ChunkWillUpdate<DefaultWorld>>| {
+            let count = ev_chunk_will_update.read().count();
+            assert!(count > 0)
+        },
+    );
+
+    app.update();
+}
+
+#[test]
 fn raycast_finds_voxel() {
     let mut app = _test_setup_app();
 
@@ -212,6 +233,7 @@ fn raycast_finds_voxel() {
                     is_empty: false,
                     fill_type: FillType::Mixed,
                     entity: Entity::PLACEHOLDER,
+                    has_generated: false,
                 },
                 ChunkWillSpawn::<DefaultWorld>::new(IVec3::new(0, 0, 0), Entity::PLACEHOLDER),
             ));
