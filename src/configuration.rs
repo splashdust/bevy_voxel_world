@@ -1,11 +1,18 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
+use crate::chunk::VoxelArray;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
 pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
 pub type VoxelLookupDelegate<I = u8> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
+
+pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
+
+pub type ChunkMeshingFn<I> =
+    Box<dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> Mesh + Send + Sync>;
+pub type ChunkMeshingDelegate<I> = Box<dyn Fn(IVec3) -> ChunkMeshingFn<I> + Send + Sync>;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -82,16 +89,36 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The three values correspond to the top, sides and bottom of the voxel. For example,
     /// if the slice is `[1,2,2]`, the top will use texture index 1 and the sides and bottom will use texture
     /// index 2.
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(&self) -> TextureIndexMapperFn<Self::MaterialIndex> {
         Arc::new(|_mat| [0, 0, 0])
     }
 
     /// A function that returns a function that returns true if a voxel exists at the given position
+    ///
     /// The delegate will be called every time a new chunk needs to be computed. The delegate should
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(|_| Box::new(|_| WorldVoxel::Unset))
+    }
+
+    /// A function that returns a function that computes the mesh for a chunk
+    ///
+    /// The delegate will be called every time a new chunk needs to be computed. The delegate should
+    /// return a function that returns a Mesh. This function needs to be thread-safe, since chunk computation
+    /// happens on a separate thread.
+    ///
+    /// The input to the function is the voxel array for the chunk, the position of the chunk and the texture
+    /// index mapper function
+    fn chunk_meshing_delegate(&self) -> ChunkMeshingDelegate<Self::MaterialIndex> {
+        Box::new(|pos: IVec3| {
+            Box::new(
+                move |voxels: Arc<VoxelArray<Self::MaterialIndex>>,
+                 texture_index_mapper: TextureIndexMapperFn<Self::MaterialIndex>| {
+                    crate::meshing::generate_chunk_mesh(voxels.into(), pos, texture_index_mapper)
+                },
+            )
+        })
     }
 
     /// A tuple of the path to the texture and the number of indexes in the texture. `None` if no texture is used.

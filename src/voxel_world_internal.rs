@@ -296,6 +296,7 @@ where
 
         for chunk in dirty_chunks.iter() {
             let voxel_data_fn = (configuration.voxel_lookup_delegate())(chunk.position);
+            let chunk_meshing_fn = (configuration.chunk_meshing_delegate())(chunk.position);
             let texture_index_mapper = configuration.texture_index_mapper().clone();
 
             let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
@@ -319,7 +320,7 @@ where
                     .unwrap()
                     .contains_key(&chunk_task.voxels_hash());
                 if !mesh_cache_hit {
-                    chunk_task.mesh(texture_index_mapper);
+                    chunk_task.mesh(chunk_meshing_fn, texture_index_mapper);
                 }
 
                 chunk_task

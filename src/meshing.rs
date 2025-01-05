@@ -17,17 +17,18 @@ use ndshape::ConstShape;
 
 use crate::{
     chunk::{PaddedChunkShape, CHUNK_SIZE_U},
+    prelude::TextureIndexMapperFn,
     voxel::WorldVoxel,
     voxel_material::ATTRIBUTE_TEX_INDEX,
 };
 
-type VoxelArray<I> = Arc<[WorldVoxel<I>; PaddedChunkShape::SIZE as usize]>;
+pub type VoxelArray<I> = Arc<[WorldVoxel<I>; PaddedChunkShape::SIZE as usize]>;
 
 /// Generate a mesh for the given chunks, or None of the chunk is empty
-pub(super) fn generate_chunk_mesh<I: PartialEq + Copy>(
+pub fn generate_chunk_mesh<I: PartialEq + Copy>(
     voxels: VoxelArray<I>,
     _pos: IVec3,
-    texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
+    texture_index_mapper: TextureIndexMapperFn<I>,
 ) -> Mesh {
     let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
     let mut buffer = UnitQuadBuffer::new();

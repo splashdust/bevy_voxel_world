@@ -22,6 +22,11 @@ pub mod prelude {
     pub use crate::voxel_world::{VoxelRaycastResult, VoxelWorld, VoxelWorldCamera};
 }
 
+pub mod custom_meshing {
+    pub use crate::meshing::generate_chunk_mesh;
+    pub use crate::meshing::VoxelArray;
+}
+
 pub mod debug {
     pub use crate::debug_draw::*;
 }

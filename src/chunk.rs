@@ -6,7 +6,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::{meshing, voxel::WorldVoxel, voxel_world_internal::ModifiedVoxels};
+use crate::{
+    prelude::{ChunkMeshingFn, TextureIndexMapperFn},
+    voxel::WorldVoxel,
+    voxel_world_internal::ModifiedVoxels,
+};
 
 // The size of a chunk in voxels
 // TODO: implement a way to change this though the configuration
@@ -19,7 +23,7 @@ pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 pub(crate) type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
-pub(crate) type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
+pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
@@ -290,11 +294,14 @@ impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
     }
 
     /// Generate a mesh for the chunk based on the currect voxel data
-    pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>) {
+    pub fn mesh(
+        &mut self,
+        mut chunk_meshing_fn: ChunkMeshingFn<I>,
+        texture_index_mapper: TextureIndexMapperFn<I>,
+    ) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
-            self.mesh = Some(meshing::generate_chunk_mesh(
+            self.mesh = Some(chunk_meshing_fn(
                 self.chunk_data.voxels.as_ref().unwrap().clone(),
-                self.position,
                 texture_index_mapper,
             ));
         }
