@@ -45,8 +45,8 @@ pub fn generate_chunk_mesh<I: PartialEq + Copy>(
     mesh_from_quads(buffer, faces, voxels, texture_index_mapper)
 }
 
-/// Convert a QuadBuffer into a Bevy Mesh
-fn mesh_from_quads<I: PartialEq + Copy>(
+/// Create a Bevy Mesh from a block_mesh::UnitQuadBuffer
+pub fn mesh_from_quads<I: PartialEq + Copy>(
     quads: UnitQuadBuffer,
     faces: [OrientedBlockFace; 6],
     voxels: VoxelArray<I>,
