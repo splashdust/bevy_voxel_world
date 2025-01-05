@@ -2,6 +2,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::chunk::VoxelArray;
+use crate::meshing::generate_chunk_mesh;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
@@ -10,9 +11,10 @@ pub type VoxelLookupDelegate<I = u8> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + S
 
 pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
 
-pub type ChunkMeshingFn<I> =
-    Box<dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> Mesh + Send + Sync>;
-pub type ChunkMeshingDelegate<I> = Box<dyn Fn(IVec3) -> ChunkMeshingFn<I> + Send + Sync>;
+pub type ChunkMeshingFn<I, UB> =
+    Box<dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>) + Send + Sync>;
+pub type ChunkMeshingDelegate<I, UB> =
+    Option<Box<dyn Fn(IVec3) -> ChunkMeshingFn<I, UB> + Send + Sync>>;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -41,7 +43,14 @@ pub enum ChunkSpawnStrategy {
 
 /// `bevy_voxel_world` configuation structs need to implement this trait
 pub trait VoxelWorldConfig: Resource + Default + Clone {
+    /// The type used to index materials. A value of this type will be stored in each voxel,
+    /// so it's a good idea to keep it small.
     type MaterialIndex: Copy + Hash + PartialEq + Eq + Default + Send + Sync;
+
+    /// This type is used to insert a custom component bundle in generated chunks during meshing.
+    /// It is part of the return type of the chunk_meshing_delegate function.
+    /// If you are not using this feature, you can set this to `()`.
+    type ChunkUserBundle: Bundle;
 
     /// Distance in chunks to spawn chunks around the camera
     fn spawning_distance(&self) -> u32 {
@@ -110,15 +119,10 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     ///
     /// The input to the function is the voxel array for the chunk, the position of the chunk and the texture
     /// index mapper function
-    fn chunk_meshing_delegate(&self) -> ChunkMeshingDelegate<Self::MaterialIndex> {
-        Box::new(|pos: IVec3| {
-            Box::new(
-                move |voxels: Arc<VoxelArray<Self::MaterialIndex>>,
-                 texture_index_mapper: TextureIndexMapperFn<Self::MaterialIndex>| {
-                    crate::meshing::generate_chunk_mesh(voxels.into(), pos, texture_index_mapper)
-                },
-            )
-        })
+    fn chunk_meshing_delegate(
+        &self,
+    ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
+        None
     }
 
     /// A tuple of the path to the texture and the number of indexes in the texture. `None` if no texture is used.
@@ -138,6 +142,17 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
 }
 
+pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
+    pos: IVec3,
+) -> ChunkMeshingFn<I, UB> {
+    Box::new(
+        move |voxels: Arc<VoxelArray<I>>, texture_index_mapper: TextureIndexMapperFn<I>| {
+            let mesh = generate_chunk_mesh(voxels, pos, texture_index_mapper);
+            (mesh, None)
+        },
+    )
+}
+
 #[derive(Resource, Clone, Default)]
 pub struct DefaultWorld;
 
@@ -145,6 +160,7 @@ impl DefaultWorld {}
 
 impl VoxelWorldConfig for DefaultWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {

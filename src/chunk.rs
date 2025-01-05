@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    prelude::{ChunkMeshingFn, TextureIndexMapperFn},
+    prelude::{ChunkMeshingFn, TextureIndexMapperFn, VoxelWorldConfig},
     voxel::WorldVoxel,
     voxel_world_internal::ModifiedVoxels,
 };
@@ -27,11 +27,11 @@ pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<C, I>(pub Task<ChunkTask<C, I>>, PhantomData<C>);
+pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(pub Task<ChunkTask<C, I>>, PhantomData<C>);
 
 impl<C, I> ChunkThread<C, I>
 where
-    C: Send + Sync + 'static,
+    C: VoxelWorldConfig,
 {
     pub fn new(task: Task<ChunkTask<C, I>>, _pos: IVec3) -> Self {
         Self(task, PhantomData)
@@ -216,21 +216,26 @@ impl<C> Chunk<C> {
 
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
-pub(crate) struct ChunkTask<C, I> {
+pub(crate) struct ChunkTask<C, I>
+where
+    C: VoxelWorldConfig,
+{
     pub position: IVec3,
     pub chunk_data: ChunkData<I>,
     pub modified_voxels: ModifiedVoxels<C, I>,
     pub mesh: Option<Mesh>,
+    pub user_bundle: Option<C::ChunkUserBundle>,
     _marker: PhantomData<C>,
 }
 
-impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
+impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
     pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C, I>) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),
             modified_voxels,
             mesh: None,
+            user_bundle: None,
             _marker: PhantomData,
         }
     }
@@ -296,14 +301,16 @@ impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
     /// Generate a mesh for the chunk based on the currect voxel data
     pub fn mesh(
         &mut self,
-        mut chunk_meshing_fn: ChunkMeshingFn<I>,
+        mut chunk_meshing_fn: ChunkMeshingFn<I, C::ChunkUserBundle>,
         texture_index_mapper: TextureIndexMapperFn<I>,
     ) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
-            self.mesh = Some(chunk_meshing_fn(
+            let mesh_and_bundle = chunk_meshing_fn(
                 self.chunk_data.voxels.as_ref().unwrap().clone(),
                 texture_index_mapper,
-            ));
+            );
+            self.mesh = Some(mesh_and_bundle.0);
+            self.user_bundle = mesh_and_bundle.1;
         }
     }
 

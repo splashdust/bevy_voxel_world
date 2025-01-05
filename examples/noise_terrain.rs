@@ -9,6 +9,7 @@ struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
         25

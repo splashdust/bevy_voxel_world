@@ -21,6 +21,7 @@ use crate::{
     configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfig},
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
+    prelude::default_chunk_meshing_delegate,
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{
@@ -66,7 +67,7 @@ pub(crate) struct Internals<C>(PhantomData<C>);
 #[derive(Component)]
 pub struct WorldRoot<C>(PhantomData<C>);
 
-impl<C: VoxelWorldConfig> Internals<C>
+impl<C> Internals<C>
 where
     C: VoxelWorldConfig,
 {
@@ -296,7 +297,11 @@ where
 
         for chunk in dirty_chunks.iter() {
             let voxel_data_fn = (configuration.voxel_lookup_delegate())(chunk.position);
-            let chunk_meshing_fn = (configuration.chunk_meshing_delegate())(chunk.position);
+            let chunk_meshing_fn = (configuration
+                .chunk_meshing_delegate()
+                .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
+                chunk.position
+            );
             let texture_index_mapper = configuration.texture_index_mapper().clone();
 
             let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
@@ -409,6 +414,10 @@ where
                     .entity(entity)
                     .remove::<Mesh3d>()
                     .remove::<MeshRef>();
+            }
+
+            if let Some(user_bundle) = chunk_task.user_bundle {
+                commands.entity(entity).insert(user_bundle);
             }
 
             chunk_map_update_buffer.push((
