@@ -50,7 +50,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// This type is used to insert a custom component bundle in generated chunks during meshing.
     /// It is part of the return type of the chunk_meshing_delegate function.
     /// If you are not using this feature, you can set this to `()`.
-    type ChunkUserBundle: Bundle;
+    type ChunkUserBundle: Bundle + Clone;
 
     /// Distance in chunks to spawn chunks around the camera
     fn spawning_distance(&self) -> u32 {

@@ -3,7 +3,7 @@
 /// This module contains the internal systems and resources used to implement bevy_voxel_world.
 ///
 use bevy::{
-    ecs::system::SystemParam,
+    ecs::{bundle, system::SystemParam},
     prelude::*,
     tasks::AsyncComputeTaskPool,
     utils::{HashMap, HashSet},
@@ -311,7 +311,8 @@ where
                 modified_voxels.clone(),
             );
 
-            let mesh_map = Arc::new(mesh_cache.get_map());
+            let mesh_map = mesh_cache.get_mesh_map();
+
             let thread = thread_pool.spawn(async move {
                 chunk_task.generate(voxel_data_fn);
 
@@ -384,7 +385,15 @@ where
             if !chunk_task.is_empty() {
                 if !chunk_task.is_full() {
                     let mesh_handle = {
-                        if let Some(mesh_handle) = mesh_cache.get(&chunk_task.voxels_hash()) {
+                        if let Some(mesh_handle) =
+                            mesh_cache.get_mesh_handle(&chunk_task.voxels_hash())
+                        {
+                            if let Some(user_bundle) =
+                                mesh_cache.get_user_bundle(&chunk_task.voxels_hash())
+                            {
+                                commands.entity(entity).insert(user_bundle);
+                            }
+
                             mesh_handle
                         } else {
                             if chunk_task.mesh.is_none() {
@@ -396,7 +405,16 @@ where
                             }
                             let hash = chunk_task.voxels_hash();
                             let mesh_ref = Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
-                            mesh_cache_insert_buffer.push((hash, mesh_ref.clone()));
+                            let user_bundle = chunk_task.user_bundle;
+
+                            mesh_cache_insert_buffer.push((
+                                hash,
+                                mesh_ref.clone(),
+                                user_bundle.clone(),
+                            ));
+                            if let Some(bundle) = user_bundle {
+                                commands.entity(entity).insert(bundle);
+                            }
                             mesh_ref
                         }
                     };
@@ -415,10 +433,6 @@ where
                     .entity(entity)
                     .remove::<Mesh3d>()
                     .remove::<MeshRef>();
-            }
-
-            if let Some(user_bundle) = chunk_task.user_bundle {
-                commands.entity(entity).insert(user_bundle);
             }
 
             chunk_map_update_buffer.push((
