@@ -8,12 +8,12 @@ use std::sync::Arc;
 use bevy::{ecs::system::SystemParam, math::bounding::RayCast3d, prelude::*};
 
 use crate::{
-    chunk::ChunkData,
+    chunk::{ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I},
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
-    voxel_world_internal::{get_chunk_voxel_position, ModifiedVoxels, VoxelWriteBuffer},
+    voxel_world_internal::{ModifiedVoxels, VoxelWriteBuffer},
 };
 
 /// This component is used to mark the Camera that bevy_voxel_world should use to determine
@@ -362,4 +362,18 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
             raycast_result
         })
     }
+}
+
+/// Returns a tuple of the chunk position and the voxel position within the chunk.
+#[inline]
+pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
+    let chunk_position = IVec3 {
+        x: (position.x as f32 / CHUNK_SIZE_F).floor() as i32,
+        y: (position.y as f32 / CHUNK_SIZE_F).floor() as i32,
+        z: (position.z as f32 / CHUNK_SIZE_F).floor() as i32,
+    };
+
+    let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
+
+    (chunk_position, voxel_position)
 }

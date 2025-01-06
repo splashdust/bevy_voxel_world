@@ -25,7 +25,8 @@ use crate::{
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{
-        ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
+        get_chunk_voxel_position, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkWillUpdate, VoxelWorldCamera,
     },
 };
 
@@ -524,18 +525,4 @@ fn is_in_view(world_point: Vec3, camera: &Camera, cam_global_transform: &GlobalT
     } else {
         false
     }
-}
-
-/// Returns a tuple of the chunk position and the voxel position within the chunk.
-#[inline]
-pub(crate) fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
-    let chunk_position = IVec3 {
-        x: (position.x as f32 / CHUNK_SIZE_F).floor() as i32,
-        y: (position.y as f32 / CHUNK_SIZE_F).floor() as i32,
-        z: (position.z as f32 / CHUNK_SIZE_F).floor() as i32,
-    };
-
-    let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
-
-    (chunk_position, voxel_position)
 }

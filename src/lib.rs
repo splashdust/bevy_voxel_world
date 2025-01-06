@@ -17,9 +17,11 @@ pub mod prelude {
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
+        get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
+    };
+    pub use crate::voxel_world::{
         ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate,
     };
-    pub use crate::voxel_world::{VoxelRaycastResult, VoxelWorld, VoxelWorldCamera};
 }
 
 pub mod custom_meshing {
