@@ -32,6 +32,9 @@ struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
+
+    // If you want to add a custom component bundle to the spawned chunk entity from the meshing
+    // function, you can define its type here. Otherwise, set it to `()`.
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
@@ -66,7 +69,9 @@ impl VoxelWorldConfig for MainWorld {
             // If necessary, we can caputure data here based on the chunk position
             // and move it into the closure below.
             Box::new(
+                // The array of voxels for the chunk
                 |voxels: VoxelArray<Self::MaterialIndex>,
+                 // A reference to the texture index mapper function as defined in the config
                  texture_index_mapper: TextureIndexMapperFn<Self::MaterialIndex>| {
                     let faces = block_mesh::RIGHT_HANDED_Y_UP_CONFIG.faces;
                     let mut buffer = block_mesh::GreedyQuadsBuffer::new(voxels.len());
@@ -110,6 +115,8 @@ impl VoxelWorldConfig for MainWorld {
 
                             let voxel_index = PaddedChunkShape::linearize(quad.minimum) as usize;
                             let material_type = match voxels[voxel_index] {
+                                // Here we call the texture index mapper function to get the texture index
+                                // for the material type of the voxel
                                 WorldVoxel::Solid(mt) => texture_index_mapper(mt),
                                 _ => [1, 1, 1],
                             };
@@ -145,6 +152,7 @@ impl VoxelWorldConfig for MainWorld {
                     // If you want to generate some custom data for the chunk, like a nav mesh,
                     // you can put it here in a regular Bevy component. This will then get added
                     // to the spawned Chunk entity.
+                    // The type of this bundle is defined in the `ChunkUserBundle` associated type.
                     (render_mesh, None)
                 },
             )
