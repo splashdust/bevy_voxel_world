@@ -3,7 +3,7 @@
 /// This module contains the internal systems and resources used to implement bevy_voxel_world.
 ///
 use bevy::{
-    ecs::{bundle, system::SystemParam},
+    ecs::system::SystemParam,
     prelude::*,
     tasks::AsyncComputeTaskPool,
     utils::{HashMap, HashSet},

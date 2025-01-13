@@ -61,10 +61,6 @@ impl<C: VoxelWorldConfig> MeshCache<C> {
     pub fn get_user_bundle(&self, voxels_hash: &u64) -> Option<C::ChunkUserBundle> {
         self.user_bundes.read().unwrap().get(voxels_hash).cloned()
     }
-
-    pub fn get_user_bundle_map(&self) -> Arc<RwLock<UserBundleMap<C::ChunkUserBundle>>> {
-        self.user_bundes.clone()
-    }
 }
 
 impl<C: VoxelWorldConfig> Default for MeshCache<C> {
@@ -77,9 +73,11 @@ impl<C: VoxelWorldConfig> Default for MeshCache<C> {
     }
 }
 
+type MeshHandleRef = Arc<Handle<Mesh>>;
+
 #[derive(Resource, Deref, DerefMut)]
 pub(crate) struct MeshCacheInsertBuffer<C: VoxelWorldConfig>(
-    #[deref] Vec<(u64, Arc<Handle<Mesh>>, Option<C::ChunkUserBundle>)>,
+    #[deref] Vec<(u64, MeshHandleRef, Option<C::ChunkUserBundle>)>,
     PhantomData<C>,
 );
 
