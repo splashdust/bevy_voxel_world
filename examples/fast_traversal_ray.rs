@@ -24,6 +24,7 @@ struct VoxelTrace {
 
 impl VoxelWorldConfig for MyMainWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
