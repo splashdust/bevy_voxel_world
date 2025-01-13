@@ -18,7 +18,9 @@ impl VoxelWorldConfig for MyMainWorld {
     type MaterialIndex = BlockTexture;
     type ChunkUserBundle = ();
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(
+        &self,
+    ) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat| match vox_mat {
             BlockTexture::SnowyBrick => [0, 1, 2],
             BlockTexture::FullBrick => [2, 2, 2],
@@ -69,7 +71,8 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
     // 20 by 20 floor
     for x in -10..10 {
         for z in -10..10 {
-            voxel_world.set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(BlockTexture::Grass));
+            voxel_world
+                .set_voxel(IVec3::new(x, -1, z), WorldVoxel::Solid(BlockTexture::Grass));
             // Grassy floor
         }
     }
