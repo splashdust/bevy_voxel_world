@@ -1,7 +1,9 @@
 use bevy::color::palettes::css;
 use bevy::prelude::*;
 use smooth_bevy_cameras::{
-    controllers::unreal::{UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin},
+    controllers::unreal::{
+        UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin,
+    },
     LookTransformPlugin,
 };
 use std::sync::Arc;
@@ -172,7 +174,8 @@ fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
             let voxel_center = voxel_coord.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 
             gizmos.cuboid(
-                Transform::from_translation(voxel_center).with_scale(Vec3::splat(VOXEL_SIZE)),
+                Transform::from_translation(voxel_center)
+                    .with_scale(Vec3::splat(VOXEL_SIZE)),
                 css::PINK,
             );
 

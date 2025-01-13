@@ -19,7 +19,9 @@ impl VoxelWorldConfig for MainWorld {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(
+        &self,
+    ) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {
             0 => [0, 0, 0],
             1 => [1, 1, 1],
@@ -56,7 +58,8 @@ fn setup(mut commands: Commands) {
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
+        Transform::from_xyz(0.0, 0.0, 0.0)
+            .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
         cascade_shadow_config,
     ));
 

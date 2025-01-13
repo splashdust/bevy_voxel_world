@@ -7,12 +7,16 @@ use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
 pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
-pub type VoxelLookupDelegate<I = u8> = Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
+pub type VoxelLookupDelegate<I = u8> =
+    Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
 
 pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
 
-pub type ChunkMeshingFn<I, UB> =
-    Box<dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>) + Send + Sync>;
+pub type ChunkMeshingFn<I, UB> = Box<
+    dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>)
+        + Send
+        + Sync,
+>;
 pub type ChunkMeshingDelegate<I, UB> =
     Option<Box<dyn Fn(IVec3) -> ChunkMeshingFn<I, UB> + Send + Sync>>;
 
@@ -146,7 +150,8 @@ pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     pos: IVec3,
 ) -> ChunkMeshingFn<I, UB> {
     Box::new(
-        move |voxels: Arc<VoxelArray<I>>, texture_index_mapper: TextureIndexMapperFn<I>| {
+        move |voxels: Arc<VoxelArray<I>>,
+              texture_index_mapper: TextureIndexMapperFn<I>| {
             let mesh = generate_chunk_mesh(voxels, pos, texture_index_mapper);
             (mesh, None)
         },
@@ -162,7 +167,9 @@ impl VoxelWorldConfig for DefaultWorld {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(
+        &self,
+    ) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {
             0 => [0, 0, 0],
             1 => [1, 1, 1],

@@ -20,13 +20,17 @@ pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
 
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
-pub type PaddedChunkShape = ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
+pub type PaddedChunkShape =
+    ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
 pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(pub Task<ChunkTask<C, I>>, PhantomData<C>);
+pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(
+    pub Task<ChunkTask<C, I>>,
+    PhantomData<C>,
+);
 
 impl<C, I> ChunkThread<C, I>
 where
@@ -96,7 +100,8 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     /// The position is given in local chunk coordinates
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if self.voxels.is_some() {
-            self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
+            self.voxels.as_ref().unwrap()
+                [PaddedChunkShape::linearize(position.to_array()) as usize]
         } else {
             match self.fill_type {
                 FillType::Uniform(voxel) => voxel,
@@ -228,7 +233,11 @@ where
 }
 
 impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
-    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C, I>) -> Self {
+    pub fn new(
+        entity: Entity,
+        position: IVec3,
+        modified_voxels: ModifiedVoxels<C, I>,
+    ) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),

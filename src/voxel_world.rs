@@ -116,7 +116,8 @@ impl<I> VoxelRaycastResult<I> {
 pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    voxel_write_buffer: ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    voxel_write_buffer:
+        ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     #[allow(unused)]
     configuration: Res<'w, C>,
 }
@@ -135,7 +136,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
 
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
-    pub fn get_voxel_fn(&self) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
+    pub fn get_voxel_fn(
+        &self,
+    ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
         let write_buffer = self.voxel_write_buffer.clone();
         let modified_voxels = self.modified_voxels.clone();
@@ -175,7 +178,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// The position should be the chunk position, measured in CHUNK_SIZE units (32 by default)
     ///
     /// You can `floor(voxel_position / CHUNK_SIZE)` to get the chunk position from a voxel position
-    pub fn get_chunk_data(&self, chunk_pos: IVec3) -> Option<ChunkData<C::MaterialIndex>> {
+    pub fn get_chunk_data(
+        &self,
+        chunk_pos: IVec3,
+    ) -> Option<ChunkData<C::MaterialIndex>> {
         self.chunk_map
             .get_map()
             .read()
@@ -205,7 +211,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
         let is_surface = |pos: IVec3| {
             let above = pos + IVec3::Y;
             (get_voxel(pos) != WorldVoxel::Unset && get_voxel(pos) != WorldVoxel::Air)
-                && (get_voxel(above) == WorldVoxel::Unset || get_voxel(above) == WorldVoxel::Air)
+                && (get_voxel(above) == WorldVoxel::Unset
+                    || get_voxel(above) == WorldVoxel::Air)
         };
 
         if current_voxel == WorldVoxel::Unset || current_voxel == WorldVoxel::Air {
@@ -310,20 +317,22 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
             let p = ray.origin;
             let d = ray.direction;
 
-            let loaded_aabb =
-                ChunkMap::<C, C::MaterialIndex>::get_world_bounds(&chunk_map.read().unwrap());
-            let trace_start =
-                if p.cmplt(loaded_aabb.min.into()).any() || p.cmpgt(loaded_aabb.max.into()).any() {
-                    if let Some(trace_start_t) =
-                        RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)
-                    {
-                        ray.get_point(trace_start_t)
-                    } else {
-                        return None;
-                    }
+            let loaded_aabb = ChunkMap::<C, C::MaterialIndex>::get_world_bounds(
+                &chunk_map.read().unwrap(),
+            );
+            let trace_start = if p.cmplt(loaded_aabb.min.into()).any()
+                || p.cmpgt(loaded_aabb.max.into()).any()
+            {
+                if let Some(trace_start_t) =
+                    RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)
+                {
+                    ray.get_point(trace_start_t)
                 } else {
-                    p
-                };
+                    return None;
+                }
+            } else {
+                p
+            };
 
             // To find where we get out of the loaded cuboid, we can intersect from a point
             // guaranteed to be on the other side of the cube and in the opposite direction

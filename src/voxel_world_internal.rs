@@ -115,8 +115,9 @@ where
         let viewport_size = camera.physical_viewport_size().unwrap_or_default();
 
         let mut visited = HashSet::new();
-        let mut chunks_deque =
-            VecDeque::with_capacity(configuration.spawning_rays() * spawning_distance as usize);
+        let mut chunks_deque = VecDeque::with_capacity(
+            configuration.spawning_rays() * spawning_distance as usize,
+        );
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
 
@@ -130,9 +131,10 @@ where
                 let mut t = 0.0;
                 while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
                     let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-                    if let Some(chunk) =
-                        ChunkMap::<C, C::MaterialIndex>::get(&chunk_pos, &chunk_map_read_lock)
-                    {
+                    if let Some(chunk) = ChunkMap::<C, C::MaterialIndex>::get(
+                        &chunk_pos,
+                        &chunk_map_read_lock,
+                    ) {
                         if chunk.is_full {
                             // If we hit a full chunk, we can stop the ray early
                             break;
@@ -149,13 +151,18 @@ where
         let m = configuration.spawning_ray_margin();
         for _ in 0..configuration.spawning_rays() {
             let random_point_in_viewport = {
-                let x = rand::random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
-                let y = rand::random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
+                let x =
+                    rand::random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
+                let y =
+                    rand::random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
                 Vec2::new(x, y)
             };
 
             // Then, for each point, we cast a ray, picking up any unspawned chunks along the ray
-            queue_chunks_intersecting_ray_from_point(random_point_in_viewport, &mut chunks_deque);
+            queue_chunks_intersecting_ray_from_point(
+                random_point_in_viewport,
+                &mut chunks_deque,
+            );
         }
 
         // We also queue the chunks closest to the camera to make sure they will always spawn early
@@ -178,7 +185,9 @@ where
             }
             visited.insert(chunk_position);
 
-            if chunk_position.distance_squared(chunk_at_camera) > spawning_distance_squared {
+            if chunk_position.distance_squared(chunk_at_camera)
+                > spawning_distance_squared
+            {
                 continue;
             }
 
@@ -197,7 +206,9 @@ where
 
                 commands.entity(chunk.entity).try_insert((
                     chunk,
-                    Transform::from_translation(chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0),
+                    Transform::from_translation(
+                        chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0,
+                    ),
                 ));
             } else {
                 continue;
@@ -264,7 +275,8 @@ where
         for chunk in chunks_to_remove {
             commands.entity(chunk.entity).try_insert(NeedsDespawn);
 
-            ev_chunk_will_despawn.send(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
+            ev_chunk_will_despawn
+                .send(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -277,7 +289,10 @@ where
     ) {
         let read_lock = chunk_map.get_read_lock();
         for (entity, chunk) in retired_chunks.iter() {
-            if ChunkMap::<C, C::MaterialIndex>::contains_chunk(&chunk.position, &read_lock) {
+            if ChunkMap::<C, C::MaterialIndex>::contains_chunk(
+                &chunk.position,
+                &read_lock,
+            ) {
                 commands.entity(entity).despawn_recursive();
                 chunk_map_remove_buffer.push(chunk.position);
             }
@@ -341,7 +356,8 @@ where
                 ))
                 .remove::<NeedsRemesh>();
 
-            ev_chunk_will_remesh.send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
+            ev_chunk_will_remesh
+                .send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -404,7 +420,8 @@ where
                                 continue;
                             }
                             let hash = chunk_task.voxels_hash();
-                            let mesh_ref = Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
+                            let mesh_ref =
+                                Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
                             let user_bundle = chunk_task.user_bundle;
 
                             mesh_cache_insert_buffer.push((
@@ -526,7 +543,11 @@ where
 /// Check if the given world point is within the camera's view
 #[inline]
 #[allow(dead_code)]
-fn is_in_view(world_point: Vec3, camera: &Camera, cam_global_transform: &GlobalTransform) -> bool {
+fn is_in_view(
+    world_point: Vec3,
+    camera: &Camera,
+    cam_global_transform: &GlobalTransform,
+) -> bool {
     if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
         // When the position is within the viewport the values returned will be between
         // -1.0 and 1.0 on the X and Y axes, and between 0.0 and 1.0 on the Z axis.
