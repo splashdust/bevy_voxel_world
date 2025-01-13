@@ -49,6 +49,11 @@ path = "examples/noise_terrain.rs"
 required-features = ["noise"]
 
 [[example]]
+name = "custom_meshing"
+path = "examples/custom_meshing.rs"
+required-features = ["noise"]
+
+[[example]]
 name = "multiple_worlds"
 path = "examples/multiple_worlds.rs"
 required-features = ["noise"]
