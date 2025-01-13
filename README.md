@@ -99,7 +99,7 @@ The `texture_index_mapper` callback is supplied with a material type and should 
 
 See the [textures example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/textures.rs) for a runnable example of this.
 
-<img width="558" alt="Screenshot 2023-11-06 at 21 50 05" src="https://github.com/splashdust/bevy_voxel_world/assets/428824/382fdcf7-9d70-4432-b2ba-18479d34346f">
+<img width="558" alt src="https://github.com/splashdust/bevy_voxel_world/assets/428824/382fdcf7-9d70-4432-b2ba-18479d34346f">
 
 ### Custom shader support
 
@@ -140,6 +140,8 @@ Custom meshing is supported though a delegate function that can be specified in 
 The meshing delegate function can also return a Bevy component or bundle that will be inserted along with the mesh. This is useful for generating additional data based on the meshing data, such as nav meshes. It can be beneficial to do all such processing at once, while the voxel data is already hot in the caches.
 
 See this [full example of custom meshing](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/custom_meshing.rs) for more details.
+
+<img width="558" src="https://github.com/user-attachments/assets/13f46fd6-81a8-4c93-943c-9c5fc7b9b38e"/>
 
 ## Gotchas
 
