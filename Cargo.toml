@@ -24,7 +24,7 @@ bevy = { version = "0.15", features = [
 ] }
 block-mesh = "0.2.0"
 ndshape = "0.3.0"
-futures-lite = "2.5.0"
+futures-lite = "2.6.0"
 rand = "0.8.5"
 ahash = "0.8.11"
 weak-table = { version = "0.3.2", features = ["ahash"] }
