@@ -23,7 +23,7 @@ pub(crate) struct TextureLayers(pub u32);
 
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(6998301138411443008);
 
-pub(crate) const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
+pub const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
     MeshVertexAttribute::new("TextureIndex", 989640910, VertexFormat::Uint32x3);
 
 pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
