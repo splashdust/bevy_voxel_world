@@ -7,6 +7,8 @@ struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
     fn spawning_distance(&self) -> u32 {
         15
     }
@@ -15,7 +17,9 @@ impl VoxelWorldConfig for MainWorld {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(
+        &self,
+    ) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {
             0 => [0, 0, 0],
             1 => [1, 1, 1],
@@ -64,7 +68,8 @@ fn setup(mut commands: Commands) {
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
+        Transform::from_xyz(0.0, 0.0, 0.0)
+            .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
         cascade_shadow_config,
     ));
 
@@ -152,7 +157,8 @@ fn explosion(
         camera_transform.forward().z,
     )
     .normalize();
-    let impact_point = camera_transform.translation + (direction * 300.0) - Vec3::Y * 10.0;
+    let impact_point =
+        camera_transform.translation + (direction * 300.0) - Vec3::Y * 10.0;
 
     if let Some((impact_point, _)) =
         voxel_world.get_random_surface_voxel(impact_point.as_ivec3(), 70)
@@ -164,8 +170,11 @@ fn explosion(
         for x in -radius..=radius {
             for y in -radius..=radius {
                 for z in -radius..=radius {
-                    let pos =
-                        IVec3::new(x + impact_point.x, y + impact_point.y, z + impact_point.z);
+                    let pos = IVec3::new(
+                        x + impact_point.x,
+                        y + impact_point.y,
+                        z + impact_point.z,
+                    );
 
                     if pos.distance_squared(impact_point) <= radius.pow(2) {
                         voxel_world.set_voxel(pos, WorldVoxel::Air);
@@ -179,8 +188,11 @@ fn explosion(
         match vox {
             WorldVoxel::Solid(mat) => {
                 for _ in 0..num_voxels {
-                    if let Some(rand_vox) = voxel_world.get_random_surface_voxel(impact_point, 25) {
-                        voxel_world.set_voxel(rand_vox.0 + IVec3::Y, WorldVoxel::Solid(mat));
+                    if let Some(rand_vox) =
+                        voxel_world.get_random_surface_voxel(impact_point, 25)
+                    {
+                        voxel_world
+                            .set_voxel(rand_vox.0 + IVec3::Y, WorldVoxel::Solid(mat));
                     }
                 }
             }

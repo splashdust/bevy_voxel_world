@@ -104,7 +104,8 @@ where
                 PreUpdate,
                 (
                     (
-                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks).chain(),
+                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks)
+                            .chain(),
                         Internals::<C>::remesh_dirty_chunks,
                     )
                         .chain(),
@@ -138,8 +139,10 @@ where
         }
 
         if !self.use_custom_material && self.spawn_meshes {
-            let mat_plugins = app.get_added_plugins::<MaterialPlugin::<
-                ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>();
+            let mat_plugins =
+                app.get_added_plugins::<MaterialPlugin<
+                    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
+                >>();
 
             if mat_plugins.is_empty() {
                 app.add_plugins(MaterialPlugin::<
@@ -211,7 +214,8 @@ where
 
         if self.use_custom_material {
             if self.config.init_custom_materials() {
-                let mut custom_material_assets = app.world_mut().resource_mut::<Assets<M>>();
+                let mut custom_material_assets =
+                    app.world_mut().resource_mut::<Assets<M>>();
                 let handle = custom_material_assets.add(self.material.clone());
                 app.insert_resource(VoxelWorldMaterialHandle { handle });
             }

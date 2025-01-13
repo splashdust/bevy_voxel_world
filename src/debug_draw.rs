@@ -127,7 +127,10 @@ fn setup<C: VoxelWorldConfig>(mut commands: Commands) {
     });
 }
 
-fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<VoxelGizmos<C>>) {
+fn draw_voxel_gizmos<C: VoxelWorldConfig>(
+    mut gizmos: Gizmos,
+    voxel_gizmos: Res<VoxelGizmos<C>>,
+) {
     for gizmo in voxel_gizmos.gizmos.read().unwrap().iter() {
         let pos = gizmo.pos.as_vec3();
         let radius = 0.45;
@@ -154,7 +157,10 @@ fn draw_voxel_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, voxel_gizmos: Res<
     }
 }
 
-fn draw_ray_gizmos<C: VoxelWorldConfig>(mut gizmos: Gizmos, ray_gizmos: Res<RayGizmos<C>>) {
+fn draw_ray_gizmos<C: VoxelWorldConfig>(
+    mut gizmos: Gizmos,
+    ray_gizmos: Res<RayGizmos<C>>,
+) {
     for gizmo in ray_gizmos.gizmos.read().unwrap().iter() {
         gizmos.line(gizmo.ray.origin, gizmo.ray.get_point(10.0), gizmo.color);
     }

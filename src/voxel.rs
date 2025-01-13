@@ -1,4 +1,4 @@
-use bevy::{prelude::*, render::primitives::Aabb};
+use bevy::math::Vec3;
 use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 
 pub const VOXEL_SIZE: f32 = 1.;

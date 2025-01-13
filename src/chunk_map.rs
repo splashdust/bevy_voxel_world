@@ -38,7 +38,10 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
         read_lock.data.get(position).cloned()
     }
 
-    pub fn contains_chunk(position: &IVec3, read_lock: &RwLockReadGuard<ChunkMapData<I>>) -> bool {
+    pub fn contains_chunk(
+        position: &IVec3,
+        read_lock: &RwLockReadGuard<ChunkMapData<I>>,
+    ) -> bool {
         read_lock.data.contains_key(position)
     }
 
@@ -74,7 +77,10 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
         ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn<C>>,
     ) {
-        if insert_buffer.is_empty() && update_buffer.is_empty() && remove_buffer.is_empty() {
+        if insert_buffer.is_empty()
+            && update_buffer.is_empty()
+            && remove_buffer.is_empty()
+        {
             return;
         }
 

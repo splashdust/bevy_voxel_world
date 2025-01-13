@@ -90,7 +90,10 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
 
             for pos in check_pos.clone() {
                 assert_eq!(
-                    voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(pos.x as f32, pos.z as f32)),
+                    voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(
+                        pos.x as f32,
+                        pos.z as f32
+                    )),
                     Some((pos, test_voxel))
                 )
             }
@@ -235,7 +238,10 @@ fn raycast_finds_voxel() {
                     entity: Entity::PLACEHOLDER,
                     has_generated: false,
                 },
-                ChunkWillSpawn::<DefaultWorld>::new(IVec3::new(0, 0, 0), Entity::PLACEHOLDER),
+                ChunkWillSpawn::<DefaultWorld>::new(
+                    IVec3::new(0, 0, 0),
+                    Entity::PLACEHOLDER,
+                ),
             ));
         },
     );
@@ -318,7 +324,8 @@ fn visit_voxel_check(
         test_state.test_name
     );
     assert!(
-        test_state.path_step_index == 0 || test_state.expected_face.unwrap_or(face) == face,
+        test_state.path_step_index == 0
+            || test_state.expected_face.unwrap_or(face) == face,
         "{}: Expected entering through {:?}",
         test_state.test_name,
         test_state.expected_face
@@ -489,7 +496,8 @@ fn voxel_line_traversal_ending_on_voxel_boundary() {
         IVec3::new(0, 0, 50),
     ];
 
-    let mut test_state = VisitVoxelTestState::new("Ending on voxel boundary", &expected_path, None);
+    let mut test_state =
+        VisitVoxelTestState::new("Ending on voxel boundary", &expected_path, None);
     voxel_line_traversal(start, end, |voxel_coords, time, face| {
         visit_voxel_check(&mut test_state, voxel_coords, time, face)
     });

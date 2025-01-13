@@ -17,9 +17,21 @@ pub mod prelude {
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
+        get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
+    };
+    pub use crate::voxel_world::{
         ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate,
     };
-    pub use crate::voxel_world::{VoxelRaycastResult, VoxelWorld, VoxelWorldCamera};
+}
+
+pub mod custom_meshing {
+    pub use crate::chunk::PaddedChunkShape;
+    pub use crate::chunk::CHUNK_SIZE_F;
+    pub use crate::chunk::CHUNK_SIZE_I;
+    pub use crate::chunk::CHUNK_SIZE_U;
+    pub use crate::meshing::generate_chunk_mesh;
+    pub use crate::meshing::mesh_from_quads;
+    pub use crate::meshing::VoxelArray;
 }
 
 pub mod debug {
@@ -29,6 +41,7 @@ pub mod debug {
 pub mod rendering {
     pub use crate::plugin::VoxelWorldMaterialHandle;
     pub use crate::voxel_material::vertex_layout;
+    pub use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
     pub use crate::voxel_material::VOXEL_TEXTURE_SHADER_HANDLE;
 }
 

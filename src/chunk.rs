@@ -6,7 +6,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::{meshing, voxel::WorldVoxel, voxel_world_internal::ModifiedVoxels};
+use crate::{
+    prelude::{ChunkMeshingFn, TextureIndexMapperFn, VoxelWorldConfig},
+    voxel::WorldVoxel,
+    voxel_world_internal::ModifiedVoxels,
+};
 
 // The size of a chunk in voxels
 // TODO: implement a way to change this though the configuration
@@ -16,18 +20,21 @@ pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
 
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
-pub(crate) type PaddedChunkShape =
+pub type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
-pub(crate) type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
+pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<C, I>(pub Task<ChunkTask<C, I>>, PhantomData<C>);
+pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(
+    pub Task<ChunkTask<C, I>>,
+    PhantomData<C>,
+);
 
 impl<C, I> ChunkThread<C, I>
 where
-    C: Send + Sync + 'static,
+    C: VoxelWorldConfig,
 {
     pub fn new(task: Task<ChunkTask<C, I>>, _pos: IVec3) -> Self {
         Self(task, PhantomData)
@@ -93,7 +100,8 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     /// The position is given in local chunk coordinates
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if self.voxels.is_some() {
-            self.voxels.as_ref().unwrap()[PaddedChunkShape::linearize(position.to_array()) as usize]
+            self.voxels.as_ref().unwrap()
+                [PaddedChunkShape::linearize(position.to_array()) as usize]
         } else {
             match self.fill_type {
                 FillType::Uniform(voxel) => voxel,
@@ -212,21 +220,30 @@ impl<C> Chunk<C> {
 
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
-pub(crate) struct ChunkTask<C, I> {
+pub(crate) struct ChunkTask<C, I>
+where
+    C: VoxelWorldConfig,
+{
     pub position: IVec3,
     pub chunk_data: ChunkData<I>,
     pub modified_voxels: ModifiedVoxels<C, I>,
     pub mesh: Option<Mesh>,
+    pub user_bundle: Option<C::ChunkUserBundle>,
     _marker: PhantomData<C>,
 }
 
-impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
-    pub fn new(entity: Entity, position: IVec3, modified_voxels: ModifiedVoxels<C, I>) -> Self {
+impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
+    pub fn new(
+        entity: Entity,
+        position: IVec3,
+        modified_voxels: ModifiedVoxels<C, I>,
+    ) -> Self {
         Self {
             position,
             chunk_data: ChunkData::with_entity(entity),
             modified_voxels,
             mesh: None,
+            user_bundle: None,
             _marker: PhantomData,
         }
     }
@@ -290,13 +307,18 @@ impl<C: Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask<C, I> {
     }
 
     /// Generate a mesh for the chunk based on the currect voxel data
-    pub fn mesh(&mut self, texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>) {
+    pub fn mesh(
+        &mut self,
+        mut chunk_meshing_fn: ChunkMeshingFn<I, C::ChunkUserBundle>,
+        texture_index_mapper: TextureIndexMapperFn<I>,
+    ) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
-            self.mesh = Some(meshing::generate_chunk_mesh(
+            let mesh_and_bundle = chunk_meshing_fn(
                 self.chunk_data.voxels.as_ref().unwrap().clone(),
-                self.position,
                 texture_index_mapper,
-            ));
+            );
+            self.mesh = Some(mesh_and_bundle.0);
+            self.user_bundle = mesh_and_bundle.1;
         }
     }
 

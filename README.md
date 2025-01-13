@@ -29,6 +29,9 @@ Create a configuration struct for your world:
 struct MyWorld;
 
 impl VoxelWorldConfig for MyWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
     // All options have defaults, so you only need to add the ones you want to modify.
     // For a full list, see src/configuration.rs
     fn spawning_distance(&self) -> u32 {
@@ -76,6 +79,7 @@ Then, to map out which indexes belong to which material type, you can supply a `
 impl VoxelWorldConfig for MyWorld {
     // In this example we use a `u8` for the index.
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
@@ -129,13 +133,21 @@ fn do_something_with_mouse_voxel_pos(
 
 See this [full example of ray casting](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/ray_cast.rs) for more details.
 
+## Custom meshing
+
+Custom meshing is supported though a delegate function that can be specified in the config. The function recives an array of voxel data for the chunk to be meshed, and a reference to the texture index mapper functon. This delegate is then called from a thread in the task pool and needs to return a Bevy Mesh that can be inserted on the chunk entity.
+
+The meshing delegate function can also return a Bevy component or bundle that will be inserted along with the mesh. This is useful for generating additional data based on the meshing data, such as nav meshes. It can be beneficial to do all such processing at once, while the voxel data is already hot in the caches.
+
+See this [full example of custom meshing](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/custom_meshing.rs) for more details.
+
 ## Gotchas
 
 `bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.
 
 In its current state, there are still various hard-coded assumptions that works well enough for my usecase, but may not suit everyone. Over time, the aim is to generalize and make `bevy_voxel_world` more configurable. There are also many potential performance optimizations that I have not prioritized yet at this point.
 
-Currently only "blocky", Minecraft-like, voxels are supported, and there is no support for "half-slabs". Meshing is handled by [block-mesh-rs](https://github.com/bonsairobo/block-mesh-rs), and only the "simple" algorithm is used (i.e, no greedy meshing.)
+Default meshing is handled by [block-mesh-rs](https://github.com/bonsairobo/block-mesh-rs), using the "simple" algorithm.
 
 Feedback, issues and pull requests are welcomed!
 

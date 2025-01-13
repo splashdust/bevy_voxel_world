@@ -6,7 +6,8 @@ use bevy::{
     render::{
         mesh::MeshVertexBufferLayoutRef,
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef, SpecializedMeshPipelineError,
+            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
+            SpecializedMeshPipelineError,
         },
     },
     utils::HashMap,
@@ -27,6 +28,7 @@ struct MainWorld;
 
 impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
         10
@@ -36,7 +38,9 @@ impl VoxelWorldConfig for MainWorld {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
 
-    fn texture_index_mapper(&self) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+    fn texture_index_mapper(
+        &self,
+    ) -> Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
         Arc::new(|mat| match mat {
             0 => [0, 0, 0],
             1 => [1, 1, 1],
@@ -53,6 +57,7 @@ struct SecondWorld;
 
 impl VoxelWorldConfig for SecondWorld {
     type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
     fn texture_index_mapper(&self) -> Arc<dyn Fn(u8) -> [u32; 3] + Send + Sync> {
         Arc::new(|vox_mat: u8| match vox_mat {
@@ -97,7 +102,8 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
+        Transform::from_xyz(0.0, 0.0, 0.0)
+            .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
         cascade_shadow_config,
     ));
 
