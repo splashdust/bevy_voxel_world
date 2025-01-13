@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0
+
+- Adds possibility of customizing the meshing step through a `chunk_meshing_delegate` function in the config.
+- Add possibility to insert components bundles from meshing function.
+- Makes various types and functions associated with meshing public.
+
+Breaking Changes:
+
+- `type ChunkUserBundle` now needs to be implemented for `VoxelWorldConfig`:
+
+```rust
+impl VoxelWorldConfig for MainWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+    ...
+}
+```
+
 ## 0.10.2
 
 - `ChunkData` is now public. You can get the data for a chunk by calling `voxel_world.get_chunk_data(chunk_pos)`
