@@ -200,8 +200,6 @@ where
             app.insert_resource(VoxelWorldMaterialHandle { handle: mat_handle });
             app.insert_resource(TextureLayers(texture_layers));
 
-            app.insert_resource(self.config.clone());
-
             app.add_systems(Update, prepare_texture);
 
             app.add_systems(
@@ -227,5 +225,7 @@ where
 
             app.add_systems(Update, Internals::<C>::assign_material::<M>);
         }
+
+        app.insert_resource(self.config.clone());
     }
 }
