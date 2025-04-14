@@ -17,10 +17,11 @@ categories = ["game-development", "graphics"]
 opt-level = 3
 
 [dependencies]
-bevy = { version = "0.15", features = [
+bevy = { version = "0.15", default-features = false, features = [
     "bevy_render",
     "bevy_asset",
     "bevy_pbr",
+    "bevy_gizmos",
 ] }
 block-mesh = "0.2.0"
 ndshape = "0.3.0"
