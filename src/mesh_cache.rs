@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock, Weak},
 };
 
-use bevy::{prelude::*, utils::HashMap};
+use bevy::{prelude::*, platform::collections::HashMap};
 use weak_table::WeakValueHashMap;
 
 use crate::prelude::VoxelWorldConfig;

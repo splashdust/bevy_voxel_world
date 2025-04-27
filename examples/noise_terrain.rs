@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*, utils::HashMap};
+use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*, platform::collections::HashMap};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
@@ -67,6 +67,7 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
+        affects_lightmapped_meshes: true,
     });
 }
 
@@ -115,6 +116,7 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    cam_transform.single_mut().translation.x += time.delta_secs() * 30.0;
-    cam_transform.single_mut().translation.z += time.delta_secs() * 60.0;
+    let Ok(mut transform) = cam_transform.get_single_mut() else { return };
+    transform.translation.x += time.delta_secs() * 30.0;
+    transform.translation.z += time.delta_secs() * 60.0;
 }

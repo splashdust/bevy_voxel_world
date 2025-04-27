@@ -24,6 +24,7 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 1000.0,
+        affects_lightmapped_meshes: true,
     });
 }
 
@@ -48,7 +49,7 @@ fn move_camera(
     time: Res<Time>,
     mut query: Query<&mut Transform, With<VoxelWorldCamera<DefaultWorld>>>,
 ) {
-    let mut transform = query.single_mut();
+    let mut transform = query.single_mut().unwrap();
     let time_seconds = time.elapsed_secs();
     transform.translation.x = 25.0 * (time_seconds * 0.1).sin();
     transform.translation.z = 25.0 * (time_seconds * 0.1).cos();
