@@ -4,9 +4,9 @@
 ///
 use bevy::{
     ecs::system::SystemParam,
+    platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::AsyncComputeTaskPool,
-    platform::collections::{HashMap, HashSet},
 };
 use futures_lite::future;
 use std::{
@@ -106,7 +106,9 @@ where
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.single().unwrap();
 
-        let Ok((camera, cam_gtf)) = camera_info.single() else { return };
+        let Ok((camera, cam_gtf)) = camera_info.single() else {
+            return;
+        };
         let cam_pos = cam_gtf.translation().as_ivec3();
 
         let spawning_distance = configuration.spawning_distance() as i32;

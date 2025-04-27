@@ -1,5 +1,9 @@
 use bevy::{
-    asset::weak_handle, pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline}, prelude::*, reflect::TypePath, render::{
+    asset::weak_handle,
+    pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
+    prelude::*,
+    reflect::TypePath,
+    render::{
         mesh::{
             MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor,
         },
@@ -7,7 +11,7 @@ use bevy::{
             AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
             SpecializedMeshPipelineError, VertexFormat,
         },
-    }
+    },
 };
 
 /// Keeps track of the loading status of the image used for the voxel texture

@@ -144,13 +144,13 @@ fn update_cursor_cube(
 ) {
     for ev in cursor_evr.read() {
         // Get a ray from the cursor position into the world
-        let (camera, cam_gtf) = camera_info.single();
+        let (camera, cam_gtf) = camera_info.single().unwrap();
         let Ok(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
             return;
         };
 
         if let Some(result) = voxel_world_raycast.raycast(ray, &|(_pos, _vox)| true) {
-            let (mut transform, mut cursor_cube) = cursor_cube.single_mut();
+            let (mut transform, mut cursor_cube) = cursor_cube.single_mut().unwrap();
 
             // Camera could end up inside geometry - in that case just ignore the trace
             if let Some(normal) = result.normal {
@@ -216,7 +216,9 @@ fn inputs(
     if keys.just_released(KeyCode::ControlLeft) {
         trace.start = None;
     } else if keys.pressed(KeyCode::ControlLeft) && keys.just_pressed(KeyCode::KeyE) {
-        let cursor = cursor_cube.single();
+        let Ok(cursor) = cursor_cube.single() else {
+            return;
+        };
         let trace_end = cursor.voxel_pos.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 
         voxel_line_traversal(
@@ -233,7 +235,9 @@ fn inputs(
     }
 
     if buttons.just_pressed(MouseButton::Left) {
-        let cursor = cursor_cube.single();
+        let Ok(cursor) = cursor_cube.single() else {
+            return;
+        };
 
         if keys.pressed(KeyCode::ControlLeft) {
             trace.start = Some(cursor.voxel_pos.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.))

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bevy::{
     pbr::{CascadeShadowConfigBuilder, MaterialPipeline, MaterialPipelineKey},
+    platform::collections::HashMap,
     prelude::*,
     render::{
         mesh::MeshVertexBufferLayoutRef,
@@ -10,7 +11,6 @@ use bevy::{
             SpecializedMeshPipelineError,
         },
     },
-    utils::HashMap,
 };
 use bevy_voxel_world::{
     prelude::*,
@@ -111,6 +111,7 @@ fn setup(mut commands: Commands, mut second_world: VoxelWorld<SecondWorld>) {
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
+        affects_lightmapped_meshes: true,
     });
 
     // Set some voxels in the second world
