@@ -91,7 +91,7 @@ pub fn mesh_from_quads<I: PartialEq + Copy>(
                 WorldVoxel::Solid(mt) => texture_index_mapper(mt),
                 _ => [0, 0, 0],
             };
-            material_types.extend(std::iter::repeat(material_type).take(4));
+            material_types.extend(std::iter::repeat_n(material_type, 4));
         }
     }
 

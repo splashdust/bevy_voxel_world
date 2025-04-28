@@ -32,7 +32,7 @@ pub(crate) struct MeshCache<C: VoxelWorldConfig> {
 
 impl<C: VoxelWorldConfig> MeshCache<C> {
     pub fn apply_buffers(&self, insert_buffer: &mut MeshCacheInsertBuffer<C>) {
-        if insert_buffer.len() == 0 {
+        if insert_buffer.is_empty() {
             return;
         }
 
