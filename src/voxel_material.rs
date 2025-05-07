@@ -1,4 +1,5 @@
 use bevy::{
+    asset::weak_handle,
     pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     prelude::*,
     reflect::TypePath,
@@ -24,7 +25,7 @@ pub(crate) struct LoadingTexture {
 pub(crate) struct TextureLayers(pub u32);
 
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
-    Handle::weak_from_u128(6998301138411443008);
+    weak_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
 
 pub const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
     MeshVertexAttribute::new("TextureIndex", 989640910, VertexFormat::Uint32x3);
