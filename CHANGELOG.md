@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.0
+
+- Upgrade to Bevy 0.16 (thanks to @GabrielCarpr)
+
 ## 0.11.0
 
 - Adds possibility of customizing the meshing step through a `chunk_meshing_delegate` function in the config.
