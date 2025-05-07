@@ -11,8 +11,8 @@ use crate::{
 use bevy::{
     math::{bounding::Aabb3d, Vec3A},
     prelude::*,
-    utils::hashbrown::HashMap,
 };
+use hashbrown::HashMap;
 
 #[derive(Deref, DerefMut)]
 pub struct ChunkMapData<I> {
@@ -119,7 +119,7 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
                     write_lock.bounds.max = position_f.max(write_lock.bounds.max);
                 }
 
-                ev_chunk_will_spawn.send((*evt).clone());
+                ev_chunk_will_spawn.write((*evt).clone());
             }
             update_buffer.clear();
 

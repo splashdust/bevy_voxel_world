@@ -1,4 +1,6 @@
-use bevy::{prelude::*, render::primitives::Aabb, tasks::Task, utils::HashSet};
+use bevy::{
+    platform::collections::HashSet, prelude::*, render::primitives::Aabb, tasks::Task,
+};
 use ndshape::{ConstShape, ConstShape3u32};
 use std::{
     hash::{Hash, Hasher},

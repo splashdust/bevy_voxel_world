@@ -6,6 +6,7 @@ use bevy::{
         wireframe::{WireframeConfig, WireframePlugin},
         CascadeShadowConfigBuilder,
     },
+    platform::collections::HashMap,
     prelude::*,
     render::{
         mesh::{Indices, VertexAttributeValues},
@@ -14,7 +15,6 @@ use bevy::{
         settings::{RenderCreation, WgpuSettings},
         RenderPlugin,
     },
-    utils::HashMap,
 };
 
 use bevy_voxel_world::{
@@ -172,7 +172,7 @@ fn main() {
                 }),
                 ..default()
             }),
-            WireframePlugin,
+            WireframePlugin::default(),
         ))
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
         .insert_resource(WireframeConfig {
@@ -210,6 +210,7 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
+        affects_lightmapped_meshes: true,
     });
 }
 
@@ -258,6 +259,7 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    cam_transform.single_mut().translation.x += time.delta_secs() * 5.0;
-    cam_transform.single_mut().translation.z += time.delta_secs() * 10.0;
+    let mut transform = cam_transform.single_mut().unwrap();
+    transform.translation.x += time.delta_secs() * 5.0;
+    transform.translation.z += time.delta_secs() * 10.0;
 }

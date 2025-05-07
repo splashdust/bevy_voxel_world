@@ -288,7 +288,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// ) {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
-    ///         let (camera, cam_gtf) = camera_info.single();
+    ///         let (camera, cam_gtf) = camera_info.single().unwrap();
     ///         let Ok(ray) = camera.viewport_to_world(cam_gtf, ev.position) else {
     ///            return;
     ///         };

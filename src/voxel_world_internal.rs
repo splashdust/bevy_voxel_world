@@ -4,9 +4,9 @@
 ///
 use bevy::{
     ecs::system::SystemParam,
+    platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::AsyncComputeTaskPool,
-    utils::{HashMap, HashSet},
 };
 use futures_lite::future;
 use std::{
@@ -104,9 +104,11 @@ where
         camera_info: CameraInfo<C>,
     ) {
         // Panic if no root exists as it is already inserted in the setup.
-        let world_root = world_root.get_single().unwrap();
+        let world_root = world_root.single().unwrap();
 
-        let (camera, cam_gtf) = camera_info.single();
+        let Ok((camera, cam_gtf)) = camera_info.single() else {
+            return;
+        };
         let cam_pos = cam_gtf.translation().as_ivec3();
 
         let spawning_distance = configuration.spawning_distance() as i32;
@@ -244,7 +246,7 @@ where
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
-        let (_, cam_gtf) = camera_info.get_single().unwrap();
+        let (_, cam_gtf) = camera_info.single().unwrap();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
@@ -276,7 +278,7 @@ where
             commands.entity(chunk.entity).try_insert(NeedsDespawn);
 
             ev_chunk_will_despawn
-                .send(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
+                .write(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -293,7 +295,7 @@ where
                 &chunk.position,
                 &read_lock,
             ) {
-                commands.entity(entity).despawn_recursive();
+                commands.entity(entity).despawn();
                 chunk_map_remove_buffer.push(chunk.position);
             }
         }
@@ -357,7 +359,7 @@ where
                 .remove::<NeedsRemesh>();
 
             ev_chunk_will_remesh
-                .send(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
+                .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
         }
     }
 
@@ -484,7 +486,7 @@ where
             if let Some(chunk_data) =
                 ChunkMap::<C, C::MaterialIndex>::get(&chunk_pos, &chunk_map_read_lock)
             {
-                if let Some(mut ent) = commands.get_entity(chunk_data.entity) {
+                if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
                     ent.try_insert(NeedsRemesh);
                     updated_chunks.insert((chunk_data.entity, chunk_pos));
                 }
@@ -492,7 +494,7 @@ where
         }
 
         for (entity, chunk_pos) in updated_chunks {
-            ev_chunk_will_update.send(ChunkWillUpdate::<C>::new(chunk_pos, entity));
+            ev_chunk_will_update.write(ChunkWillUpdate::<C>::new(chunk_pos, entity));
         }
 
         buffer.clear();
