@@ -118,7 +118,8 @@ where
                         ),
                     )
                         .chain(),
-                ),
+                )
+                    .run_if(self.config.get_run_if_condition()),
             )
             .add_event::<ChunkWillSpawn<C>>()
             .add_event::<ChunkWillDespawn<C>>()
