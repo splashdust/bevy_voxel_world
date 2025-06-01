@@ -56,6 +56,12 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// If you are not using this feature, you can set this to `()`.
     type ChunkUserBundle: Bundle + Clone;
 
+    /// Condition to evaluate before running any voxel systems. This allows you
+    /// to defer execution of bevy_voxel_world systems.
+    fn get_run_if_condition(&self) -> impl Condition<()> {
+        IntoSystem::into_system(|| true)
+    }
+
     /// Distance in chunks to spawn chunks around the camera
     fn spawning_distance(&self) -> u32 {
         10
