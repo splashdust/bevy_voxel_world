@@ -111,7 +111,7 @@ where
         };
         let cam_pos = cam_gtf.translation().as_ivec3();
 
-        let spawning_distance = configuration.spawning_distance() as i32;
+        let spawning_distance = configuration.max_spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
         let viewport_size = camera.physical_viewport_size().unwrap_or_default();
@@ -169,9 +169,10 @@ where
 
         // We also queue the chunks closest to the camera to make sure they will always spawn early
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
-        for x in -1..=1 {
-            for y in -1..=1 {
-                for z in -1..=1 {
+        let distance = configuration.min_spawning_distance() as i32;
+        for x in -distance..=distance {
+            for y in -distance..=distance {
+                for z in -distance..=distance {
                     let queue_pos = chunk_at_camera + IVec3::new(x, y, z);
                     chunks_deque.push_back(queue_pos);
                 }
@@ -243,7 +244,7 @@ where
         camera_info: CameraInfo<C>,
         mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
     ) {
-        let spawning_distance = configuration.spawning_distance() as i32;
+        let spawning_distance = configuration.max_spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
         let (_, cam_gtf) = camera_info.single().unwrap();
@@ -267,7 +268,12 @@ where
                     }
                 };
                 let dist_squared = chunk.position.distance_squared(chunk_at_camera);
-                if should_be_culled || dist_squared > spawning_distance_squared + 1 {
+                let near_camera = dist_squared
+                    <= (CHUNK_SIZE_I * configuration.min_spawning_distance() as i32)
+                        .pow(2);
+                if (should_be_culled && !near_camera)
+                    || dist_squared > spawning_distance_squared + 1
+                {
                     remove.push(chunk);
                 }
             }
@@ -276,7 +282,6 @@ where
 
         for chunk in chunks_to_remove {
             commands.entity(chunk.entity).try_insert(NeedsDespawn);
-
             ev_chunk_will_despawn
                 .write(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
         }

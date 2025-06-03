@@ -11,8 +11,12 @@ impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
-    fn spawning_distance(&self) -> u32 {
+    fn max_spawning_distance(&self) -> u32 {
         25
+    }
+
+    fn min_spawning_distance(&self) -> u32 {
+        1
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
