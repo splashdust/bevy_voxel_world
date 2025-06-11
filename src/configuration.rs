@@ -56,9 +56,15 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// If you are not using this feature, you can set this to `()`.
     type ChunkUserBundle: Bundle + Clone;
 
-    /// Distance in chunks to spawn chunks around the camera
+    /// Maximum distance in chunks to spawn chunks, depending on the [`ChunkSpawnStrategy`]
     fn spawning_distance(&self) -> u32 {
         10
+    }
+
+    /// Minimum distance in chunks to despawn chunks regardless of the [`ChunkSpawnStrategy`].
+    /// As a result, this radius will always remain spawned around the camera.
+    fn min_despawn_distance(&self) -> u32 {
+        1
     }
 
     /// Strategy for despawning chunks

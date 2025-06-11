@@ -15,6 +15,10 @@ impl VoxelWorldConfig for MainWorld {
         25
     }
 
+    fn min_despawn_distance(&self) -> u32 {
+        1
+    }
+
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos| get_voxel_fn())
     }
