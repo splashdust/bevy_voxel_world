@@ -169,7 +169,7 @@ where
 
         // We also queue the chunks closest to the camera to make sure they will always spawn early
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
-        let distance = configuration.spawning_distance() as i32;
+        let distance = configuration.min_despawn_distance() as i32;
         for x in -distance..=distance {
             for y in -distance..=distance {
                 for z in -distance..=distance {
