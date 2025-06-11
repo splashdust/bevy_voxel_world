@@ -111,7 +111,7 @@ where
         };
         let cam_pos = cam_gtf.translation().as_ivec3();
 
-        let spawning_distance = configuration.max_spawning_distance() as i32;
+        let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
         let viewport_size = camera.physical_viewport_size().unwrap_or_default();
@@ -169,7 +169,7 @@ where
 
         // We also queue the chunks closest to the camera to make sure they will always spawn early
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
-        let distance = configuration.min_spawning_distance() as i32;
+        let distance = configuration.spawning_distance() as i32;
         for x in -distance..=distance {
             for y in -distance..=distance {
                 for z in -distance..=distance {
@@ -244,7 +244,7 @@ where
         camera_info: CameraInfo<C>,
         mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
     ) {
-        let spawning_distance = configuration.max_spawning_distance() as i32;
+        let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
         let (_, cam_gtf) = camera_info.single().unwrap();
@@ -269,7 +269,7 @@ where
                 };
                 let dist_squared = chunk.position.distance_squared(chunk_at_camera);
                 let near_camera = dist_squared
-                    <= (CHUNK_SIZE_I * configuration.min_spawning_distance() as i32)
+                    <= (CHUNK_SIZE_I * configuration.min_despawn_distance() as i32)
                         .pow(2);
                 if (should_be_culled && !near_camera)
                     || dist_squared > spawning_distance_squared + 1

@@ -37,7 +37,7 @@ impl VoxelWorldConfig for MainWorld {
     // function, you can define its type here. Otherwise, set it to `()`.
     type ChunkUserBundle = ();
 
-    fn max_spawning_distance(&self) -> u32 {
+    fn spawning_distance(&self) -> u32 {
         25
     }
 

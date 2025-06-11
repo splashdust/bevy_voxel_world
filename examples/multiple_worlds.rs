@@ -30,7 +30,7 @@ impl VoxelWorldConfig for MainWorld {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
-    fn max_spawning_distance(&self) -> u32 {
+    fn spawning_distance(&self) -> u32 {
         10
     }
 
