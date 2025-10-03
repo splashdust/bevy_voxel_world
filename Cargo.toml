@@ -58,3 +58,8 @@ required-features = ["noise"]
 name = "multiple_worlds"
 path = "examples/multiple_worlds.rs"
 required-features = ["noise"]
+
+[[example]]
+name = "multiple_noise_terrain"
+path = "examples/multiple_noise_terrain.rs"
+required-features = ["noise"]
