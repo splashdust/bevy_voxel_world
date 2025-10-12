@@ -31,11 +31,11 @@ fn setup(mut commands: Commands) {
 fn set_solid_voxel(mut voxel_world: VoxelWorld<DefaultWorld>) {
     // Generate some random values
     let size = 10;
-    let mut rng = rand::thread_rng();
-    let x = rng.gen_range(-size..size);
-    let y = rng.gen_range(-size..size);
-    let z = rng.gen_range(-size..size);
-    let voxel_type = rng.gen_range(0..4);
+    let mut rng = rand::rng();
+    let x = rng.random_range(-size..size);
+    let y = rng.random_range(-size..size);
+    let z = rng.random_range(-size..size);
+    let voxel_type = rng.random_range(0..4);
     let pos = IVec3::new(x, y, z);
 
     // Set a voxel at the random position with the random type
