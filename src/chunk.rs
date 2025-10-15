@@ -1,5 +1,5 @@
 use bevy::{
-    platform::collections::HashSet, prelude::*, render::primitives::Aabb, tasks::Task,
+    math::bounding::Aabb3d, platform::collections::HashSet, prelude::*, tasks::Task,
 };
 use ndshape::{ConstShape, ConstShape3u32};
 use std::{
@@ -144,10 +144,13 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     }
 
     /// Returns the AABB of the chunk
-    pub fn aabb(&self) -> Aabb {
+    pub fn aabb(&self) -> Aabb3d {
         let min = Vec3::ZERO;
         let max = min + Vec3::splat(CHUNK_SIZE_F);
-        Aabb::from_min_max(min, max)
+        Aabb3d {
+            min: min.into(),
+            max: max.into(),
+        }
     }
 
     /// Returns true if the given point is inside the chunk
@@ -155,8 +158,8 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     pub fn encloses_point(&self, point: Vec3) -> bool {
         let local_point = point - self.world_position();
         let aabb = self.aabb();
-        let min = aabb.min();
-        let max = aabb.max();
+        let min: Vec3 = aabb.min.into();
+        let max: Vec3 = aabb.max.into();
         local_point.x >= min.x
             && local_point.y >= min.y
             && local_point.z >= min.z
@@ -213,10 +216,13 @@ impl<C> Chunk<C> {
         }
     }
 
-    pub fn aabb(&self) -> Aabb {
+    pub fn aabb(&self) -> Aabb3d {
         let min = Vec3::ZERO;
         let max = min + Vec3::splat(CHUNK_SIZE_F);
-        Aabb::from_min_max(min, max)
+        Aabb3d {
+            min: min.into(),
+            max: max.into(),
+        }
     }
 }
 

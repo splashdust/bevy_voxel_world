@@ -31,16 +31,24 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
-pub trait ChunkEventType {}
+pub trait ChunkEventType: Send + Sync + 'static {}
 
 #[derive(Event)]
-pub struct ChunkEvent<C, E: ChunkEventType> {
+pub struct ChunkEvent<C, E>
+where
+    C: VoxelWorldConfig,
+    E: ChunkEventType,
+{
     pub chunk_key: IVec3,
     pub entity: Entity,
     _marker: (PhantomData<C>, PhantomData<E>),
 }
 
-impl<C, E: ChunkEventType> ChunkEvent<C, E> {
+impl<C, E> ChunkEvent<C, E>
+where
+    C: VoxelWorldConfig,
+    E: ChunkEventType,
+{
     pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
         Self {
             chunk_key,
@@ -56,6 +64,13 @@ impl<C, E: ChunkEventType> ChunkEvent<C, E> {
             _marker: (PhantomData, PhantomData),
         }
     }
+}
+
+impl<C, E> Message for ChunkEvent<C, E>
+where
+    C: VoxelWorldConfig,
+    E: ChunkEventType,
+{
 }
 
 /// Fired when a chunk is about to be despawned.

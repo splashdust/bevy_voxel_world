@@ -6,12 +6,10 @@ use block_mesh::{
 };
 
 use bevy::{
+    asset::RenderAssetUsages,
+    mesh::{Indices, VertexAttributeValues},
     prelude::*,
-    render::{
-        mesh::{Indices, VertexAttributeValues},
-        render_asset::RenderAssetUsages,
-        render_resource::PrimitiveTopology,
-    },
+    render::render_resource::PrimitiveTopology,
 };
 use ndshape::ConstShape;
 

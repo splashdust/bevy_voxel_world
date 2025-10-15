@@ -1,18 +1,14 @@
 use bevy::{
-    asset::weak_handle,
+    asset::uuid_handle,
+    mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
     pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     prelude::*,
     reflect::TypePath,
-    render::{
-        mesh::{
-            MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor,
-        },
-        render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
-            SpecializedMeshPipelineError, VertexFormat,
-        },
+    render::render_resource::{
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
     },
 };
+use bevy_shader::{Shader, ShaderDefVal, ShaderRef};
 
 /// Keeps track of the loading status of the image used for the voxel texture
 #[derive(Resource)]
@@ -25,7 +21,7 @@ pub(crate) struct LoadingTexture {
 pub(crate) struct TextureLayers(pub u32);
 
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
-    weak_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
+    uuid_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
 
 pub const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
     MeshVertexAttribute::new("TextureIndex", 989640910, VertexFormat::Uint32x3);

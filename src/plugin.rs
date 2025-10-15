@@ -1,9 +1,8 @@
 use bevy::{
-    asset::load_internal_asset,
+    asset::{load_internal_asset, RenderAssetUsages},
     image::{CompressedImageFormats, ImageSampler, ImageType},
     pbr::ExtendedMaterial,
     prelude::*,
-    render::render_asset::RenderAssetUsages,
 };
 
 use crate::{
@@ -120,10 +119,10 @@ where
                         .chain(),
                 ),
             )
-            .add_event::<ChunkWillSpawn<C>>()
-            .add_event::<ChunkWillDespawn<C>>()
-            .add_event::<ChunkWillRemesh<C>>()
-            .add_event::<ChunkWillUpdate<C>>();
+            .add_message::<ChunkWillSpawn<C>>()
+            .add_message::<ChunkWillDespawn<C>>()
+            .add_message::<ChunkWillRemesh<C>>()
+            .add_message::<ChunkWillUpdate<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
         // This makes voxel_world work with a MinimalPlugins setup.

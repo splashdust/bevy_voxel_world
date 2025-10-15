@@ -1,14 +1,12 @@
 use bevy::{
+    mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::{
-        mesh::MeshVertexBufferLayoutRef,
-        render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderDefVal, ShaderRef,
-            SpecializedMeshPipelineError,
-        },
+    render::render_resource::{
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
     },
 };
+use bevy_shader::{ShaderDefVal, ShaderRef};
 use bevy_voxel_world::{
     prelude::*,
     rendering::{vertex_layout, VOXEL_TEXTURE_SHADER_HANDLE},
@@ -104,7 +102,7 @@ impl Material for CustomVoxelMaterial {
     }
 
     fn specialize(
-        _pipeline: &MaterialPipeline<Self>,
+        _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
