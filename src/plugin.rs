@@ -144,9 +144,11 @@ where
                 >>();
 
             if mat_plugins.is_empty() {
-                app.add_plugins(MaterialPlugin::<
+                let mut material_plugin = MaterialPlugin::<
                     ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-                >::default());
+                >::default();
+                material_plugin.prepass_enabled = false;
+                app.add_plugins(material_plugin);
             }
 
             let mut preloaded_texture = true;

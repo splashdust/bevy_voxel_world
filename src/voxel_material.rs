@@ -46,6 +46,14 @@ pub(crate) struct StandardVoxelMaterial {
     pub voxels_texture: Handle<Image>,
 }
 
+impl Default for StandardVoxelMaterial {
+    fn default() -> Self {
+        Self {
+            voxels_texture: Handle::default(),
+        }
+    }
+}
+
 impl MaterialExtension for StandardVoxelMaterial {
     fn fragment_shader() -> ShaderRef {
         VOXEL_TEXTURE_SHADER_HANDLE.into()
