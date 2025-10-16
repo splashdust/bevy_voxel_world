@@ -4,7 +4,7 @@
 // orbit camera via middle mouse
 // scroll wheel to zoom
 
-use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*};
+use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_northstar::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_voxel_world::custom_meshing::{
@@ -104,7 +104,7 @@ fn main() {
         // This should just be a path to an image in your assets folder.
         .add_plugins(VoxelWorldPlugin::with_config(MyMainWorld))
         .add_plugins(PanOrbitCameraPlugin)
-        .add_event::<AnimationWaitEvent>()
+        .add_message::<AnimationWaitEvent>()
         .add_systems(Startup, (setup, create_voxel_scene))
         .add_systems(PreUpdate, move_pathfinders)
         .add_systems(
@@ -132,7 +132,7 @@ struct CursorCube {
 pub struct Player;
 
 // Event that lets other systems know to wait until animations are completed.
-#[derive(Debug, Event)]
+#[derive(Debug, Message)]
 pub struct AnimationWaitEvent;
 
 fn setup(
@@ -263,7 +263,7 @@ fn create_voxel_floor() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
 fn update_cursor_cube(
     voxel_world_raycast: VoxelWorld<MyMainWorld>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MyMainWorld>>>,
-    mut cursor_evr: EventReader<CursorMoved>,
+    mut cursor_evr: MessageReader<CursorMoved>,
     mut cursor_cube: Query<(
         &mut Transform,
         &mut CursorCube,
@@ -356,7 +356,7 @@ fn player_input_3d(
 fn move_pathfinders(
     mut commands: Commands,
     mut query: Query<(Entity, &mut AgentPos, &NextPos)>,
-    animation_reader: EventReader<AnimationWaitEvent>,
+    animation_reader: MessageReader<AnimationWaitEvent>,
 ) {
     if !animation_reader.is_empty() {
         return;
@@ -372,7 +372,7 @@ fn move_pathfinders(
 fn animate_move(
     mut query: Query<(&AgentPos, &mut Transform)>,
     time: Res<Time>,
-    mut ev_wait: EventWriter<AnimationWaitEvent>,
+    mut ev_wait: MessageWriter<AnimationWaitEvent>,
 ) {
     for (position, mut transform) in query.iter_mut() {
         let target = Vec3::new(
@@ -414,7 +414,7 @@ fn pathfind_error(query: Query<Entity, With<PathfindingFailed>>, mut commands: C
 fn apply_chunk_nav_on_spawn(
     mut grid: Single<&mut OrdinalGrid3d>,
     nav_q: Query<&ChunkNav>,
-    mut ev_spawn: EventReader<ChunkWillSpawn<MyMainWorld>>,
+    mut ev_spawn: MessageReader<ChunkWillSpawn<MyMainWorld>>,
 ) {
     let mut changed = false;
     for evt in ev_spawn.read() {

@@ -134,7 +134,7 @@ fn update_cursor_cube(
     voxel_world_raycast: VoxelWorld<MyMainWorld>,
     mut trace: ResMut<VoxelTrace>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MyMainWorld>>>,
-    mut cursor_evr: EventReader<CursorMoved>,
+    mut cursor_evr: MessageReader<CursorMoved>,
     mut cursor_cube: Query<(&mut Transform, &mut CursorCube)>,
 ) {
     for ev in cursor_evr.read() {

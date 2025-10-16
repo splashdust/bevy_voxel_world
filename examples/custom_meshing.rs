@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use bevy::{
+    asset::RenderAssetUsages,
     color::palettes::css::*,
-    pbr::{
-        wireframe::{WireframeConfig, WireframePlugin},
-        CascadeShadowConfigBuilder,
-    },
+    light::CascadeShadowConfigBuilder,
+    mesh::{Indices, VertexAttributeValues},
+    pbr::wireframe::{WireframeConfig, WireframePlugin},
     platform::collections::HashMap,
     prelude::*,
     render::{
-        mesh::{Indices, VertexAttributeValues},
-        render_asset::RenderAssetUsages,
         render_resource::{PrimitiveTopology, WgpuFeatures},
         settings::{RenderCreation, WgpuSettings},
         RenderPlugin,
@@ -67,7 +65,7 @@ impl VoxelWorldConfig for MainWorld {
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|pos: IVec3| {
+        Some(Box::new(|_pos: IVec3| {
             // If necessary, we can caputure data here based on the chunk position
             // and move it into the closure below.
             Box::new(
@@ -98,7 +96,7 @@ impl VoxelWorldConfig for MainWorld {
 
                     for (group, face) in buffer.quads.groups.into_iter().zip(faces.into_iter()) {
                         for quad in group.into_iter() {
-                            let normal = IVec3::from([
+                            let _normal = IVec3::from([
                                 face.signed_normal().x,
                                 face.signed_normal().y,
                                 face.signed_normal().z,
@@ -259,7 +257,8 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    let mut transform = cam_transform.single_mut().unwrap();
-    transform.translation.x += time.delta_secs() * 5.0;
-    transform.translation.z += time.delta_secs() * 10.0;
+    if let Ok(mut transform) = cam_transform.single_mut() {
+        transform.translation.x += time.delta_secs() * 5.0;
+        transform.translation.z += time.delta_secs() * 10.0;
+    }
 }

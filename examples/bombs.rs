@@ -1,4 +1,6 @@
-use bevy::{pbr::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*};
+use bevy::{
+    light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
+};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 use std::{sync::Arc, time::Duration};
@@ -132,9 +134,10 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    let mut transform = cam_transform.get_single_mut().unwrap();
-    transform.translation.x += time.delta_secs() * 7.0;
-    transform.translation.z += time.delta_secs() * 12.0;
+    if let Ok(mut transform) = cam_transform.single_mut() {
+        transform.translation.x += time.delta_secs() * 7.0;
+        transform.translation.z += time.delta_secs() * 12.0;
+    }
 }
 
 fn explosion(
@@ -143,16 +146,20 @@ fn explosion(
     mut timeout: Query<&mut ExplosionTimeout>,
     time: Res<Time>,
 ) {
-    let mut timeout = timeout.get_single_mut().unwrap();
+    let Ok(mut timeout) = timeout.single_mut() else {
+        return;
+    };
     timeout
         .timer
         .tick(Duration::from_secs_f32(time.delta_secs()));
 
-    if !timeout.timer.finished() {
+    if !timeout.timer.is_finished() {
         return;
     }
 
-    let camera_transform = camera.get_single().unwrap();
+    let Ok(camera_transform) = camera.single() else {
+        return;
+    };
     let direction = Vec3::new(
         camera_transform.forward().x,
         1.0,
