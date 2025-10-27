@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    prelude::{ChunkMeshingFn, TextureIndexMapperFn, VoxelWorldConfig},
+    prelude::{ChunkMeshingFn, LodLevel, TextureIndexMapperFn, VoxelWorldConfig},
     voxel::WorldVoxel,
     voxel_world_internal::ModifiedVoxels,
 };
@@ -62,6 +62,7 @@ pub enum FillType<I> {
 #[derive(Clone, Debug)]
 pub struct ChunkData<I> {
     pub(crate) position: IVec3,
+    pub(crate) lod_level: LodLevel,
     pub(crate) voxels: Option<Arc<VoxelArray<I>>>,
     pub(crate) voxels_hash: u64,
     pub(crate) is_full: bool,
@@ -75,6 +76,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     pub(crate) fn new() -> Self {
         Self {
             position: IVec3::ZERO,
+            lod_level: 0,
             voxels: None,
             voxels_hash: 0,
             is_full: false,
@@ -195,14 +197,16 @@ impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
 #[derive(Component, Clone)]
 pub struct Chunk<C> {
     pub position: IVec3,
+    pub lod_level: LodLevel,
     pub entity: Entity,
     _marker: PhantomData<C>,
 }
 
 impl<C> Chunk<C> {
-    pub fn new(position: IVec3, entity: Entity) -> Self {
+    pub fn new(position: IVec3, lod_level: LodLevel, entity: Entity) -> Self {
         Self {
             position,
+            lod_level,
             entity,
             _marker: PhantomData,
         }
@@ -211,6 +215,7 @@ impl<C> Chunk<C> {
     pub fn from(chunk: &Chunk<C>) -> Self {
         Self {
             position: chunk.position,
+            lod_level: chunk.lod_level,
             entity: chunk.entity,
             _marker: PhantomData,
         }
@@ -244,11 +249,15 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     pub fn new(
         entity: Entity,
         position: IVec3,
+        lod_level: LodLevel,
         modified_voxels: ModifiedVoxels<C, I>,
     ) -> Self {
+        let mut chunk_data = ChunkData::with_entity(entity);
+        chunk_data.lod_level = lod_level;
+
         Self {
             position,
-            chunk_data: ChunkData::with_entity(entity),
+            chunk_data,
             modified_voxels,
             mesh: None,
             user_bundle: None,

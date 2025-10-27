@@ -1,14 +1,15 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::chunk::VoxelArray;
+use crate::chunk::{ChunkData, VoxelArray};
 use crate::meshing::generate_chunk_mesh;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
 pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
+pub type LodLevel = u8;
 pub type VoxelLookupDelegate<I = u8> =
-    Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
+    Box<dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> VoxelLookupFn<I> + Send + Sync>;
 
 pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
 
@@ -17,8 +18,13 @@ pub type ChunkMeshingFn<I, UB> = Box<
         + Send
         + Sync,
 >;
-pub type ChunkMeshingDelegate<I, UB> =
-    Option<Box<dyn Fn(IVec3) -> ChunkMeshingFn<I, UB> + Send + Sync>>;
+pub type ChunkMeshingDelegate<I, UB> = Option<
+    Box<
+        dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> ChunkMeshingFn<I, UB>
+            + Send
+            + Sync,
+    >,
+>;
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -118,7 +124,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(|_| Box::new(|_| WorldVoxel::Unset))
+        Box::new(|_, _, _| Box::new(|_| WorldVoxel::Unset))
     }
 
     /// A function that returns a function that computes the mesh for a chunk
@@ -149,11 +155,19 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         true
     }
 
+    /// Compute the level of detail for a chunk at a world-space position.
+    /// Defaults to `0` for all chunks.
+    fn chunk_lod(&self, _chunk_position: IVec3, _camera_position: Vec3) -> LodLevel {
+        0
+    }
+
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
 }
 
 pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     pos: IVec3,
+    _lod: LodLevel,
+    _previous_data: Option<ChunkData<I>>,
 ) -> ChunkMeshingFn<I, UB> {
     Box::new(
         move |voxels: Arc<VoxelArray<I>>,

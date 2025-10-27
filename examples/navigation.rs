@@ -53,13 +53,13 @@ impl VoxelWorldConfig for MyMainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos| create_voxel_floor())
+        Box::new(move |_chunk_pos, _lod, _previous| create_voxel_floor())
     }
 
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|pos: IVec3| {
+        Some(Box::new(|pos: IVec3, _lod, _previous| {
             Box::new(move |voxels, texture_index_mapper| {
                 // Use the crate's default meshing to build the mesh.
                 let mesh = generate_chunk_mesh(voxels.clone(), pos, texture_index_mapper);

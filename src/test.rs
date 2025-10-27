@@ -234,6 +234,7 @@ fn raycast_finds_voxel() {
                 IVec3::new(0, 0, 0),
                 ChunkData {
                     position: IVec3::new(0, 0, 0),
+                    lod_level: 0,
                     voxels: Some(std::sync::Arc::new([WorldVoxel::Unset; 39304])),
                     voxels_hash: 0,
                     is_full: false,

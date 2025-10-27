@@ -40,7 +40,7 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos| get_voxel_fn())
+        Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
     }
 
     fn texture_index_mapper(
@@ -65,7 +65,7 @@ impl VoxelWorldConfig for MainWorld {
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|_pos: IVec3| {
+        Some(Box::new(|_pos: IVec3, _lod, _previous| {
             // If necessary, we can caputure data here based on the chunk position
             // and move it into the closure below.
             Box::new(

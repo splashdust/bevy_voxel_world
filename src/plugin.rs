@@ -103,7 +103,11 @@ where
                 PreUpdate,
                 (
                     (
-                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks)
+                        (
+                            Internals::<C>::spawn_chunks,
+                            Internals::<C>::update_chunk_lods,
+                            Internals::<C>::retire_chunks,
+                        )
                             .chain(),
                         Internals::<C>::remesh_dirty_chunks,
                     )

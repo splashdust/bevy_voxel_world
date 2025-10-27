@@ -17,7 +17,7 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos| get_voxel_fn())
+        Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
     }
 
     fn texture_index_mapper(

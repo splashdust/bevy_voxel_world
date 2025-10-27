@@ -202,10 +202,12 @@ where
             if !has_chunk {
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
                 commands.entity(world_root).add_child(chunk_entity);
-                let chunk = Chunk::<C>::new(chunk_position, chunk_entity);
+                let lod_level = configuration.chunk_lod(chunk_position, camera_position);
+                let chunk = Chunk::<C>::new(chunk_position, lod_level, chunk_entity);
 
-                chunk_map_insert_buffer
-                    .push((chunk_position, ChunkData::with_entity(chunk.entity)));
+                let mut chunk_data = ChunkData::with_entity(chunk.entity);
+                chunk_data.lod_level = lod_level;
+                chunk_map_insert_buffer.push((chunk_position, chunk_data));
 
                 commands.entity(chunk.entity).try_insert((
                     chunk,
@@ -233,6 +235,34 @@ where
                     }
                 }
             }
+        }
+    }
+
+    /// Update chunk LOD assignments and schedule remeshing when a change occurs.
+    pub fn update_chunk_lods(
+        mut commands: Commands,
+        mut chunks: Query<(Entity, &mut Chunk<C>), Without<NeedsDespawn>>,
+        configuration: Res<C>,
+        camera_info: CameraInfo<C>,
+    ) {
+        let Ok((_, cam_gtf)) = camera_info.single() else {
+            return;
+        };
+
+        let camera_position = cam_gtf.translation();
+
+        for (entity, mut chunk) in chunks.iter_mut() {
+            let target_lod = configuration.chunk_lod(chunk.position, camera_position);
+            if target_lod == chunk.lod_level {
+                continue;
+            }
+
+            chunk.lod_level = target_lod;
+
+            // Ensure a remesh occurs to refresh data at the new LOD.
+            let mut entity_commands = commands.entity(entity);
+            entity_commands.try_insert(NeedsRemesh);
+            entity_commands.remove::<ChunkThread<C, C::MaterialIndex>>();
         }
     }
 
@@ -311,25 +341,43 @@ where
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
         mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
-        dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
+        dirty_chunks: Query<
+            &Chunk<C>,
+            (With<NeedsRemesh>, Without<ChunkThread<C, C::MaterialIndex>>),
+        >,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
+        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
 
         for chunk in dirty_chunks.iter() {
-            let voxel_data_fn = (configuration.voxel_lookup_delegate())(chunk.position);
+            let previous_chunk_data = {
+                let read_lock = chunk_map.get_read_lock();
+                ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
+            };
+
+            let lod_level = chunk.lod_level;
+
+            let voxel_data_fn = (configuration.voxel_lookup_delegate())(
+                chunk.position,
+                lod_level,
+                previous_chunk_data.clone(),
+            );
             let chunk_meshing_fn = (configuration
                 .chunk_meshing_delegate()
                 .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
-                chunk.position
+                chunk.position,
+                lod_level,
+                previous_chunk_data.clone(),
             );
             let texture_index_mapper = configuration.texture_index_mapper().clone();
 
             let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
                 chunk.entity,
                 chunk.position,
+                lod_level,
                 modified_voxels.clone(),
             );
 
@@ -490,6 +538,7 @@ where
             {
                 if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
                     ent.try_insert(NeedsRemesh);
+                    ent.remove::<ChunkThread<C, C::MaterialIndex>>();
                     updated_chunks.insert((chunk_data.entity, chunk_pos));
                 }
             }
