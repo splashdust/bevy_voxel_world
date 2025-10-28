@@ -109,7 +109,8 @@ where
         let Ok((camera, cam_gtf)) = camera_info.single() else {
             return;
         };
-        let cam_pos = cam_gtf.translation().as_ivec3();
+        let camera_position = cam_gtf.translation();
+        let cam_pos = camera_position.as_ivec3();
 
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
