@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bevy::{
     light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
 };
-use bevy_voxel_world::{custom_meshing::CHUNK_SIZE_F, prelude::*};
+use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
 #[derive(Resource, Clone, Default)]
@@ -14,7 +14,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        35
+        25
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -22,44 +22,7 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos, _lod, _previous| {
-            // Set up some noise to use as the terrain height map
-            let mut noise = HybridMulti::<Perlin>::new(1234);
-            noise.octaves = 5;
-            noise.frequency = 1.1;
-            noise.lacunarity = 2.8;
-            noise.persistence = 0.4;
-
-            // Cache the noise value for each y column so we only calculate it once
-            let mut cache = HashMap::<(i32, i32), f64>::new();
-
-            // This closure gets sent to a separate thread for meshing by bevy_voxel_world
-            Box::new(move |pos: IVec3| {
-                // Sea level
-                if pos.y < 1 {
-                    return WorldVoxel::Solid(3);
-                }
-
-                let [x, y, z] = pos.as_dvec3().to_array();
-
-                // Sample terrain column once, then reuse from the cache
-                let is_ground = y < match cache.get(&(pos.x, pos.z)) {
-                    Some(sample) => *sample,
-                    None => {
-                        let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
-                        cache.insert((pos.x, pos.z), sample);
-                        sample
-                    }
-                };
-
-                if is_ground {
-                    // Solid voxel of material type 0
-                    WorldVoxel::Solid(0)
-                } else {
-                    WorldVoxel::Air
-                }
-            })
-        })
+        Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
     }
 
     fn texture_index_mapper(
@@ -72,21 +35,6 @@ impl VoxelWorldConfig for MainWorld {
             3 => [3, 3, 3],
             _ => [0, 0, 0],
         })
-    }
-
-    fn chunk_lod(&self, chunk_position: IVec3, camera_position: Vec3) -> LodLevel {
-        let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
-        let distance = chunk_position.as_vec3().distance(camera_chunk);
-
-        if distance < 5.0 {
-            0
-        } else if distance < 10.0 {
-            1
-        } else if distance < 20.0 {
-            2
-        } else {
-            3
-        }
     }
 }
 
@@ -127,6 +75,47 @@ fn setup(mut commands: Commands) {
         brightness: 100.0,
         affects_lightmapped_meshes: true,
     });
+}
+
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+    // Set up some noise to use as the terrain height map
+    let mut noise = HybridMulti::<Perlin>::new(1234);
+    noise.octaves = 5;
+    noise.frequency = 1.1;
+    noise.lacunarity = 2.8;
+    noise.persistence = 0.4;
+
+    // We use this to cache the noise value for each y column so we only need
+    // to calculate it once per x/z coordinate
+    let mut cache = HashMap::<(i32, i32), f64>::new();
+
+    // Then we return this boxed closure that captures the noise and the cache
+    // This will get sent off to a separate thread for meshing by bevy_voxel_world
+    Box::new(move |pos: IVec3| {
+        // Sea level
+        if pos.y < 1 {
+            return WorldVoxel::Solid(3);
+        }
+
+        let [x, y, z] = pos.as_dvec3().to_array();
+
+        // If y is less than the noise sample, we will set the voxel to solid
+        let is_ground = y < match cache.get(&(pos.x, pos.z)) {
+            Some(sample) => *sample,
+            None => {
+                let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
+                cache.insert((pos.x, pos.z), sample);
+                sample
+            }
+        };
+
+        if is_ground {
+            // Solid voxel of material type 0
+            WorldVoxel::Solid(0)
+        } else {
+            WorldVoxel::Air
+        }
+    })
 }
 
 fn move_camera(
