@@ -41,7 +41,7 @@ impl VoxelWorldConfig for MainWorld {
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
         Box::new(move |chunk_pos, lod, previous| {
-            if chunk_pos.y < 1 {
+            if chunk_pos.y < 0 {
                 return Box::new(|_, _| WorldVoxel::Solid(3));
             }
             if chunk_pos.y > 4 {
@@ -58,6 +58,11 @@ impl VoxelWorldConfig for MainWorld {
             // Then we return this boxed closure that captures the noise and the cache
             // This will get sent off to a separate thread for meshing by bevy_voxel_world
             Box::new(move |pos: IVec3, previous_voxel| {
+                // Sea level
+                if pos.y < 1 {
+                    return WorldVoxel::Solid(3);
+                }
+
                 let lod_step = i32::from(lod.max(1));
                 let base_x = pos.x.div_euclid(lod_step) * lod_step;
                 let base_z = pos.z.div_euclid(lod_step) * lod_step;
