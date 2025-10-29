@@ -110,7 +110,7 @@ impl VoxelWorldConfig for MainWorld {
                             tex_coords.extend_from_slice(&face.tex_coords(
                                 RIGHT_HANDED_Y_UP_CONFIG.u_flip_face,
                                 true,
-                                &quad.into(),
+                                &quad,
                             ));
 
                             let voxel_index = PaddedChunkShape::linearize(quad.minimum) as usize;
@@ -120,7 +120,8 @@ impl VoxelWorldConfig for MainWorld {
                                 WorldVoxel::Solid(mt) => texture_index_mapper(mt),
                                 _ => [1, 1, 1],
                             };
-                            material_types.extend(std::iter::repeat(material_type).take(4));
+                            material_types
+                                .extend(std::iter::repeat_n(material_type, 4));
                         }
                     }
 

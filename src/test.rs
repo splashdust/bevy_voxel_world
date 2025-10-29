@@ -95,11 +95,7 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
                 let result = voxel_world
                     .raycast(ray, &|(_, voxel)| matches!(voxel, WorldVoxel::Solid(_)));
 
-                assert!(
-                    result.is_some(),
-                    "expected to hit solid voxel at {:?}",
-                    pos
-                );
+                assert!(result.is_some(), "expected to hit solid voxel at {:?}", pos);
 
                 let result = result.unwrap();
                 assert_eq!(result.voxel_pos(), pos);

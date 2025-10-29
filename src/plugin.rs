@@ -175,7 +175,8 @@ where
                     )
                     .unwrap();
                     image.reinterpret_stacked_2d_as_array(4);
-                    let mut image_assets = app.world_mut().resource_mut::<Assets<Image>>();
+                    let mut image_assets =
+                        app.world_mut().resource_mut::<Assets<Image>>();
                     image_assets.add(image)
                 }
             };

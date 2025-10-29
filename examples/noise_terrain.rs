@@ -123,7 +123,7 @@ fn move_camera(
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
     if let Ok(mut transform) = cam_transform.single_mut() {
-        transform.translation.x += time.delta_secs() * 30.0;
-        transform.translation.z += time.delta_secs() * 60.0;
+        transform.translation.x += time.delta_secs() * 12.0;
+        transform.translation.z += time.delta_secs() * 24.0;
     }
 }

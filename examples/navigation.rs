@@ -47,7 +47,8 @@ impl VoxelWorldConfig for MyMainWorld {
         Arc::new(|vox_mat: u8| match vox_mat {
             SNOWY_BRICK => [0, 1, 2],
             FULL_BRICK => [2, 2, 2],
-            GRASS | _ => [3, 3, 3],
+            GRASS => [3, 3, 3],
+            _ => [3, 3, 3],
         })
     }
 
@@ -252,11 +253,13 @@ fn create_voxel_floor() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
             && pos.z < FLOOR_SIZE as i32
         {
             if pos.y < 1 && pos.y > -3 {
-                return WorldVoxel::Solid(GRASS);
+                WorldVoxel::Solid(GRASS)
+            } else {
+                WorldVoxel::Air
             }
-            return WorldVoxel::Air;
+        } else {
+            WorldVoxel::Unset
         }
-        return WorldVoxel::Unset;
     })
 }
 
@@ -294,10 +297,8 @@ fn update_cursor_cube(
                 if let Some(mat) = materials.get_mut(&material_handle.0) {
                     mat.base_color = Color::srgba_u8(255, 144, 124, 128);
                 }
-            } else {
-                if let Some(mat) = materials.get_mut(&material_handle.0) {
-                    mat.base_color = Color::srgba_u8(124, 144, 255, 128);
-                }
+            } else if let Some(mat) = materials.get_mut(&material_handle.0) {
+                mat.base_color = Color::srgba_u8(124, 144, 255, 128);
             }
         }
     }
