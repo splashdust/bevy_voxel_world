@@ -125,6 +125,26 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         self.is_empty
     }
 
+    /// Returns the chunk-space position of this chunk.
+    pub fn chunk_position(&self) -> IVec3 {
+        self.position
+    }
+
+    /// Returns the LOD level this chunk was generated with.
+    pub fn lod_level(&self) -> LodLevel {
+        self.lod_level
+    }
+
+    /// Returns the hash of the voxel payload, if any.
+    pub fn voxels_hash(&self) -> u64 {
+        self.voxels_hash
+    }
+
+    /// Returns a clone of the voxel array, if the chunk stores explicit voxels.
+    pub fn voxels_arc(&self) -> Option<Arc<VoxelArray<I>>> {
+        self.voxels.as_ref().map(Arc::clone)
+    }
+
     /// Returns the fill type of the chunk.
     /// This is used to determine the type of content in the chunk.
     ///
