@@ -39,19 +39,11 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
         ATTRIBUTE_TEX_INDEX.at_shader_location(8),
     ]
 }
-#[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
+#[derive(Asset, AsBindGroup, Debug, Clone, Default, TypePath)]
 pub(crate) struct StandardVoxelMaterial {
     #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
     pub voxels_texture: Handle<Image>,
-}
-
-impl Default for StandardVoxelMaterial {
-    fn default() -> Self {
-        Self {
-            voxels_texture: Handle::default(),
-        }
-    }
 }
 
 impl MaterialExtension for StandardVoxelMaterial {

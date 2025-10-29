@@ -144,37 +144,40 @@ where
                 >>();
 
             if mat_plugins.is_empty() {
-                let mut material_plugin = MaterialPlugin::<
+                let material_plugin = MaterialPlugin::<
                     ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
-                >::default();
-                material_plugin.prepass_enabled = false;
+                > {
+                    prepass_enabled: false,
+                    ..Default::default()
+                };
                 app.add_plugins(material_plugin);
             }
 
             let mut preloaded_texture = true;
-            let texture_conf = self.config.voxel_texture();
             let mut texture_layers = 0;
 
             // Use built-in default texture if no texture is specified.
-            let image_handle = if texture_conf.is_none() {
-                let mut image = Image::from_buffer(
-                    include_bytes!("shaders/default_texture.png"),
-                    ImageType::MimeType("image/png"),
-                    CompressedImageFormats::default(),
-                    false,
-                    ImageSampler::Default,
-                    RenderAssetUsages::default(),
-                )
-                .unwrap();
-                image.reinterpret_stacked_2d_as_array(4);
-                let mut image_assets = app.world_mut().resource_mut::<Assets<Image>>();
-                image_assets.add(image)
-            } else {
-                let (img_path, layers) = texture_conf.unwrap();
-                texture_layers = layers;
-                let asset_server = app.world().get_resource::<AssetServer>().unwrap();
-                preloaded_texture = false;
-                asset_server.load(img_path)
+            let image_handle = match self.config.voxel_texture() {
+                Some((img_path, layers)) => {
+                    texture_layers = layers;
+                    preloaded_texture = false;
+                    let asset_server = app.world().get_resource::<AssetServer>().unwrap();
+                    asset_server.load(img_path)
+                }
+                None => {
+                    let mut image = Image::from_buffer(
+                        include_bytes!("shaders/default_texture.png"),
+                        ImageType::MimeType("image/png"),
+                        CompressedImageFormats::default(),
+                        false,
+                        ImageSampler::Default,
+                        RenderAssetUsages::default(),
+                    )
+                    .unwrap();
+                    image.reinterpret_stacked_2d_as_array(4);
+                    let mut image_assets = app.world_mut().resource_mut::<Assets<Image>>();
+                    image_assets.add(image)
+                }
             };
 
             let mut material_assets = app
