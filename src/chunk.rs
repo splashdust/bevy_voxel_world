@@ -9,7 +9,10 @@ use std::{
 };
 
 use crate::{
-    prelude::{ChunkMeshingFn, LodLevel, TextureIndexMapperFn, VoxelWorldConfig},
+    prelude::{
+        ChunkMeshingFn, ChunkRegenerateStrategy, LodLevel, TextureIndexMapperFn,
+        VoxelWorldConfig,
+    },
     voxel::WorldVoxel,
     voxel_world_internal::ModifiedVoxels,
 };
@@ -320,14 +323,21 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     /// Generate voxel data for the chunk. The supplied `modified_voxels` map is first checked,
     /// and where no voxeles are modified, the `voxel_data_fn` is called to get data from the
     /// consumer.
-    pub fn generate<F>(&mut self, mut voxel_data_fn: F)
+    pub fn generate<F>(
+        &mut self,
+        mut voxel_data_fn: F,
+        previous_data: Option<ChunkData<I>>,
+        strategy: ChunkRegenerateStrategy,
+    )
     where
-        F: FnMut(IVec3) -> WorldVoxel<I> + Send + 'static,
+        F: FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + 'static,
     {
         let mut filled_count = 0;
         let modified_voxels = (*self.modified_voxels).read().unwrap();
         let mut voxels = [WorldVoxel::Unset; PaddedChunkShape::SIZE as usize];
         let mut material_count = HashSet::new();
+        let reuse_previous =
+            matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
 
         self.chunk_data.has_generated = true;
 
@@ -348,7 +358,31 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
                 continue;
             }
 
-            let voxel = voxel_data_fn(block_pos);
+            let previous_voxel = previous_data.as_ref().map(|chunk| {
+                if let Some(previous_voxels) = &chunk.voxels {
+                    previous_voxels[i as usize]
+                } else {
+                    match chunk.get_fill_type() {
+                        FillType::Uniform(voxel) => *voxel,
+                        _ => WorldVoxel::Unset,
+                    }
+                }
+            });
+
+            if reuse_previous {
+                if let Some(prev_voxel) = previous_voxel {
+                    if !prev_voxel.is_unset() {
+                        voxels[i as usize] = prev_voxel;
+                        if let WorldVoxel::Solid(m) = prev_voxel {
+                            filled_count += 1;
+                            material_count.insert(m);
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            let voxel = voxel_data_fn(block_pos, previous_voxel);
 
             voxels[i as usize] = voxel;
 

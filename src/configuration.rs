@@ -6,7 +6,8 @@ use crate::meshing::generate_chunk_mesh;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
-pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
+pub type VoxelLookupFn<I = u8> =
+    Box<dyn FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + Sync>;
 pub type LodLevel = u8;
 pub type VoxelLookupDelegate<I = u8> =
     Box<dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> VoxelLookupFn<I> + Send + Sync>;
@@ -25,6 +26,15 @@ pub type ChunkMeshingDelegate<I, UB> = Option<
             + Sync,
     >,
 >;
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkRegenerateStrategy {
+    /// Attempt to reuse previously generated chunk data before invoking the voxel lookup delegate.
+    #[default]
+    Reuse,
+    /// Always regenerate voxel data using the voxel lookup delegate.
+    Repopulate,
+}
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -124,7 +134,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(|_, _, _| Box::new(|_| WorldVoxel::Unset))
+        Box::new(|_, _, _| Box::new(|_, _| WorldVoxel::Unset))
     }
 
     /// A function that returns a function that computes the mesh for a chunk
@@ -159,6 +169,11 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// Defaults to `0` for all chunks.
     fn chunk_lod(&self, _chunk_position: IVec3, _camera_position: Vec3) -> LodLevel {
         0
+    }
+
+    /// Determine how voxel data should be regenerated for a chunk. Defaults to reusing previous data.
+    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
+        ChunkRegenerateStrategy::Reuse
     }
 
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}

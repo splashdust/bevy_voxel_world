@@ -213,7 +213,8 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+fn get_voxel_fn(
+) -> Box<dyn FnMut(IVec3, Option<WorldVoxel>) -> WorldVoxel + Send + Sync> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 5;
@@ -227,7 +228,7 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
 
     // Then we return this boxed closure that captures the noise and the cache
     // This will get sent off to a separate thread for meshing by bevy_voxel_world
-    Box::new(move |pos: IVec3| {
+    Box::new(move |pos: IVec3, _previous| {
         // Sea level
         if pos.y < 1 {
             return WorldVoxel::Solid(3);

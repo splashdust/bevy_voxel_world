@@ -42,10 +42,10 @@ impl VoxelWorldConfig for MainWorld {
         let chunk_noise = Arc::clone(&self.noise);
         Box::new(move |chunk_pos, lod, previous| {
             if chunk_pos.y < 1 {
-                return Box::new(|_| WorldVoxel::Solid(3));
+                return Box::new(|_, _| WorldVoxel::Solid(3));
             }
             if chunk_pos.y > 4 {
-                return Box::new(|_| WorldVoxel::Air);
+                return Box::new(|_, _| WorldVoxel::Air);
             }
 
             let noise = Arc::clone(&chunk_noise);
@@ -57,12 +57,12 @@ impl VoxelWorldConfig for MainWorld {
 
             // Then we return this boxed closure that captures the noise and the cache
             // This will get sent off to a separate thread for meshing by bevy_voxel_world
-            Box::new(move |pos: IVec3| {
+            Box::new(move |pos: IVec3, previous_voxel| {
                 let lod_step = i32::from(lod.max(1));
                 let base_x = pos.x.div_euclid(lod_step) * lod_step;
                 let base_z = pos.z.div_euclid(lod_step) * lod_step;
 
-                if let (Some(prev_chunk), Some(prev_lod)) =
+                if let (Some(_), Some(prev_lod)) =
                     (previous.as_ref(), previous_lod)
                 {
                     // Try to reuse the voxel from a previously generated chunk when we
@@ -72,9 +72,7 @@ impl VoxelWorldConfig for MainWorld {
                     let prev_base_z = pos.z.div_euclid(prev_step) * prev_step;
 
                     if prev_base_x == base_x && prev_base_z == base_z {
-                        if let Some(voxel) =
-                            prev_chunk.get_voxel_at_world_position(pos)
-                        {
+                        if let Some(voxel) = previous_voxel {
                             if !voxel.is_unset() {
                                 return voxel;
                             }
@@ -122,15 +120,19 @@ impl VoxelWorldConfig for MainWorld {
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
         // directly set lod values to our stride lengths
-        if distance < 15.0 {
+        if distance < 5.0 {
             1
-        // } else if distance < 10.0 {
-        //     2
-        // } else if distance < 20.0 {
-        //     4
+        } else if distance < 10.0 {
+            2
+        } else if distance < 20.0 {
+            4
         } else {
             8
         }
+    }
+
+    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
+        ChunkRegenerateStrategy::Repopulate
     }
 }
 

@@ -245,8 +245,9 @@ fn create_voxel_scene(mut voxel_world: VoxelWorld<MyMainWorld>) {
     voxel_world.set_voxel(IVec3::new(16, 2, 16), WorldVoxel::Solid(SNOWY_BRICK));
 }
 
-fn create_voxel_floor() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
-    Box::new(move |pos: IVec3| {
+fn create_voxel_floor(
+) -> Box<dyn FnMut(IVec3, Option<WorldVoxel>) -> WorldVoxel + Send + Sync> {
+    Box::new(move |pos: IVec3, _previous| {
         if pos.x > 0
             && pos.z > 0
             && pos.x < FLOOR_SIZE as i32

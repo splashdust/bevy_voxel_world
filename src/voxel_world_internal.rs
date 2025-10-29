@@ -361,6 +361,8 @@ where
 
             let lod_level = chunk.lod_level;
 
+            let regenerate_strategy = configuration.chunk_regenerate_strategy();
+
             let voxel_data_fn = (configuration.voxel_lookup_delegate())(
                 chunk.position,
                 lod_level,
@@ -384,8 +386,14 @@ where
 
             let mesh_map = mesh_cache.get_mesh_map();
 
+            let previous_for_generate = previous_chunk_data.clone();
+
             let thread = thread_pool.spawn(async move {
-                chunk_task.generate(voxel_data_fn);
+                chunk_task.generate(
+                    voxel_data_fn,
+                    previous_for_generate,
+                    regenerate_strategy,
+                );
 
                 // No need to mesh if the chunk is empty or full
                 if chunk_task.is_empty() || chunk_task.is_full() {

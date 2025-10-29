@@ -156,6 +156,15 @@ current LOD value together with the previously generated `ChunkData` (if any).
 This allows reuse of cached information when a chunk's LOD changes without
 forcing full regeneration from scratch.
 
+You can further control how voxel data is rebuilt by overriding
+`VoxelWorldConfig::chunk_regenerate_strategy`. The default behaviour reuses the
+previously generated `ChunkData` whenever possible, only invoking the voxel
+lookup delegate for positions that need new data. When you need to fully rebuild
+a chunk (for example when using a bespoke low-detail representation), return
+`ChunkRegenerateStrategy::Repopulate`. The voxel lookup closure now receives an
+`Option<WorldVoxel>` describing the previous value for each sample, making it
+easy to decide whether to reuse or replace on a per-voxel basis.
+
 ## Gotchas
 
 `bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.
