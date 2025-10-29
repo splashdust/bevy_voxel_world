@@ -3,10 +3,8 @@ use std::sync::Arc;
 use bevy::{
     light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
 };
-use bevy_voxel_world::{
-    custom_meshing::CHUNK_SIZE_F,
-    prelude::*,
-};
+use bevy_voxel_world::custom_meshing::CHUNK_SIZE_F;
+use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
 #[derive(Resource, Clone)]
@@ -33,7 +31,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        50
+        25
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -51,7 +49,8 @@ impl VoxelWorldConfig for MainWorld {
             }
 
             let noise = Arc::clone(&chunk_noise);
-
+            let previous = previous.filter(|chunk| chunk.has_generated());
+            let previous_lod = previous.as_ref().map(|chunk| chunk.lod_level());
             // We use this to cache the noise value for each y column so we only need
             // to calculate it once per x/z coordinate
             let mut cache = HashMap::<(i32, i32), f64>::new();
@@ -59,14 +58,39 @@ impl VoxelWorldConfig for MainWorld {
             // Then we return this boxed closure that captures the noise and the cache
             // This will get sent off to a separate thread for meshing by bevy_voxel_world
             Box::new(move |pos: IVec3| {
-                let [x, y, z] = pos.as_dvec3().to_array();
+                let lod_step = i32::from(lod.max(1));
+                let base_x = pos.x.div_euclid(lod_step) * lod_step;
+                let base_z = pos.z.div_euclid(lod_step) * lod_step;
+
+                if let (Some(prev_chunk), Some(prev_lod)) =
+                    (previous.as_ref(), previous_lod)
+                {
+                    // Try to reuse the voxel from a previously generated chunk when we
+                    // are sampling the same world-space column at a new LOD.
+                    let prev_step = i32::from(prev_lod.max(1));
+                    let prev_base_x = pos.x.div_euclid(prev_step) * prev_step;
+                    let prev_base_z = pos.z.div_euclid(prev_step) * prev_step;
+
+                    if prev_base_x == base_x && prev_base_z == base_z {
+                        if let Some(voxel) =
+                            prev_chunk.get_voxel_at_world_position(pos)
+                        {
+                            if !voxel.is_unset() {
+                                return voxel;
+                            }
+                        }
+                    }
+                }
 
                 // If y is less than the noise sample, we will set the voxel to solid
-                let is_ground = y < match cache.get(&(pos.x, pos.z)) {
+                let is_ground = f64::from(pos.y) < match cache.get(&(base_x, base_z)) {
                     Some(sample) => *sample,
                     None => {
-                        let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
-                        cache.insert((pos.x, pos.z), sample);
+                        let sample = noise.get([
+                            f64::from(base_x) / 1000.0,
+                            f64::from(base_z) / 1000.0,
+                        ]) * 50.0;
+                        cache.insert((base_x, base_z), sample);
                         sample
                     }
                 };
@@ -97,12 +121,13 @@ impl VoxelWorldConfig for MainWorld {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
-        if distance < 5.0 {
+        // directly set lod values to our stride lengths
+        if distance < 15.0 {
             1
-        } else if distance < 10.0 {
-            2
-        } else if distance < 20.0 {
-            4
+        // } else if distance < 10.0 {
+        //     2
+        // } else if distance < 20.0 {
+        //     4
         } else {
             8
         }
