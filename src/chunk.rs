@@ -115,6 +115,38 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
     }
 
+    /// Returns the voxel at the given world-space position if this chunk contains it.
+    pub fn get_voxel_at_world_position(
+        &self,
+        world_position: IVec3,
+    ) -> Option<WorldVoxel<I>> {
+        let chunk_pos = IVec3 {
+            x: (world_position.x as f32 / CHUNK_SIZE_F).floor() as i32,
+            y: (world_position.y as f32 / CHUNK_SIZE_F).floor() as i32,
+            z: (world_position.z as f32 / CHUNK_SIZE_F).floor() as i32,
+        };
+
+        if chunk_pos != self.position {
+            return None;
+        }
+
+        let offset = world_position - chunk_pos * CHUNK_SIZE_I;
+
+        if offset.cmplt(IVec3::ZERO).any()
+            || offset.cmpge(IVec3::splat(CHUNK_SIZE_I)).any()
+        {
+            return None;
+        }
+
+        let local = UVec3::new(
+            (offset.x as u32) + 1,
+            (offset.y as u32) + 1,
+            (offset.z as u32) + 1,
+        );
+
+        Some(self.get_voxel(local))
+    }
+
     /// Returns true if the chunk is full. No mesh will be generated for full chunks.
     pub fn is_full(&self) -> bool {
         self.is_full
