@@ -173,7 +173,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
 
     /// Determine how voxel data should be regenerated for a chunk. Defaults to reusing previous data.
     fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
-        ChunkRegenerateStrategy::Reuse
+        ChunkRegenerateStrategy::default()
     }
 
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
