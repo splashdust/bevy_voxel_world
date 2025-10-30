@@ -31,7 +31,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        25
+        100
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -49,51 +49,35 @@ impl VoxelWorldConfig for MainWorld {
             }
 
             let noise = Arc::clone(&chunk_noise);
-            let previous = previous.filter(|chunk| chunk.has_generated());
-            let previous_lod = previous.as_ref().map(|chunk| chunk.lod_level());
+            // let previous = previous.filter(|chunk| chunk.has_generated());
+            // let previous_lod = previous.as_ref().map(|chunk| chunk.lod_level());
             // We use this to cache the noise value for each y column so we only need
             // to calculate it once per x/z coordinate
             let mut cache = HashMap::<(i32, i32), f64>::new();
 
             // Then we return this boxed closure that captures the noise and the cache
             // This will get sent off to a separate thread for meshing by bevy_voxel_world
-            Box::new(move |pos: IVec3, previous_voxel| {
+            Box::new(move |pos: IVec3, _previous_voxel| {
                 // Sea level
                 if pos.y < 1 {
                     return WorldVoxel::Solid(3);
                 }
 
                 let lod_step = i32::from(lod.max(1));
-                let base_x = pos.x.div_euclid(lod_step) * lod_step;
-                let base_z = pos.z.div_euclid(lod_step) * lod_step;
-
-                if let (Some(_), Some(prev_lod)) =
-                    (previous.as_ref(), previous_lod)
-                {
-                    // Try to reuse the voxel from a previously generated chunk when we
-                    // are sampling the same world-space column at a new LOD.
-                    let prev_step = i32::from(prev_lod.max(1));
-                    let prev_base_x = pos.x.div_euclid(prev_step) * prev_step;
-                    let prev_base_z = pos.z.div_euclid(prev_step) * prev_step;
-
-                    if prev_base_x == base_x && prev_base_z == base_z {
-                        if let Some(voxel) = previous_voxel {
-                            if !voxel.is_unset() {
-                                return voxel;
-                            }
-                        }
-                    }
+                let x_rem = pos.x.rem_euclid(lod_step);
+                let z_rem = pos.z.rem_euclid(lod_step);
+                if x_rem != 0 || z_rem != 0 {
+                    return WorldVoxel::Unset;
                 }
 
+                let [x, y, z] = pos.as_dvec3().to_array();
+
                 // If y is less than the noise sample, we will set the voxel to solid
-                let is_ground = f64::from(pos.y) < match cache.get(&(base_x, base_z)) {
+                let is_ground = y < match cache.get(&(pos.x, pos.z)) {
                     Some(sample) => *sample,
                     None => {
-                        let sample = noise.get([
-                            f64::from(base_x) / 1000.0,
-                            f64::from(base_z) / 1000.0,
-                        ]) * 50.0;
-                        cache.insert((base_x, base_z), sample);
+                        let sample = noise.get([x / 1000.0, z / 1000.0]) * 50.0;
+                        cache.insert((pos.x, pos.z), sample);
                         sample
                     }
                 };
@@ -125,19 +109,15 @@ impl VoxelWorldConfig for MainWorld {
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
         // directly set lod values to our stride lengths
-        if distance < 5.0 {
+        if distance < 10.0 {
             1
-        } else if distance < 10.0 {
+        } else if distance < 25.0 {
             2
-        } else if distance < 20.0 {
+        } else if distance < 50.0 {
             4
         } else {
             8
         }
-    }
-
-    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
-        ChunkRegenerateStrategy::Repopulate
     }
 }
 
@@ -154,7 +134,8 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-200.0, 180.0, -200.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-200.0, 180.0, -200.0)
+            .looking_at(Vec3::new(0.0, 60.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
