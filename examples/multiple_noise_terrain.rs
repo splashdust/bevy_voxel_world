@@ -89,8 +89,7 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn(
-) -> Box<
+fn get_voxel_fn() -> Box<
     dyn FnMut(IVec3, Option<WorldVoxel<BlockTexture>>) -> WorldVoxel<BlockTexture>
         + Send
         + Sync,

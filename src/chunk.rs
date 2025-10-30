@@ -328,8 +328,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         mut voxel_data_fn: F,
         previous_data: Option<ChunkData<I>>,
         strategy: ChunkRegenerateStrategy,
-    )
-    where
+    ) where
         F: FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + 'static,
     {
         let mut filled_count = 0;
