@@ -13,6 +13,10 @@ exclude = ["/assets/", "/examples/", "/.github/"]
 keywords = ["bevy", "voxels", "gamedev", "voxelengine"]
 categories = ["game-development", "graphics"]
 
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 3
 
