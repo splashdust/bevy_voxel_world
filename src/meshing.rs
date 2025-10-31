@@ -11,10 +11,10 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
-use ndshape::ConstShape;
+use ndshape::{ConstShape, RuntimeShape, Shape};
 
 use crate::{
-    chunk::{PaddedChunkShape, CHUNK_SIZE_U},
+    chunk::{PaddedChunkShape, PADDED_CHUNK_SIZE},
     prelude::TextureIndexMapperFn,
     voxel::WorldVoxel,
     voxel_material::ATTRIBUTE_TEX_INDEX,
@@ -28,19 +28,48 @@ pub fn generate_chunk_mesh<I: PartialEq + Copy>(
     _pos: IVec3,
     texture_index_mapper: TextureIndexMapperFn<I>,
 ) -> Mesh {
+    generate_chunk_mesh_for_shape(
+        voxels,
+        _pos,
+        UVec3::splat(PADDED_CHUNK_SIZE),
+        UVec3::splat(PADDED_CHUNK_SIZE),
+        texture_index_mapper,
+    )
+}
+
+/// Generate a mesh for the given voxels using an arbitrary padded chunk shape.
+pub fn generate_chunk_mesh_for_shape<I: PartialEq + Copy>(
+    voxels: Arc<[WorldVoxel<I>]>,
+    _pos: IVec3,
+    data_padded_shape: UVec3,
+    mesh_padded_shape: UVec3,
+    texture_index_mapper: TextureIndexMapperFn<I>,
+) -> Mesh {
     let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
     let mut buffer = UnitQuadBuffer::new();
+    let mesh_shape = RuntimeShape::<u32, 3>::new(mesh_padded_shape.to_array());
+    let max = [
+        mesh_padded_shape.x.saturating_sub(1),
+        mesh_padded_shape.y.saturating_sub(1),
+        mesh_padded_shape.z.saturating_sub(1),
+    ];
 
     visible_block_faces(
-        &*voxels,
-        &PaddedChunkShape {},
+        voxels.as_ref(),
+        &mesh_shape,
         [0; 3],
-        [CHUNK_SIZE_U + 1; 3],
+        max,
         &faces,
         &mut buffer,
     );
 
-    mesh_from_quads(buffer, faces, voxels, texture_index_mapper)
+    mesh_from_quads_for_shape(
+        buffer,
+        faces,
+        voxels.as_ref(),
+        texture_index_mapper,
+        &mesh_shape,
+    )
 }
 
 /// Create a Bevy Mesh from a block_mesh::UnitQuadBuffer
@@ -49,6 +78,23 @@ pub fn mesh_from_quads<I: PartialEq + Copy>(
     faces: [OrientedBlockFace; 6],
     voxels: VoxelArray<I>,
     texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
+) -> Mesh {
+    let shape = RuntimeShape::<u32, 3>::new([PADDED_CHUNK_SIZE; 3]);
+    mesh_from_quads_for_shape(
+        quads,
+        faces,
+        voxels.as_ref(),
+        texture_index_mapper,
+        &shape,
+    )
+}
+
+fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
+    quads: UnitQuadBuffer,
+    faces: [OrientedBlockFace; 6],
+    voxels: &[WorldVoxel<I>],
+    texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
+    shape: &RuntimeShape<u32, 3>,
 ) -> Mesh {
     let num_indices = quads.num_quads() * 6;
     let num_vertices = quads.num_quads() * 4;
@@ -68,7 +114,7 @@ pub fn mesh_from_quads<I: PartialEq + Copy>(
                 face.signed_normal().z,
             ]);
 
-            let ao = face_aos(&quad.minimum, &normal, &voxels);
+            let ao = face_aos(&quad.minimum, &normal, voxels, shape);
             aos.extend_from_slice(&ao);
 
             // TODO: Fix AO anisotropy
@@ -84,7 +130,7 @@ pub fn mesh_from_quads<I: PartialEq + Copy>(
                 &quad.into(),
             ));
 
-            let voxel_index = PaddedChunkShape::linearize(quad.minimum) as usize;
+            let voxel_index = shape.linearize(quad.minimum) as usize;
             let material_type = match voxels[voxel_index] {
                 WorldVoxel::Solid(mt) => texture_index_mapper(mt),
                 _ => [0, 0, 0],
@@ -168,70 +214,71 @@ fn side_aos<I: PartialEq>(neighbours: [WorldVoxel<I>; 8]) -> [u32; 4] {
 fn face_aos<I: PartialEq + Copy>(
     voxel_pos: &[u32; 3],
     face_normal: &IVec3,
-    voxels: &VoxelArray<I>,
+    voxels: &[WorldVoxel<I>],
+    shape: &RuntimeShape<u32, 3>,
 ) -> [u32; 4] {
     let [x, y, z] = *voxel_pos;
 
     match *face_normal {
         IVec3::NEG_X => side_aos([
-            voxels[PaddedChunkShape::linearize([x - 1, y, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z - 1]) as usize],
         ]),
         IVec3::X => side_aos([
-            voxels[PaddedChunkShape::linearize([x + 1, y, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z - 1]) as usize],
         ]),
         IVec3::NEG_Y => side_aos([
-            voxels[PaddedChunkShape::linearize([x, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z - 1]) as usize],
         ]),
         IVec3::Y => side_aos([
-            voxels[PaddedChunkShape::linearize([x, y + 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z - 1]) as usize],
         ]),
         IVec3::NEG_Z => side_aos([
-            voxels[PaddedChunkShape::linearize([x - 1, y, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y + 1, z - 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y, z - 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x, y + 1, z - 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z - 1]) as usize],
         ]),
         IVec3::Z => side_aos([
-            voxels[PaddedChunkShape::linearize([x - 1, y, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y - 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x + 1, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x, y + 1, z + 1]) as usize],
-            voxels[PaddedChunkShape::linearize([x - 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y - 1, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y, z + 1]) as usize],
+            voxels[shape.linearize([x + 1, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x, y + 1, z + 1]) as usize],
+            voxels[shape.linearize([x - 1, y + 1, z + 1]) as usize],
         ]),
         _ => unreachable!(),
     }

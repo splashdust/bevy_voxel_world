@@ -1,7 +1,7 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::chunk::{ChunkData, VoxelArray};
+use crate::chunk::{ChunkData, VoxelArray, PADDED_CHUNK_SIZE};
 use crate::meshing::generate_chunk_mesh;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
@@ -13,6 +13,17 @@ pub type VoxelLookupDelegate<I = u8> =
     Box<dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> VoxelLookupFn<I> + Send + Sync>;
 
 pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
+pub type ChunkShapeFn = Box<dyn Fn(LodLevel) -> UVec3 + Send + Sync>;
+
+#[inline]
+pub const fn padded_chunk_shape(interior: UVec3) -> UVec3 {
+    UVec3::new(interior.x + 2, interior.y + 2, interior.z + 2)
+}
+
+#[inline]
+pub const fn padded_chunk_shape_uniform(edge: u32) -> UVec3 {
+    UVec3::splat(edge + 2)
+}
 
 pub type ChunkMeshingFn<I, UB> = Box<
     dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>)
@@ -169,6 +180,16 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// Defaults to `0` for all chunks.
     fn chunk_lod(&self, _chunk_position: IVec3, _camera_position: Vec3) -> LodLevel {
         0
+    }
+
+    /// Define the padded voxel dimensions used for data generation for a given LOD level.
+    fn chunk_data_shape(&self, _lod_level: LodLevel) -> UVec3 {
+        UVec3::splat(PADDED_CHUNK_SIZE)
+    }
+
+    /// Define the padded voxel dimensions used for meshing for a given LOD level.
+    fn chunk_meshing_shape(&self, _lod_level: LodLevel) -> UVec3 {
+        UVec3::splat(PADDED_CHUNK_SIZE)
     }
 
     /// Determine how voxel data should be regenerated for a chunk. Defaults to reusing previous data.
