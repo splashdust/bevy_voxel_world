@@ -386,12 +386,10 @@ where
 
             let mesh_map = mesh_cache.get_mesh_map();
 
-            let previous_for_generate = previous_chunk_data.clone();
-
             let thread = thread_pool.spawn(async move {
                 chunk_task.generate(
                     voxel_data_fn,
-                    previous_for_generate,
+                    previous_chunk_data.clone(),
                     regenerate_strategy,
                 );
 
