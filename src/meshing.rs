@@ -16,7 +16,7 @@ use bevy::{
 use ndshape::{ConstShape, RuntimeShape, Shape};
 
 use crate::{
-    chunk::{CHUNK_SIZE_F, PADDED_CHUNK_SIZE, PaddedChunkShape},
+    chunk::{PaddedChunkShape, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
     prelude::TextureIndexMapperFn,
     voxel::WorldVoxel,
     voxel_material::ATTRIBUTE_TEX_INDEX,
@@ -54,7 +54,8 @@ pub fn generate_chunk_mesh_for_shape<I: PartialEq + Copy>(
     let data_shape = RuntimeShape::<u32, 3>::new(data_padded_shape.to_array());
     let mesh_shape = RuntimeShape::<u32, 3>::new(mesh_padded_shape.to_array());
 
-    let voxels_for_mesh: Arc<[WorldVoxel<I>]> = if data_padded_shape != mesh_padded_shape {
+    let voxels_for_mesh: Arc<[WorldVoxel<I>]> = if data_padded_shape != mesh_padded_shape
+    {
         let coarse = resample_voxels_nearest(voxels.as_ref(), &data_shape, &mesh_shape);
         Arc::<[WorldVoxel<I>]>::from(coarse)
     } else {
@@ -93,13 +94,7 @@ pub fn mesh_from_quads<I: PartialEq + Copy>(
     texture_index_mapper: Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>,
 ) -> Mesh {
     let shape = RuntimeShape::<u32, 3>::new([PADDED_CHUNK_SIZE; 3]);
-    mesh_from_quads_for_shape(
-        quads,
-        faces,
-        voxels.as_ref(),
-        texture_index_mapper,
-        &shape,
-    )
+    mesh_from_quads_for_shape(quads, faces, voxels.as_ref(), texture_index_mapper, &shape)
 }
 
 fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
@@ -135,8 +130,11 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
             // TODO: Fix AO anisotropy
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
-            positions.extend_from_slice(&face.quad_corners(&quad.into())
-            .map(|c| (voxel_size * c.as_vec3()).to_array()));
+            positions.extend_from_slice(
+                &face
+                    .quad_corners(&quad.into())
+                    .map(|c| (voxel_size * c.as_vec3()).to_array()),
+            );
 
             normals.extend_from_slice(&face.quad_mesh_normals());
 
@@ -203,9 +201,13 @@ fn map_nearest_1d(mesh_i: u32, mesh_dim: u32, data_dim: u32) -> u32 {
     // scale the inner dimension of the padded shape
     let scale = (data_dim - 2) as f32 / (mesh_dim - 3) as f32;
     let mut s = (((mesh_i as f32 - 1.0) * scale).round() + 1.0) as i32;
-    if s < 0 { s = 0; }
+    if s < 0 {
+        s = 0;
+    }
     let max = (data_dim as i32 - 1).max(0);
-    if s > max { s = max; }
+    if s > max {
+        s = max;
+    }
     s as u32
 }
 

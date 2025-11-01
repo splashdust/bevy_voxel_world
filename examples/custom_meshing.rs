@@ -65,12 +65,15 @@ impl VoxelWorldConfig for MainWorld {
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|_pos: IVec3, _lod, _previous| {
-            // If necessary, we can caputure data here based on the chunk position
-            // and move it into the closure below.
-            Box::new(
+        Some(Box::new(
+            |_pos: IVec3, _lod, _data_shape, _mesh_shape, _previous| {
+                // If necessary, we can caputure data here based on the chunk position
+                // and move it into the closure below.
+                Box::new(
                 // The array of voxels for the chunk
                 |voxels: VoxelArray<Self::MaterialIndex>,
+                 _data_shape_in: UVec3,
+                 _mesh_shape_in: UVec3,
                  // A reference to the texture index mapper function as defined in the config
                  texture_index_mapper: TextureIndexMapperFn<Self::MaterialIndex>| {
                     let faces = block_mesh::RIGHT_HANDED_Y_UP_CONFIG.faces;
@@ -157,7 +160,8 @@ impl VoxelWorldConfig for MainWorld {
                     (render_mesh, None)
                 },
             )
-        }))
+            },
+        ))
     }
 }
 

@@ -204,10 +204,20 @@ where
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
                 commands.entity(world_root).add_child(chunk_entity);
                 let lod_level = configuration.chunk_lod(chunk_position, camera_position);
-                let chunk = Chunk::<C>::new(chunk_position, lod_level, chunk_entity);
+                let data_shape = configuration.chunk_data_shape(lod_level);
+                let mesh_shape = configuration.chunk_meshing_shape(lod_level);
+                let chunk = Chunk::<C>::new(
+                    chunk_position,
+                    lod_level,
+                    chunk_entity,
+                    data_shape,
+                    mesh_shape,
+                );
 
                 let mut chunk_data = ChunkData::with_entity(chunk.entity);
                 chunk_data.lod_level = lod_level;
+                chunk_data.data_shape = data_shape;
+                chunk_data.mesh_shape = mesh_shape;
                 chunk_map_insert_buffer.push((chunk_position, chunk_data));
 
                 commands.entity(chunk.entity).try_insert((
@@ -258,6 +268,11 @@ where
                 continue;
             }
 
+            let data_shape = configuration.chunk_data_shape(target_lod);
+            let mesh_shape = configuration.chunk_meshing_shape(target_lod);
+
+            chunk.data_shape = data_shape;
+            chunk.mesh_shape = mesh_shape;
             chunk.lod_level = target_lod;
 
             // Ensure a remesh occurs to refresh data at the new LOD.
@@ -368,11 +383,15 @@ where
                 lod_level,
                 previous_chunk_data.clone(),
             );
+            let data_shape = chunk.data_shape;
+            let mesh_shape = chunk.mesh_shape;
             let chunk_meshing_fn = (configuration
                 .chunk_meshing_delegate()
                 .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
                 chunk.position,
                 lod_level,
+                data_shape,
+                mesh_shape,
                 previous_chunk_data.clone(),
             );
             let texture_index_mapper = configuration.texture_index_mapper().clone();
@@ -381,6 +400,8 @@ where
                 chunk.entity,
                 chunk.position,
                 lod_level,
+                data_shape,
+                mesh_shape,
                 modified_voxels.clone(),
             );
 

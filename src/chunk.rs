@@ -73,6 +73,8 @@ pub struct ChunkData<I> {
     pub(crate) fill_type: FillType<I>,
     pub(crate) entity: Entity,
     pub(crate) has_generated: bool,
+    pub(crate) data_shape: UVec3,
+    pub(crate) mesh_shape: UVec3,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -87,12 +89,22 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             fill_type: FillType::Empty,
             entity: Entity::PLACEHOLDER,
             has_generated: false,
+            data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
+            mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
         }
     }
 
     pub(crate) fn with_entity(entity: Entity) -> Self {
         let new = Self::new();
         Self { entity, ..new }
+    }
+
+    pub fn data_shape(&self) -> UVec3 {
+        self.data_shape
+    }
+
+    pub fn mesh_shape(&self) -> UVec3 {
+        self.mesh_shape
     }
 
     pub(crate) fn generate_hash(&mut self) {
@@ -254,15 +266,25 @@ pub struct Chunk<C> {
     pub position: IVec3,
     pub lod_level: LodLevel,
     pub entity: Entity,
+    pub data_shape: UVec3,
+    pub mesh_shape: UVec3,
     _marker: PhantomData<C>,
 }
 
 impl<C> Chunk<C> {
-    pub fn new(position: IVec3, lod_level: LodLevel, entity: Entity) -> Self {
+    pub fn new(
+        position: IVec3,
+        lod_level: LodLevel,
+        entity: Entity,
+        data_shape: UVec3,
+        mesh_shape: UVec3,
+    ) -> Self {
         Self {
             position,
             lod_level,
             entity,
+            data_shape,
+            mesh_shape,
             _marker: PhantomData,
         }
     }
@@ -272,6 +294,8 @@ impl<C> Chunk<C> {
             position: chunk.position,
             lod_level: chunk.lod_level,
             entity: chunk.entity,
+            data_shape: chunk.data_shape,
+            mesh_shape: chunk.mesh_shape,
             _marker: PhantomData,
         }
     }
@@ -305,10 +329,14 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         entity: Entity,
         position: IVec3,
         lod_level: LodLevel,
+        data_shape: UVec3,
+        mesh_shape: UVec3,
         modified_voxels: ModifiedVoxels<C, I>,
     ) -> Self {
         let mut chunk_data = ChunkData::with_entity(entity);
         chunk_data.lod_level = lod_level;
+        chunk_data.data_shape = data_shape;
+        chunk_data.mesh_shape = mesh_shape;
 
         Self {
             position,
@@ -415,8 +443,12 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         texture_index_mapper: TextureIndexMapperFn<I>,
     ) {
         if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
+            let data_shape = self.chunk_data.data_shape;
+            let mesh_shape = self.chunk_data.mesh_shape;
             let mesh_and_bundle = chunk_meshing_fn(
-                self.chunk_data.voxels.as_ref().unwrap().clone(),
+                Arc::clone(self.chunk_data.voxels.as_ref().unwrap()),
+                data_shape,
+                mesh_shape,
                 texture_index_mapper,
             );
             self.mesh = Some(mesh_and_bundle.0);

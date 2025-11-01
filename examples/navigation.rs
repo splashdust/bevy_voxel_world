@@ -59,42 +59,53 @@ impl VoxelWorldConfig for MyMainWorld {
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|pos: IVec3, _lod, _previous| {
-            Box::new(move |voxels, texture_index_mapper| {
-                // Use the crate's default meshing to build the mesh.
-                let mesh = generate_chunk_mesh(voxels.clone(), pos, texture_index_mapper);
+        Some(Box::new(
+            |pos: IVec3, _lod, _data_shape, _mesh_shape, _previous| {
+                Box::new(
+                    move |voxels,
+                          _data_shape_in,
+                          _mesh_shape_in,
+                          texture_index_mapper| {
+                        // Use the crate's default meshing to build the mesh.
+                        let mesh = generate_chunk_mesh(
+                            voxels.clone(),
+                            pos,
+                            texture_index_mapper,
+                        );
 
-                // Build per-chunk navigation: cells are passable when Air above Solid.
-                let mut passable = Vec::new();
-                let base = (pos * CHUNK_SIZE_U as i32).as_uvec3();
-                for x in 0..CHUNK_SIZE_U {
-                    for z in 0..CHUNK_SIZE_U {
-                        for y in 0..CHUNK_SIZE_U {
-                            let above_local = UVec3::new(x + 1, y + 1, z + 1);
-                            let below_local = UVec3::new(x + 1, y, z + 1);
-                            let vox_above = voxels[PaddedChunkShape::linearize(
-                                above_local.to_array(),
-                            )
-                                as usize];
-                            let vox_below = voxels[PaddedChunkShape::linearize(
-                                below_local.to_array(),
-                            )
-                                as usize];
-                            if vox_above.is_air() && vox_below.is_solid() {
-                                passable.push(base + UVec3::new(x, y, z));
+                        // Build per-chunk navigation: cells are passable when Air above Solid.
+                        let mut passable = Vec::new();
+                        let base = (pos * CHUNK_SIZE_U as i32).as_uvec3();
+                        for x in 0..CHUNK_SIZE_U {
+                            for z in 0..CHUNK_SIZE_U {
+                                for y in 0..CHUNK_SIZE_U {
+                                    let above_local = UVec3::new(x + 1, y + 1, z + 1);
+                                    let below_local = UVec3::new(x + 1, y, z + 1);
+                                    let vox_above = voxels[PaddedChunkShape::linearize(
+                                        above_local.to_array(),
+                                    )
+                                        as usize];
+                                    let vox_below = voxels[PaddedChunkShape::linearize(
+                                        below_local.to_array(),
+                                    )
+                                        as usize];
+                                    if vox_above.is_air() && vox_below.is_solid() {
+                                        passable.push(base + UVec3::new(x, y, z));
+                                    }
+                                }
                             }
                         }
-                    }
-                }
 
-                (
-                    mesh,
-                    Some(ChunkNavBundle {
-                        nav: ChunkNav { passable },
-                    }),
+                        (
+                            mesh,
+                            Some(ChunkNavBundle {
+                                nav: ChunkNav { passable },
+                            }),
+                        )
+                    },
                 )
-            })
-        }))
+            },
+        ))
     }
 }
 
