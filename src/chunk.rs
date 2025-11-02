@@ -1,7 +1,7 @@
 use bevy::{
     math::bounding::Aabb3d, platform::collections::HashSet, prelude::*, tasks::Task,
 };
-use ndshape::{ConstShape, ConstShape3u32};
+use ndshape::{ConstShape, ConstShape3u32, RuntimeShape, Shape};
 use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -29,6 +29,19 @@ pub type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
 pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
+
+fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
+    let [ex, ey, ez] = shape.as_array();
+    let ix = (ex.saturating_sub(2)).max(1);
+    let iy = (ey.saturating_sub(2)).max(1);
+    let iz = (ez.saturating_sub(2)).max(1);
+
+    Vec3::new(
+        CHUNK_SIZE_F / ix as f32,
+        CHUNK_SIZE_F / iy as f32,
+        CHUNK_SIZE_F / iz as f32,
+    )
+}
 
 #[derive(Component)]
 #[component(storage = "SparseSet")]
@@ -366,15 +379,39 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         let reuse_previous =
             matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
 
+        let desired_shape = self.chunk_data.data_shape;
+        let previous_shape = previous_data
+            .as_ref()
+            .map(|chunk| chunk.data_shape())
+            .unwrap_or(desired_shape);
+        let mut active_shape = desired_shape;
+
+        if reuse_previous
+            && previous_data
+                .as_ref()
+                .map(|chunk| chunk.has_generated())
+                .unwrap_or(false)
+            && desired_shape.x <= previous_shape.x
+            && desired_shape.y <= previous_shape.y
+            && desired_shape.z <= previous_shape.z
+        {
+            active_shape = previous_shape;
+        }
+
+        self.chunk_data.data_shape = active_shape;
+        let data_shape = RuntimeShape::<u32, 3>::new(active_shape.to_array());
+
+        let scale = voxel_size_from_shape(&data_shape);
+
         self.chunk_data.has_generated = true;
 
-        for i in 0..PaddedChunkShape::SIZE {
-            let chunk_block = PaddedChunkShape::delinearize(i);
+        for i in 0..data_shape.size() {
+            let chunk_block = data_shape.delinearize(i);
 
             let block_pos = IVec3 {
-                x: chunk_block[0] as i32 + (self.position.x * CHUNK_SIZE_I) - 1,
-                y: chunk_block[1] as i32 + (self.position.y * CHUNK_SIZE_I) - 1,
-                z: chunk_block[2] as i32 + (self.position.z * CHUNK_SIZE_I) - 1,
+                x: (((chunk_block[0] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.x * CHUNK_SIZE_I),
+                y: (((chunk_block[1] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.y * CHUNK_SIZE_I),
+                z: (((chunk_block[2] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.z * CHUNK_SIZE_I),
             };
 
             if let Some(voxel) = modified_voxels.get(&block_pos) {
@@ -385,16 +422,10 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
                 continue;
             }
 
-            let previous_voxel = previous_data.as_ref().map(|chunk| {
-                if let Some(previous_voxels) = &chunk.voxels {
-                    previous_voxels[i as usize]
-                } else {
-                    match chunk.get_fill_type() {
-                        FillType::Uniform(voxel) => *voxel,
-                        _ => WorldVoxel::Unset,
-                    }
-                }
-            });
+            let previous_voxel =
+                previous_data
+                    .as_ref()
+                    .and_then(|chunk| chunk.get_voxel_at_world_position(block_pos));
 
             if reuse_previous {
                 if let Some(prev_voxel) = previous_voxel {
