@@ -21,7 +21,8 @@ impl VoxelWorldConfig for MyMainWorld {
         Arc::new(|vox_mat| match vox_mat {
             SNOWY_BRICK => [0, 1, 2],
             FULL_BRICK => [2, 2, 2],
-            GRASS | _ => [3, 3, 3],
+            GRASS => [3, 3, 3],
+            _ => [3, 3, 3],
         })
     }
 

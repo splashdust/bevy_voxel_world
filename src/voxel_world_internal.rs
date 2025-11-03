@@ -242,7 +242,7 @@ where
         all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
-        mut ev_chunk_will_despawn: EventWriter<ChunkWillDespawn<C>>,
+        mut ev_chunk_will_despawn: MessageWriter<ChunkWillDespawn<C>>,
     ) {
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
@@ -310,7 +310,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
-        mut ev_chunk_will_remesh: EventWriter<ChunkWillRemesh<C>>,
+        mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
         dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
@@ -443,14 +443,11 @@ where
                         }
                     };
 
-                    commands
-                        .entity(entity)
-                        .try_insert((
-                            *transform,
-                            MeshRef(mesh_handle),
-                            NeedsMaterial::<C>(PhantomData),
-                        ))
-                        .remove::<bevy::render::primitives::Aabb>();
+                    commands.entity(entity).try_insert((
+                        *transform,
+                        MeshRef(mesh_handle),
+                        NeedsMaterial::<C>(PhantomData),
+                    ));
                 }
             } else {
                 commands
@@ -474,7 +471,7 @@ where
     pub fn flush_voxel_write_buffer(
         mut commands: Commands,
         mut buffer: ResMut<VoxelWriteBuffer<C, C::MaterialIndex>>,
-        mut ev_chunk_will_update: EventWriter<ChunkWillUpdate<C>>,
+        mut ev_chunk_will_update: MessageWriter<ChunkWillUpdate<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
     ) {
@@ -516,7 +513,7 @@ where
         mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C, C::MaterialIndex>>,
         mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C, C::MaterialIndex>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        mut ev_chunk_will_spawn: EventWriter<ChunkWillSpawn<C>>,
+        mut ev_chunk_will_spawn: MessageWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     ) {
         chunk_map.apply_buffers(

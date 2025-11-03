@@ -4,6 +4,7 @@
     mesh_functions,
     view_transformations::position_world_to_clip
 }
+#import bevy_pbr::pbr_bindings
 #import bevy_render::instance_index::get_instance_index
 
 #ifdef PREPASS_PIPELINE
@@ -18,10 +19,10 @@
 }
 #endif
 
-@group(2) @binding(100)
+@group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var mat_array_texture: texture_2d_array<f32>;
 
-@group(2) @binding(101)
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var mat_array_texture_sampler: sampler;
 
 struct Vertex {

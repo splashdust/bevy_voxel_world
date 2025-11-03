@@ -1,11 +1,6 @@
 use bevy::color::palettes::css;
 use bevy::prelude::*;
-use smooth_bevy_cameras::{
-    controllers::unreal::{
-        UnrealCameraBundle, UnrealCameraController, UnrealCameraPlugin,
-    },
-    LookTransformPlugin,
-};
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use std::sync::Arc;
 
 use bevy_voxel_world::{prelude::*, traversal_alg::*};
@@ -55,8 +50,7 @@ fn main() {
         // This should just be a path to an image in your assets folder.
         .add_plugins((
             VoxelWorldPlugin::with_config(MyMainWorld),
-            LookTransformPlugin,
-            UnrealCameraPlugin::default(),
+            PanOrbitCameraPlugin,
         ))
         .init_resource::<VoxelTrace>()
         .add_systems(Startup, (setup, create_voxel_scene))
@@ -89,18 +83,19 @@ fn setup(
     ));
 
     // Camera
-    commands
-        .spawn((
-            Camera3d::default(),
-            // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
-            VoxelWorldCamera::<MyMainWorld>::default(),
-        ))
-        .insert(UnrealCameraBundle::new(
-            UnrealCameraController::default(),
-            Vec3::new(10.0, 10.0, 10.0),
-            Vec3::ZERO,
-            Vec3::Y,
-        ));
+    commands.spawn((
+        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Camera3d::default(),
+        PanOrbitCamera {
+            orbit_smoothness: 0.15,
+            pan_smoothness: 0.15,
+            zoom_smoothness: 0.15,
+            target_radius: 20.0,
+            ..default()
+        },
+        // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
+        VoxelWorldCamera::<MyMainWorld>::default(),
+    ));
 
     // light
     commands.spawn((
@@ -139,7 +134,7 @@ fn update_cursor_cube(
     voxel_world_raycast: VoxelWorld<MyMainWorld>,
     mut trace: ResMut<VoxelTrace>,
     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MyMainWorld>>>,
-    mut cursor_evr: EventReader<CursorMoved>,
+    mut cursor_evr: MessageReader<CursorMoved>,
     mut cursor_cube: Query<(&mut Transform, &mut CursorCube)>,
 ) {
     for ev in cursor_evr.read() {

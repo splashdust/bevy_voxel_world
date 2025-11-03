@@ -89,13 +89,17 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
             let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
             for pos in check_pos.clone() {
-                assert_eq!(
-                    voxel_world.get_surface_voxel_at_2d_pos(Vec2::new(
-                        pos.x as f32,
-                        pos.z as f32
-                    )),
-                    Some((pos, test_voxel))
-                )
+                let origin = Vec3::new(pos.x as f32 + 0.5, 256.0, pos.z as f32 + 0.5);
+                let ray = Ray3d::new(origin, Dir3::NEG_Y);
+
+                let result = voxel_world
+                    .raycast(ray, &|(_, voxel)| matches!(voxel, WorldVoxel::Solid(_)));
+
+                assert!(result.is_some(), "expected to hit solid voxel at {:?}", pos);
+
+                let result = result.unwrap();
+                assert_eq!(result.voxel_pos(), pos);
+                assert_eq!(result.voxel, test_voxel);
             }
         },
     );
@@ -111,7 +115,7 @@ fn chunk_will_spawn_events() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_spawn: EventReader<ChunkWillSpawn<DefaultWorld>>| {
+        |mut ev_chunk_will_spawn: MessageReader<ChunkWillSpawn<DefaultWorld>>| {
             let spawn_count = ev_chunk_will_spawn.read().count();
             assert!(spawn_count > 0);
         },
@@ -137,7 +141,7 @@ fn chunk_will_remesh_event_after_set_voxel() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_remesh: EventReader<ChunkWillRemesh<DefaultWorld>>| {
+        |mut ev_chunk_will_remesh: MessageReader<ChunkWillRemesh<DefaultWorld>>| {
             let count = ev_chunk_will_remesh.read().count();
             assert!(count > 0)
         },
@@ -167,7 +171,7 @@ fn chunk_will_despawn_event() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_despawn: EventReader<ChunkWillDespawn<DefaultWorld>>| {
+        |mut ev_chunk_will_despawn: MessageReader<ChunkWillDespawn<DefaultWorld>>| {
             let count = ev_chunk_will_despawn.read().count();
             assert!(count > 0)
         },
@@ -188,7 +192,7 @@ fn chunk_will_update_event() {
 
     app.add_systems(
         Update,
-        |mut ev_chunk_will_update: EventReader<ChunkWillUpdate<DefaultWorld>>| {
+        |mut ev_chunk_will_update: MessageReader<ChunkWillUpdate<DefaultWorld>>| {
             let count = ev_chunk_will_update.read().count();
             assert!(count > 0)
         },
@@ -319,7 +323,7 @@ fn visit_voxel_check(
         test_state.test_name
     );
     assert!(
-        !test_state.traversal_time_out.finished(),
+        !test_state.traversal_time_out.is_finished(),
         "{}: Infinite loop detected (bc. such a simple trace should be much faster than 1s)",
         test_state.test_name
     );

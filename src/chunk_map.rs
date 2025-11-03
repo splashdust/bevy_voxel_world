@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     chunk::{self, ChunkData, CHUNK_SIZE_F},
+    configuration::VoxelWorldConfig,
     voxel::VOXEL_SIZE,
     voxel_world::ChunkWillSpawn,
 };
@@ -30,7 +31,7 @@ pub struct ChunkMap<C, I> {
     _marker: PhantomData<C>,
 }
 
-impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
+impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
     pub fn get(
         position: &IVec3,
         read_lock: &RwLockReadGuard<ChunkMapData<I>>,
@@ -62,7 +63,7 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
         world_bounds
     }
 
-    pub fn get_read_lock(&self) -> RwLockReadGuard<ChunkMapData<I>> {
+    pub fn get_read_lock(&self) -> RwLockReadGuard<'_, ChunkMapData<I>> {
         self.map.read().unwrap()
     }
 
@@ -75,7 +76,7 @@ impl<C: Send + Sync + 'static, I: Copy> ChunkMap<C, I> {
         insert_buffer: &mut ChunkMapInsertBuffer<C, I>,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
-        ev_chunk_will_spawn: &mut EventWriter<ChunkWillSpawn<C>>,
+        ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
     ) {
         if insert_buffer.is_empty()
             && update_buffer.is_empty()
@@ -163,7 +164,7 @@ pub(crate) struct ChunkMapInsertBuffer<C, I>(
 );
 
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapUpdateBuffer<C, I>(
+pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(
     #[deref] Vec<(IVec3, chunk::ChunkData<I>, ChunkWillSpawn<C>)>,
     PhantomData<C>,
 );

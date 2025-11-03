@@ -1,6 +1,9 @@
-use bevy::{pbr::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*};
+use bevy::{
+    light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
+};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
+use rand::Rng;
 use std::{sync::Arc, time::Duration};
 #[derive(Resource, Clone, Default)]
 struct MainWorld;
@@ -132,9 +135,39 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    let mut transform = cam_transform.get_single_mut().unwrap();
-    transform.translation.x += time.delta_secs() * 7.0;
-    transform.translation.z += time.delta_secs() * 12.0;
+    if let Ok(mut transform) = cam_transform.single_mut() {
+        transform.translation.x += time.delta_secs() * 7.0;
+        transform.translation.z += time.delta_secs() * 12.0;
+    }
+}
+
+fn random_surface_voxel(
+    voxel_world: &VoxelWorld<MainWorld>,
+    center: IVec3,
+    radius: u32,
+) -> Option<(IVec3, WorldVoxel)> {
+    let mut rng = rand::rng();
+    for _ in 0..100 {
+        let offset = IVec3::new(
+            rng.random_range(-(radius as i32)..=(radius as i32)),
+            0,
+            rng.random_range(-(radius as i32)..=(radius as i32)),
+        );
+        let sample_pos = center + offset;
+        let ray_origin = Vec3::new(
+            sample_pos.x as f32 + 0.5,
+            sample_pos.y as f32 + radius as f32 + 50.0,
+            sample_pos.z as f32 + 0.5,
+        );
+        let ray = Ray3d::new(ray_origin, Dir3::NEG_Y);
+        if let Some(hit) =
+            voxel_world.raycast(ray, &|(_, voxel)| matches!(voxel, WorldVoxel::Solid(_)))
+        {
+            return Some((hit.voxel_pos(), hit.voxel));
+        }
+    }
+
+    None
 }
 
 fn explosion(
@@ -143,16 +176,20 @@ fn explosion(
     mut timeout: Query<&mut ExplosionTimeout>,
     time: Res<Time>,
 ) {
-    let mut timeout = timeout.get_single_mut().unwrap();
+    let Ok(mut timeout) = timeout.single_mut() else {
+        return;
+    };
     timeout
         .timer
         .tick(Duration::from_secs_f32(time.delta_secs()));
 
-    if !timeout.timer.finished() {
+    if !timeout.timer.is_finished() {
         return;
     }
 
-    let camera_transform = camera.get_single().unwrap();
+    let Ok(camera_transform) = camera.single() else {
+        return;
+    };
     let direction = Vec3::new(
         camera_transform.forward().x,
         1.0,
@@ -163,7 +200,7 @@ fn explosion(
         camera_transform.translation + (direction * 300.0) - Vec3::Y * 10.0;
 
     if let Some((impact_point, _)) =
-        voxel_world.get_random_surface_voxel(impact_point.as_ivec3(), 70)
+        random_surface_voxel(&voxel_world, impact_point.as_ivec3(), 70)
     {
         let vox = voxel_world.get_voxel(impact_point - IVec3::Y);
 
@@ -186,19 +223,15 @@ fn explosion(
         }
 
         // Spread some voxels out around the impact zone
-        let num_voxels = 50;
-        match vox {
-            WorldVoxel::Solid(mat) => {
-                for _ in 0..num_voxels {
-                    if let Some(rand_vox) =
-                        voxel_world.get_random_surface_voxel(impact_point, 25)
-                    {
-                        voxel_world
-                            .set_voxel(rand_vox.0 + IVec3::Y, WorldVoxel::Solid(mat));
-                    }
+        if let WorldVoxel::Solid(mat) = vox {
+            let num_voxels = 50;
+            for _ in 0..num_voxels {
+                if let Some(rand_vox) =
+                    random_surface_voxel(&voxel_world, impact_point, 25)
+                {
+                    voxel_world.set_voxel(rand_vox.0 + IVec3::Y, WorldVoxel::Solid(mat));
                 }
             }
-            _ => {}
         }
     }
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use bevy::{pbr::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*};
+use bevy::{
+    light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
+};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
@@ -155,9 +157,8 @@ fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
-    let Ok(mut transform) = cam_transform.get_single_mut() else {
-        return;
-    };
-    transform.translation.x += time.delta_secs() * 30.0;
-    transform.translation.z += time.delta_secs() * 60.0;
+    if let Ok(mut transform) = cam_transform.single_mut() {
+        transform.translation.x += time.delta_secs() * 12.0;
+        transform.translation.z += time.delta_secs() * 24.0;
+    }
 }
