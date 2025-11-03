@@ -1,7 +1,7 @@
 use bevy::{
     math::bounding::Aabb3d, platform::collections::HashSet, prelude::*, tasks::Task,
 };
-use ndshape::{ConstShape, ConstShape3u32, RuntimeShape, Shape};
+use ndshape::{ConstShape3u32, RuntimeShape, Shape};
 use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -28,7 +28,7 @@ pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 pub type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
-pub type VoxelArray<I> = [WorldVoxel<I>; PaddedChunkShape::SIZE as usize];
+pub type VoxelArray<I> = Arc<[WorldVoxel<I>]>;
 
 fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
     let [ex, ey, ez] = shape.as_array();
@@ -40,6 +40,29 @@ fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
         CHUNK_SIZE_F / ix as f32,
         CHUNK_SIZE_F / iy as f32,
         CHUNK_SIZE_F / iz as f32,
+    )
+}
+
+#[inline]
+fn map_nearest(position: UVec3, data_shape: UVec3) -> UVec3 {
+    let to_index = |pos_i: u32, data_dim: u32| -> u32 {
+        // scale the inner dimension of the padded shape
+        let scale = CHUNK_SIZE_F / (data_dim - 3) as f32;
+        let mut s = (((pos_i as f32 - 1.0) * scale).round() + 1.0) as i32;
+        if s < 0 {
+            s = 0;
+        }
+        let max = (data_dim as i32 - 1).max(0);
+        if s > max {
+            s = max;
+        }
+        s as u32
+    };
+
+    UVec3::new(
+        to_index(position.x, data_shape.x),
+        to_index(position.y, data_shape.y),
+        to_index(position.z, data_shape.z),
     )
 }
 
@@ -79,7 +102,7 @@ pub enum FillType<I> {
 pub struct ChunkData<I> {
     pub(crate) position: IVec3,
     pub(crate) lod_level: LodLevel,
-    pub(crate) voxels: Option<Arc<VoxelArray<I>>>,
+    pub(crate) voxels: Option<VoxelArray<I>>,
     pub(crate) voxels_hash: u64,
     pub(crate) is_full: bool,
     pub(crate) is_empty: bool,
@@ -131,9 +154,9 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     /// Get the voxel at the given position in the chunk
     /// The position is given in local chunk coordinates
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
-        if self.voxels.is_some() {
-            self.voxels.as_ref().unwrap()
-                [PaddedChunkShape::linearize(position.to_array()) as usize]
+        if let Some(voxels) = &self.voxels {
+            let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
+            voxels[shape.linearize(position.to_array()) as usize]
         } else {
             match self.fill_type {
                 FillType::Uniform(voxel) => voxel,
@@ -159,12 +182,6 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
 
         let offset = world_position - chunk_pos * CHUNK_SIZE_I;
-
-        if offset.cmplt(IVec3::ZERO).any()
-            || offset.cmpge(IVec3::splat(CHUNK_SIZE_I)).any()
-        {
-            return None;
-        }
 
         let local = UVec3::new(
             (offset.x as u32) + 1,
@@ -201,7 +218,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     }
 
     /// Returns a clone of the voxel array, if the chunk stores explicit voxels.
-    pub fn voxels_arc(&self) -> Option<Arc<VoxelArray<I>>> {
+    pub fn voxels_arc(&self) -> Option<VoxelArray<I>> {
         self.voxels.as_ref().map(Arc::clone)
     }
 
@@ -374,7 +391,6 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     {
         let mut filled_count = 0;
         let modified_voxels = (*self.modified_voxels).read().unwrap();
-        let mut voxels = [WorldVoxel::Unset; PaddedChunkShape::SIZE as usize];
         let mut material_count = HashSet::new();
         let reuse_previous =
             matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
@@ -401,6 +417,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         self.chunk_data.data_shape = active_shape;
         let data_shape = RuntimeShape::<u32, 3>::new(active_shape.to_array());
 
+        let mut voxels = vec![WorldVoxel::Unset; data_shape.size() as usize];
+
         let scale = voxel_size_from_shape(&data_shape);
 
         self.chunk_data.has_generated = true;
@@ -409,9 +427,9 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             let chunk_block = data_shape.delinearize(i);
 
             let block_pos = IVec3 {
-                x: (((chunk_block[0] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.x * CHUNK_SIZE_I),
-                y: (((chunk_block[1] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.y * CHUNK_SIZE_I),
-                z: (((chunk_block[2] - 1) as f32 * scale[0]) + 1.0) as i32 + (self.position.z * CHUNK_SIZE_I),
+                x: ((chunk_block[0] as f32 - 1.0) * scale[0]) as i32 + (self.position.x * CHUNK_SIZE_I),
+                y: ((chunk_block[1] as f32 - 1.0) * scale[1]) as i32 + (self.position.y * CHUNK_SIZE_I),
+                z: ((chunk_block[2] as f32 - 1.0) * scale[2]) as i32 + (self.position.z * CHUNK_SIZE_I),
             };
 
             if let Some(voxel) = modified_voxels.get(&block_pos) {
@@ -422,10 +440,14 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
                 continue;
             }
 
-            let previous_voxel =
-                previous_data
-                    .as_ref()
-                    .and_then(|chunk| chunk.get_voxel_at_world_position(block_pos));
+            let previous_voxel = previous_data.as_ref().and_then(|chunk| {
+                chunk
+                    .get_voxel_at_world_position(block_pos)
+                    .or_else(|| match chunk.get_fill_type() {
+                        FillType::Uniform(voxel) => Some(*voxel),
+                        _ => Some(WorldVoxel::Unset),
+                    })
+            });
 
             if reuse_previous {
                 if let Some(prev_voxel) = previous_voxel {
@@ -451,14 +473,14 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         }
 
         self.chunk_data.is_empty = filled_count == 0;
-        self.chunk_data.is_full = filled_count == PaddedChunkShape::SIZE;
+        self.chunk_data.is_full = filled_count == data_shape.size();
 
         if self.chunk_data.is_full && material_count.len() == 1 {
             self.chunk_data.fill_type = FillType::Uniform(voxels[0]);
             self.chunk_data.voxels = None;
         } else if filled_count > 0 {
             self.chunk_data.fill_type = FillType::Mixed;
-            self.chunk_data.voxels = Some(Arc::new(voxels));
+            self.chunk_data.voxels = Some(Arc::from(voxels));
         } else {
             self.chunk_data.fill_type = FillType::Empty;
             self.chunk_data.voxels = None;

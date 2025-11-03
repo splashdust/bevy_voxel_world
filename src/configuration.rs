@@ -26,7 +26,7 @@ pub const fn padded_chunk_shape_uniform(edge: u32) -> UVec3 {
 
 pub type ChunkMeshingFn<I, UB> = Box<
     dyn FnMut(
-            Arc<VoxelArray<I>>,
+            VoxelArray<I>,
             UVec3,
             UVec3,
             TextureIndexMapperFn<I>,
@@ -218,7 +218,7 @@ pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     _previous_data: Option<ChunkData<I>>,
 ) -> ChunkMeshingFn<I, UB> {
     Box::new(
-        move |voxels: Arc<VoxelArray<I>>,
+        move |voxels: VoxelArray<I>,
               data_shape_in: UVec3,
               mesh_shape_in: UVec3,
               texture_index_mapper: TextureIndexMapperFn<I>| {

@@ -31,7 +31,7 @@ pub mod custom_meshing {
     pub use crate::chunk::CHUNK_SIZE_U;
     pub use crate::meshing::generate_chunk_mesh;
     pub use crate::meshing::mesh_from_quads;
-    pub use crate::meshing::VoxelArray;
+    pub use crate::chunk::VoxelArray;
 }
 
 pub mod debug {

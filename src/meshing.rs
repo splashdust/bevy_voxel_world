@@ -13,16 +13,14 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
-use ndshape::{ConstShape, RuntimeShape, Shape};
+use ndshape::{RuntimeShape, Shape};
 
 use crate::{
-    chunk::{PaddedChunkShape, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
+    chunk::{VoxelArray, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
     prelude::TextureIndexMapperFn,
     voxel::WorldVoxel,
     voxel_material::ATTRIBUTE_TEX_INDEX,
 };
-
-pub type VoxelArray<I> = Arc<[WorldVoxel<I>; PaddedChunkShape::SIZE as usize]>;
 
 /// Generate a mesh for the given chunks, or None of the chunk is empty
 pub fn generate_chunk_mesh<I: PartialEq + Copy>(
