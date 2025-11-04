@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use bevy::{
-    light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
+    light::CascadeShadowConfigBuilder,
+    pbr::{DistanceFog, FogFalloff},
+    platform::collections::HashMap,
+    prelude::*,
 };
-use bevy_voxel_world::custom_meshing::CHUNK_SIZE_F;
+use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_U};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
@@ -31,7 +34,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        100
+        200
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -40,7 +43,7 @@ impl VoxelWorldConfig for MainWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
-        Box::new(move |chunk_pos, lod, previous| {
+        Box::new(move |chunk_pos, _lod, _previous| {
             if chunk_pos.y < 0 {
                 return Box::new(|_, _| WorldVoxel::Solid(3));
             }
@@ -61,13 +64,6 @@ impl VoxelWorldConfig for MainWorld {
                 // Sea level
                 if pos.y < 1 {
                     return WorldVoxel::Solid(3);
-                }
-
-                let lod_step = i32::from(lod.max(1));
-                let x_rem = pos.x.rem_euclid(lod_step);
-                let z_rem = pos.z.rem_euclid(lod_step);
-                if x_rem != 0 || z_rem != 0 {
-                    return WorldVoxel::Unset;
                 }
 
                 let [x, y, z] = pos.as_dvec3().to_array();
@@ -104,6 +100,14 @@ impl VoxelWorldConfig for MainWorld {
         })
     }
 
+    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
+        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level as u32)
+    }
+
+    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
+        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level as u32)
+    }
+
     fn chunk_lod(&self, chunk_position: IVec3, camera_position: Vec3) -> LodLevel {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
@@ -115,8 +119,12 @@ impl VoxelWorldConfig for MainWorld {
             2
         } else if distance < 50.0 {
             4
-        } else {
+        } else if distance < 85.0 {
             8
+        } else if distance < 125.0 {
+            16
+        } else {
+            32
         }
     }
 }
@@ -138,6 +146,14 @@ fn setup(mut commands: Commands) {
             .looking_at(Vec3::new(0.0, 60.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
+        DistanceFog {
+            color: *ClearColor::default(),
+            falloff: FogFalloff::Linear {
+                start: 125.0 * CHUNK_SIZE_F,
+                end: 200.0 * CHUNK_SIZE_F,
+            },
+            ..default()
+        },
     ));
 
     // Sun
