@@ -152,7 +152,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     }
 
     /// Get the voxel at the given position in the chunk
-    /// The position is given in local chunk coordinates
+    /// The position is given in local chunk data coordinates
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if let Some(voxels) = &self.voxels {
             let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
@@ -181,15 +181,49 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             return None;
         }
 
-        let offset = world_position - chunk_pos * CHUNK_SIZE_I;
+        let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
+        let scale = voxel_size_from_shape(&shape);
+        let chunk_origin = chunk_pos * CHUNK_SIZE_I;
+        let offset = world_position - chunk_origin;
 
-        let local = UVec3::new(
-            (offset.x as u32) + 1,
-            (offset.y as u32) + 1,
-            (offset.z as u32) + 1,
-        );
+        let to_index = |component: i32, scale: f32, max: u32| -> Option<u32> {
+            if scale <= f32::EPSILON || max == 0 {
+                return None;
+            }
 
-        Some(self.get_voxel(local))
+            let raw = ((component as f32) + 1.0) / scale;
+            let chunk_block = raw.ceil();
+
+            if chunk_block < 0.0 {
+                return None;
+            }
+
+            let chunk_block_i = chunk_block as i32;
+
+            if chunk_block_i < 0 || chunk_block_i >= max as i32 {
+                return None;
+            }
+
+            let reconstructed =
+                ((chunk_block - 1.0) * scale) as i32;
+
+            if reconstructed != component {
+                return None;
+            }
+
+            Some(chunk_block_i as u32)
+        };
+
+        let chunk_block = match (
+            to_index(offset.x, scale.x, self.data_shape.x),
+            to_index(offset.y, scale.y, self.data_shape.y),
+            to_index(offset.z, scale.z, self.data_shape.z),
+        ) {
+            (Some(x), Some(y), Some(z)) => UVec3::new(x, y, z),
+            _ => return Some(WorldVoxel::Unset),
+        };
+
+        Some(self.get_voxel(chunk_block))
     }
 
     /// Returns true if the chunk is full. No mesh will be generated for full chunks.
