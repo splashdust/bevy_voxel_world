@@ -146,8 +146,12 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     pub(crate) fn generate_hash(&mut self) {
         if let Some(voxels) = &self.voxels {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.data_shape.to_array().hash(&mut hasher);
+            self.mesh_shape.to_array().hash(&mut hasher);
             voxels.hash(&mut hasher);
             self.voxels_hash = hasher.finish();
+        } else {
+            self.voxels_hash = 0;
         }
     }
 
