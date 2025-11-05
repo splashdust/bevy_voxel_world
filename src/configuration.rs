@@ -48,12 +48,23 @@ pub type ChunkMeshingDelegate<I, UB> = Option<
     >,
 >;
 
+/// Controls how voxel payloads are handled when a chunk changes LOD.
+///
+/// `Reuse` keeps previously generated voxel data even when the requested
+/// `chunk_data_shape` shrinks. This avoids the cost of
+/// regenerating high-resolution data if the chunk is later promoted to a finer
+/// LOD at the expense of retaining the larger voxel buffer while the chunk is
+/// coarse.
+///
+/// `Repopulate` always rebuilds voxel data for the requested shape, discarding
+/// any excess high-resolution data so that downgraded chunks keep only the
+/// coarse payload.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkRegenerateStrategy {
-    /// Attempt to reuse previously generated chunk data before invoking the voxel lookup delegate.
+    /// Attempt to reuse previously generated chunk data before invoking the voxel lookup delegate, retaining the existing voxel payload when possible.
     #[default]
     Reuse,
-    /// Always regenerate voxel data using the voxel lookup delegate.
+    /// Always regenerate voxel data using the voxel lookup delegate, discarding any higher-resolution data that is no longer needed.
     Repopulate,
 }
 

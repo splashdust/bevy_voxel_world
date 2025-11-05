@@ -441,6 +441,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         let mut active_shape = desired_shape;
 
         if reuse_previous
+            // Preserve the previously generated payload so the full-resolution voxels remain available when the chunk is promoted again.
             && previous_data
                 .as_ref()
                 .map(|chunk| chunk.has_generated())
