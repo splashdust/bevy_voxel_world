@@ -101,11 +101,11 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level as u32)
+        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
     }
 
     fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level as u32)
+        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
     }
 
     fn chunk_lod(&self, chunk_position: IVec3, camera_position: Vec3) -> LodLevel {
