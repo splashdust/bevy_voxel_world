@@ -81,7 +81,7 @@ impl VoxelWorldConfig for MainWorld {
 
                     // Call the greedy meshing algorithm from the block_mesh crate
                     block_mesh::greedy_quads(
-                        &*voxels,
+                        &voxels,
                         &PaddedChunkShape {},
                         [0; 3],
                         [CHUNK_SIZE_U + 1; 3],

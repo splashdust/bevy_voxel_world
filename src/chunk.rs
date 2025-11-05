@@ -43,7 +43,6 @@ fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
     )
 }
 
-#[inline]
 fn map_nearest(position: UVec3, data_shape: UVec3) -> UVec3 {
     let to_index = |pos_i: u32, data_dim: u32| -> u32 {
         // scale the inner dimension of the padded shape
@@ -208,8 +207,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
                 return None;
             }
 
-            let reconstructed =
-                ((chunk_block - 1.0) * scale) as i32;
+            let reconstructed = ((chunk_block - 1.0) * scale) as i32;
 
             if reconstructed != component {
                 return None;
@@ -466,9 +464,12 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             let chunk_block = data_shape.delinearize(i);
 
             let block_pos = IVec3 {
-                x: ((chunk_block[0] as f32 - 1.0) * scale[0]) as i32 + (self.position.x * CHUNK_SIZE_I),
-                y: ((chunk_block[1] as f32 - 1.0) * scale[1]) as i32 + (self.position.y * CHUNK_SIZE_I),
-                z: ((chunk_block[2] as f32 - 1.0) * scale[2]) as i32 + (self.position.z * CHUNK_SIZE_I),
+                x: ((chunk_block[0] as f32 - 1.0) * scale[0]) as i32
+                    + (self.position.x * CHUNK_SIZE_I),
+                y: ((chunk_block[1] as f32 - 1.0) * scale[1]) as i32
+                    + (self.position.y * CHUNK_SIZE_I),
+                z: ((chunk_block[2] as f32 - 1.0) * scale[2]) as i32
+                    + (self.position.z * CHUNK_SIZE_I),
             };
 
             if let Some(voxel) = modified_voxels.get(&block_pos) {
@@ -480,12 +481,12 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             }
 
             let previous_voxel = previous_data.as_ref().and_then(|chunk| {
-                chunk
-                    .get_voxel_at_world_position(block_pos)
-                    .or_else(|| match chunk.get_fill_type() {
+                chunk.get_voxel_at_world_position(block_pos).or_else(|| {
+                    match chunk.get_fill_type() {
                         FillType::Uniform(voxel) => Some(*voxel),
                         _ => Some(WorldVoxel::Unset),
-                    })
+                    }
+                })
             });
 
             if reuse_previous {

@@ -5,7 +5,7 @@ use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{ChunkData, FillType},
+    chunk::{ChunkData, FillType, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
     voxel_world::*,
 };
@@ -242,6 +242,8 @@ fn raycast_finds_voxel() {
                     fill_type: FillType::Mixed,
                     entity: Entity::PLACEHOLDER,
                     has_generated: false,
+                    data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
+                    mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
                 },
                 ChunkWillSpawn::<DefaultWorld>::new(
                     IVec3::new(0, 0, 0),

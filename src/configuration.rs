@@ -25,12 +25,7 @@ pub const fn padded_chunk_shape_uniform(edge: u32) -> UVec3 {
 }
 
 pub type ChunkMeshingFn<I, UB> = Box<
-    dyn FnMut(
-            VoxelArray<I>,
-            UVec3,
-            UVec3,
-            TextureIndexMapperFn<I>,
-        ) -> (Mesh, Option<UB>)
+    dyn FnMut(VoxelArray<I>, UVec3, UVec3, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>)
         + Send
         + Sync,
 >;

@@ -26,12 +26,12 @@ pub mod prelude {
 
 pub mod custom_meshing {
     pub use crate::chunk::PaddedChunkShape;
+    pub use crate::chunk::VoxelArray;
     pub use crate::chunk::CHUNK_SIZE_F;
     pub use crate::chunk::CHUNK_SIZE_I;
     pub use crate::chunk::CHUNK_SIZE_U;
     pub use crate::meshing::generate_chunk_mesh;
     pub use crate::meshing::mesh_from_quads;
-    pub use crate::chunk::VoxelArray;
 }
 
 pub mod debug {
