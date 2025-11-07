@@ -43,28 +43,6 @@ fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
     )
 }
 
-fn map_nearest(position: UVec3, data_shape: UVec3) -> UVec3 {
-    let to_index = |pos_i: u32, data_dim: u32| -> u32 {
-        // scale the inner dimension of the padded shape
-        let scale = CHUNK_SIZE_F / (data_dim - 3) as f32;
-        let mut s = (((pos_i as f32 - 1.0) * scale).round() + 1.0) as i32;
-        if s < 0 {
-            s = 0;
-        }
-        let max = (data_dim as i32 - 1).max(0);
-        if s > max {
-            s = max;
-        }
-        s as u32
-    };
-
-    UVec3::new(
-        to_index(position.x, data_shape.x),
-        to_index(position.y, data_shape.y),
-        to_index(position.z, data_shape.z),
-    )
-}
-
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(

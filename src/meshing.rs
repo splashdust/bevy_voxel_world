@@ -128,10 +128,12 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
             // TODO: Fix AO anisotropy
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
+            let vec_one = BMVec3::new(1.0,1.0,1.0);
+
             positions.extend_from_slice(
                 &face
                     .quad_corners(&quad.into())
-                    .map(|c| (voxel_size * c.as_vec3()).to_array()),
+                    .map(|c| ((voxel_size * (c.as_vec3() - vec_one)) + vec_one).to_array()),
             );
 
             normals.extend_from_slice(&face.quad_mesh_normals());
@@ -197,7 +199,7 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
 #[inline]
 fn map_nearest_1d(mesh_i: u32, mesh_dim: u32, data_dim: u32) -> u32 {
     // scale the inner dimension of the padded shape
-    let scale = (data_dim - 2) as f32 / (mesh_dim - 3) as f32;
+    let scale = (data_dim - 2) as f32 / (mesh_dim - 3).max(1) as f32;
     let mut s = (((mesh_i as f32 - 1.0) * scale).round() + 1.0) as i32;
     if s < 0 {
         s = 0;
