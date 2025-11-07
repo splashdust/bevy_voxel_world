@@ -128,12 +128,16 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
             // TODO: Fix AO anisotropy
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
-            let vec_one = BMVec3::new(1.0,1.0,1.0);
-
             positions.extend_from_slice(
                 &face
                     .quad_corners(&quad.into())
-                    .map(|c| ((voxel_size * (c.as_vec3() - vec_one)) + vec_one).to_array()),
+                    .map(|c| {
+                        let corner = c.as_vec3();
+                        let adjusted =
+                            voxel_size * (corner - BMVec3::splat(1.0))
+                                + BMVec3::splat(1.0);
+                        adjusted.to_array()
+                    }),
             );
 
             normals.extend_from_slice(&face.quad_mesh_normals());
