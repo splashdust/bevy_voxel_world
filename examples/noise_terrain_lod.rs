@@ -6,7 +6,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
-use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_U};
+use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
@@ -43,7 +43,7 @@ impl VoxelWorldConfig for MainWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
-        Box::new(move |chunk_pos, _lod, _previous| {
+        Box::new(move |chunk_pos, lod_level, _previous| {
             if chunk_pos.y < 0 {
                 return Box::new(|_, _| WorldVoxel::Solid(3));
             }
@@ -51,9 +51,11 @@ impl VoxelWorldConfig for MainWorld {
                 return Box::new(|_, _| WorldVoxel::Air);
             }
 
+            let chunk_min = chunk_pos * CHUNK_SIZE_I;
+            let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I);
+            let skirt_enabled = lod_level > 1;
             let noise = Arc::clone(&chunk_noise);
-            // let previous = previous.filter(|chunk| chunk.has_generated());
-            // let previous_lod = previous.as_ref().map(|chunk| chunk.lod_level());
+
             // We use this to cache the noise value for each y column so we only need
             // to calculate it once per x/z coordinate
             let mut cache = HashMap::<(i32, i32), f64>::new();
@@ -61,6 +63,17 @@ impl VoxelWorldConfig for MainWorld {
             // Then we return this boxed closure that captures the noise and the cache
             // This will get sent off to a separate thread for meshing by bevy_voxel_world
             Box::new(move |pos: IVec3, _previous_voxel| {
+                if skirt_enabled {
+                    let outside = pos.x < chunk_min.x
+                        || pos.x >= chunk_max.x
+                        || pos.y < chunk_min.y
+                        || pos.y >= chunk_max.y
+                        || pos.z < chunk_min.z
+                        || pos.z >= chunk_max.z;
+                    if outside {
+                        return WorldVoxel::Unset;
+                    }
+                }
                 // Sea level
                 if pos.y < 1 {
                     return WorldVoxel::Solid(3);
