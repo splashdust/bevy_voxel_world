@@ -5,8 +5,9 @@ use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{ChunkData, FillType, PADDED_CHUNK_SIZE},
+    chunk::{ChunkData, ChunkTask, FillType, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
+    voxel_world_internal::ModifiedVoxels,
     voxel_world::*,
 };
 
@@ -199,6 +200,47 @@ fn chunk_will_update_event() {
     );
 
     app.update();
+}
+
+#[test]
+fn chunk_generate_reuses_previous_data_when_configured() {
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+
+    let entity = Entity::from_raw_u32(1).unwrap();
+    let position = IVec3::ZERO;
+    let data_shape = UVec3::splat(PADDED_CHUNK_SIZE);
+    let mesh_shape = data_shape;
+
+    let modified_voxels = ModifiedVoxels::<DefaultWorld, Mat>::default();
+    let mut chunk_task = ChunkTask::<DefaultWorld, Mat>::new(
+        entity,
+        position,
+        0,
+        data_shape,
+        mesh_shape,
+        modified_voxels,
+    );
+
+    let mut previous_data = ChunkData::<Mat>::with_entity(entity);
+    previous_data.position = position;
+    previous_data.is_full = true;
+    previous_data.is_empty = false;
+    previous_data.has_generated = true;
+    previous_data.fill_type = FillType::Uniform(WorldVoxel::Solid(1));
+
+    chunk_task.generate(
+        |_pos, _previous| -> WorldVoxel<Mat> {
+            panic!("voxel lookup should not run when reusing previous data");
+        },
+        Some(previous_data),
+        ChunkRegenerateStrategy::Reuse,
+    );
+
+    assert!(chunk_task.is_full());
+    match chunk_task.chunk_data.fill_type {
+        FillType::Uniform(WorldVoxel::Solid(material)) => assert_eq!(material, 1),
+        ref other => panic!("expected uniform solid fill type, got {:?}", other),
+    }
 }
 
 #[test]
