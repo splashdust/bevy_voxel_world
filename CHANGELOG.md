@@ -5,6 +5,8 @@
 - Upgrade to Bevy 0.17
 - Ensure Linux CI installs the required Wayland dependencies
 
+Thanks to @nathanaelneveux
+
 ## 0.12.0
 
 - Upgrade to Bevy 0.16 (thanks to @GabrielCarpr)
