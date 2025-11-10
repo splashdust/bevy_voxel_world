@@ -132,8 +132,13 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
     }
 
-    /// Get the voxel at the given position in the chunk
-    /// The position is given in local chunk data coordinates
+    /// Get the voxel at the given position in the chunk.
+    ///
+    /// The `position` is expressed in chunk-local **data** coordinates, meaning it
+    /// indexes directly into the padded `data_shape` associated with this chunk.
+    /// When using non-default LOD shapes, these coordinates may no longer map
+    /// 1:1 to world-space voxels. Prefer [`ChunkData::get_voxel_at_world_position`]
+    /// when you need to query by a world position.
     pub fn get_voxel(&self, position: UVec3) -> WorldVoxel<I> {
         if let Some(voxels) = &self.voxels {
             let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
