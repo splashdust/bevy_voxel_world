@@ -88,6 +88,11 @@ pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;
 pub struct WillRemesh;
 impl ChunkEventType for WillRemesh {}
 
+/// Fired when a chunk's LOD value changes.
+pub type ChunkWillChangeLod<C> = ChunkEvent<C, WillChangeLod>;
+pub struct WillChangeLod;
+impl ChunkEventType for WillChangeLod {}
+
 /// Fired when a chunk is about to be updated, typically when `set_voxel` was called on a voxel
 /// within the chunk.
 pub type ChunkWillUpdate<C> = ChunkEvent<C, WillUpdate>;

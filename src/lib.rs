@@ -20,7 +20,8 @@ pub mod prelude {
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
     };
     pub use crate::voxel_world::{
-        ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate,
+        ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkWillUpdate,
     };
 }
 

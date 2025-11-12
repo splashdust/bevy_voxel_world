@@ -126,6 +126,7 @@ where
             .add_message::<ChunkWillSpawn<C>>()
             .add_message::<ChunkWillDespawn<C>>()
             .add_message::<ChunkWillRemesh<C>>()
+            .add_message::<ChunkWillChangeLod<C>>()
             .add_message::<ChunkWillUpdate<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.

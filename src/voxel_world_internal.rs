@@ -25,8 +25,8 @@ use crate::{
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{
-        get_chunk_voxel_position, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
-        ChunkWillUpdate, VoxelWorldCamera,
+        get_chunk_voxel_position, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
+        ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
     },
 };
 
@@ -256,6 +256,7 @@ where
         mut chunks: Query<(Entity, &mut Chunk<C>), Without<NeedsDespawn>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
+        mut ev_chunk_will_change_lod: MessageWriter<ChunkWillChangeLod<C>>,
     ) {
         let Ok((_, cam_gtf)) = camera_info.single() else {
             return;
@@ -270,8 +271,17 @@ where
                 continue;
             }
 
+            ev_chunk_will_change_lod
+                .write(ChunkWillChangeLod::<C>::new(chunk.position, entity));
+
             let data_shape = configuration.chunk_data_shape(target_lod);
             let mesh_shape = configuration.chunk_meshing_shape(target_lod);
+
+            if chunk.data_shape == data_shape && chunk.mesh_shape == mesh_shape {
+                chunk.lod_level = target_lod;
+                // Shape did not change, so nothing to regenerate/remesh.
+                continue;
+            }
 
             chunk.data_shape = data_shape;
             chunk.mesh_shape = mesh_shape;
