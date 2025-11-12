@@ -157,19 +157,9 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         &self,
         world_position: IVec3,
     ) -> Option<WorldVoxel<I>> {
-        let chunk_pos = IVec3 {
-            x: (world_position.x as f32 / CHUNK_SIZE_F).floor() as i32,
-            y: (world_position.y as f32 / CHUNK_SIZE_F).floor() as i32,
-            z: (world_position.z as f32 / CHUNK_SIZE_F).floor() as i32,
-        };
-
-        if chunk_pos != self.position {
-            return None;
-        }
-
         let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
         let scale = voxel_size_from_shape(&shape);
-        let chunk_origin = chunk_pos * CHUNK_SIZE_I;
+        let chunk_origin = self.position * CHUNK_SIZE_I;
         let offset = world_position - chunk_origin;
 
         let to_index = |component: i32, scale: f32, max: u32| -> Option<u32> {
@@ -205,7 +195,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             to_index(offset.z, scale.z, self.data_shape.z),
         ) {
             (Some(x), Some(y), Some(z)) => UVec3::new(x, y, z),
-            _ => return Some(WorldVoxel::Unset),
+            _ => return None,
         };
 
         Some(self.get_voxel(chunk_block))

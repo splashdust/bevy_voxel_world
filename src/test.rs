@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use std::sync::Arc;
 
 use crate::chunk_map::ChunkMapUpdateBuffer;
 use crate::mesh_cache::MeshCacheInsertBuffer;
@@ -10,6 +11,7 @@ use crate::{
     voxel_world_internal::ModifiedVoxels,
     voxel_world::*,
 };
+use ndshape::{RuntimeShape, Shape};
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
@@ -211,6 +213,15 @@ fn chunk_generate_reuses_previous_data_when_configured() {
     let data_shape = UVec3::splat(PADDED_CHUNK_SIZE);
     let mesh_shape = data_shape;
 
+    let data_shape_runtime = RuntimeShape::<u32, 3>::new(data_shape.to_array());
+    let mut voxel_payload =
+        vec![WorldVoxel::Solid(5); data_shape_runtime.size() as usize];
+    let highlighted_block = [1, 1, 1];
+    let highlighted_world_pos = IVec3::new(0, 0, 0);
+    voxel_payload[data_shape_runtime.linearize(highlighted_block) as usize] =
+        WorldVoxel::Solid(9);
+    let voxel_payload: Arc<[WorldVoxel<Mat>]> = Arc::from(voxel_payload);
+
     let modified_voxels = ModifiedVoxels::<DefaultWorld, Mat>::default();
     let mut chunk_task = ChunkTask::<DefaultWorld, Mat>::new(
         entity,
@@ -223,10 +234,14 @@ fn chunk_generate_reuses_previous_data_when_configured() {
 
     let mut previous_data = ChunkData::<Mat>::with_entity(entity);
     previous_data.position = position;
+    previous_data.data_shape = data_shape;
+    previous_data.mesh_shape = mesh_shape;
+    previous_data.has_generated = true;
     previous_data.is_full = true;
     previous_data.is_empty = false;
-    previous_data.has_generated = true;
-    previous_data.fill_type = FillType::Uniform(WorldVoxel::Solid(1));
+    previous_data.fill_type = FillType::Mixed;
+    previous_data.voxels = Some(voxel_payload.clone());
+    previous_data.generate_hash();
 
     chunk_task.generate(
         |_pos, _previous| -> WorldVoxel<Mat> {
@@ -236,11 +251,18 @@ fn chunk_generate_reuses_previous_data_when_configured() {
         ChunkRegenerateStrategy::Reuse,
     );
 
+    assert!(chunk_task.chunk_data.voxels.is_some());
     assert!(chunk_task.is_full());
     match chunk_task.chunk_data.fill_type {
-        FillType::Uniform(WorldVoxel::Solid(material)) => assert_eq!(material, 1),
-        ref other => panic!("expected uniform solid fill type, got {:?}", other),
+        FillType::Mixed => {}
+        ref other => panic!("expected mixed fill type, got {:?}", other),
     }
+
+    let voxel = chunk_task
+        .chunk_data
+        .get_voxel_at_world_position(highlighted_world_pos)
+        .expect("voxel should be addressable");
+    assert_eq!(voxel, WorldVoxel::Solid(9));
 }
 
 #[test]
