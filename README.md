@@ -145,7 +145,7 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 ## Level of Detail
 
-Worlds can compute a per-chunk level-of-detail (LOD) value by overriding `VoxelWorldConfig::chunk_lod`. The default implementation always returns `0`, so nothing changes unless you opt in. When a chunk's LOD changes it is automatically marked for regeneration and remeshing to apply the new data.
+Worlds can compute a per-chunk level-of-detail (LOD) value by overriding `VoxelWorldConfig::chunk_lod`. The callback receives both the chunk position and the previously assigned LOD (if any). The default implementation always returns `0`, so nothing changes unless you opt in. When a chunk's LOD changes it is automatically marked for regeneration and remeshing to apply the new data.
 
 Once you provide your own LOD value, the following hooks become available:
 

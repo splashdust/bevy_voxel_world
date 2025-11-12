@@ -121,7 +121,12 @@ impl VoxelWorldConfig for MainWorld {
         padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
     }
 
-    fn chunk_lod(&self, chunk_position: IVec3, camera_position: Vec3) -> LodLevel {
+    fn chunk_lod(
+        &self,
+        chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        camera_position: Vec3,
+    ) -> LodLevel {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 

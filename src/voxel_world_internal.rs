@@ -203,7 +203,8 @@ where
             if !has_chunk {
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
                 commands.entity(world_root).add_child(chunk_entity);
-                let lod_level = configuration.chunk_lod(chunk_position, camera_position);
+                let lod_level =
+                    configuration.chunk_lod(chunk_position, None, camera_position);
                 let data_shape = configuration.chunk_data_shape(lod_level);
                 let mesh_shape = configuration.chunk_meshing_shape(lod_level);
                 let chunk = Chunk::<C>::new(
@@ -263,7 +264,8 @@ where
         let camera_position = cam_gtf.translation();
 
         for (entity, mut chunk) in chunks.iter_mut() {
-            let target_lod = configuration.chunk_lod(chunk.position, camera_position);
+            let target_lod = configuration
+                .chunk_lod(chunk.position, Some(chunk.lod_level), camera_position);
             if target_lod == chunk.lod_level {
                 continue;
             }

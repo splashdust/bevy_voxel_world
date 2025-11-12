@@ -193,8 +193,16 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     /// Compute the level of detail for a chunk at a world-space position.
+    ///
+    /// `previous_lod` will be `None` when the chunk is first spawned and `Some(current_lod)`
+    /// when an existing chunk is being re-evaluated. Implementors can use this to add hysteresis.
     /// Defaults to `0` for all chunks.
-    fn chunk_lod(&self, _chunk_position: IVec3, _camera_position: Vec3) -> LodLevel {
+    fn chunk_lod(
+        &self,
+        _chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        _camera_position: Vec3,
+    ) -> LodLevel {
         0
     }
 
