@@ -287,13 +287,13 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     }
 
     /// Returns true if the given voxel is within the bounds of the chunk
-    /// and the voxel data at the given position matcheso the given voxel
+    /// and the voxel data at the given position matches the given voxel
     pub fn has_voxel(&self, voxel_pos: IVec3, voxel: WorldVoxel<I>) -> bool {
         let chunk_pos = voxel_pos / CHUNK_SIZE_I;
         if self.position != chunk_pos {
             return false;
         }
-        self.get_voxel(voxel_pos.as_uvec3() % CHUNK_SIZE_U) == voxel
+        self.get_voxel_at_world_position(voxel_pos) == Some(voxel)
     }
 
     /// Returns true if this chunk has been processed by the voxel generation system (typically to generate terrain)
