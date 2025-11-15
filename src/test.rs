@@ -8,8 +8,8 @@ use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{ChunkData, ChunkTask, FillType, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
-    voxel_world_internal::ModifiedVoxels,
     voxel_world::*,
+    voxel_world_internal::ModifiedVoxels,
 };
 use ndshape::{RuntimeShape, Shape};
 
