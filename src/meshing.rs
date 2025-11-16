@@ -128,17 +128,12 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
             // TODO: Fix AO anisotropy
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
-            positions.extend_from_slice(
-                &face
-                    .quad_corners(&quad.into())
-                    .map(|c| {
-                        let corner = c.as_vec3();
-                        let adjusted =
-                            voxel_size * (corner - BMVec3::splat(1.0))
-                                + BMVec3::splat(1.0);
-                        adjusted.to_array()
-                    }),
-            );
+            positions.extend_from_slice(&face.quad_corners(&quad.into()).map(|c| {
+                let corner = c.as_vec3();
+                let adjusted =
+                    voxel_size * (corner - BMVec3::splat(1.0)) + BMVec3::splat(1.0);
+                adjusted.to_array()
+            }));
 
             normals.extend_from_slice(&face.quad_mesh_normals());
 
@@ -202,17 +197,28 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
 
 #[inline]
 fn map_nearest_1d(mesh_i: u32, mesh_dim: u32, data_dim: u32) -> u32 {
-    // scale the inner dimension of the padded shape
-    let scale = (data_dim as f32 - 2.0) / (mesh_dim as f32 - 3.0).max(1.0);
-    let mut s = (((mesh_i as f32 - 1.0) * scale).round() + 1.0) as i32;
-    if s < 0 {
-        s = 0;
+    let mesh_inner = (mesh_dim.saturating_sub(2)).max(1);
+    let data_inner = (data_dim.saturating_sub(2)).max(1);
+
+    if mesh_inner == data_inner {
+        return mesh_i;
     }
-    let max = (data_dim as i32 - 1).max(0);
-    if s > max {
-        s = max;
+
+    // Keep padded bounds aligned so that resampling never erodes the outermost voxels.
+    if mesh_i == 0 {
+        return 0;
     }
-    s as u32
+    if mesh_i >= mesh_dim - 1 {
+        return data_dim - 1;
+    }
+
+    let mesh_steps = (mesh_inner - 1).max(1) as f32;
+    let data_steps = (data_inner - 1).max(1) as f32;
+    let ratio = data_steps / mesh_steps;
+    let inner_idx = (mesh_i - 1) as f32;
+    let mapped = (inner_idx * ratio).round();
+
+    (mapped as u32 + 1).min(data_dim - 1)
 }
 
 fn resample_voxels_nearest<I: PartialEq + Copy>(
