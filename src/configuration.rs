@@ -221,6 +221,21 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         ChunkRegenerateStrategy::default()
     }
 
+    /// Maximum number of chunk generation tasks that may be active simultaneously.
+    fn max_active_chunk_threads(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Whether chunk entities should be parented to the world root entity.
+    ///
+    /// Parenting makes it easy to transform or hide the entire voxel world at once,
+    /// but it also forces Bevy's transform propagation system to walk the entire
+    /// hierarchy whenever chunks spawn/despawn. Worlds with large numbers of chunks
+    /// streaming into and out of view will perform better without a world_root.
+    fn attach_chunks_to_root(&self) -> bool {
+        true
+    }
+
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
 }
 

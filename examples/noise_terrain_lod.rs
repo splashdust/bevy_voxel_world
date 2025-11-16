@@ -1,14 +1,20 @@
 use std::sync::Arc;
 
 use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     light::CascadeShadowConfigBuilder,
     pbr::{DistanceFog, FogFalloff},
     platform::collections::HashMap,
     prelude::*,
+    text::DEFAULT_FONT_DATA,
+    ui::{PositionType, Val},
 };
 use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
+
+#[derive(Component)]
+struct FpsText;
 
 #[derive(Resource, Clone)]
 struct MainWorld {
@@ -44,7 +50,7 @@ impl VoxelWorldConfig for MainWorld {
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
         Box::new(move |chunk_pos, lod_level, _previous| {
-            if chunk_pos.y < 0 {
+            if chunk_pos.y < -1 {
                 return Box::new(|_, _| WorldVoxel::Solid(3));
             }
             if chunk_pos.y > 4 {
@@ -53,7 +59,7 @@ impl VoxelWorldConfig for MainWorld {
 
             let chunk_min = chunk_pos * CHUNK_SIZE_I;
             let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I);
-            let skirt_enabled = lod_level > 1;
+            let skirt_enabled = lod_level == 2;
             let noise = Arc::clone(&chunk_noise);
 
             // We use this to cache the noise value for each y column so we only need
@@ -75,7 +81,7 @@ impl VoxelWorldConfig for MainWorld {
                     }
                 }
                 // Sea level
-                if pos.y < 1 {
+                if pos.y < 0 {
                     return WorldVoxel::Solid(3);
                 }
 
@@ -145,21 +151,29 @@ impl VoxelWorldConfig for MainWorld {
             32
         }
     }
+
+    fn attach_chunks_to_root(&self) -> bool {
+        false
+    }
 }
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, FrameTimeDiagnosticsPlugin::default()))
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, move_camera)
+        .add_systems(Update, (move_camera, update_fps_text))
         .run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     // camera
     commands.spawn((
         Camera3d::default(),
+        Camera {
+            order: 0,
+            ..default()
+        },
         Transform::from_xyz(-200.0, 180.0, -200.0)
             .looking_at(Vec3::new(0.0, 60.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
@@ -193,6 +207,34 @@ fn setup(mut commands: Commands) {
         brightness: 100.0,
         affects_lightmapped_meshes: true,
     });
+
+    // UI overlay camera
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 1,
+            ..default()
+        },
+    ));
+
+    let font = fonts.add(Font::try_from_bytes(DEFAULT_FONT_DATA.to_vec()).unwrap());
+
+    commands.spawn((
+        Text::new("FPS: -- (--)\nFrame: -- ms"),
+        TextFont {
+            font,
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+        FpsText,
+    ));
 }
 
 fn move_camera(
@@ -202,5 +244,38 @@ fn move_camera(
     if let Ok(mut transform) = cam_transform.single_mut() {
         transform.translation.x += time.delta_secs() * 12.0;
         transform.translation.z += time.delta_secs() * 24.0;
+        transform.rotate_y(time.delta_secs() * 0.1);
     }
+}
+
+fn update_fps_text(
+    diagnostics: Res<DiagnosticsStore>,
+    mut text_query: Query<&mut Text, With<FpsText>>,
+) {
+    let Some(mut text) = text_query.iter_mut().next() else {
+        return;
+    };
+
+    let fps_diag = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS);
+    let fps_current = fps_diag.and_then(|d| d.value());
+    let fps_avg = fps_diag.and_then(|d| d.average());
+    let frame_ms = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|d| d.average())
+        .map(|seconds| seconds * 1000.0);
+
+    let line_one = match (fps_current, fps_avg) {
+        (Some(current), Some(avg)) => {
+            format!("FPS: {:>5.1} (avg {:>5.1})\n", current, avg)
+        }
+        (Some(current), None) => format!("FPS: {:>5.1} (--)\n", current),
+        _ => "FPS: -- (--)\n".to_string(),
+    };
+
+    let line_two = match frame_ms {
+        Some(ms) => format!("Frame: {:>5.2} ms", ms),
+        None => "Frame: -- ms".to_string(),
+    };
+
+    text.0 = format!("{line_one}{line_two}");
 }

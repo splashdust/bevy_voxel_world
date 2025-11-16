@@ -105,6 +105,7 @@ where
     ) {
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.single().unwrap();
+        let attach_to_root = configuration.attach_chunks_to_root();
 
         let Ok((camera, cam_gtf)) = camera_info.single() else {
             return;
@@ -114,8 +115,12 @@ where
 
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
+        let spawn_strategy = configuration.chunk_spawn_strategy();
 
         let viewport_size = camera.physical_viewport_size().unwrap_or_default();
+        let visibility_margin = 0.0f32;
+        let protected_chunk_radius_sq =
+            (configuration.min_despawn_distance() as i32).pow(2);
 
         let mut visited = HashSet::new();
         let mut chunks_deque = VecDeque::with_capacity(
@@ -195,6 +200,19 @@ where
                 continue;
             }
 
+            if spawn_strategy == ChunkSpawnStrategy::CloseAndInView
+                && !chunk_visible_to_camera(
+                    camera,
+                    cam_gtf,
+                    chunk_position,
+                    visibility_margin,
+                )
+                && chunk_position.distance_squared(chunk_at_camera)
+                    > protected_chunk_radius_sq
+            {
+                continue;
+            }
+
             let has_chunk = ChunkMap::<C, C::MaterialIndex>::contains_chunk(
                 &chunk_position,
                 &chunk_map_read_lock,
@@ -202,7 +220,9 @@ where
 
             if !has_chunk {
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
-                commands.entity(world_root).add_child(chunk_entity);
+                if attach_to_root {
+                    commands.entity(world_root).add_child(chunk_entity);
+                }
                 let lod_level =
                     configuration.chunk_lod(chunk_position, None, camera_position);
                 let data_shape = configuration.chunk_data_shape(lod_level);
@@ -231,7 +251,7 @@ where
                 continue;
             }
 
-            if configuration.chunk_spawn_strategy() != ChunkSpawnStrategy::Close {
+            if spawn_strategy != ChunkSpawnStrategy::Close {
                 continue;
             }
 
@@ -265,8 +285,11 @@ where
         let camera_position = cam_gtf.translation();
 
         for (entity, mut chunk) in chunks.iter_mut() {
-            let target_lod = configuration
-                .chunk_lod(chunk.position, Some(chunk.lod_level), camera_position);
+            let target_lod = configuration.chunk_lod(
+                chunk.position,
+                Some(chunk.lod_level),
+                camera_position,
+            );
             if target_lod == chunk.lod_level {
                 continue;
             }
@@ -305,7 +328,7 @@ where
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
-        let (_, cam_gtf) = camera_info.single().unwrap();
+        let (camera, cam_gtf) = camera_info.single().unwrap();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
@@ -317,10 +340,16 @@ where
                     match configuration.chunk_despawn_strategy() {
                         ChunkDespawnStrategy::FarAway => false,
                         ChunkDespawnStrategy::FarAwayOrOutOfView => {
+                            let frustum_culled = !chunk_visible_to_camera(
+                                camera,
+                                cam_gtf,
+                                chunk.position,
+                                0.0,
+                            );
                             if let Some(visibility) = view_visibility {
-                                !visibility.get()
+                                !visibility.get() || frustum_culled
                             } else {
-                                false
+                                frustum_culled
                             }
                         }
                     }
@@ -373,14 +402,25 @@ where
             &Chunk<C>,
             (With<NeedsRemesh>, Without<ChunkThread<C, C::MaterialIndex>>),
         >,
+        chunk_threads: Query<(), With<ChunkThread<C, C::MaterialIndex>>>,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
+        let max_threads = configuration.max_active_chunk_threads();
+        let mut active_threads = chunk_threads.iter().count();
+
+        if max_threads == 0 {
+            return;
+        }
 
         for chunk in dirty_chunks.iter() {
+            if active_threads >= max_threads {
+                break;
+            }
+
             let previous_chunk_data = {
                 let read_lock = chunk_map.get_read_lock();
                 ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
@@ -450,6 +490,8 @@ where
                     chunk.position,
                 ))
                 .remove::<NeedsRemesh>();
+
+            active_threads += 1;
 
             ev_chunk_will_remesh
                 .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
@@ -631,6 +673,57 @@ where
                 .remove::<NeedsMaterial<C>>();
         }
     }
+}
+
+fn chunk_visible_to_camera(
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+    chunk_position: IVec3,
+    ndc_margin: f32,
+) -> bool {
+    let chunk_min = chunk_position.as_vec3() * CHUNK_SIZE_F;
+    let chunk_max = chunk_min + Vec3::splat(CHUNK_SIZE_F);
+
+    let cam_pos = cam_gtf.translation();
+    if cam_pos.x >= chunk_min.x
+        && cam_pos.x <= chunk_max.x
+        && cam_pos.y >= chunk_min.y
+        && cam_pos.y <= chunk_max.y
+        && cam_pos.z >= chunk_min.z
+        && cam_pos.z <= chunk_max.z
+    {
+        return true;
+    }
+
+    let limit = 1.0 + ndc_margin;
+    let point_in_ndc = |point: Vec3| -> bool {
+        if let Some(ndc) = camera.world_to_ndc(cam_gtf, point) {
+            ndc.x >= -limit
+                && ndc.x <= limit
+                && ndc.y >= -limit
+                && ndc.y <= limit
+                && ndc.z >= -ndc_margin
+                && ndc.z <= 1.0 + ndc_margin
+        } else {
+            false
+        }
+    };
+
+    if point_in_ndc((chunk_min + chunk_max) * 0.5) {
+        return true;
+    }
+
+    for &x in &[chunk_min.x, chunk_max.x] {
+        for &y in &[chunk_min.y, chunk_max.y] {
+            for &z in &[chunk_min.z, chunk_max.z] {
+                if point_in_ndc(Vec3::new(x, y, z)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if the given world point is within the camera's view
