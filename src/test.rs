@@ -1,17 +1,20 @@
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use std::sync::Arc;
 
 use crate::chunk_map::ChunkMapUpdateBuffer;
 use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::prelude::*;
+use crate::meshing::generate_chunk_mesh_for_shape;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{ChunkData, ChunkTask, FillType, PADDED_CHUNK_SIZE},
+    chunk::{ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
     voxel_world::*,
     voxel_world_internal::ModifiedVoxels,
 };
 use ndshape::{RuntimeShape, Shape};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
@@ -263,6 +266,75 @@ fn chunk_generate_reuses_previous_data_when_configured() {
         .get_voxel_at_world_position(highlighted_world_pos)
         .expect("voxel should be addressable");
     assert_eq!(voxel, WorldVoxel::Solid(9));
+}
+
+#[test]
+fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+
+    for _ in 0..8 {
+        let data_shape = {
+            let dim = |rng: &mut StdRng| rng.random_range(3..=66);
+            UVec3::new(dim(&mut rng), dim(&mut rng), dim(&mut rng))
+        };
+        let mesh_shape = UVec3::new(
+            rng.random_range(3..=data_shape.x),
+            rng.random_range(3..=data_shape.y),
+            rng.random_range(3..=data_shape.z),
+        );
+        let data_runtime_shape = RuntimeShape::<u32, 3>::new(data_shape.to_array());
+        let mut voxels =
+            vec![WorldVoxel::<Mat>::Unset; data_runtime_shape.size() as usize];
+
+        for x in 1..data_shape.x - 1 {
+            for y in 1..data_shape.y - 1 {
+                for z in 1..data_shape.z - 1 {
+                    let idx = data_runtime_shape.linearize([x, y, z]) as usize;
+                    voxels[idx] = WorldVoxel::Solid(1);
+                }
+            }
+        }
+
+        let texture_index_mapper: TextureIndexMapperFn<Mat> = Arc::new(|_| [0, 0, 0]);
+        let mesh = generate_chunk_mesh_for_shape(
+            Arc::from(voxels),
+            IVec3::ZERO,
+            data_shape,
+            mesh_shape,
+            texture_index_mapper,
+        );
+
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(values)) => values,
+            other => panic!("unexpected position attribute layout: {:?}", other),
+        };
+        assert!(
+            !positions.is_empty(),
+            "expected generated mesh to contain vertices"
+        );
+
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for p in positions {
+            let p = Vec3::from_array(*p);
+            min = min.min(p);
+            max = max.max(p);
+        }
+
+        let extent = max - min;
+        for (axis, len) in ["x", "y", "z"].into_iter().zip(extent.to_array()) {
+            assert!(
+                (len - CHUNK_SIZE_F).abs() < 0.001,
+                "mesh extent along {} axis should be {} but was {} (data_shape={:?}, mesh_shape={:?})",
+                axis,
+                CHUNK_SIZE_F,
+                len,
+                data_shape,
+                mesh_shape
+            );
+        }
+    }
 }
 
 #[test]
