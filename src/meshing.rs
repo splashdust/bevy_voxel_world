@@ -116,6 +116,7 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
 
     for (group, face) in quads.groups.into_iter().zip(faces.into_iter()) {
         for quad in group.into_iter() {
+            let quad = Into::<block_mesh::geometry::UnorientedQuad>::into(quad);
             let normal = IVec3::from([
                 face.signed_normal().x,
                 face.signed_normal().y,
@@ -128,20 +129,28 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
             // TODO: Fix AO anisotropy
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
 
-            positions.extend_from_slice(&face.quad_corners(&quad.into()).map(|c| {
-                let corner = c.as_vec3();
-                let adjusted =
-                    voxel_size * (corner - BMVec3::splat(1.0)) + BMVec3::splat(1.0);
-                adjusted.to_array()
-            }));
+            let corners = face.quad_corners(&quad);
+
+            positions.extend_from_slice(
+                &corners.map(|c| {
+                    let corner = c.as_vec3();
+                    let adjusted =
+                        voxel_size * (corner - BMVec3::splat(1.0)) + BMVec3::splat(1.0);
+                    adjusted.to_array()
+                }),
+            );
 
             normals.extend_from_slice(&face.quad_mesh_normals());
 
-            tex_coords.extend_from_slice(&face.tex_coords(
-                RIGHT_HANDED_Y_UP_CONFIG.u_flip_face,
-                true,
-                &quad.into(),
-            ));
+            let u_direction = corners[1].as_vec3() - corners[0].as_vec3();
+            let v_direction = corners[2].as_vec3() - corners[0].as_vec3();
+            let u_scale = voxel_size.dot(u_direction) / quad.width.max(1) as f32;
+            let v_scale = voxel_size.dot(v_direction) / quad.height.max(1) as f32;
+
+            let scaled_tex_coords = face
+                .tex_coords(RIGHT_HANDED_Y_UP_CONFIG.u_flip_face, true, &quad)
+                .map(|[u, v]| [u * u_scale, v * v_scale]);
+            tex_coords.extend_from_slice(&scaled_tex_coords);
 
             let voxel_index = shape.linearize(quad.minimum) as usize;
             let material_type = match voxels[voxel_index] {

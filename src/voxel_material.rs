@@ -8,6 +8,7 @@ use bevy::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
     },
 };
+use bevy::image::ImageAddressMode;
 use bevy_shader::{Shader, ShaderDefVal, ShaderRef};
 
 /// Keeps track of the loading status of the image used for the voxel texture
@@ -92,5 +93,13 @@ pub(crate) fn prepare_texture(
     loading_texture.is_loaded = true;
 
     let image = images.get_mut(&loading_texture.handle).unwrap();
+    set_repeat_sampler(image);
     image.reinterpret_stacked_2d_as_array(texture_layers.0);
+}
+
+pub(crate) fn set_repeat_sampler(image: &mut Image) {
+    let descriptor = image.sampler.get_or_init_descriptor();
+    descriptor.address_mode_u = ImageAddressMode::Repeat;
+    descriptor.address_mode_v = ImageAddressMode::Repeat;
+    descriptor.address_mode_w = ImageAddressMode::Repeat;
 }
