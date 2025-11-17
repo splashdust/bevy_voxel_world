@@ -1,3 +1,4 @@
+use bevy::image::ImageAddressMode;
 use bevy::{
     asset::uuid_handle,
     mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
@@ -8,7 +9,6 @@ use bevy::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
     },
 };
-use bevy::image::ImageAddressMode;
 use bevy_shader::{Shader, ShaderDefVal, ShaderRef};
 
 /// Keeps track of the loading status of the image used for the voxel texture

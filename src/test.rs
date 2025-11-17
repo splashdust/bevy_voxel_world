@@ -3,9 +3,10 @@ use bevy::prelude::*;
 use std::sync::Arc;
 
 use crate::chunk_map::ChunkMapUpdateBuffer;
+use crate::configuration::VoxelWorldConfig;
 use crate::mesh_cache::MeshCacheInsertBuffer;
-use crate::prelude::*;
 use crate::meshing::generate_chunk_mesh_for_shape;
+use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},

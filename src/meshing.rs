@@ -131,14 +131,12 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
 
             let corners = face.quad_corners(&quad);
 
-            positions.extend_from_slice(
-                &corners.map(|c| {
-                    let corner = c.as_vec3();
-                    let adjusted =
-                        voxel_size * (corner - BMVec3::splat(1.0)) + BMVec3::splat(1.0);
-                    adjusted.to_array()
-                }),
-            );
+            positions.extend_from_slice(&corners.map(|c| {
+                let corner = c.as_vec3();
+                let adjusted =
+                    voxel_size * (corner - BMVec3::splat(1.0)) + BMVec3::splat(1.0);
+                adjusted.to_array()
+            }));
 
             normals.extend_from_slice(&face.quad_mesh_normals());
 

@@ -453,8 +453,9 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
                 continue;
             }
 
-            let previous_voxel = previous_data.as_ref().and_then(|chunk| {
-                chunk.get_voxel_at_world_position(block_pos)});
+            let previous_voxel = previous_data
+                .as_ref()
+                .and_then(|chunk| chunk.get_voxel_at_world_position(block_pos));
 
             if reuse_previous {
                 if let Some(prev_voxel) = previous_voxel {

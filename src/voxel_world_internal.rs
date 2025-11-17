@@ -395,6 +395,7 @@ where
 
     /// Spawn a thread for each chunk that has been marked by NeedsRemesh
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
         mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,

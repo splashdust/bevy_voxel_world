@@ -8,8 +8,8 @@ use bevy::{
 use crate::{
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
-        prepare_texture, set_repeat_sampler, LoadingTexture, StandardVoxelMaterial, TextureLayers,
-        VOXEL_TEXTURE_SHADER_HANDLE,
+        prepare_texture, set_repeat_sampler, LoadingTexture, StandardVoxelMaterial,
+        TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
     voxel_world_internal::Internals,
