@@ -40,7 +40,7 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos| get_voxel_fn())
+        Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
     }
 
     fn texture_index_mapper(
@@ -65,12 +65,15 @@ impl VoxelWorldConfig for MainWorld {
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
-        Some(Box::new(|_pos: IVec3| {
-            // If necessary, we can caputure data here based on the chunk position
-            // and move it into the closure below.
-            Box::new(
+        Some(Box::new(
+            |_pos: IVec3, _lod, _data_shape, _mesh_shape, _previous| {
+                // If necessary, we can caputure data here based on the chunk position
+                // and move it into the closure below.
+                Box::new(
                 // The array of voxels for the chunk
                 |voxels: VoxelArray<Self::MaterialIndex>,
+                 _data_shape_in: UVec3,
+                 _mesh_shape_in: UVec3,
                  // A reference to the texture index mapper function as defined in the config
                  texture_index_mapper: TextureIndexMapperFn<Self::MaterialIndex>| {
                     let faces = block_mesh::RIGHT_HANDED_Y_UP_CONFIG.faces;
@@ -78,7 +81,7 @@ impl VoxelWorldConfig for MainWorld {
 
                     // Call the greedy meshing algorithm from the block_mesh crate
                     block_mesh::greedy_quads(
-                        &*voxels,
+                        &voxels,
                         &PaddedChunkShape {},
                         [0; 3],
                         [CHUNK_SIZE_U + 1; 3],
@@ -157,7 +160,8 @@ impl VoxelWorldConfig for MainWorld {
                     (render_mesh, None)
                 },
             )
-        }))
+            },
+        ))
     }
 }
 
@@ -213,7 +217,8 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
+fn get_voxel_fn() -> Box<dyn FnMut(IVec3, Option<WorldVoxel>) -> WorldVoxel + Send + Sync>
+{
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 5;
@@ -227,7 +232,7 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel + Send + Sync> {
 
     // Then we return this boxed closure that captures the noise and the cache
     // This will get sent off to a separate thread for meshing by bevy_voxel_world
-    Box::new(move |pos: IVec3| {
+    Box::new(move |pos: IVec3, _previous| {
         // Sea level
         if pos.y < 1 {
             return WorldVoxel::Solid(3);

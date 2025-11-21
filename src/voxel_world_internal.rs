@@ -25,8 +25,8 @@ use crate::{
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{
-        get_chunk_voxel_position, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
-        ChunkWillUpdate, VoxelWorldCamera,
+        get_chunk_voxel_position, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
+        ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
     },
 };
 
@@ -105,16 +105,22 @@ where
     ) {
         // Panic if no root exists as it is already inserted in the setup.
         let world_root = world_root.single().unwrap();
+        let attach_to_root = configuration.attach_chunks_to_root();
 
         let Ok((camera, cam_gtf)) = camera_info.single() else {
             return;
         };
-        let cam_pos = cam_gtf.translation().as_ivec3();
+        let camera_position = cam_gtf.translation();
+        let cam_pos = camera_position.as_ivec3();
 
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
+        let spawn_strategy = configuration.chunk_spawn_strategy();
 
         let viewport_size = camera.physical_viewport_size().unwrap_or_default();
+        let visibility_margin = 0.0f32;
+        let protected_chunk_radius_sq =
+            (configuration.min_despawn_distance() as i32).pow(2);
 
         let mut visited = HashSet::new();
         let mut chunks_deque = VecDeque::with_capacity(
@@ -194,6 +200,19 @@ where
                 continue;
             }
 
+            if spawn_strategy == ChunkSpawnStrategy::CloseAndInView
+                && !chunk_visible_to_camera(
+                    camera,
+                    cam_gtf,
+                    chunk_position,
+                    visibility_margin,
+                )
+                && chunk_position.distance_squared(chunk_at_camera)
+                    > protected_chunk_radius_sq
+            {
+                continue;
+            }
+
             let has_chunk = ChunkMap::<C, C::MaterialIndex>::contains_chunk(
                 &chunk_position,
                 &chunk_map_read_lock,
@@ -201,11 +220,26 @@ where
 
             if !has_chunk {
                 let chunk_entity = commands.spawn(NeedsRemesh).id();
-                commands.entity(world_root).add_child(chunk_entity);
-                let chunk = Chunk::<C>::new(chunk_position, chunk_entity);
+                if attach_to_root {
+                    commands.entity(world_root).add_child(chunk_entity);
+                }
+                let lod_level =
+                    configuration.chunk_lod(chunk_position, None, camera_position);
+                let data_shape = configuration.chunk_data_shape(lod_level);
+                let mesh_shape = configuration.chunk_meshing_shape(lod_level);
+                let chunk = Chunk::<C>::new(
+                    chunk_position,
+                    lod_level,
+                    chunk_entity,
+                    data_shape,
+                    mesh_shape,
+                );
 
-                chunk_map_insert_buffer
-                    .push((chunk_position, ChunkData::with_entity(chunk.entity)));
+                let mut chunk_data = ChunkData::with_entity(chunk.entity);
+                chunk_data.lod_level = lod_level;
+                chunk_data.data_shape = data_shape;
+                chunk_data.mesh_shape = mesh_shape;
+                chunk_map_insert_buffer.push((chunk_position, chunk_data));
 
                 commands.entity(chunk.entity).try_insert((
                     chunk,
@@ -217,7 +251,7 @@ where
                 continue;
             }
 
-            if configuration.chunk_spawn_strategy() != ChunkSpawnStrategy::Close {
+            if spawn_strategy != ChunkSpawnStrategy::Close {
                 continue;
             }
 
@@ -236,6 +270,53 @@ where
         }
     }
 
+    /// Update chunk LOD assignments and schedule remeshing when a change occurs.
+    pub fn update_chunk_lods(
+        mut commands: Commands,
+        mut chunks: Query<(Entity, &mut Chunk<C>), Without<NeedsDespawn>>,
+        configuration: Res<C>,
+        camera_info: CameraInfo<C>,
+        mut ev_chunk_will_change_lod: MessageWriter<ChunkWillChangeLod<C>>,
+    ) {
+        let Ok((_, cam_gtf)) = camera_info.single() else {
+            return;
+        };
+
+        let camera_position = cam_gtf.translation();
+
+        for (entity, mut chunk) in chunks.iter_mut() {
+            let target_lod = configuration.chunk_lod(
+                chunk.position,
+                Some(chunk.lod_level),
+                camera_position,
+            );
+            if target_lod == chunk.lod_level {
+                continue;
+            }
+
+            ev_chunk_will_change_lod
+                .write(ChunkWillChangeLod::<C>::new(chunk.position, entity));
+
+            let data_shape = configuration.chunk_data_shape(target_lod);
+            let mesh_shape = configuration.chunk_meshing_shape(target_lod);
+
+            if chunk.data_shape == data_shape && chunk.mesh_shape == mesh_shape {
+                chunk.lod_level = target_lod;
+                // Shape did not change, so nothing to regenerate/remesh.
+                continue;
+            }
+
+            chunk.data_shape = data_shape;
+            chunk.mesh_shape = mesh_shape;
+            chunk.lod_level = target_lod;
+
+            // Ensure a remesh occurs to refresh data at the new LOD.
+            let mut entity_commands = commands.entity(entity);
+            entity_commands.try_insert(NeedsRemesh);
+            entity_commands.remove::<ChunkThread<C, C::MaterialIndex>>();
+        }
+    }
+
     /// Tags chunks that are eligible for despawning
     pub fn retire_chunks(
         mut commands: Commands,
@@ -247,7 +328,7 @@ where
         let spawning_distance = configuration.spawning_distance() as i32;
         let spawning_distance_squared = spawning_distance.pow(2);
 
-        let (_, cam_gtf) = camera_info.single().unwrap();
+        let (camera, cam_gtf) = camera_info.single().unwrap();
         let cam_pos = cam_gtf.translation().as_ivec3();
 
         let chunk_at_camera = cam_pos / CHUNK_SIZE_I;
@@ -259,10 +340,16 @@ where
                     match configuration.chunk_despawn_strategy() {
                         ChunkDespawnStrategy::FarAway => false,
                         ChunkDespawnStrategy::FarAwayOrOutOfView => {
+                            let frustum_culled = !chunk_visible_to_camera(
+                                camera,
+                                cam_gtf,
+                                chunk.position,
+                                0.0,
+                            );
                             if let Some(visibility) = view_visibility {
-                                !visibility.get()
+                                !visibility.get() || frustum_culled
                             } else {
-                                false
+                                frustum_culled
                             }
                         }
                     }
@@ -308,35 +395,77 @@ where
 
     /// Spawn a thread for each chunk that has been marked by NeedsRemesh
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub fn remesh_dirty_chunks(
         mut commands: Commands,
         mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
-        dirty_chunks: Query<&Chunk<C>, With<NeedsRemesh>>,
+        dirty_chunks: Query<
+            &Chunk<C>,
+            (With<NeedsRemesh>, Without<ChunkThread<C, C::MaterialIndex>>),
+        >,
+        chunk_threads: Query<(), With<ChunkThread<C, C::MaterialIndex>>>,
         mesh_cache: Res<MeshCache<C>>,
         modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
+        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
+        let max_threads = configuration.max_active_chunk_threads();
+        let mut active_threads = chunk_threads.iter().count();
+
+        if max_threads == 0 {
+            return;
+        }
 
         for chunk in dirty_chunks.iter() {
-            let voxel_data_fn = (configuration.voxel_lookup_delegate())(chunk.position);
+            if active_threads >= max_threads {
+                break;
+            }
+
+            let previous_chunk_data = {
+                let read_lock = chunk_map.get_read_lock();
+                ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
+            };
+
+            let lod_level = chunk.lod_level;
+
+            let regenerate_strategy = configuration.chunk_regenerate_strategy();
+
+            let voxel_data_fn = (configuration.voxel_lookup_delegate())(
+                chunk.position,
+                lod_level,
+                previous_chunk_data.clone(),
+            );
+            let data_shape = chunk.data_shape;
+            let mesh_shape = chunk.mesh_shape;
             let chunk_meshing_fn = (configuration
                 .chunk_meshing_delegate()
                 .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
-                chunk.position
+                chunk.position,
+                lod_level,
+                data_shape,
+                mesh_shape,
+                previous_chunk_data.clone(),
             );
             let texture_index_mapper = configuration.texture_index_mapper().clone();
 
             let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
                 chunk.entity,
                 chunk.position,
+                lod_level,
+                data_shape,
+                mesh_shape,
                 modified_voxels.clone(),
             );
 
             let mesh_map = mesh_cache.get_mesh_map();
 
             let thread = thread_pool.spawn(async move {
-                chunk_task.generate(voxel_data_fn);
+                chunk_task.generate(
+                    voxel_data_fn,
+                    previous_chunk_data.clone(),
+                    regenerate_strategy,
+                );
 
                 // No need to mesh if the chunk is empty or full
                 if chunk_task.is_empty() || chunk_task.is_full() {
@@ -362,6 +491,8 @@ where
                     chunk.position,
                 ))
                 .remove::<NeedsRemesh>();
+
+            active_threads += 1;
 
             ev_chunk_will_remesh
                 .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
@@ -490,6 +621,7 @@ where
             {
                 if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
                     ent.try_insert(NeedsRemesh);
+                    ent.remove::<ChunkThread<C, C::MaterialIndex>>();
                     updated_chunks.insert((chunk_data.entity, chunk_pos));
                 }
             }
@@ -542,6 +674,57 @@ where
                 .remove::<NeedsMaterial<C>>();
         }
     }
+}
+
+fn chunk_visible_to_camera(
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+    chunk_position: IVec3,
+    ndc_margin: f32,
+) -> bool {
+    let chunk_min = chunk_position.as_vec3() * CHUNK_SIZE_F;
+    let chunk_max = chunk_min + Vec3::splat(CHUNK_SIZE_F);
+
+    let cam_pos = cam_gtf.translation();
+    if cam_pos.x >= chunk_min.x
+        && cam_pos.x <= chunk_max.x
+        && cam_pos.y >= chunk_min.y
+        && cam_pos.y <= chunk_max.y
+        && cam_pos.z >= chunk_min.z
+        && cam_pos.z <= chunk_max.z
+    {
+        return true;
+    }
+
+    let limit = 1.0 + ndc_margin;
+    let point_in_ndc = |point: Vec3| -> bool {
+        if let Some(ndc) = camera.world_to_ndc(cam_gtf, point) {
+            ndc.x >= -limit
+                && ndc.x <= limit
+                && ndc.y >= -limit
+                && ndc.y <= limit
+                && ndc.z >= -ndc_margin
+                && ndc.z <= 1.0 + ndc_margin
+        } else {
+            false
+        }
+    };
+
+    if point_in_ndc((chunk_min + chunk_max) * 0.5) {
+        return true;
+    }
+
+    for &x in &[chunk_min.x, chunk_max.x] {
+        for &y in &[chunk_min.y, chunk_max.y] {
+            for &z in &[chunk_min.z, chunk_max.z] {
+                if point_in_ndc(Vec3::new(x, y, z)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if the given world point is within the camera's view

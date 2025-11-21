@@ -8,8 +8,8 @@ use bevy::{
 use crate::{
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
-        prepare_texture, LoadingTexture, StandardVoxelMaterial, TextureLayers,
-        VOXEL_TEXTURE_SHADER_HANDLE,
+        prepare_texture, set_repeat_sampler, LoadingTexture, StandardVoxelMaterial,
+        TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
     voxel_world_internal::Internals,
@@ -103,7 +103,11 @@ where
                 PreUpdate,
                 (
                     (
-                        (Internals::<C>::spawn_chunks, Internals::<C>::retire_chunks)
+                        (
+                            Internals::<C>::spawn_chunks,
+                            Internals::<C>::update_chunk_lods,
+                            Internals::<C>::retire_chunks,
+                        )
                             .chain(),
                         Internals::<C>::remesh_dirty_chunks,
                     )
@@ -122,6 +126,7 @@ where
             .add_message::<ChunkWillSpawn<C>>()
             .add_message::<ChunkWillDespawn<C>>()
             .add_message::<ChunkWillRemesh<C>>()
+            .add_message::<ChunkWillChangeLod<C>>()
             .add_message::<ChunkWillUpdate<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
@@ -174,6 +179,7 @@ where
                         RenderAssetUsages::default(),
                     )
                     .unwrap();
+                    set_repeat_sampler(&mut image);
                     image.reinterpret_stacked_2d_as_array(4);
                     let mut image_assets =
                         app.world_mut().resource_mut::<Assets<Image>>();

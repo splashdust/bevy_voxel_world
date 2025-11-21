@@ -143,6 +143,19 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 <img width="558" src="https://github.com/user-attachments/assets/13f46fd6-81a8-4c93-943c-9c5fc7b9b38e"/>
 
+## Level of Detail
+
+Worlds can compute a per-chunk level-of-detail (LOD) value by overriding `VoxelWorldConfig::chunk_lod`. The callback receives both the chunk position and the previously assigned LOD (if any). The default implementation always returns `0`, so nothing changes unless you opt in. When a chunk's LOD changes it is automatically marked for regeneration and remeshing to apply the new data, and a `ChunkWillChangeLod` event is fired so gameplay/UI systems can react even if no remesh is needed.
+
+Once you provide your own LOD value, the following hooks become available:
+
+- `chunk_data_shape(lod)`: define the padded voxel dimensions used while generating data per unique LOD. Returning a smaller shape reduces the number of samples you pull from the `voxel_lookup_delegate`.
+- `chunk_meshing_shape(lod)`: define the padded voxel dimensions per unique LOD used purely for meshing. If this differs from the data shape, the default mesher downsamples using nearest-neighbour sampling before handing the voxels to block-mesh. You can keep the meshing shape fixed (for example `PADDED_CHUNK_SIZE`) to guarantee identical tessellation across LODs, or shrink it to reduce triangle counts and fill seams with your own skirts/transition geometry. `chunk_meshing_delegate` receives the `data_shape` and `mesh_shape` which can be used in custom meshers.
+- `chunk_regenerate_strategy()`: choose whether previously generated voxel buffers should be reused (`Reuse`, the new default) or recalculated (`Repopulate`, pre 0.13.1 behavior) when the chunk changes LOD. Reuse avoids re-running expensive generators at the cost of storing the higher-resolution payload while the chunk is coarse.
+- `voxel_lookup_delegate` and `chunk_meshing_delegate`: both delegates receive the current LOD together with the previously generated `ChunkData` (if any). This lets you pull information forward when LODs change instead of starting from scratch. The voxel lookup closure also receives an `Option<WorldVoxel>` describing any previous value for each sample so you can cheaply decide whether a position needs new work.
+
+See `examples/noise_terrain_lod.rs` for a reference implementation that varies both data and mesh shapes, and uses coarse-chunk skirts (implemented by returning `WorldVoxel::Unset` for voxels in the padded border) to hide cracks at LOD boundaries.
+
 ## Gotchas
 
 `bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.

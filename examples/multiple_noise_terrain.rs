@@ -32,7 +32,7 @@ impl VoxelWorldConfig for MainWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(move |_chunk_pos| get_voxel_fn())
+        Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
     }
 
     fn texture_index_mapper(
@@ -89,7 +89,11 @@ fn setup(mut commands: Commands) {
     });
 }
 
-fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<BlockTexture> + Send + Sync> {
+fn get_voxel_fn() -> Box<
+    dyn FnMut(IVec3, Option<WorldVoxel<BlockTexture>>) -> WorldVoxel<BlockTexture>
+        + Send
+        + Sync,
+> {
     // Set up some noise to use as the terrain height map
     let mut noise = HybridMulti::<Perlin>::new(1234);
     noise.octaves = 5;
@@ -110,7 +114,7 @@ fn get_voxel_fn() -> Box<dyn FnMut(IVec3) -> WorldVoxel<BlockTexture> + Send + S
 
     // Then we return this boxed closure that captures the noise and the cache
     // This will get sent off to a separate thread for meshing by bevy_voxel_world
-    Box::new(move |pos: IVec3| {
+    Box::new(move |pos: IVec3, _previous| {
         // Sea level
         if pos.y < 1 {
             return WorldVoxel::Solid(BlockTexture::Snow);

@@ -1,24 +1,67 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::chunk::VoxelArray;
-use crate::meshing::generate_chunk_mesh;
+use crate::chunk::{ChunkData, VoxelArray, PADDED_CHUNK_SIZE};
+use crate::meshing::generate_chunk_mesh_for_shape;
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
-pub type VoxelLookupFn<I = u8> = Box<dyn FnMut(IVec3) -> WorldVoxel<I> + Send + Sync>;
+pub type VoxelLookupFn<I = u8> =
+    Box<dyn FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + Sync>;
+pub type LodLevel = u8;
 pub type VoxelLookupDelegate<I = u8> =
-    Box<dyn Fn(IVec3) -> VoxelLookupFn<I> + Send + Sync>;
+    Box<dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> VoxelLookupFn<I> + Send + Sync>;
 
 pub type TextureIndexMapperFn<I = u8> = Arc<dyn Fn(I) -> [u32; 3] + Send + Sync>;
 
+#[inline]
+pub const fn padded_chunk_shape(interior: UVec3) -> UVec3 {
+    UVec3::new(interior.x + 2, interior.y + 2, interior.z + 2)
+}
+
+#[inline]
+pub const fn padded_chunk_shape_uniform(edge: u32) -> UVec3 {
+    UVec3::splat(edge + 2)
+}
+
 pub type ChunkMeshingFn<I, UB> = Box<
-    dyn FnMut(Arc<VoxelArray<I>>, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>)
+    dyn FnMut(VoxelArray<I>, UVec3, UVec3, TextureIndexMapperFn<I>) -> (Mesh, Option<UB>)
         + Send
         + Sync,
 >;
-pub type ChunkMeshingDelegate<I, UB> =
-    Option<Box<dyn Fn(IVec3) -> ChunkMeshingFn<I, UB> + Send + Sync>>;
+pub type ChunkMeshingDelegate<I, UB> = Option<
+    Box<
+        dyn Fn(
+                IVec3,
+                LodLevel,
+                UVec3,
+                UVec3,
+                Option<ChunkData<I>>,
+            ) -> ChunkMeshingFn<I, UB>
+            + Send
+            + Sync,
+    >,
+>;
+
+/// Controls how voxel payloads are handled when a chunk changes LOD.
+///
+/// `Reuse` keeps previously generated voxel data even when the requested
+/// `chunk_data_shape` shrinks. This avoids the cost of
+/// regenerating high-resolution data if the chunk is later promoted to a finer
+/// LOD at the expense of retaining the larger voxel buffer while the chunk is
+/// coarse.
+///
+/// `Repopulate` always rebuilds voxel data for the requested shape, discarding
+/// any excess high-resolution data so that downgraded chunks keep only the
+/// coarse payload.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkRegenerateStrategy {
+    /// Attempt to reuse previously generated chunk data before invoking the voxel lookup delegate, retaining the existing voxel payload when possible.
+    #[default]
+    Reuse,
+    /// Always regenerate voxel data using the voxel lookup delegate, discarding any higher-resolution data that is no longer needed.
+    Repopulate,
+}
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -118,7 +161,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(|_| Box::new(|_| WorldVoxel::Unset))
+        Box::new(|_, _, _| Box::new(|_, _| WorldVoxel::Unset))
     }
 
     /// A function that returns a function that computes the mesh for a chunk
@@ -149,16 +192,84 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         true
     }
 
+    /// Compute the level of detail for a chunk at a world-space position.
+    ///
+    /// `previous_lod` will be `None` when the chunk is first spawned and `Some(current_lod)`
+    /// when an existing chunk is being re-evaluated. Implementors can use this to add hysteresis.
+    /// Defaults to `0` for all chunks.
+    fn chunk_lod(
+        &self,
+        _chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        _camera_position: Vec3,
+    ) -> LodLevel {
+        0
+    }
+
+    /// Define the padded voxel dimensions used for data generation for a given LOD level.
+    fn chunk_data_shape(&self, _lod_level: LodLevel) -> UVec3 {
+        UVec3::splat(PADDED_CHUNK_SIZE)
+    }
+
+    /// Define the padded voxel dimensions used for meshing for a given LOD level.
+    fn chunk_meshing_shape(&self, _lod_level: LodLevel) -> UVec3 {
+        UVec3::splat(PADDED_CHUNK_SIZE)
+    }
+
+    /// Determine how voxel data should be regenerated for a chunk. Defaults to reusing previous data.
+    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
+        ChunkRegenerateStrategy::default()
+    }
+
+    /// Maximum number of chunk generation tasks that may be active simultaneously.
+    fn max_active_chunk_threads(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Whether chunk entities should be parented to the world root entity.
+    ///
+    /// Parenting makes it easy to transform or hide the entire voxel world at once,
+    /// but it also forces Bevy's transform propagation system to walk the entire
+    /// hierarchy whenever chunks spawn/despawn. Worlds with large numbers of chunks
+    /// streaming into and out of view will perform better without a world_root.
+    fn attach_chunks_to_root(&self) -> bool {
+        true
+    }
+
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
 }
 
 pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     pos: IVec3,
+    _lod: LodLevel,
+    data_shape: UVec3,
+    mesh_shape: UVec3,
+    _previous_data: Option<ChunkData<I>>,
 ) -> ChunkMeshingFn<I, UB> {
     Box::new(
-        move |voxels: Arc<VoxelArray<I>>,
+        move |voxels: VoxelArray<I>,
+              data_shape_in: UVec3,
+              mesh_shape_in: UVec3,
               texture_index_mapper: TextureIndexMapperFn<I>| {
-            let mesh = generate_chunk_mesh(voxels, pos, texture_index_mapper);
+            let data_shape = if data_shape_in == UVec3::ZERO {
+                data_shape
+            } else {
+                data_shape_in
+            };
+            let mesh_shape = if mesh_shape_in == UVec3::ZERO {
+                mesh_shape
+            } else {
+                mesh_shape_in
+            };
+
+            let voxels_slice: Arc<[WorldVoxel<I>]> = voxels.clone();
+            let mesh = generate_chunk_mesh_for_shape(
+                voxels_slice,
+                pos,
+                data_shape,
+                mesh_shape,
+                texture_index_mapper,
+            );
             (mesh, None)
         },
     )

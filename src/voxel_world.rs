@@ -88,6 +88,11 @@ pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;
 pub struct WillRemesh;
 impl ChunkEventType for WillRemesh {}
 
+/// Fired when a chunk's LOD value changes.
+pub type ChunkWillChangeLod<C> = ChunkEvent<C, WillChangeLod>;
+pub struct WillChangeLod;
+impl ChunkEventType for WillChangeLod {}
+
 /// Fired when a chunk is about to be updated, typically when `set_voxel` was called on a voxel
 /// within the chunk.
 pub type ChunkWillUpdate<C> = ChunkEvent<C, WillUpdate>;
@@ -159,7 +164,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
         let modified_voxels = self.modified_voxels.clone();
 
         Arc::new(move |position| {
-            let (chunk_pos, vox_pos) = get_chunk_voxel_position(position);
+            let (chunk_pos, _) = get_chunk_voxel_position(position);
 
             if let Some(voxel) = write_buffer
                 .iter()
@@ -180,11 +185,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
                 chun_map_read.get(&chunk_pos).cloned()
             };
 
-            if let Some(chunk_data) = chunk_opt {
-                chunk_data.get_voxel(vox_pos)
-            } else {
-                WorldVoxel::Unset
-            }
+            chunk_opt
+                .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
+                .unwrap_or(WorldVoxel::Unset)
         })
     }
 

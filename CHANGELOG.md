@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.0
+
+ - Introduce per-chunk level-of-detail and configurable chunk shapes
+ - Add `ChunkRegenerateStrategy`
+ - Add `max_active_chunk_threads()` and `attach_chunks_to_root()` knobs for better control over task-pool pressure and transform hierarchy costs.
+
 ## 0.13.0
 
 - Upgrade to Bevy 0.17

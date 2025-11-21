@@ -20,18 +20,20 @@ pub mod prelude {
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
     };
     pub use crate::voxel_world::{
-        ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate,
+        ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkWillUpdate,
     };
 }
 
 pub mod custom_meshing {
     pub use crate::chunk::PaddedChunkShape;
+    pub use crate::chunk::VoxelArray;
     pub use crate::chunk::CHUNK_SIZE_F;
     pub use crate::chunk::CHUNK_SIZE_I;
     pub use crate::chunk::CHUNK_SIZE_U;
     pub use crate::meshing::generate_chunk_mesh;
+    pub use crate::meshing::generate_chunk_mesh_for_shape;
     pub use crate::meshing::mesh_from_quads;
-    pub use crate::meshing::VoxelArray;
 }
 
 pub mod debug {

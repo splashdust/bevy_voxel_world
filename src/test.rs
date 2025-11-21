@@ -1,14 +1,21 @@
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
+use std::sync::Arc;
 
 use crate::chunk_map::ChunkMapUpdateBuffer;
+use crate::configuration::VoxelWorldConfig;
 use crate::mesh_cache::MeshCacheInsertBuffer;
+use crate::meshing::generate_chunk_mesh_for_shape;
 use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{ChunkData, FillType},
+    chunk::{ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
     voxel_world::*,
+    voxel_world_internal::ModifiedVoxels,
 };
+use ndshape::{RuntimeShape, Shape};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
@@ -202,6 +209,136 @@ fn chunk_will_update_event() {
 }
 
 #[test]
+fn chunk_generate_reuses_previous_data_when_configured() {
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+
+    let entity = Entity::from_raw_u32(1).unwrap();
+    let position = IVec3::ZERO;
+    let data_shape = UVec3::splat(PADDED_CHUNK_SIZE);
+    let mesh_shape = data_shape;
+
+    let data_shape_runtime = RuntimeShape::<u32, 3>::new(data_shape.to_array());
+    let mut voxel_payload =
+        vec![WorldVoxel::Solid(5); data_shape_runtime.size() as usize];
+    let highlighted_block = [1, 1, 1];
+    let highlighted_world_pos = IVec3::new(0, 0, 0);
+    voxel_payload[data_shape_runtime.linearize(highlighted_block) as usize] =
+        WorldVoxel::Solid(9);
+    let voxel_payload: Arc<[WorldVoxel<Mat>]> = Arc::from(voxel_payload);
+
+    let modified_voxels = ModifiedVoxels::<DefaultWorld, Mat>::default();
+    let mut chunk_task = ChunkTask::<DefaultWorld, Mat>::new(
+        entity,
+        position,
+        0,
+        data_shape,
+        mesh_shape,
+        modified_voxels,
+    );
+
+    let mut previous_data = ChunkData::<Mat>::with_entity(entity);
+    previous_data.position = position;
+    previous_data.data_shape = data_shape;
+    previous_data.mesh_shape = mesh_shape;
+    previous_data.has_generated = true;
+    previous_data.is_full = true;
+    previous_data.is_empty = false;
+    previous_data.fill_type = FillType::Mixed;
+    previous_data.voxels = Some(voxel_payload.clone());
+    previous_data.generate_hash();
+
+    chunk_task.generate(
+        |_pos, _previous| -> WorldVoxel<Mat> {
+            panic!("voxel lookup should not run when reusing previous data");
+        },
+        Some(previous_data),
+        ChunkRegenerateStrategy::Reuse,
+    );
+
+    assert!(chunk_task.chunk_data.voxels.is_some());
+    assert!(chunk_task.is_full());
+    match chunk_task.chunk_data.fill_type {
+        FillType::Mixed => {}
+        ref other => panic!("expected mixed fill type, got {:?}", other),
+    }
+
+    let voxel = chunk_task
+        .chunk_data
+        .get_voxel_at_world_position(highlighted_world_pos)
+        .expect("voxel should be addressable");
+    assert_eq!(voxel, WorldVoxel::Solid(9));
+}
+
+#[test]
+fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+
+    for _ in 0..8 {
+        let data_shape = {
+            let dim = |rng: &mut StdRng| rng.random_range(3..=66);
+            UVec3::new(dim(&mut rng), dim(&mut rng), dim(&mut rng))
+        };
+        let mesh_shape = UVec3::new(
+            rng.random_range(3..=data_shape.x),
+            rng.random_range(3..=data_shape.y),
+            rng.random_range(3..=data_shape.z),
+        );
+        let data_runtime_shape = RuntimeShape::<u32, 3>::new(data_shape.to_array());
+        let mut voxels =
+            vec![WorldVoxel::<Mat>::Unset; data_runtime_shape.size() as usize];
+
+        for x in 1..data_shape.x - 1 {
+            for y in 1..data_shape.y - 1 {
+                for z in 1..data_shape.z - 1 {
+                    let idx = data_runtime_shape.linearize([x, y, z]) as usize;
+                    voxels[idx] = WorldVoxel::Solid(1);
+                }
+            }
+        }
+
+        let texture_index_mapper: TextureIndexMapperFn<Mat> = Arc::new(|_| [0, 0, 0]);
+        let mesh = generate_chunk_mesh_for_shape(
+            Arc::from(voxels),
+            IVec3::ZERO,
+            data_shape,
+            mesh_shape,
+            texture_index_mapper,
+        );
+
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(values)) => values,
+            other => panic!("unexpected position attribute layout: {:?}", other),
+        };
+        assert!(
+            !positions.is_empty(),
+            "expected generated mesh to contain vertices"
+        );
+
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for p in positions {
+            let p = Vec3::from_array(*p);
+            min = min.min(p);
+            max = max.max(p);
+        }
+
+        let extent = max - min;
+        for (axis, len) in ["x", "y", "z"].into_iter().zip(extent.to_array()) {
+            assert!(
+                (len - CHUNK_SIZE_F).abs() < 0.001,
+                "mesh extent along {} axis should be {} but was {} (data_shape={:?}, mesh_shape={:?})",
+                axis,
+                CHUNK_SIZE_F,
+                len,
+                data_shape,
+                mesh_shape
+            );
+        }
+    }
+}
+
+#[test]
 fn raycast_finds_voxel() {
     let mut app = _test_setup_app();
 
@@ -234,6 +371,7 @@ fn raycast_finds_voxel() {
                 IVec3::new(0, 0, 0),
                 ChunkData {
                     position: IVec3::new(0, 0, 0),
+                    lod_level: 0,
                     voxels: Some(std::sync::Arc::new([WorldVoxel::Unset; 39304])),
                     voxels_hash: 0,
                     is_full: false,
@@ -241,6 +379,8 @@ fn raycast_finds_voxel() {
                     fill_type: FillType::Mixed,
                     entity: Entity::PLACEHOLDER,
                     has_generated: false,
+                    data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
+                    mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
                 },
                 ChunkWillSpawn::<DefaultWorld>::new(
                     IVec3::new(0, 0, 0),
