@@ -983,7 +983,7 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_northstar"
 version = "0.4.0"
-source = "git+https://github.com/jtothethree/bevy_northstar?branch=bevy_0.17#8d25bd9f8e0cab491fe696d8d4ff809a58e1abae"
+source = "git+https://github.com/jtothethree/bevy_northstar?branch=bevy_0.17#d649d779dc4a2e4df997275683e8d648ad3fb313"
 dependencies = [
  "bevy",
  "indexmap",
