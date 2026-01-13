@@ -38,7 +38,7 @@ bevy_shader = "0.17"
 
 [dev-dependencies]
 bevy_northstar = { git = "https://github.com/jtothethree/bevy_northstar", branch = "bevy_0.17" }
-bevy_panorbit_camera = { version = "0.33.0" }
+bevy_panorbit_camera = { version = "0.33.1" }
 noise = { version = "0.9.0" }
 
 [[example]]
