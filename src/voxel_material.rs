@@ -47,6 +47,12 @@ pub(crate) struct StandardVoxelMaterial {
     pub voxels_texture: Handle<Image>,
 }
 
+impl Material for StandardVoxelMaterial {
+    fn enable_prepass() -> bool {
+        false
+    }
+}
+
 impl MaterialExtension for StandardVoxelMaterial {
     fn fragment_shader() -> ShaderRef {
         VOXEL_TEXTURE_SHADER_HANDLE.into()
@@ -94,7 +100,7 @@ pub(crate) fn prepare_texture(
 
     let image = images.get_mut(&loading_texture.handle).unwrap();
     set_repeat_sampler(image);
-    image.reinterpret_stacked_2d_as_array(texture_layers.0);
+    let _ = image.reinterpret_stacked_2d_as_array(texture_layers.0);
 }
 
 pub(crate) fn set_repeat_sampler(image: &mut Image) {

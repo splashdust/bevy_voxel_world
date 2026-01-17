@@ -15,6 +15,7 @@ enum BlockTexture {
     #[default]
     Grass,
     Stone,
+    #[allow(dead_code)]
     Dirt,
     Snow,
 }
@@ -82,7 +83,7 @@ fn setup(mut commands: Commands) {
     ));
 
     // Ambient light, same color as sun
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
         brightness: 100.0,
         affects_lightmapped_meshes: true,
