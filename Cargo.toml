@@ -21,7 +21,7 @@ opt-level = 1
 opt-level = 3
 
 [dependencies]
-bevy = { version = "0.17", features = [
+bevy = { version = "0.18", features = [
     "bevy_render",
     "bevy_asset",
     "bevy_pbr",
