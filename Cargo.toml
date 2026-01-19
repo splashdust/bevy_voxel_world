@@ -34,7 +34,7 @@ rand = "0.9.2"
 ahash = "0.8.11"
 weak-table = { version = "0.3.2", features = ["ahash"] }
 hashbrown = "0.16.1"
-bevy_shader = "0.17"
+bevy_shader = "0.18"
 
 [dev-dependencies]
 bevy_northstar = { git = "https://github.com/jtothethree/bevy_northstar", branch = "bevy_0.17" }
