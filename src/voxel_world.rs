@@ -302,7 +302,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// fn do_raycast(
     ///     voxel_world: VoxelWorld<DefaultWorld>,
     ///     camera_info: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<DefaultWorld>>>,
-    ///     mut cursor_evr: EventReader<CursorMoved>,
+    ///     mut cursor_evr: MessageReader<CursorMoved>,
     /// ) {
     ///     for ev in cursor_evr.read() {
     ///         // Get a ray from the cursor position into the world
