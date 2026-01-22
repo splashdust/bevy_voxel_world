@@ -338,6 +338,17 @@ fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
     }
 }
 
+type RaycastTestBuffers<'w> = (
+    ResMut<
+        'w,
+        ChunkMapUpdateBuffer<
+            DefaultWorld,
+            <DefaultWorld as VoxelWorldConfig>::MaterialIndex,
+        >,
+    >,
+    ResMut<'w, MeshCacheInsertBuffer<DefaultWorld>>,
+);
+
 #[test]
 fn raycast_finds_voxel() {
     let mut app = _test_setup_app();
@@ -349,16 +360,7 @@ fn raycast_finds_voxel() {
 
     app.add_systems(
         Startup,
-        move |mut voxel_world: VoxelWorld<DefaultWorld>,
-              buffers: (
-            ResMut<
-                ChunkMapUpdateBuffer<
-                    DefaultWorld,
-                    <DefaultWorld as VoxelWorldConfig>::MaterialIndex,
-                >,
-            >,
-            ResMut<MeshCacheInsertBuffer<DefaultWorld>>,
-        )| {
+        move |mut voxel_world: VoxelWorld<DefaultWorld>, buffers: RaycastTestBuffers| {
             let test_voxel = crate::voxel::WorldVoxel::Solid(1);
 
             for pos in make_pos.clone() {
