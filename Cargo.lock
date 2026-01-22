@@ -1033,7 +1033,8 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_northstar"
 version = "0.6.0"
-source = "git+https://github.com/AndreRoelofs/bevy_northstar?branch=bevy_18#fda0e49b150c37f8b0afe90639ba02d2a85974ab"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b94308ef4f7423ec3e525442065b923d0b5645967dbac985c7587f6111200a53"
 dependencies = [
  "bevy",
  "indexmap",
@@ -1554,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_voxel_world"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "ahash 0.8.12",
  "bevy",
