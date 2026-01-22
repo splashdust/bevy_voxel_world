@@ -172,6 +172,7 @@ Feedback, issues and pull requests are welcomed!
 
 | bevy | bevy_voxel_world |
 | ---- | ---------------- |
+| 0.18 | ^0.15.0          |
 | 0.17 | ^0.13.0          |
 | 0.16 | 0.12.0           |
 | 0.15 | 0.10.0           |
