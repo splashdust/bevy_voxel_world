@@ -168,7 +168,7 @@ fn draw_trace(trace: Res<VoxelTrace>, mut gizmos: Gizmos) {
         voxel_line_traversal(trace_start, trace.end, |voxel_coord, time, face| {
             let voxel_center = voxel_coord.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 
-            gizmos.cuboid(
+            gizmos.cube(
                 Transform::from_translation(voxel_center)
                     .with_scale(Vec3::splat(VOXEL_SIZE)),
                 css::PINK,

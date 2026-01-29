@@ -503,17 +503,19 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         mut chunk_meshing_fn: ChunkMeshingFn<I, C::ChunkUserBundle>,
         texture_index_mapper: TextureIndexMapperFn<I>,
     ) {
-        if self.mesh.is_none() && self.chunk_data.voxels.is_some() {
-            let data_shape = self.chunk_data.data_shape;
-            let mesh_shape = self.chunk_data.mesh_shape;
-            let mesh_and_bundle = chunk_meshing_fn(
-                Arc::clone(self.chunk_data.voxels.as_ref().unwrap()),
-                data_shape,
-                mesh_shape,
-                texture_index_mapper,
-            );
-            self.mesh = Some(mesh_and_bundle.0);
-            self.user_bundle = mesh_and_bundle.1;
+        if self.mesh.is_none() {
+            if let Some(voxels) = self.chunk_data.voxels.as_ref() {
+                let data_shape = self.chunk_data.data_shape;
+                let mesh_shape = self.chunk_data.mesh_shape;
+                let mesh_and_bundle = chunk_meshing_fn(
+                    Arc::clone(voxels),
+                    data_shape,
+                    mesh_shape,
+                    texture_index_mapper,
+                );
+                self.mesh = Some(mesh_and_bundle.0);
+                self.user_bundle = mesh_and_bundle.1;
+            }
         }
     }
 

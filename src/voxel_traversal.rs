@@ -58,7 +58,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 ///         let voxel_center = voxel_coord.as_vec3() + Vec3::splat(VOXEL_SIZE / 2.);
 ///
 ///         // Draw a debug cube for the currently visited voxel
-///         gizmos.cuboid(
+///         gizmos.cube(
 ///             Transform::from_translation(voxel_center).with_scale(Vec3::splat(VOXEL_SIZE)),
 ///             css::PINK,
 ///         );

@@ -152,7 +152,6 @@ where
                 let material_plugin = MaterialPlugin::<
                     ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>,
                 > {
-                    prepass_enabled: false,
                     ..Default::default()
                 };
                 app.add_plugins(material_plugin);
@@ -180,7 +179,7 @@ where
                     )
                     .unwrap();
                     set_repeat_sampler(&mut image);
-                    image.reinterpret_stacked_2d_as_array(4);
+                    let _ = image.reinterpret_stacked_2d_as_array(4);
                     let mut image_assets =
                         app.world_mut().resource_mut::<Assets<Image>>();
                     image_assets.add(image)
