@@ -4,6 +4,8 @@
 
 - Upgrade to Bevy 0.18
 
+Thanks to @AndreRoelofs
+
 ## 0.14.0
 
 - Introduce per-chunk level-of-detail and configurable chunk shapes
