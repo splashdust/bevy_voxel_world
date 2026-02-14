@@ -694,8 +694,7 @@ fn set_voxel_same_value_does_not_trigger_remesh() {
     // new messages appear (guard prevents redundant remeshes).
     app.add_systems(
         Update,
-        |mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>,
-         mut frame: Local<u32>| {
+        |mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>, mut frame: Local<u32>| {
             *frame += 1;
             if *frame > 1 {
                 let count = ev.read().count();
