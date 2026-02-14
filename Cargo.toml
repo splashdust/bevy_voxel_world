@@ -58,7 +58,7 @@ block-mesh = "0.2.0"
 futures-lite = "2.6.1"
 hashbrown = "0.16.1"
 ndshape = "0.3.0"
-rand = "0.9.2"
+rand = "0.10.0"
 weak-table = { version = "0.3.2", features = ["ahash"] }
 
 [dev-dependencies]
