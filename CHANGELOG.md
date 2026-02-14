@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.1
+
+- Fix: `set_voxel` no longer triggers a chunk remesh when the written value is identical to the current value. Previously, writing the same voxel value every frame would cause perpetual remesh cancellation — the in-progress async meshing task was dropped each frame before completion, preventing the chunk from ever rendering.
+
 ## 0.15.0
 
 - Upgrade to Bevy 0.18
