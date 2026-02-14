@@ -672,3 +672,78 @@ fn can_get_chunk_data() {
 
     app.update();
 }
+
+#[test]
+fn set_voxel_same_value_does_not_trigger_remesh() {
+    let mut app = _test_setup_app();
+
+    // Set a voxel and let the write fully process through the pipeline.
+    // The system will keep writing Solid(1) every frame.
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
+        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+    });
+
+    // Run enough frames so the initial write is flushed into modified_voxels
+    // and subsequent same-value writes are skipped by the guard.
+    for _ in 0..5 {
+        app.update();
+    }
+
+    // Add a reader with a frame counter. On the first run, drain any stale
+    // messages from the initial write. On subsequent runs, assert that no
+    // new messages appear (guard prevents redundant remeshes).
+    app.add_systems(
+        Update,
+        |mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>,
+         mut frame: Local<u32>| {
+            *frame += 1;
+            if *frame > 1 {
+                let count = ev.read().count();
+                assert_eq!(
+                    count, 0,
+                    "expected no ChunkWillUpdate when setting voxel to same value"
+                );
+            } else {
+                // Drain stale messages from the initial set_voxel
+                ev.read().count();
+            }
+        },
+    );
+
+    app.update(); // reader frame 1 — drains stale messages
+    app.update(); // reader frame 2 — asserts no new messages
+    app.update(); // reader frame 3 — asserts again for good measure
+}
+
+#[test]
+fn set_voxel_different_value_triggers_remesh() {
+    let mut app = _test_setup_app();
+
+    // Set initial voxel
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
+        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+    });
+    app.update();
+    app.update();
+
+    // Now change to a different value — should produce a ChunkWillUpdate event
+    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
+        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(2));
+    });
+
+    app.update(); // writes Solid(2) to buffer
+    app.update(); // flushes — value differs, should trigger update
+
+    app.add_systems(
+        Update,
+        |mut ev_chunk_will_update: MessageReader<ChunkWillUpdate<DefaultWorld>>| {
+            let count = ev_chunk_will_update.read().count();
+            assert!(
+                count > 0,
+                "expected ChunkWillUpdate when setting voxel to different value"
+            );
+        },
+    );
+
+    app.update();
+}
