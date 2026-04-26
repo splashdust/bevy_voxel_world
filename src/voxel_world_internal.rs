@@ -25,8 +25,8 @@ use crate::{
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{
-        get_chunk_voxel_position, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
-        ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
+        get_affected_chunk_positions, ChunkWillChangeLod, ChunkWillDespawn,
+        ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
     },
 };
 
@@ -621,17 +621,18 @@ where
                 continue;
             }
 
-            let (chunk_pos, _vox_pos) = get_chunk_voxel_position(*position);
             modified_voxels.insert(*position, *voxel);
 
-            // Mark the chunk as needing remeshing or spawn a new chunk if it doesn't exist
-            if let Some(chunk_data) =
-                ChunkMap::<C, C::MaterialIndex>::get(&chunk_pos, &chunk_map_read_lock)
-            {
-                if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
-                    ent.try_insert(NeedsRemesh);
-                    ent.remove::<ChunkThread<C, C::MaterialIndex>>();
-                    updated_chunks.insert((chunk_data.entity, chunk_pos));
+            for affected_chunk_pos in get_affected_chunk_positions(*position) {
+                if let Some(chunk_data) = ChunkMap::<C, C::MaterialIndex>::get(
+                    &affected_chunk_pos,
+                    &chunk_map_read_lock,
+                ) {
+                    if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
+                        ent.try_insert(NeedsRemesh);
+                        ent.remove::<ChunkThread<C, C::MaterialIndex>>();
+                        updated_chunks.insert((chunk_data.entity, affected_chunk_pos));
+                    }
                 }
             }
         }
