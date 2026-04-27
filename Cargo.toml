@@ -47,10 +47,13 @@ path = "examples/navigation.rs"
 
 [dependencies]
 ahash = "0.8.11"
-bevy = { version = "0.18", features = [
+bevy = { version = "0.18", default-features = false, features = [
   "bevy_asset",
+  "bevy_log",
   "bevy_pbr",
   "bevy_render",
+  "bevy_gizmos",
+  "png",
 ] }
 bevy_shader = "0.18"
 block-mesh = "0.2.0"
@@ -65,6 +68,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 bevy_northstar = { version = "0.6.2" }
+bevy = { version = "0.18", default-features = false, features = ["3d", "png"] }
 bevy_panorbit_camera = { version = "0.34.0" }
 noise = { version = "0.9.0" }
 
