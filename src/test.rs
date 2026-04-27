@@ -1,15 +1,19 @@
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
-use crate::chunk_map::ChunkMapUpdateBuffer;
+use crate::chunk_map::{ChunkMapInsertBuffer, ChunkMapUpdateBuffer};
 use crate::configuration::VoxelWorldConfig;
 use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::meshing::generate_chunk_mesh_for_shape;
 use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, PADDED_CHUNK_SIZE},
+    chunk::{
+        Chunk, ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, CHUNK_SIZE_I,
+        PADDED_CHUNK_SIZE,
+    },
     prelude::VoxelWorldCamera,
     voxel_world::*,
     voxel_world_internal::ModifiedVoxels,
@@ -206,6 +210,126 @@ fn chunk_will_update_event() {
     );
 
     app.update();
+}
+
+#[test]
+fn affected_chunk_positions_include_padding_neighbors() {
+    let affected: HashSet<_> = get_affected_chunk_positions(IVec3::new(0, 0, 0))
+        .into_iter()
+        .collect();
+    let expected = HashSet::from([
+        IVec3::new(0, 0, 0),
+        IVec3::new(0, 0, -1),
+        IVec3::new(0, -1, 0),
+        IVec3::new(0, -1, -1),
+        IVec3::new(-1, 0, 0),
+        IVec3::new(-1, 0, -1),
+        IVec3::new(-1, -1, 0),
+        IVec3::new(-1, -1, -1),
+    ]);
+
+    assert_eq!(affected, expected);
+
+    assert_eq!(
+        get_affected_chunk_positions(IVec3::new(1, 1, 1)),
+        vec![IVec3::new(0, 0, 0)]
+    );
+
+    let affected: HashSet<_> =
+        get_affected_chunk_positions(IVec3::new(CHUNK_SIZE_I - 1, 1, 1))
+            .into_iter()
+            .collect();
+    let expected = HashSet::from([IVec3::new(0, 0, 0), IVec3::new(1, 0, 0)]);
+
+    assert_eq!(affected, expected);
+}
+
+#[test]
+fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
+    let expected = HashSet::from([
+        IVec3::new(0, 0, 0),
+        IVec3::new(0, 0, -1),
+        IVec3::new(0, -1, 0),
+        IVec3::new(0, -1, -1),
+        IVec3::new(-1, 0, 0),
+        IVec3::new(-1, 0, -1),
+        IVec3::new(-1, -1, 0),
+        IVec3::new(-1, -1, -1),
+    ]);
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
+    let camera_transform =
+        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+    app.world_mut().spawn((
+        Camera::default(),
+        Camera3d::default(),
+        camera_transform,
+        GlobalTransform::from(camera_transform),
+        VoxelWorldCamera::<DefaultWorld>::default(),
+    ));
+    app.update();
+
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+    let mut chunks = Vec::new();
+    for chunk_pos in expected.iter().copied() {
+        let entity = app.world_mut().spawn_empty().id();
+        let shape = UVec3::splat(PADDED_CHUNK_SIZE);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Chunk::<DefaultWorld>::new(
+                chunk_pos, 0, entity, shape, shape,
+            ));
+        chunks.push((chunk_pos, ChunkData::<Mat>::with_entity(entity)));
+    }
+
+    app.world_mut()
+        .resource_mut::<ChunkMapInsertBuffer<DefaultWorld, Mat>>()
+        .extend(chunks);
+    app.update();
+    for _ in 0..100 {
+        app.update();
+    }
+
+    app.world_mut()
+        .resource_mut::<Messages<ChunkWillRemesh<DefaultWorld>>>()
+        .clear();
+
+    let remeshed_chunks = Arc::new(Mutex::new(Vec::new()));
+    let remeshed_chunks_writer = remeshed_chunks.clone();
+    app.add_systems(
+        Update,
+        move |mut events: MessageReader<ChunkWillRemesh<DefaultWorld>>| {
+            remeshed_chunks_writer
+                .lock()
+                .unwrap()
+                .extend(events.read().map(|event| event.chunk_key));
+        },
+    );
+
+    app.add_systems(
+        Update,
+        |mut voxel_world: VoxelWorld<DefaultWorld>, mut did_set: Local<bool>| {
+            if *did_set {
+                return;
+            }
+
+            voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+            *did_set = true;
+        },
+    );
+
+    app.update();
+    app.update();
+    app.update();
+
+    let remeshed_chunks: HashSet<_> =
+        remeshed_chunks.lock().unwrap().iter().copied().collect();
+
+    assert!(
+        expected.is_subset(&remeshed_chunks),
+        "expected {expected:?} to be remeshed, got {remeshed_chunks:?}"
+    );
 }
 
 #[test]
