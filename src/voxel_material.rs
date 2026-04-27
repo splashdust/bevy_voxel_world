@@ -99,14 +99,11 @@ pub(crate) fn prepare_texture(
     }
 
     let image = images.get_mut(&loading_texture.handle).unwrap();
-    match prepare_voxel_texture(image, texture_layers.0) {
-        Ok(()) => {
-            loading_texture.is_loaded = true;
-        }
-        Err(err) => {
-            warn_once!("Failed to prepare voxel texture as a texture array: {err}");
-        }
+    if let Err(err) = prepare_voxel_texture(image, texture_layers.0) {
+        warn_once!("Failed to prepare voxel texture as a texture array: {err}");
     }
+
+    loading_texture.is_loaded = true;
 }
 
 pub(crate) fn prepare_voxel_texture(
