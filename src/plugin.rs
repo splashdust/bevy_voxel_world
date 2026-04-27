@@ -8,7 +8,7 @@ use bevy::{
 use crate::{
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
-        prepare_texture, set_repeat_sampler, LoadingTexture, StandardVoxelMaterial,
+        prepare_texture, prepare_voxel_texture, LoadingTexture, StandardVoxelMaterial,
         TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
@@ -178,8 +178,9 @@ where
                         RenderAssetUsages::default(),
                     )
                     .unwrap();
-                    set_repeat_sampler(&mut image);
-                    let _ = image.reinterpret_stacked_2d_as_array(4);
+                    prepare_voxel_texture(&mut image, 4).expect(
+                        "default voxel texture should be a valid 4-layer array texture",
+                    );
                     let mut image_assets =
                         app.world_mut().resource_mut::<Assets<Image>>();
                     image_assets.add(image)
