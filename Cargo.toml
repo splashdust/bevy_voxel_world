@@ -28,7 +28,6 @@ path = "examples/noise_terrain.rs"
 [[example]]
 name = "noise_terrain_lod"
 path = "examples/noise_terrain_lod.rs"
-required-features = ["noise"]
 
 [[example]]
 name = "custom_meshing"

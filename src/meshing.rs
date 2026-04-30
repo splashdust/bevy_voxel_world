@@ -114,7 +114,7 @@ fn mesh_from_quads_for_shape<I: PartialEq + Copy>(
 
     let voxel_size = voxel_size_from_shape(shape);
 
-    for (group, face) in quads.groups.into_iter().zip(faces.into_iter()) {
+    for (group, face) in quads.groups.into_iter().zip(faces) {
         for quad in group.into_iter() {
             let quad = Into::<block_mesh::geometry::UnorientedQuad>::into(quad);
             let normal = IVec3::from([

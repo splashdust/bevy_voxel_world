@@ -90,6 +90,7 @@ fn setup(mut commands: Commands) {
     });
 }
 
+#[allow(clippy::type_complexity)]
 fn get_voxel_fn() -> Box<
     dyn FnMut(IVec3, Option<WorldVoxel<BlockTexture>>) -> WorldVoxel<BlockTexture>
         + Send
