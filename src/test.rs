@@ -19,7 +19,7 @@ use crate::{
     voxel_world_internal::ModifiedVoxels,
 };
 use ndshape::{RuntimeShape, Shape};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
