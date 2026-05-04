@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 fn main() {
     App::new()

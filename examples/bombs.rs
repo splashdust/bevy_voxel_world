@@ -3,7 +3,7 @@ use bevy::{
 };
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
-use rand::Rng;
+use rand::RngExt;
 use std::{sync::Arc, time::Duration};
 #[derive(Resource, Clone, Default)]
 struct MainWorld;
