@@ -189,7 +189,12 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     ));
 
     // Sun
-    let cascade_shadow_config = CascadeShadowConfigBuilder { ..default() }.build();
+    let cascade_shadow_config = CascadeShadowConfigBuilder {
+        maximum_distance: 3000.0,
+        first_cascade_far_bound: 200.0,
+        ..default()
+    }
+    .build();
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
