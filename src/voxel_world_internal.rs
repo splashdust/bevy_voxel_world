@@ -411,17 +411,13 @@ where
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
         let max_threads = configuration.max_active_chunk_threads();
-        let mut active_threads = chunk_threads.iter().count();
+        let remaining_threads = max_threads.saturating_sub(chunk_threads.iter().count());
 
-        if max_threads == 0 {
+        if remaining_threads == 0 {
             return;
         }
 
-        for chunk in dirty_chunks.iter() {
-            if active_threads >= max_threads {
-                break;
-            }
-
+        for chunk in dirty_chunks.iter().take(remaining_threads) {
             let previous_chunk_data = {
                 let read_lock = chunk_map.get_read_lock();
                 ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
@@ -491,8 +487,6 @@ where
                     chunk.position,
                 ))
                 .remove::<NeedsRemesh>();
-
-            active_threads += 1;
 
             ev_chunk_will_remesh
                 .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
