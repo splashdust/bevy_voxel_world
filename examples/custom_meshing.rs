@@ -97,7 +97,7 @@ impl VoxelWorldConfig for MainWorld {
                     let mut tex_coords = Vec::with_capacity(num_vertices);
                     let mut material_types = Vec::with_capacity(num_vertices);
 
-                    for (group, face) in buffer.quads.groups.into_iter().zip(faces.into_iter()) {
+                    for (group, face) in buffer.quads.groups.into_iter().zip(faces) {
                         for quad in group.into_iter() {
                             let _normal = IVec3::from([
                                 face.signed_normal().x,
