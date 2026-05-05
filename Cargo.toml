@@ -61,7 +61,7 @@ rand = "0.10.1"
 weak-table = { version = "0.3.2", features = ["ahash"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 bevy_northstar = { version = "0.6.2" }
