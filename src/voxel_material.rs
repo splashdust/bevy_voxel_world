@@ -1,4 +1,4 @@
-use bevy::image::ImageAddressMode;
+use bevy::image::{ImageAddressMode, TextureReinterpretationError};
 use bevy::{
     asset::uuid_handle,
     mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
@@ -6,7 +6,8 @@ use bevy::{
     prelude::*,
     reflect::TypePath,
     render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+        TextureViewDescriptor, TextureViewDimension, VertexFormat,
     },
 };
 use bevy_shader::{Shader, ShaderDefVal, ShaderRef};
@@ -96,11 +97,27 @@ pub(crate) fn prepare_texture(
     {
         return;
     }
-    loading_texture.is_loaded = true;
 
     let image = images.get_mut(&loading_texture.handle).unwrap();
+    if let Err(err) = prepare_voxel_texture(image, texture_layers.0) {
+        warn_once!("Failed to prepare voxel texture as a texture array: {err}");
+    }
+
+    loading_texture.is_loaded = true;
+}
+
+pub(crate) fn prepare_voxel_texture(
+    image: &mut Image,
+    texture_layers: u32,
+) -> Result<(), TextureReinterpretationError> {
     set_repeat_sampler(image);
-    let _ = image.reinterpret_stacked_2d_as_array(texture_layers.0);
+    image.reinterpret_stacked_2d_as_array(texture_layers)?;
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..default()
+    });
+
+    Ok(())
 }
 
 pub(crate) fn set_repeat_sampler(image: &mut Image) {
