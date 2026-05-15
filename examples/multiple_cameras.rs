@@ -240,15 +240,13 @@ fn update_patrol_camera_count(
         spawn_patrol_camera(&mut commands, &marker_assets, patrols.iter().count());
     }
 
-    if keys.just_pressed(KeyCode::Backspace)
+    let remove_requested = keys.just_pressed(KeyCode::Backspace)
         || keys.just_pressed(KeyCode::Minus)
-        || keys.just_pressed(KeyCode::NumpadSubtract)
-    {
-        if patrols.iter().count() > 1 {
-            if let Some(entity) = patrols.iter().last() {
-                commands.entity(entity).despawn();
-            }
-        }
+        || keys.just_pressed(KeyCode::NumpadSubtract);
+
+    if remove_requested && patrols.iter().count() > 1 {
+        let entity = patrols.iter().last().expect("at least one patrol camera");
+        commands.entity(entity).despawn();
     }
 }
 
@@ -266,7 +264,6 @@ fn patrol_cameras(
             continue;
         }
 
-        let travel_direction = to_target.normalize_or_zero();
         let step = (patrol.speed * time.delta_secs()).min(distance);
         transform.translation += to_target.normalize_or_zero() * step;
         transform.look_at(patrol.target, Vec3::Y);
