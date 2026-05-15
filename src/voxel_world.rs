@@ -16,7 +16,7 @@ use crate::{
     voxel_world_internal::{ModifiedVoxels, VoxelWriteBuffer},
 };
 
-/// This component is used to mark the Camera that bevy_voxel_world should use to determine
+/// This component is used to mark Cameras that bevy_voxel_world should use to determine
 /// which chunks to spawn and despawn.
 #[derive(Component)]
 pub struct VoxelWorldCamera<C> {
