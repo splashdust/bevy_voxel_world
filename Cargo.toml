@@ -42,6 +42,10 @@ name = "multiple_noise_terrain"
 path = "examples/multiple_noise_terrain.rs"
 
 [[example]]
+name = "multiple_cameras"
+path = "examples/multiple_cameras.rs"
+
+[[example]]
 name = "navigation"
 path = "examples/navigation.rs"
 
