@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::chunk_map::{ChunkMapInsertBuffer, ChunkMapUpdateBuffer};
+use crate::chunk_map::{ChunkMap, ChunkMapInsertBuffer, ChunkMapUpdateBuffer};
 use crate::configuration::VoxelWorldConfig;
 use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::meshing::generate_chunk_mesh_for_shape;
@@ -33,6 +33,48 @@ fn _test_setup_app() -> App {
     });
 
     app
+}
+
+#[test]
+fn chunks_spawn_with_multiple_voxel_world_cameras() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
+    app.add_systems(Startup, |mut commands: Commands| {
+        let first_transform =
+            Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+        commands.spawn((
+            Camera::default(),
+            Camera3d::default(),
+            first_transform,
+            GlobalTransform::from(first_transform),
+            VoxelWorldCamera::<DefaultWorld>::default(),
+        ));
+
+        let second_transform =
+            Transform::from_xyz(1000.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+        commands.spawn((
+            Camera::default(),
+            Camera3d::default(),
+            second_transform,
+            GlobalTransform::from(second_transform),
+            VoxelWorldCamera::<DefaultWorld>::default(),
+        ));
+    });
+
+    app.update();
+
+    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+    let chunk_map = app.world().resource::<ChunkMap<DefaultWorld, Mat>>();
+    let chunk_map_read_lock = chunk_map.get_read_lock();
+
+    assert!(ChunkMap::<DefaultWorld, Mat>::contains_chunk(
+        &IVec3::ZERO,
+        &chunk_map_read_lock,
+    ));
+    assert!(ChunkMap::<DefaultWorld, Mat>::contains_chunk(
+        &(IVec3::new(1000, 10, 10) / CHUNK_SIZE_I),
+        &chunk_map_read_lock,
+    ));
 }
 
 #[test]
