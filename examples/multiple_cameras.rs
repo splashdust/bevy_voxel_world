@@ -5,8 +5,13 @@ use bevy::{
     light::CascadeShadowConfigBuilder,
     platform::collections::HashMap,
     prelude::*,
+    text::DEFAULT_FONT_DATA,
+    ui::{PositionType, Val},
 };
-use bevy_voxel_world::{custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_U}, prelude::*};
+use bevy_voxel_world::{
+    custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_U},
+    prelude::*,
+};
 use noise::{HybridMulti, NoiseFn, Perlin};
 
 const PATROL_RANGE: f32 = 180.0;
@@ -81,8 +86,8 @@ impl VoxelWorldConfig for MainWorld {
         // directly set lod values to our stride lengths
         if distance > 4.0 {
             return 4;
-        } 
-        
+        }
+
         1
     }
 }
@@ -92,6 +97,9 @@ struct PatrolCamera {
     target: Vec3,
     speed: f32,
 }
+
+#[derive(Component)]
+struct CameraCountText;
 
 #[derive(Resource, Clone)]
 struct PatrolMarkerAssets {
@@ -104,7 +112,14 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
         .add_systems(Startup, setup)
-        .add_systems(Update, (patrol_cameras, add_patrol_camera))
+        .add_systems(
+            Update,
+            (
+                patrol_cameras,
+                update_patrol_camera_count,
+                update_camera_count_text,
+            ),
+        )
         .run();
 }
 
@@ -112,6 +127,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fonts: ResMut<Assets<Font>>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.04, 0.06, 0.08)));
 
@@ -134,6 +150,32 @@ fn setup(
         Camera3d::default(),
         Transform::from_xyz(0.0, 300.0, 260.0)
             .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+    ));
+
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 1,
+            ..default()
+        },
+    ));
+
+    let font = fonts.add(Font::try_from_bytes(DEFAULT_FONT_DATA.to_vec()).unwrap());
+    commands.spawn((
+        Text::new(camera_count_text(2)),
+        TextFont {
+            font,
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+        CameraCountText,
     ));
 
     let cascade_shadow_config = CascadeShadowConfigBuilder {
@@ -185,14 +227,28 @@ fn spawn_patrol_camera(
     ));
 }
 
-fn add_patrol_camera(
+fn update_patrol_camera_count(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     marker_assets: Res<PatrolMarkerAssets>,
-    patrols: Query<(), With<PatrolCamera>>,
+    patrols: Query<Entity, With<PatrolCamera>>,
 ) {
-    if keys.just_pressed(KeyCode::Space) {
+    if keys.just_pressed(KeyCode::Space)
+        || keys.just_pressed(KeyCode::Equal)
+        || keys.just_pressed(KeyCode::NumpadAdd)
+    {
         spawn_patrol_camera(&mut commands, &marker_assets, patrols.iter().count());
+    }
+
+    if keys.just_pressed(KeyCode::Backspace)
+        || keys.just_pressed(KeyCode::Minus)
+        || keys.just_pressed(KeyCode::NumpadSubtract)
+    {
+        if patrols.iter().count() > 1 {
+            if let Some(entity) = patrols.iter().last() {
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }
 
@@ -210,10 +266,30 @@ fn patrol_cameras(
             continue;
         }
 
+        let travel_direction = to_target.normalize_or_zero();
         let step = (patrol.speed * time.delta_secs()).min(distance);
         transform.translation += to_target.normalize_or_zero() * step;
         transform.look_at(patrol.target, Vec3::Y);
     }
+}
+
+fn update_camera_count_text(
+    patrols: Query<(), With<PatrolCamera>>,
+    mut text_query: Query<&mut Text, With<CameraCountText>>,
+) {
+    let Some(mut text) = text_query.iter_mut().next() else {
+        return;
+    };
+
+    text.0 = camera_count_text(patrols.iter().count());
+}
+
+fn camera_count_text(count: usize) -> String {
+    format!(
+        "VoxelWorldCameras: {count}\n\
+        Space / +: Add patrol camera\n\
+        Backspace / -: Remove patrol camera"
+    )
 }
 
 fn random_patrol_point() -> Vec3 {
