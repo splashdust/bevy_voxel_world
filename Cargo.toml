@@ -59,7 +59,7 @@ bevy = { version = "0.18", default-features = false, features = [
   "bevy_gizmos",
   "png",
 ] }
-bevy_shader = "0.18"
+bevy_shader = "0.19"
 block-mesh = "0.2.0"
 futures-lite = "2.6.1"
 hashbrown = "0.17.1"
