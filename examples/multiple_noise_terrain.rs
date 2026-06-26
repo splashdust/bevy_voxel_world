@@ -78,7 +78,7 @@ fn setup(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0)
