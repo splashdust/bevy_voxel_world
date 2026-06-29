@@ -73,7 +73,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 [dev-dependencies]
 bevy_northstar = { version = "0.6.2" }
 bevy = { version = "0.18", default-features = false, features = ["3d", "png"] }
-bevy_panorbit_camera = { version = "0.34.0" }
+bevy_panorbit_camera = { version = "0.35.0" }
 noise = { version = "0.9.0" }
 
 # Enable a small amount of optimization in the dev profile.
