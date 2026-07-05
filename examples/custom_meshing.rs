@@ -169,10 +169,10 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                     features: WgpuFeatures::POLYGON_MODE_LINE,
                     ..default()
-                }),
+                })),
                 ..default()
             }),
             WireframePlugin::default(),
@@ -181,6 +181,7 @@ fn main() {
         .insert_resource(WireframeConfig {
             global: true,
             default_color: WHITE.into(),
+            ..default()
         })
         .add_systems(Startup, setup)
         .add_systems(Update, move_camera)
@@ -201,7 +202,7 @@ fn setup(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0)

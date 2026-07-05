@@ -6,7 +6,6 @@ use bevy::{
     pbr::{DistanceFog, FogFalloff},
     platform::collections::HashMap,
     prelude::*,
-    text::DEFAULT_FONT_DATA,
     ui::{PositionType, Val},
 };
 use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -166,7 +165,7 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
+fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
@@ -198,7 +197,7 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -222,13 +221,10 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
         },
     ));
 
-    let font = fonts.add(Font::try_from_bytes(DEFAULT_FONT_DATA.to_vec()).unwrap());
-
     commands.spawn((
         Text::new("FPS: -- (--)\nFrame: -- ms"),
         TextFont {
-            font,
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(Color::WHITE),

@@ -5,7 +5,6 @@ use bevy::{
     light::CascadeShadowConfigBuilder,
     platform::collections::HashMap,
     prelude::*,
-    text::DEFAULT_FONT_DATA,
     ui::{PositionType, Val},
 };
 use bevy_voxel_world::{
@@ -127,7 +126,6 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut fonts: ResMut<Assets<Font>>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.04, 0.06, 0.08)));
 
@@ -160,12 +158,10 @@ fn setup(
         },
     ));
 
-    let font = fonts.add(Font::try_from_bytes(DEFAULT_FONT_DATA.to_vec()).unwrap());
     commands.spawn((
         Text::new(camera_count_text(2)),
         TextFont {
-            font,
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(Color::WHITE),
@@ -186,7 +182,7 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.98, 0.95, 0.82),
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0)

@@ -9,8 +9,8 @@ use bevy::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
         TextureViewDescriptor, TextureViewDimension, VertexFormat,
     },
+    shader::{Shader, ShaderDefVal, ShaderRef},
 };
-use bevy_shader::{Shader, ShaderDefVal, ShaderRef};
 
 /// Keeps track of the loading status of the image used for the voxel texture
 #[derive(Resource)]
@@ -98,8 +98,8 @@ pub(crate) fn prepare_texture(
         return;
     }
 
-    let image = images.get_mut(&loading_texture.handle).unwrap();
-    if let Err(err) = prepare_voxel_texture(image, texture_layers.0) {
+    let mut image = images.get_mut(&loading_texture.handle).unwrap();
+    if let Err(err) = prepare_voxel_texture(&mut image, texture_layers.0) {
         warn_once!("Failed to prepare voxel texture as a texture array: {err}");
     }
 

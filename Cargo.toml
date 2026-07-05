@@ -13,6 +13,10 @@ exclude = ["/.github/", "/assets/", "/examples/"]
 keywords = ["bevy", "gamedev", "voxelengine", "voxels"]
 categories = ["game-development", "graphics"]
 
+[features]
+default = []
+navigation = []
+
 [[example]]
 name = "fast_traversal_ray"
 path = "examples/fast_traversal_ray.rs"
@@ -48,6 +52,7 @@ path = "examples/multiple_cameras.rs"
 [[example]]
 name = "navigation"
 path = "examples/navigation.rs"
+required-features = ["navigation"]
 
 [dependencies]
 ahash = "0.8.11"
@@ -59,7 +64,6 @@ bevy = { version = "0.19", default-features = false, features = [
   "bevy_gizmos",
   "png",
 ] }
-bevy_shader = "0.18"
 block-mesh = "0.2.0"
 futures-lite = "2.6.1"
 hashbrown = "0.17.1"
@@ -72,8 +76,8 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 bevy_northstar = { version = "0.6.2" }
-bevy = { version = "0.19", default-features = false, features = ["3d", "png"] }
-bevy_panorbit_camera = { version = "0.34.0" }
+bevy = { version = "0.19", default-features = false, features = ["3d", "bevy_ui", "png"] }
+bevy_panorbit_camera = { version = "0.35.0" }
 noise = { version = "0.9.0" }
 
 # Enable a small amount of optimization in the dev profile.
