@@ -554,55 +554,75 @@ where
 
             let chunk_task = thread_result.unwrap();
 
-            if !chunk_task.is_empty() {
-                if !chunk_task.is_full() {
-                    let mesh_handle = {
-                        if let Some(mesh_handle) =
-                            mesh_cache.get_mesh_handle(&chunk_task.voxels_hash())
-                        {
-                            if let Some(user_bundle) =
-                                mesh_cache.get_user_bundle(&chunk_task.voxels_hash())
-                            {
-                                commands.entity(entity).insert(user_bundle);
-                            }
-
-                            mesh_handle
-                        } else {
-                            if chunk_task.mesh.is_none() {
-                                commands
-                                    .entity(chunk.entity)
-                                    .try_insert(NeedsRemesh)
-                                    .remove::<ChunkThread<C, C::MaterialIndex>>();
-                                continue;
-                            }
-                            let hash = chunk_task.voxels_hash();
-                            let mesh_ref =
-                                Arc::new(mesh_assets.add(chunk_task.mesh.unwrap()));
-                            let user_bundle = chunk_task.user_bundle;
-
-                            mesh_cache_insert_buffer.push((
-                                hash,
-                                mesh_ref.clone(),
-                                user_bundle.clone(),
-                            ));
-                            if let Some(bundle) = user_bundle {
-                                commands.entity(entity).insert(bundle);
-                            }
-                            mesh_ref
-                        }
-                    };
-
-                    commands.entity(entity).try_insert((
-                        *transform,
-                        MeshRef(mesh_handle),
-                        NeedsMaterial::<C>(PhantomData),
-                    ));
-                }
-            } else {
+            if chunk_task.is_empty() || chunk_task.is_full() {
                 commands
                     .entity(entity)
                     .remove::<Mesh3d>()
-                    .remove::<MeshRef>();
+                    .remove::<MeshRef>()
+                    .remove::<NeedsMaterial<C>>()
+                    .remove::<C::ChunkUserBundle>();
+            } else {
+                let mesh_handle = {
+                    if let Some(mesh_handle) =
+                        mesh_cache.get_mesh_handle(&chunk_task.voxels_hash())
+                    {
+                        if let Some(user_bundle) =
+                            mesh_cache.get_user_bundle(&chunk_task.voxels_hash())
+                        {
+                            commands.entity(entity).insert(user_bundle);
+                        }
+
+                        mesh_handle
+                    } else {
+                        let hash = chunk_task.voxels_hash();
+                        let Some(mesh) = chunk_task.mesh else {
+                            commands
+                                .entity(chunk.entity)
+                                .try_insert(NeedsRemesh)
+                                .remove::<ChunkThread<C, C::MaterialIndex>>();
+                            continue;
+                        };
+
+                        // Bevy 0.19 mesh slab allocator can emit use-after-free
+                        // errors if zero-vertex meshes are uploaded.
+                        if mesh.count_vertices() == 0 {
+                            commands
+                                .entity(entity)
+                                .remove::<Mesh3d>()
+                                .remove::<MeshRef>()
+                                .remove::<NeedsMaterial<C>>()
+                                .remove::<C::ChunkUserBundle>();
+                            chunk_map_update_buffer.push((
+                                chunk.position,
+                                chunk_task.chunk_data,
+                                ChunkWillSpawn::<C>::new(chunk_task.position, entity),
+                            ));
+                            commands
+                                .entity(chunk.entity)
+                                .remove::<ChunkThread<C, C::MaterialIndex>>();
+                            continue;
+                        }
+
+                        let mesh_ref = Arc::new(mesh_assets.add(mesh));
+                        let user_bundle = chunk_task.user_bundle;
+
+                        mesh_cache_insert_buffer.push((
+                            hash,
+                            mesh_ref.clone(),
+                            user_bundle.clone(),
+                        ));
+                        if let Some(bundle) = user_bundle {
+                            commands.entity(entity).insert(bundle);
+                        }
+                        mesh_ref
+                    }
+                };
+
+                commands.entity(entity).try_insert((
+                    *transform,
+                    MeshRef(mesh_handle),
+                    NeedsMaterial::<C>(PhantomData),
+                ));
             }
 
             chunk_map_update_buffer.push((
