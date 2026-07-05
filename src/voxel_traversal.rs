@@ -17,7 +17,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
             .signum()
             .abs()
             .iter_fields()
-            .map(|f| { i32::from_reflect(f).unwrap() })
+            .map(|(_, f)| i32::from_reflect(f).unwrap())
             .sum::<i32>()
             == 1
     );

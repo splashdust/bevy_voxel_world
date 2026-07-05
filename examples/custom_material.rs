@@ -5,8 +5,8 @@ use bevy::{
     render::render_resource::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
     },
+    shader::{ShaderDefVal, ShaderRef},
 };
-use bevy_shader::{ShaderDefVal, ShaderRef};
 use bevy_voxel_world::{
     prelude::*,
     rendering::{vertex_layout, VOXEL_TEXTURE_SHADER_HANDLE},
