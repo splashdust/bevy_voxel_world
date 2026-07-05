@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17
+
+- Update to Bevy 0.19
+
 ## 0.16
 
 - Fix: `set_voxel` now queues loaded neighboring chunks for remeshing when a changed voxel is part of their padded chunk data. This keeps meshes correct across chunk boundaries without requiring user code to manually mark adjacent chunks.
