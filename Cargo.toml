@@ -75,7 +75,7 @@ weak-table = { version = "0.3.2", features = ["ahash"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
-bevy_northstar = { version = "0.6.2" }
+bevy_northstar = { version = "0.7.0" }
 bevy = { version = "0.19", default-features = false, features = [
   "3d",
   "bevy_ui",
