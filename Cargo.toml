@@ -69,7 +69,7 @@ futures-lite = "2.6.1"
 hashbrown = "0.17.1"
 ndshape = "0.3.0"
 rand = "0.10.1"
-weak-table = { version = "0.3.2", features = ["ahash"] }
+weak-table = { version = "0.4.0", features = ["ahash"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
