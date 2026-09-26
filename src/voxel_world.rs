@@ -341,12 +341,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
             let trace_start = if p.cmplt(loaded_aabb.min.into()).any()
                 || p.cmpgt(loaded_aabb.max.into()).any()
             {
-                if let Some(trace_start_t) =
-                    RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)
                 {
+                    let trace_start_t = RayCast3d::from_ray(ray, f32::MAX)
+                        .aabb_intersection_at(&loaded_aabb)?;
                     ray.get_point(trace_start_t)
-                } else {
-                    return None;
                 }
             } else {
                 p
