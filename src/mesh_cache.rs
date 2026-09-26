@@ -66,7 +66,10 @@ impl<C: VoxelWorldConfig> MeshCache<C> {
 impl<C: VoxelWorldConfig> Default for MeshCache<C> {
     fn default() -> Self {
         Self {
-            mesh_handles: Arc::new(RwLock::new(WeakMeshMap::with_capacity(2000))),
+            mesh_handles: Arc::new(RwLock::new(WeakMeshMap::with_capacity_and_hasher(
+                2000,
+                Default::default(),
+            ))),
             user_bundes: Arc::new(RwLock::new(UserBundleMap::with_capacity(2000))),
             _marker: std::marker::PhantomData,
         }
