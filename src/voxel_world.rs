@@ -342,7 +342,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
                 || p.cmpgt(loaded_aabb.max.into()).any()
             {
                 {
-                    let trace_start_t = RayCast3d::from_ray(ray, f32::MAX).aabb_intersection_at(&loaded_aabb)?;
+                    let trace_start_t = RayCast3d::from_ray(ray, f32::MAX)
+                        .aabb_intersection_at(&loaded_aabb)?;
                     ray.get_point(trace_start_t)
                 }
             } else {
