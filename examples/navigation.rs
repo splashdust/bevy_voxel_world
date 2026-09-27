@@ -306,10 +306,10 @@ fn update_cursor_cube(
                 || cursor_cube.voxel_pos.z < 0
             {
                 //indicate that this voxel position is not ment to spawn a cube
-                if let Some(mat) = materials.get_mut(&material_handle.0) {
+                if let Some(mut mat) = materials.get_mut(&material_handle.0) {
                     mat.base_color = Color::srgba_u8(255, 144, 124, 128);
                 }
-            } else if let Some(mat) = materials.get_mut(&material_handle.0) {
+            } else if let Some(mut mat) = materials.get_mut(&material_handle.0) {
                 mat.base_color = Color::srgba_u8(124, 144, 255, 128);
             }
         }
