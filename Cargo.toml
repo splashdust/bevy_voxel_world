@@ -56,7 +56,7 @@ required-features = ["navigation"]
 
 [dependencies]
 ahash = "0.8.11"
-bevy = { version = "0.19", default-features = false, features = [
+bevy = { version = "0.20", default-features = false, features = [
   "bevy_asset",
   "bevy_log",
   "bevy_pbr",
@@ -76,7 +76,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 bevy_northstar = { version = "0.7.0" }
-bevy = { version = "0.19", default-features = false, features = [
+bevy = { version = "0.20", default-features = false, features = [
   "3d",
   "bevy_ui",
   "png",
