@@ -1,6 +1,4 @@
-use bevy::{
-    math::bounding::Aabb3d, platform::collections::HashSet, prelude::*, tasks::Task,
-};
+use bevy::{platform::collections::HashSet, prelude::*, tasks::Task};
 use ndshape::{ConstShape3u32, RuntimeShape, Shape};
 use std::{
     hash::{Hash, Hasher},
