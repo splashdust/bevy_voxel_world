@@ -550,7 +550,7 @@ dependencies = [
  "bevy_app 0.20.0",
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_derive 0.20.0",
  "bevy_diagnostic 0.20.0",
  "bevy_ecs 0.20.0",
@@ -834,35 +834,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "wgpu-types 30.0.1",
-]
-
-[[package]]
-name = "bevy_core_pipeline"
-version = "0.19.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2564f1ba766532e8eeb20059133ff6703e8dd5c3864b92378d0d1c541096ef12"
-dependencies = [
- "bevy_app 0.19.1",
- "bevy_asset 0.19.1",
- "bevy_camera 0.19.1",
- "bevy_color 0.19.1",
- "bevy_derive 0.19.1",
- "bevy_diagnostic 0.19.1",
- "bevy_ecs 0.19.1",
- "bevy_image 0.19.1",
- "bevy_light 0.19.1",
- "bevy_log 0.19.1",
- "bevy_math 0.19.1",
- "bevy_platform 0.19.1",
- "bevy_reflect 0.19.1",
- "bevy_render 0.19.1",
- "bevy_shader 0.19.1",
- "bevy_transform 0.19.1",
- "bevy_utils 0.19.1",
- "bevy_window 0.19.1",
- "bitflags 2.13.2",
- "indexmap",
- "nonmax",
 ]
 
 [[package]]
@@ -1289,7 +1260,7 @@ dependencies = [
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_ecs 0.20.0",
  "bevy_extract",
  "bevy_gizmos 0.20.0",
@@ -1466,7 +1437,6 @@ dependencies = [
  "bevy_asset 0.19.1",
  "bevy_camera 0.19.1",
  "bevy_color 0.19.1",
- "bevy_core_pipeline 0.19.1",
  "bevy_derive 0.19.1",
  "bevy_diagnostic 0.19.1",
  "bevy_ecs 0.19.1",
@@ -1504,7 +1474,7 @@ dependencies = [
  "bevy_camera 0.20.0",
  "bevy_clipboard",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_curve",
  "bevy_derive 0.20.0",
  "bevy_dev_tools",
@@ -1846,11 +1816,11 @@ dependencies = [
 
 [[package]]
 name = "bevy_panorbit_camera"
-version = "0.35.1"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a445b3b3e07ce952a023293d486bc85dc9e2c39b13e20912c2b2e2023a0e6218"
+checksum = "af273e956e0f7a54874e51fc79aa3535da55e7eb84afdd627758a7d7d6da0c9f"
 dependencies = [
- "bevy 0.19.1",
+ "bevy 0.20.0",
 ]
 
 [[package]]
@@ -1864,7 +1834,7 @@ dependencies = [
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_derive 0.20.0",
  "bevy_diagnostic 0.20.0",
  "bevy_ecs 0.20.0",
@@ -1978,7 +1948,7 @@ dependencies = [
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_curve",
  "bevy_derive 0.20.0",
  "bevy_ecs 0.20.0",
@@ -2351,7 +2321,7 @@ dependencies = [
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_derive 0.20.0",
  "bevy_ecs 0.20.0",
  "bevy_extract",
@@ -2583,7 +2553,7 @@ dependencies = [
  "bevy_asset 0.20.0",
  "bevy_camera 0.20.0",
  "bevy_color 0.20.0",
- "bevy_core_pipeline 0.20.0",
+ "bevy_core_pipeline",
  "bevy_derive 0.20.0",
  "bevy_ecs 0.20.0",
  "bevy_extract",
