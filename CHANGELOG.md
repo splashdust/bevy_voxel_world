@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18
+
+- Update to Bevy 0.20
+
 ## 0.17
 
 - Update to Bevy 0.19
