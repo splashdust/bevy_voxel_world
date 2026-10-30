@@ -1,57 +1,47 @@
-#import bevy_pbr::{
+import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     mesh_functions,
-    view_transformations::position_world_to_clip
-}
-#import bevy_pbr::pbr_bindings
-#import bevy_render::instance_index::get_instance_index
+    view_transformations::position_world_to_clip,
+};
 
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
+@if(PREPASS_PIPELINE)
+import bevy_pbr::{
+    prepass::io::{VertexOutput, FragmentOutput},
+    deferred::functions::deferred_output,
+};
+@else
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
+};
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100)
+@group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var mat_array_texture: texture_2d_array<f32>;
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+@group(constants::MATERIAL_BIND_GROUP) @binding(101)
 var mat_array_texture_sampler: sampler;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
-#ifdef VERTEX_POSITIONS
+    @if(VERTEX_POSITIONS)
     @location(0) position: vec3<f32>,
-#endif
-#ifdef VERTEX_NORMALS
+    @if(VERTEX_NORMALS)
     @location(1) normal: vec3<f32>,
-#endif
-#ifdef VERTEX_UVS
+    @if(VERTEX_UVS)
     @location(2) uv: vec2<f32>,
-#endif
-#ifdef VERTEX_UVS_B
+    @if(VERTEX_UVS_B)
     @location(3) uv_b: vec2<f32>,
-#endif
-#ifdef VERTEX_TANGENTS
+    @if(VERTEX_TANGENTS)
     @location(4) tangent: vec4<f32>,
-#endif
-#ifdef VERTEX_COLORS
+    @if(VERTEX_COLORS)
     @location(5) color: vec4<f32>,
-#endif
-// #ifdef SKINNED
-//     @location(6) joint_indices: vec4<u32>,
-//     @location(7) joint_weights: vec4<f32>,
-// #endif
-#ifdef MORPH_TARGETS
+    // @if(SKINNED)
+    // @location(6) joint_indices: vec4<u32>,
+    // @if(SKINNED)
+    // @location(7) joint_weights: vec4<f32>,
+    @if(MORPH_TARGETS)
     @builtin(vertex_index) index: u32,
-#endif
 
     @location(8) tex_idx: vec3<u32>
 };
@@ -60,23 +50,18 @@ struct CustomVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
-#ifdef VERTEX_UVS
+    @if(VERTEX_UVS)
     @location(2) uv: vec2<f32>,
-#endif
-#ifdef VERTEX_UVS_B
+    @if(VERTEX_UVS_B)
     @location(3) uv_b: vec2<f32>,
-#endif
-#ifdef VERTEX_TANGENTS
+    @if(VERTEX_TANGENTS)
     @location(4) world_tangent: vec4<f32>,
-#endif
-#ifdef VERTEX_COLORS
+    @if(VERTEX_COLORS)
     @location(5) color: vec4<f32>,
-#endif
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    @if(VERTEX_OUTPUT_INSTANCE_INDEX)
     @location(6) @interpolate(flat) instance_index: u32,
-#endif
 
-    @location(8) tex_idx: vec3<u32>,
+    @location(8) @interpolate(flat) tex_idx: vec3<u32>,
 }
 
 @vertex
@@ -91,24 +76,21 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
         model, vec4<f32>(vertex.position, 1.0));
 
     out.position = position_world_to_clip(out.world_position.xyz);
-        
-#ifdef VERTEX_UVS
-    out.uv = vertex.uv;
-#endif
 
-#ifdef VERTEX_TANGENTS
+@if(VERTEX_UVS)
+    out.uv = vertex.uv;
+
+@if(VERTEX_TANGENTS)
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         model,
         vertex.tangent,
         vertex.instance_index
     );
-#endif
 
     out.color = vertex.color;
 
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex.instance_index;
-#endif
 
     out.tex_idx = vertex.tex_idx;
 
@@ -141,15 +123,20 @@ fn fragment(
     pbr_input.material.base_color = textureSample(mat_array_texture, mat_array_texture_sampler, in.uv, in.tex_idx[tex_face]);
     pbr_input.material.base_color = pbr_input.material.base_color * in.color;
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color
+    );
 
-#ifdef PREPASS_PIPELINE
+@if(PREPASS_PIPELINE)
     let out = deferred_output(in, pbr_input);
-#else
+@if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
+@if(!PREPASS_PIPELINE)
     out.color = apply_pbr_lighting(pbr_input);
+@if(!PREPASS_PIPELINE)
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
 
-    return out;   
+    return out;
 }

@@ -1,9 +1,9 @@
-#import bevy_pbr::forward_io::{VertexOutput, FragmentOutput};
+import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 
 @fragment
 fn fragment(
     in: VertexOutput,
-    @location(8) tex_idx: vec3<u32>,
+    @location(8) @interpolate(flat) tex_idx: vec3<u32>,
 ) -> FragmentOutput {
     var out: FragmentOutput;
 

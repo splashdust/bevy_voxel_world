@@ -188,7 +188,7 @@ impl Material for CustomVoxelMaterial {
     }
 
     fn fragment_shader() -> ShaderRef {
-        "custom_material.wgsl".into()
+        "custom_material.wesl".into()
     }
 
     fn specialize(

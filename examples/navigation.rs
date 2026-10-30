@@ -217,7 +217,7 @@ fn setup(
 
     let debug_grid = DebugGridBuilder::new(2, 2)
         .set_depth(2)
-        .tilemap_type(DebugTilemapType::Square)
+        .tilemap_type(DebugTilemapType::Square3d)
         .enable_chunks()
         .enable_entrances()
         .build();

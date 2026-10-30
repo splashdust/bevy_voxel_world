@@ -135,8 +135,8 @@ where
             load_internal_asset!(
                 app,
                 VOXEL_TEXTURE_SHADER_HANDLE,
-                "shaders/voxel_texture.wgsl",
-                Shader::from_wgsl
+                "shaders/voxel_texture.wesl",
+                Shader::from_wesl
             );
 
             app.add_systems(Update, Internals::<C>::spawn_meshes);
