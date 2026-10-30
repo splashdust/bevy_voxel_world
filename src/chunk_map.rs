@@ -9,10 +9,7 @@ use crate::{
     voxel::VOXEL_SIZE,
     voxel_world::ChunkWillSpawn,
 };
-use bevy::{
-    math::{bounding::Aabb3d, Vec3A},
-    prelude::*,
-};
+use bevy::{math::Vec3A, prelude::*};
 use hashbrown::HashMap;
 
 #[derive(Deref, DerefMut)]
