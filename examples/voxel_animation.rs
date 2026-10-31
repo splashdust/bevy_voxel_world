@@ -3,9 +3,9 @@ use bevy_voxel_world::prelude::*;
 
 // The pool spans the four chunks around the origin, and every voxel of water
 // in it is set every frame.
-const POOL_RADIUS: f32 = 24.0;
+const POOL_RADIUS: f32 = 48.0;
 const RIM_WIDTH: f32 = 2.0;
-const MAX_HEIGHT: i32 = 8;
+const MAX_HEIGHT: i32 = 16;
 
 // Layers of the default voxel texture
 const STONE: u8 = 2;
@@ -24,7 +24,7 @@ fn setup(mut commands: Commands) {
     // Camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(50.0, 35.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(100.0, 70.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<DefaultWorld>::default(),
     ));
@@ -42,7 +42,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0)
-            .looking_at(Vec3::new(-0.3, -1.0, 0.5), Vec3::Y),
+            .looking_at(Vec3::new(-0.3, -0.2, 0.5), Vec3::Y),
         cascade_shadow_config,
     ));
 
@@ -74,7 +74,7 @@ fn animate_water(mut voxel_world: VoxelWorld<DefaultWorld>, time: Res<Time>) {
     let t = time.elapsed_secs();
 
     for (x, z, distance) in columns_within(POOL_RADIUS) {
-        let wave = (distance * 0.4 - t * 4.0).sin();
+        let wave = (distance * 0.2 - t * 2.0).sin();
         let height = (MAX_HEIGHT as f32 * (0.5 + 0.4 * wave)).round() as i32;
 
         for y in 1..=MAX_HEIGHT {
@@ -104,7 +104,7 @@ fn move_camera(
 ) {
     let mut transform = query.single_mut().unwrap();
     let time_seconds = time.elapsed_secs();
-    transform.translation.x = 70.0 * (time_seconds * 0.1).sin();
-    transform.translation.z = 70.0 * (time_seconds * 0.1).cos();
+    transform.translation.x = 100.0 * (time_seconds * 0.1).sin();
+    transform.translation.z = 100.0 * (time_seconds * 0.1).cos();
     transform.look_at(Vec3::ZERO, Vec3::Y);
 }
