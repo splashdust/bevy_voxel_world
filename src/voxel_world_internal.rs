@@ -214,8 +214,7 @@ where
             }
             match chunk_map_read_lock.get(&position) {
                 Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
-                Some(_) => Occupancy::Published,
-                None => Occupancy::Spawned,
+                _ => Occupancy::Spawned,
             }
         };
         let existing = chunks.iter().map(|chunk| ExistingChunk {

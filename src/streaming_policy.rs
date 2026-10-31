@@ -125,10 +125,8 @@ impl CameraSnapshot {
 pub(crate) enum Occupancy {
     /// No chunk exists here.
     Missing,
-    /// A chunk exists here but has not been published.
+    /// A chunk exists here, and is not known to be full.
     Spawned,
-    /// A chunk exists here and has been published.
-    Published,
     /// A chunk exists here and its published voxels are all solid.
     Full,
 }
@@ -200,7 +198,25 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
     let mut chunks_deque =
         VecDeque::with_capacity(config.spawning_rays() * spawning_distance as usize);
 
-    // Shoots a ray from the given point, and queue all (non-published) chunks intersecting the ray
+    // Every camera's protected cube is queued first, nearest chunks first, so
+    // they spawn before any other chunk.
+    let protected_distance = config.min_despawn_distance() as i32;
+    let mut protected_offsets = Vec::new();
+    for x in -protected_distance..=protected_distance {
+        for y in -protected_distance..=protected_distance {
+            for z in -protected_distance..=protected_distance {
+                protected_offsets.push(IVec3::new(x, y, z));
+            }
+        }
+    }
+    protected_offsets.sort_by_key(|offset| offset.length_squared());
+    for offset in protected_offsets {
+        for camera in cameras {
+            chunks_deque.push_back(camera.chunk_position() + offset);
+        }
+    }
+
+    // Shoots a ray from the given point, and queue all missing chunks intersecting the ray
     let queue_chunks_intersecting_ray_from_point =
         |camera: &CameraSnapshot, point: Vec2, queue: &mut VecDeque<IVec3>| {
             let Some(ray) = camera.viewport_ray(point) else {
@@ -213,8 +229,8 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
                 match occupancy(chunk_pos) {
                     // If we hit a full chunk, we can stop the ray early
                     Occupancy::Full => break,
-                    Occupancy::Published => {}
-                    Occupancy::Missing | Occupancy::Spawned => queue.push_back(chunk_pos),
+                    Occupancy::Spawned => {}
+                    Occupancy::Missing => queue.push_back(chunk_pos),
                 }
                 t += CHUNK_SIZE_F;
                 current = ray.origin + ray.direction * t;
@@ -240,27 +256,14 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
         );
     }
 
-    // We also queue the chunks closest to every camera to make sure they will always spawn early.
-    let protected_distance = config.min_despawn_distance() as i32;
-    for camera in cameras {
-        for x in -protected_distance..=protected_distance {
-            for y in -protected_distance..=protected_distance {
-                for z in -protected_distance..=protected_distance {
-                    let queue_pos = camera.chunk_position() + IVec3::new(x, y, z);
-                    chunks_deque.push_back(queue_pos);
-                }
-            }
-        }
-    }
-
     // Then, when we have a queue of chunks, we can set them up for spawning
     while let Some(chunk_position) = chunks_deque.pop_front() {
-        if visited.contains(&chunk_position)
-            || chunks_deque.len() > config.max_spawn_per_frame()
-        {
+        if spawn.len() >= config.max_spawn_per_frame() {
+            break;
+        }
+        if !visited.insert(chunk_position) {
             continue;
         }
-        visited.insert(chunk_position);
 
         if !chunk_is_close_to_any_camera(
             cameras,
@@ -302,6 +305,11 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
     spawn
 }
 
+/// Chunks are retired only beyond the spawning distance plus this margin, in
+/// squared chunks, leaving a thin band where existing chunks are kept but none
+/// are spawned.
+const RETIRE_MARGIN_SQUARED: i32 = 1;
+
 fn should_retire<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
@@ -311,7 +319,7 @@ fn should_retire<C: VoxelWorldConfig>(
     if !chunk_is_close_to_any_camera(
         cameras,
         chunk_position,
-        spawning_distance_squared + 1,
+        spawning_distance_squared + RETIRE_MARGIN_SQUARED,
     ) {
         return true;
     }
@@ -342,14 +350,15 @@ fn chunk_is_close_to_any_camera(
     })
 }
 
+/// The position of the camera nearest the chunk's centre.
 fn closest_camera_position(cameras: &[CameraSnapshot], chunk_position: IVec3) -> Vec3 {
-    let chunk_world_position = chunk_position.as_vec3() * CHUNK_SIZE_F;
+    let chunk_centre = (chunk_position.as_vec3() + 0.5) * CHUNK_SIZE_F;
     cameras
         .iter()
         .min_by(|a, b| {
             a.position
-                .distance_squared(chunk_world_position)
-                .total_cmp(&b.position.distance_squared(chunk_world_position))
+                .distance_squared(chunk_centre)
+                .total_cmp(&b.position.distance_squared(chunk_centre))
         })
         .map(|camera| camera.position)
         .unwrap_or(Vec3::ZERO)
@@ -379,6 +388,7 @@ mod tests {
         spawn_in_view: bool,
         /// `FarAwayOrOutOfView` despawning when set, `FarAway` otherwise.
         despawn_out_of_view: bool,
+        max_spawn_per_frame: usize,
     }
 
     impl Default for TestWorld {
@@ -388,6 +398,7 @@ mod tests {
                 min_despawn_distance: 1,
                 spawn_in_view: false,
                 despawn_out_of_view: false,
+                max_spawn_per_frame: 10_000,
             }
         }
     }
@@ -420,16 +431,20 @@ mod tests {
             }
         }
 
-        /// LOD level 1 for chunks whose corner is more than two chunks from the
-        /// camera, 0 otherwise.
+        fn max_spawn_per_frame(&self) -> usize {
+            self.max_spawn_per_frame
+        }
+
+        /// LOD level 1 for chunks whose centre is more than one and a half
+        /// chunks from the camera, 0 otherwise.
         fn chunk_lod(
             &self,
             chunk_position: IVec3,
             _previous_lod: Option<LodLevel>,
             camera_position: Vec3,
         ) -> LodLevel {
-            let corner = chunk_position.as_vec3() * CHUNK_SIZE_F;
-            (corner.distance(camera_position) > 2.0 * CHUNK_SIZE_F) as LodLevel
+            let centre = (chunk_position.as_vec3() + 0.5) * CHUNK_SIZE_F;
+            (centre.distance(camera_position) > 1.5 * CHUNK_SIZE_F) as LodLevel
         }
     }
 
@@ -540,7 +555,7 @@ mod tests {
     fn chunks_that_exist_are_not_spawned_again() {
         let occupied = within(C, 1)
             .into_iter()
-            .map(|position| (position, Occupancy::Published))
+            .map(|position| (position, Occupancy::Spawned))
             .collect();
 
         let plan = plan_with(
@@ -588,7 +603,7 @@ mod tests {
         let retired = C + IVec3::new(3, 1, 1);
         let occupied = [C, kept, retired]
             .into_iter()
-            .map(|position| (position, Occupancy::Published))
+            .map(|position| (position, Occupancy::Spawned))
             .collect();
 
         let plan = plan_with(
@@ -609,7 +624,7 @@ mod tests {
         let ahead = C + IVec3::new(0, 0, -2);
         let occupied = [C, protected, unprotected, ahead]
             .into_iter()
-            .map(|position| (position, Occupancy::Published))
+            .map(|position| (position, Occupancy::Spawned))
             .collect();
 
         let plan = plan_with(
@@ -654,6 +669,7 @@ mod tests {
                 min_despawn_distance: rng.random_range(0..=2),
                 spawn_in_view: rng.random(),
                 despawn_out_of_view: rng.random(),
+                ..default()
             };
             let cameras: Vec<_> = (0..rng.random_range(1..=2))
                 .map(|_| {
@@ -704,7 +720,7 @@ mod tests {
         let between = a + IVec3::new(5, 0, 0);
         let occupied = [near_b, between]
             .into_iter()
-            .map(|position| (position, Occupancy::Published))
+            .map(|position| (position, Occupancy::Spawned))
             .collect();
 
         let plan = plan_with(
@@ -729,7 +745,7 @@ mod tests {
         let coarse_but_near = C + IVec3::Y;
         let occupied = [near, far, coarse_but_near]
             .into_iter()
-            .map(|position| (position, Occupancy::Published))
+            .map(|position| (position, Occupancy::Spawned))
             .collect();
         let camera = camera(C, Vec3::NEG_Z);
 
@@ -754,6 +770,43 @@ mod tests {
                 "{position} spawns at the LOD level chunk_lod gives it"
             );
         }
+    }
+
+    #[test]
+    fn lod_levels_are_chosen_with_the_camera_nearest_the_chunk_centre() {
+        // `a` is nearer the chunk's corner, `b` nearer its centre.
+        let a = camera(C - IVec3::ONE, Vec3::NEG_Z);
+        let b = camera(C + IVec3::X, Vec3::NEG_Z);
+        let occupied = [(C, Occupancy::Spawned)].into_iter().collect();
+
+        let plan = plan_with(
+            &TestWorld::default(),
+            &[a, b],
+            &occupied,
+            vec![existing(C, 1)],
+        );
+
+        assert_eq!(plan.change_lod, vec![(C, 0)]);
+    }
+
+    #[test]
+    fn at_most_max_spawn_per_frame_chunks_spawn_nearest_the_cameras_first() {
+        let config = TestWorld {
+            max_spawn_per_frame: 14,
+            ..default()
+        };
+        let a = C;
+        let b = C + IVec3::new(20, 0, 0);
+
+        let plan = plan_with(
+            &config,
+            &[camera(a, Vec3::NEG_Z), camera(b, Vec3::NEG_Z)],
+            &HashMap::new(),
+            vec![],
+        );
+
+        let expected: HashSet<_> = within(a, 1).union(&within(b, 1)).copied().collect();
+        assert_eq!(spawned(&plan), expected);
     }
 
     /// A chunk whose centre is at negative coordinates on every axis.

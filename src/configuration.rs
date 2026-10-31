@@ -124,9 +124,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         ChunkSpawnStrategy::default()
     }
 
-    /// Maximum number of chunks that can get queued for spawning in a given frame.
-    /// In some scenarios, reducing this number can help with performance, due to less
-    /// thread contention.
+    /// Maximum number of chunks spawned in a frame. Chunks within `min_despawn_distance`
+    /// of a camera are spawned first, nearest first. In some scenarios, reducing this
+    /// number can help with performance, due to less thread contention.
     fn max_spawn_per_frame(&self) -> usize {
         10000
     }

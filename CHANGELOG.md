@@ -21,6 +21,8 @@
 - Fix: `ChunkDespawnStrategy::FarAwayOrOutOfView` despawns chunks out of view beyond `min_despawn_distance` chunks from every camera. Before, it multiplied that distance by the chunk size, so with the default settings no chunk was despawned for being out of view.
 - Despawning out of view now only checks the cameras' views. Before, it also used the renderer's visibility, which is a frame behind the camera.
 - With `ChunkDespawnStrategy::FarAwayOrOutOfView`, chunks out of view are only spawned within `min_despawn_distance`, whatever the `ChunkSpawnStrategy`. Before, `ChunkSpawnStrategy::Close` spawned chunks that would be despawned the next frame.
+- Fix: `max_spawn_per_frame` is the most chunks spawned in a frame, and chunks within `min_despawn_distance` of a camera spawn first, nearest first. Before, it limited a queue of candidate chunks, which neither bounded how many chunks spawned nor favoured the ones nearest a camera.
+- Fix: with several cameras, a chunk's LOD level is chosen with the camera nearest the chunk's centre. Before, it was the camera nearest the chunk's minimum corner, which could be the farther camera.
 
 ## 0.18
 
