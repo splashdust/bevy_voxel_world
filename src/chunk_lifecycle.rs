@@ -19,11 +19,12 @@ use crate::{
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
+    voxel_edits::VoxelEdits,
     voxel_world::{
         ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
         ChunkWillSpawn, ChunkWillUpdate,
     },
-    voxel_world_internal::{ModifiedVoxels, NeedsMaterial, SpawnMeshes, WorldRoot},
+    voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
 };
 
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
@@ -395,7 +396,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut chunks: Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
         mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
         mesh_cache: Res<MeshCache<C>>,
-        modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
+        voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
@@ -448,7 +449,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 lod_level,
                 data_shape,
                 mesh_shape,
-                modified_voxels.chunk_edits(chunk.position),
+                voxel_edits.chunk_edits(chunk.position),
             );
 
             let mesh_map = mesh_cache.get_mesh_map();

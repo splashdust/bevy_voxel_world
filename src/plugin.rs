@@ -104,7 +104,7 @@ where
             .add_systems(
                 PreUpdate,
                 (
-                    Internals::<C>::flush_voxel_write_buffer,
+                    Internals::<C>::commit_voxel_edits,
                     Internals::<C>::stream_chunks,
                     ChunkLifecycle::<C>::apply_requests,
                     // Starting tasks needs the chunks spawned above. No other step

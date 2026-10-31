@@ -543,57 +543,50 @@ fn chunk_will_despawn_event() {
     app.update();
 }
 
-#[test]
-fn chunk_will_update_event() {
+/// The voxel that `set_origin_voxel` sets at the origin every frame.
+#[derive(Resource)]
+struct OriginVoxel(WorldVoxel);
+
+fn set_origin_voxel(mut voxel_world: VoxelWorld<DefaultWorld>, voxel: Res<OriginVoxel>) {
+    voxel_world.set_voxel(IVec3::ZERO, voxel.0);
+}
+
+/// The chunks that `ChunkWillUpdate` was fired for.
+#[derive(Resource, Default)]
+struct Updated(Vec<IVec3>);
+
+fn record_updates(
+    mut updated: ResMut<Updated>,
+    mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>,
+) {
+    updated.0.extend(ev.read().map(|msg| msg.chunk_key));
+}
+
+/// A `DefaultWorld` app that sets `voxel` at the origin every frame once the
+/// chunk there is ready, and records the chunks `ChunkWillUpdate` fires for.
+fn app_setting_the_origin_voxel(voxel: WorldVoxel) -> App {
     let mut app = _test_setup_app();
-
-    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
-        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<DefaultWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
     });
+    app.insert_resource(OriginVoxel(voxel))
+        .init_resource::<Updated>()
+        .add_systems(Update, (set_origin_voxel, record_updates));
+    app
+}
 
-    app.update();
-
-    app.add_systems(
-        Update,
-        |mut ev_chunk_will_update: MessageReader<ChunkWillUpdate<DefaultWorld>>| {
-            let count = ev_chunk_will_update.read().count();
-            assert!(count > 0)
-        },
-    );
-
-    app.update();
+fn origin_updated(app: &mut App) -> bool {
+    app.world().resource::<Updated>().0.contains(&IVec3::ZERO)
 }
 
 #[test]
-fn affected_chunk_positions_include_padding_neighbors() {
-    let affected: HashSet<_> = get_affected_chunk_positions(IVec3::new(0, 0, 0))
-        .into_iter()
-        .collect();
-    let expected = HashSet::from([
-        IVec3::new(0, 0, 0),
-        IVec3::new(0, 0, -1),
-        IVec3::new(0, -1, 0),
-        IVec3::new(0, -1, -1),
-        IVec3::new(-1, 0, 0),
-        IVec3::new(-1, 0, -1),
-        IVec3::new(-1, -1, 0),
-        IVec3::new(-1, -1, -1),
-    ]);
-
-    assert_eq!(affected, expected);
-
-    assert_eq!(
-        get_affected_chunk_positions(IVec3::new(1, 1, 1)),
-        vec![IVec3::new(0, 0, 0)]
+fn chunk_will_update_event() {
+    let mut app = app_setting_the_origin_voxel(WorldVoxel::Solid(1));
+    update_until(
+        &mut app,
+        "the chunk at the origin to update",
+        origin_updated,
     );
-
-    let affected: HashSet<_> =
-        get_affected_chunk_positions(IVec3::new(CHUNK_SIZE_I - 1, 1, 1))
-            .into_iter()
-            .collect();
-    let expected = HashSet::from([IVec3::new(0, 0, 0), IVec3::new(1, 0, 0)]);
-
-    assert_eq!(affected, expected);
 }
 
 #[test]
@@ -648,17 +641,11 @@ fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
         },
     );
 
-    app.update();
-    app.update();
-    app.update();
-
-    let remeshed_chunks: HashSet<_> =
-        remeshed_chunks.lock().unwrap().iter().copied().collect();
-
-    assert!(
-        expected.is_subset(&remeshed_chunks),
-        "expected {expected:?} to be remeshed, got {remeshed_chunks:?}"
-    );
+    update_until(&mut app, "the chunks around the origin to remesh", |_| {
+        let remeshed_chunks: HashSet<_> =
+            remeshed_chunks.lock().unwrap().iter().copied().collect();
+        expected.is_subset(&remeshed_chunks)
+    });
 }
 
 /// Voxel lookups by the chunk tasks of the chunk at the origin, in `ReuseWorld`.
@@ -1109,76 +1096,39 @@ fn can_get_chunk_data() {
 
 #[test]
 fn set_voxel_same_value_does_not_trigger_remesh() {
-    let mut app = _test_setup_app();
-
-    // Set a voxel and let the write fully process through the pipeline.
-    // The system will keep writing Solid(1) every frame.
-    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
-        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
-    });
-
-    // Run enough frames so the initial write is flushed into modified_voxels
-    // and subsequent same-value writes are skipped by the guard.
-    for _ in 0..5 {
-        app.update();
-    }
-
-    // Add a reader with a frame counter. On the first run, drain any stale
-    // messages from the initial write. On subsequent runs, assert that no
-    // new messages appear (guard prevents redundant remeshes).
-    app.add_systems(
-        Update,
-        |mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>, mut frame: Local<u32>| {
-            *frame += 1;
-            if *frame > 1 {
-                let count = ev.read().count();
-                assert_eq!(
-                    count, 0,
-                    "expected no ChunkWillUpdate when setting voxel to same value"
-                );
-            } else {
-                // Drain stale messages from the initial set_voxel
-                ev.read().count();
-            }
-        },
+    let mut app = app_setting_the_origin_voxel(WorldVoxel::Solid(1));
+    update_until(
+        &mut app,
+        "the first edit to update the chunk",
+        origin_updated,
     );
 
-    app.update(); // reader frame 1 — drains stale messages
-    app.update(); // reader frame 2 — asserts no new messages
-    app.update(); // reader frame 3 — asserts again for good measure
+    app.world_mut().resource_mut::<Updated>().0.clear();
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<Updated>().0.is_empty(),
+        "expected no ChunkWillUpdate when setting voxel to same value"
+    );
 }
 
 #[test]
 fn set_voxel_different_value_triggers_remesh() {
-    let mut app = _test_setup_app();
-
-    // Set initial voxel
-    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
-        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
-    });
-    app.update();
-    app.update();
-
-    // Now change to a different value — should produce a ChunkWillUpdate event
-    app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
-        voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(2));
-    });
-
-    app.update(); // writes Solid(2) to buffer
-    app.update(); // flushes — value differs, should trigger update
-
-    app.add_systems(
-        Update,
-        |mut ev_chunk_will_update: MessageReader<ChunkWillUpdate<DefaultWorld>>| {
-            let count = ev_chunk_will_update.read().count();
-            assert!(
-                count > 0,
-                "expected ChunkWillUpdate when setting voxel to different value"
-            );
-        },
+    let mut app = app_setting_the_origin_voxel(WorldVoxel::Solid(1));
+    update_until(
+        &mut app,
+        "the first edit to update the chunk",
+        origin_updated,
     );
 
-    app.update();
+    app.world_mut().resource_mut::<Updated>().0.clear();
+    app.insert_resource(OriginVoxel(WorldVoxel::Solid(2)));
+    update_until(
+        &mut app,
+        "the second edit to update the chunk",
+        origin_updated,
+    );
 }
 
 /// How long the first voxel lookup of `SlowLookupWorld` holds up its chunk task.

@@ -8,13 +8,14 @@ use std::sync::Arc;
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    chunk::{chunk_containing, ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U},
+    chunk::{chunk_containing, ChunkData, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
-    voxel_world_internal::{ModifiedVoxels, VoxelWriteBuffer},
+    voxel_edits::VoxelEdits,
+    voxel_world_internal::VoxelWriteBuffer,
 };
 
 /// This component is used to mark Cameras that bevy_voxel_world should use to determine
@@ -186,7 +187,7 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_write_buffer:
         ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     #[allow(unused)]
@@ -224,7 +225,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
         let write_buffer = self.voxel_write_buffer.clone();
-        let modified_voxels = self.modified_voxels.clone();
+        let voxel_edits = self.voxel_edits.reader();
 
         Arc::new(move |position| {
             let (chunk_pos, _) = get_chunk_voxel_position(position);
@@ -237,10 +238,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
                 return voxel;
             }
 
-            {
-                if let Some(voxel) = modified_voxels.get_voxel(&position) {
-                    return voxel;
-                }
+            if let Some(voxel) = voxel_edits.get(position) {
+                return voxel;
             }
 
             let chunk_opt = {
@@ -459,39 +458,4 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)
-}
-
-/// Returns every chunk whose padded voxel data includes the given world-space voxel.
-pub(crate) fn get_affected_chunk_positions(position: IVec3) -> Vec<IVec3> {
-    let (chunk_position, voxel_position) = get_chunk_voxel_position(position);
-
-    let axis_offsets = |component| {
-        let mut offsets = [0, 0, 0];
-        let mut len = 1;
-
-        if component == 1 {
-            offsets[len] = -1;
-            len += 1;
-        }
-        if component == CHUNK_SIZE_U {
-            offsets[len] = 1;
-            len += 1;
-        }
-
-        (offsets, len)
-    };
-
-    let (x_offsets, x_len) = axis_offsets(voxel_position.x);
-    let (y_offsets, y_len) = axis_offsets(voxel_position.y);
-    let (z_offsets, z_len) = axis_offsets(voxel_position.z);
-    let mut affected_chunks = Vec::with_capacity(8);
-    for x in x_offsets.iter().take(x_len).copied() {
-        for y in y_offsets.iter().take(y_len).copied() {
-            for z in z_offsets.iter().take(z_len).copied() {
-                affected_chunks.push(chunk_position + IVec3::new(x, y, z));
-            }
-        }
-    }
-
-    affected_chunks
 }

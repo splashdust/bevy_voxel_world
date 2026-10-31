@@ -41,6 +41,12 @@ _Avoid_: cancelled task
 **Publish**:
 To make a finished chunk task's voxel data readable through the voxel world, independent of whether a mesh is ever shown.
 
+### Voxels
+
+**Voxel edit**:
+A voxel set through the voxel world. It replaces the generated voxel at its position for as long as the world exists, across chunk despawns and respawns.
+_Avoid_: modified voxel, voxel write
+
 ### Streaming
 
 **Streaming policy**:

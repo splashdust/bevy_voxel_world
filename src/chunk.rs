@@ -12,7 +12,7 @@ use crate::{
         VoxelWorldConfig,
     },
     voxel::WorldVoxel,
-    voxel_world_internal::ChunkEdits,
+    voxel_edits::ChunkEdits,
 };
 
 // The size of a chunk in voxels
