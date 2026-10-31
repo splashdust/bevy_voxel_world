@@ -648,6 +648,12 @@ where
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
     ) {
+        // Chunk tasks hold the read lock while they generate, so taking the write
+        // lock waits for all of them; don't, unless there is something to write.
+        if buffer.is_empty() {
+            return;
+        }
+
         let chunk_map_read_lock = chunk_map.get_read_lock();
         let mut modified_voxels = {
             #[cfg(feature = "trace")]

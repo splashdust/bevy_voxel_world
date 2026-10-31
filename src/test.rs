@@ -912,3 +912,70 @@ fn set_voxel_different_value_triggers_remesh() {
 
     app.update();
 }
+
+/// How long the first voxel lookup of `SlowLookupWorld` holds up its chunk task.
+const SLOW_LOOKUP_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+static SLOW_LOOKUP_UNTIL: std::sync::OnceLock<std::time::Instant> =
+    std::sync::OnceLock::new();
+
+/// A world whose chunk tasks are all held up for `SLOW_LOOKUP_HOLD` after the
+/// first voxel lookup, as if generation were very expensive.
+#[derive(Resource, Clone, Default)]
+struct SlowLookupWorld;
+
+impl VoxelWorldConfig for SlowLookupWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            Box::new(|_, _| {
+                let until = *SLOW_LOOKUP_UNTIL
+                    .get_or_init(|| std::time::Instant::now() + SLOW_LOOKUP_HOLD);
+                std::thread::sleep(
+                    until.saturating_duration_since(std::time::Instant::now()),
+                );
+                WorldVoxel::Air
+            })
+        })
+    }
+}
+
+#[test]
+fn frames_without_voxel_edits_do_not_wait_for_chunk_tasks() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<SlowLookupWorld>::minimal(),
+    ));
+    app.add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((
+            Camera3d::default(),
+            Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+            VoxelWorldCamera::<SlowLookupWorld>::default(),
+        ));
+    });
+
+    let mut frames = 0;
+    while SLOW_LOOKUP_UNTIL.get().is_none() {
+        app.update();
+        frames += 1;
+        assert!(frames < 100, "no chunk task started");
+    }
+
+    // Chunk tasks are now generating; no frame should have to wait for them.
+    let until = *SLOW_LOOKUP_UNTIL.get().unwrap();
+    while std::time::Instant::now() < until {
+        let start = std::time::Instant::now();
+        app.update();
+        assert!(
+            start.elapsed() < SLOW_LOOKUP_HOLD / 3,
+            "frame took {:?} while chunk tasks were generating",
+            start.elapsed()
+        );
+    }
+}
