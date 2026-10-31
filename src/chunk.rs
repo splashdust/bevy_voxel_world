@@ -397,7 +397,13 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         F: FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + 'static,
     {
         let mut filled_count = 0;
-        let modified_voxels = (*self.modified_voxels).read().unwrap();
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("generate_chunk").entered();
+        let modified_voxels = {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("wait_modified_voxels_read").entered();
+            (*self.modified_voxels).read().unwrap()
+        };
         let mut material_count = HashSet::new();
         let reuse_previous =
             matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
@@ -501,6 +507,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         mut chunk_meshing_fn: ChunkMeshingFn<I, C::ChunkUserBundle>,
         texture_index_mapper: TextureIndexMapperFn<I>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("mesh_chunk").entered();
         if self.mesh.is_none() {
             if let Some(voxels) = self.chunk_data.voxels.as_ref() {
                 let data_shape = self.chunk_data.data_shape;

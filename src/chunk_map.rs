@@ -61,6 +61,8 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
     }
 
     pub fn get_read_lock(&self) -> RwLockReadGuard<'_, ChunkMapData<I>> {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("wait_chunk_map_read").entered();
         self.map.read().unwrap()
     }
 

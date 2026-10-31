@@ -51,6 +51,8 @@ impl<C: VoxelWorldConfig> MeshCache<C> {
     }
 
     pub fn get_mesh_handle(&self, voxels_hash: &u64) -> Option<Arc<Handle<Mesh>>> {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
         self.mesh_handles.read().unwrap().get(voxels_hash)
     }
 
@@ -59,6 +61,8 @@ impl<C: VoxelWorldConfig> MeshCache<C> {
     }
 
     pub fn get_user_bundle(&self, voxels_hash: &u64) -> Option<C::ChunkUserBundle> {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
         self.user_bundes.read().unwrap().get(voxels_hash).cloned()
     }
 }

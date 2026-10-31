@@ -481,6 +481,8 @@ where
             let mesh_map = mesh_cache.get_mesh_map();
 
             let thread = thread_pool.spawn(async move {
+                #[cfg(feature = "trace")]
+                let _span = bevy::log::info_span!("chunk_task").entered();
                 chunk_task.generate(
                     voxel_data_fn,
                     previous_chunk_data.clone(),
@@ -493,10 +495,12 @@ where
                 }
 
                 // Also no need to mesh if a matching mesh is already cached
-                let mesh_cache_hit = mesh_map
-                    .read()
-                    .unwrap()
-                    .contains_key(&chunk_task.voxels_hash());
+                let mesh_cache_hit = {
+                    #[cfg(feature = "trace")]
+                    let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
+                    mesh_map.read().unwrap()
+                }
+                .contains_key(&chunk_task.voxels_hash());
                 if !mesh_cache_hit {
                     chunk_task.mesh(chunk_meshing_fn, texture_index_mapper);
                 }
@@ -645,7 +649,11 @@ where
         modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
     ) {
         let chunk_map_read_lock = chunk_map.get_read_lock();
-        let mut modified_voxels = modified_voxels.write().unwrap();
+        let mut modified_voxels = {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("wait_modified_voxels_write").entered();
+            modified_voxels.write().unwrap()
+        };
 
         let mut updated_chunks = HashSet::<(Entity, IVec3)>::new();
 
