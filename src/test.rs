@@ -1,3 +1,4 @@
+use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
@@ -1129,6 +1130,87 @@ fn set_voxel_different_value_triggers_remesh() {
         "the second edit to update the chunk",
         origin_updated,
     );
+}
+
+#[test]
+fn set_voxel_and_back_does_not_trigger_remesh() {
+    let mut app = app_setting_the_origin_voxel(WorldVoxel::Solid(1));
+    update_until(
+        &mut app,
+        "the first edit to update the chunk",
+        origin_updated,
+    );
+
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<DefaultWorld>| {
+            voxel_world.set_voxel(IVec3::ZERO, WorldVoxel::Solid(2));
+            voxel_world.set_voxel(IVec3::ZERO, WorldVoxel::Solid(1));
+        })
+        .unwrap();
+    app.world_mut().resource_mut::<Updated>().0.clear();
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<Updated>().0.is_empty(),
+        "expected no ChunkWillUpdate when setting voxel to another value and back"
+    );
+}
+
+#[test]
+fn get_voxel_returns_the_last_voxel_set() {
+    let mut app = _test_setup_app();
+    // Creates the voxel world's resources.
+    app.update();
+
+    let voxels = app
+        .world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<DefaultWorld>| {
+            voxel_world.set_voxel(IVec3::ZERO, WorldVoxel::Solid(1));
+            voxel_world.set_voxel(IVec3::ZERO, WorldVoxel::Solid(2));
+            [
+                voxel_world.get_voxel(IVec3::ZERO),
+                voxel_world.get_voxel_fn()(IVec3::ZERO),
+            ]
+        })
+        .unwrap();
+    assert_eq!(voxels, [WorldVoxel::Solid(2); 2]);
+}
+
+#[test]
+fn systems_using_voxel_world_can_run_in_parallel() {
+    let mut app = _test_setup_app();
+    // Creates the voxel world's resources.
+    app.update();
+
+    let mut schedule = Schedule::default();
+    schedule.set_build_settings(ScheduleBuildSettings {
+        ambiguity_detection: LogLevel::Error,
+        ..default()
+    });
+    schedule.add_systems((
+        |mut voxel_world: VoxelWorld<DefaultWorld>| {
+            voxel_world.set_voxel(IVec3::NEG_X, WorldVoxel::Solid(1));
+        },
+        |mut voxel_world: VoxelWorld<DefaultWorld>| {
+            voxel_world.set_voxel(IVec3::X, WorldVoxel::Solid(2));
+        },
+    ));
+    schedule
+        .initialize(app.world_mut())
+        .expect("systems using VoxelWorld should not conflict");
+    schedule.run(app.world_mut());
+
+    let voxels = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<DefaultWorld>| {
+            [
+                voxel_world.get_voxel(IVec3::NEG_X),
+                voxel_world.get_voxel(IVec3::X),
+            ]
+        })
+        .unwrap();
+    assert_eq!(voxels, [WorldVoxel::Solid(1), WorldVoxel::Solid(2)]);
 }
 
 /// How long the first voxel lookup of `SlowLookupWorld` holds up its chunk task.

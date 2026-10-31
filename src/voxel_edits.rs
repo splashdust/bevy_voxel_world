@@ -1,12 +1,13 @@
 ///
 /// Voxel edits
 /// Every voxel edit of a voxel world, kept for as long as the world exists, and
-/// which chunks each edit makes stale. It reads no Bevy world state, so it can
-/// be tested with plain values.
+/// which chunks each edit makes stale. Edits can be set from systems running in
+/// parallel, and are committed once a frame. It reads no Bevy world state, so it
+/// can be tested with plain values.
 ///
 use std::{
     marker::PhantomData,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use bevy::{
@@ -19,43 +20,76 @@ use crate::{
     voxel::WorldVoxel,
 };
 
-/// The edited voxels of one chunk, shared with the chunk tasks that read them.
-type EditBucket<I> = Arc<HashMap<IVec3, WorldVoxel<I>>>;
+type Voxels<I> = HashMap<IVec3, WorldVoxel<I>>;
 
-/// Every voxel edit of the voxel world `C`. Edits are grouped by chunk, so a
-/// chunk task takes the edits it reads when it starts and holds no lock while
-/// it runs.
+/// The edited voxels of one chunk, shared with the chunk tasks that read them.
+type EditBucket<I> = Arc<Voxels<I>>;
+
+/// Committed edits, by chunk.
+type Committed<I> = Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>;
+
+/// Every voxel edit of the voxel world `C`.
+///
+/// Edits set since the last commit are pending: they are readable right away,
+/// and only the last voxel set at a position is committed. Committed edits are
+/// grouped by chunk, so a chunk task takes the edits it reads when it starts and
+/// holds no lock while it runs.
 ///
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
-#[derive(Resource, Clone)]
-pub struct VoxelEdits<C, I>(Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>, PhantomData<C>);
+#[derive(Resource)]
+pub struct VoxelEdits<C, I> {
+    /// Copied only when an edit is set while a reader holds it.
+    pending: Mutex<Arc<Voxels<I>>>,
+    committed: Committed<I>,
+    _marker: PhantomData<C>,
+}
 
 impl<C, I> Default for VoxelEdits<C, I> {
     fn default() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())), PhantomData)
+        Self {
+            pending: Mutex::default(),
+            committed: Arc::default(),
+            _marker: PhantomData,
+        }
     }
 }
 
 impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
-    /// Reads the committed edits, from any thread, including those committed
-    /// after it was made.
-    pub(crate) fn reader(&self) -> VoxelEditReader<I> {
-        VoxelEditReader(self.0.clone())
+    /// Sets the voxel at `position`, replacing any voxel set there since the
+    /// last commit.
+    pub(crate) fn set(&self, position: IVec3, voxel: WorldVoxel<I>) {
+        let mut pending = self.pending.lock().unwrap();
+        Arc::make_mut(&mut pending).insert(position, voxel);
     }
 
-    /// Commits `edits` in order and returns the chunks they make stale: those
-    /// whose padded voxel data includes a voxel that changed. Committing a voxel
-    /// that is already committed changes nothing, so setting the same voxel
-    /// every frame doesn't remesh its chunk every frame. A chunk's edits are
-    /// copied only while a running chunk task holds them.
-    pub(crate) fn commit(&self, edits: &[(IVec3, WorldVoxel<I>)]) -> HashSet<IVec3> {
+    /// Reads the edits from any thread: the pending edits as they were when it
+    /// was made, and the committed edits as they are when read.
+    pub(crate) fn reader(&self) -> VoxelEditReader<I> {
+        VoxelEditReader {
+            pending: self.pending.lock().unwrap().clone(),
+            committed: self.committed.clone(),
+        }
+    }
+
+    /// Commits the pending edits and returns the chunks they make stale: those
+    /// whose padded voxel data includes a voxel that changed. An edit that sets
+    /// a voxel to its committed edit changes nothing, so setting the same voxel
+    /// every frame, or setting a voxel and back, doesn't remesh its chunk. A
+    /// chunk's edits are copied only while a running chunk task holds them.
+    pub(crate) fn commit(&self) -> HashSet<IVec3> {
+        // The pending edits stay locked until they are committed, so a reader
+        // made meanwhile finds each edit pending or committed.
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            return HashSet::new();
+        }
         let mut buckets = {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("wait_voxel_edits_write").entered();
-            self.0.write().unwrap()
+            self.committed.write().unwrap()
         };
         let mut stale = HashSet::new();
-        for &(position, voxel) in edits {
+        for (&position, &voxel) in pending.iter() {
             let bucket = buckets.entry(chunk_containing(position)).or_default();
             if bucket.get(&position) == Some(&voxel) {
                 continue;
@@ -63,12 +97,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             Arc::make_mut(bucket).insert(position, voxel);
             add_chunks_including(position, &mut stale);
         }
+        match Arc::get_mut(&mut pending) {
+            Some(voxels) => voxels.clear(),
+            None => *pending = Arc::default(),
+        }
         stale
     }
 
     /// The edits a chunk task at `chunk_pos` reads.
     pub(crate) fn chunk_edits(&self, chunk_pos: IVec3) -> ChunkEdits<I> {
-        let buckets = self.0.read().unwrap();
+        let buckets = self.committed.read().unwrap();
         let mut edits = ChunkEdits {
             chunk_pos,
             buckets: std::array::from_fn(|_| None),
@@ -106,13 +144,19 @@ fn add_chunks_including(position: IVec3, stale: &mut HashSet<IVec3>) {
     }
 }
 
-/// Reads committed voxel edits from any thread.
-pub(crate) struct VoxelEditReader<I>(Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>);
+/// Reads voxel edits from any thread.
+pub(crate) struct VoxelEditReader<I> {
+    pending: Arc<Voxels<I>>,
+    committed: Committed<I>,
+}
 
 impl<I: Copy> VoxelEditReader<I> {
     /// The voxel edit at `position`, if there is one.
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
-        let buckets = self.0.read().unwrap();
+        if let Some(voxel) = self.pending.get(&position) {
+            return Some(*voxel);
+        }
+        let buckets = self.committed.read().unwrap();
         buckets
             .get(&chunk_containing(position))?
             .get(&position)
@@ -155,14 +199,21 @@ impl<I: Copy> ChunkEdits<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     type Edits = VoxelEdits<(), u8>;
 
     const LAST: i32 = CHUNK_SIZE_I - 1;
 
+    /// Sets one voxel and commits it, returning the chunks it makes stale.
+    fn commit_one(edits: &Edits, position: IVec3, voxel: WorldVoxel) -> HashSet<IVec3> {
+        edits.set(position, voxel);
+        edits.commit()
+    }
+
     /// The chunks that one edit at `position` makes stale.
     fn stale_after_editing(position: IVec3) -> HashSet<IVec3> {
-        Edits::default().commit(&[(position, WorldVoxel::Solid(1))])
+        commit_one(&Edits::default(), position, WorldVoxel::Solid(1))
     }
 
     fn chunks(positions: &[[i32; 3]]) -> HashSet<IVec3> {
@@ -170,45 +221,127 @@ mod tests {
     }
 
     #[test]
-    fn committed_edits_are_read_back() {
+    fn edits_are_read_back_before_and_after_they_are_committed() {
         let edits = Edits::default();
         let position = IVec3::new(3, -40, 70);
-        edits.commit(&[(position, WorldVoxel::Solid(2))]);
+        edits.set(position, WorldVoxel::Solid(2));
 
+        assert_eq!(edits.reader().get(position), Some(WorldVoxel::Solid(2)));
+        edits.commit();
         let reader = edits.reader();
         assert_eq!(reader.get(position), Some(WorldVoxel::Solid(2)));
         assert_eq!(reader.get(position + IVec3::X), None);
     }
 
     #[test]
-    fn a_reader_sees_edits_committed_after_it_was_made() {
+    fn the_last_voxel_set_is_read_and_committed() {
         let edits = Edits::default();
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(1));
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(2));
+
+        assert_eq!(edits.reader().get(IVec3::ZERO), Some(WorldVoxel::Solid(2)));
+        edits.commit();
+        assert_eq!(edits.reader().get(IVec3::ZERO), Some(WorldVoxel::Solid(2)));
+    }
+
+    #[test]
+    fn a_reader_keeps_the_pending_edits_it_was_made_with() {
+        let edits = Edits::default();
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(1));
         let reader = edits.reader();
-        edits.commit(&[(IVec3::ZERO, WorldVoxel::Solid(1))]);
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(2));
 
         assert_eq!(reader.get(IVec3::ZERO), Some(WorldVoxel::Solid(1)));
     }
 
     #[test]
+    fn a_reader_sees_later_edits_once_they_are_committed() {
+        let edits = Edits::default();
+        let reader = edits.reader();
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(1));
+
+        assert_eq!(reader.get(IVec3::ZERO), None);
+        edits.commit();
+        assert_eq!(reader.get(IVec3::ZERO), Some(WorldVoxel::Solid(1)));
+    }
+
+    #[test]
+    fn a_reader_made_during_a_commit_sees_each_edit_pending_or_committed() {
+        const ROUNDS: u32 = 100_000;
+        let edits = VoxelEdits::<(), u32>::default();
+        // The last voxel read. Each edit is committed only once it has been read
+        // while pending, so that a reader made during the commit could tell if
+        // the edit went missing.
+        let read = AtomicU32::new(0);
+        let went_back = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for n in 1..=ROUNDS {
+                    edits.set(IVec3::ZERO, WorldVoxel::Solid(n));
+                    while read.load(Ordering::Acquire) < n {
+                        std::thread::yield_now();
+                    }
+                    edits.commit();
+                }
+            });
+
+            let mut last = 0;
+            let mut went_back = None;
+            while last < ROUNDS {
+                let n = match edits.reader().get(IVec3::ZERO) {
+                    Some(WorldVoxel::Solid(n)) => n,
+                    _ => 0,
+                };
+                if n < last {
+                    went_back = Some((last, n));
+                    break;
+                }
+                last = n;
+                read.store(n, Ordering::Release);
+            }
+            // Lets the writer finish if the voxel went back.
+            read.store(u32::MAX, Ordering::Release);
+            went_back
+        });
+        assert_eq!(
+            went_back, None,
+            "the voxel was read as one value, then as an older one"
+        );
+    }
+
+    #[test]
     fn committing_the_same_voxel_again_makes_no_chunk_stale() {
         let edits = Edits::default();
-        let edit = [(IVec3::new(5, 5, 5), WorldVoxel::Solid(1))];
+        let position = IVec3::new(5, 5, 5);
 
-        assert_eq!(edits.commit(&edit), chunks(&[[0, 0, 0]]));
-        assert!(edits.commit(&edit).is_empty());
+        assert_eq!(
+            commit_one(&edits, position, WorldVoxel::Solid(1)),
+            chunks(&[[0, 0, 0]])
+        );
+        assert!(commit_one(&edits, position, WorldVoxel::Solid(1)).is_empty());
     }
 
     #[test]
     fn committing_a_different_voxel_makes_its_chunk_stale_again() {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
-        edits.commit(&[(position, WorldVoxel::Solid(1))]);
+        commit_one(&edits, position, WorldVoxel::Solid(1));
 
         assert_eq!(
-            edits.commit(&[(position, WorldVoxel::Solid(2))]),
+            commit_one(&edits, position, WorldVoxel::Solid(2)),
             chunks(&[[0, 0, 0]])
         );
         assert_eq!(edits.reader().get(position), Some(WorldVoxel::Solid(2)));
+    }
+
+    #[test]
+    fn setting_a_committed_voxel_and_back_makes_no_chunk_stale() {
+        let edits = Edits::default();
+        let position = IVec3::new(5, 5, 5);
+        commit_one(&edits, position, WorldVoxel::Solid(1));
+
+        edits.set(position, WorldVoxel::Solid(2));
+        edits.set(position, WorldVoxel::Solid(1));
+        assert!(edits.commit().is_empty());
     }
 
     #[test]
@@ -287,7 +420,7 @@ mod tests {
     fn a_chunk_task_reads_the_edits_its_padding_reaches() {
         let edits = Edits::default();
         let position = IVec3::new(-1, 5, 5);
-        edits.commit(&[(position, WorldVoxel::Solid(1))]);
+        commit_one(&edits, position, WorldVoxel::Solid(1));
 
         for chunk_pos in [IVec3::new(-1, 0, 0), IVec3::ZERO] {
             let chunk_edits = edits.chunk_edits(chunk_pos);
@@ -301,10 +434,10 @@ mod tests {
     fn a_chunk_task_keeps_the_edits_it_started_with() {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
-        edits.commit(&[(position, WorldVoxel::Solid(1))]);
+        commit_one(&edits, position, WorldVoxel::Solid(1));
         let started_with = edits.chunk_edits(IVec3::ZERO);
 
-        edits.commit(&[(position, WorldVoxel::Solid(2))]);
+        commit_one(&edits, position, WorldVoxel::Solid(2));
 
         assert_eq!(started_with.get(position), Some(WorldVoxel::Solid(1)));
         assert_eq!(

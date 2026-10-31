@@ -23,6 +23,9 @@
 - With `ChunkDespawnStrategy::FarAwayOrOutOfView`, chunks out of view are only spawned within `min_despawn_distance`, whatever the `ChunkSpawnStrategy`. Before, `ChunkSpawnStrategy::Close` spawned chunks that would be despawned the next frame.
 - Fix: `max_spawn_per_frame` is the most chunks spawned in a frame, and chunks within `min_despawn_distance` of a camera spawn first, nearest first. Before, it limited a queue of candidate chunks, which neither bounded how many chunks spawned nor favoured the ones nearest a camera.
 - Fix: with several cameras, a chunk's LOD level is chosen with the camera nearest the chunk's centre. Before, it was the camera nearest the chunk's minimum corner, which could be the farther camera.
+- Fix: when `set_voxel` sets the same position more than once, the last voxel set wins. Before, `get_voxel` returned the first voxel set there until the start of the next frame. Setting a voxel that was set in an earlier frame to another voxel and back within one frame no longer remeshes its chunk.
+- Systems that use `VoxelWorld` can run in parallel, including ones that call `set_voxel`. Before, each `VoxelWorld` held the voxel edits mutably, so Bevy ran these systems one at a time.
+- `get_voxel`, `get_voxel_fn` and `raycast_fn` no longer copy the voxels set this frame, and `get_voxel` no longer builds a closure on every call.
 
 ## 0.18
 

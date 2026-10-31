@@ -2,20 +2,20 @@
 /// VoxelWorld
 /// This module implements most of the public API for bevy_voxel_world.
 ///
+use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     chunk::{chunk_containing, ChunkData, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
-    chunk_map::ChunkMap,
+    chunk_map::{ChunkMap, ChunkMapData},
     configuration::VoxelWorldConfig,
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
-    voxel_edits::VoxelEdits,
-    voxel_world_internal::VoxelWriteBuffer,
+    voxel_edits::{VoxelEditReader, VoxelEdits},
 };
 
 /// This component is used to mark Cameras that bevy_voxel_world should use to determine
@@ -188,8 +188,6 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    voxel_write_buffer:
-        ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     #[allow(unused)]
     configuration: Res<'w, C>,
 }
@@ -209,13 +207,20 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
 
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
-        self.get_voxel_fn()(position)
+        voxel_at(
+            &self.voxel_edits.reader(),
+            &self.chunk_map.get_map(),
+            position,
+        )
     }
 
-    /// Set the voxel at the given position. This will create a new chunk if one does not exist at
-    /// the given position.
+    /// Set the voxel at the given position. It replaces the generated voxel there for
+    /// as long as the world exists, and `get_voxel` returns it right away. Setting a
+    /// voxel doesn't spawn a chunk: a spawned chunk that contains it remeshes to show
+    /// it, and a chunk spawned later shows it from the start. When the same position
+    /// is set more than once, the last voxel set wins.
     pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::MaterialIndex>) {
-        self.voxel_write_buffer.push((position, voxel));
+        self.voxel_edits.set(position, voxel);
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
@@ -223,34 +228,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     pub fn get_voxel_fn(
         &self,
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
-        let chunk_map = self.chunk_map.get_map();
-        let write_buffer = self.voxel_write_buffer.clone();
         let voxel_edits = self.voxel_edits.reader();
+        let chunk_map = self.chunk_map.get_map();
 
-        Arc::new(move |position| {
-            let (chunk_pos, _) = get_chunk_voxel_position(position);
-
-            if let Some(voxel) = write_buffer
-                .iter()
-                .find(|(pos, _)| *pos == position)
-                .map(|(_, voxel)| *voxel)
-            {
-                return voxel;
-            }
-
-            if let Some(voxel) = voxel_edits.get(position) {
-                return voxel;
-            }
-
-            let chunk_opt = {
-                let chun_map_read = chunk_map.read().unwrap();
-                chun_map_read.get(&chunk_pos).cloned()
-            };
-
-            chunk_opt
-                .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
-                .unwrap_or(WorldVoxel::Unset)
-        })
+        Arc::new(move |position| voxel_at(&voxel_edits, &chunk_map, position))
     }
 
     /// Get the ChunkData for the given chunk position
@@ -458,4 +439,22 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)
+}
+
+/// The voxel at `position`: its voxel edit if it has one, or else its voxel in the
+/// published chunk data.
+fn voxel_at<I: Hash + Copy + PartialEq>(
+    voxel_edits: &VoxelEditReader<I>,
+    chunk_map: &RwLock<ChunkMapData<I>>,
+    position: IVec3,
+) -> WorldVoxel<I> {
+    if let Some(voxel) = voxel_edits.get(position) {
+        return voxel;
+    }
+    chunk_map
+        .read()
+        .unwrap()
+        .get(&chunk_containing(position))
+        .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
+        .unwrap_or(WorldVoxel::Unset)
 }

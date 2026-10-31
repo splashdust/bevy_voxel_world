@@ -13,7 +13,6 @@ use crate::{
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
     streaming_policy::{self, CameraSnapshot, ExistingChunk, Occupancy},
-    voxel::WorldVoxel,
     voxel_edits::VoxelEdits,
     voxel_material::LoadingTexture,
     voxel_world::VoxelWorldCamera,
@@ -23,11 +22,6 @@ use crate::{
 pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
     Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera<C>>>,
 );
-
-/// Voxel edits set since the last frame, committed to `VoxelEdits` at the start
-/// of the next frame's `VoxelWorldSet`.
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct VoxelWriteBuffer<C, I>(#[deref] Vec<(IVec3, WorldVoxel<I>)>, PhantomData<C>);
 
 #[derive(Component)]
 pub(crate) struct NeedsMaterial<C>(PhantomData<C>);
@@ -65,7 +59,6 @@ where
         commands.init_resource::<MeshCache<C>>();
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
         commands.init_resource::<VoxelEdits<C, C::MaterialIndex>>();
-        commands.init_resource::<VoxelWriteBuffer<C, C::MaterialIndex>>();
         commands.init_resource::<ChunkIndex<C>>();
         commands.init_resource::<ChunkRequests<C>>();
 
@@ -133,15 +126,10 @@ where
     /// Commits the voxel edits set since the last frame, and requests that the
     /// chunks they make stale be updated.
     pub fn commit_voxel_edits(
-        mut buffer: ResMut<VoxelWriteBuffer<C, C::MaterialIndex>>,
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
     ) {
-        if buffer.is_empty() {
-            return;
-        }
-        requests.edited.extend(voxel_edits.commit(&buffer));
-        buffer.clear();
+        requests.edited.extend(voxel_edits.commit());
     }
 
     /// Shows the meshes of chunks once the voxel texture has loaded.
