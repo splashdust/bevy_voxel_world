@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    chunk::{ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U},
+    chunk::{chunk_containing, ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U},
     chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
@@ -455,12 +455,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
 /// Returns a tuple of the chunk position and the voxel position within the chunk.
 #[inline]
 pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
-    let chunk_position = IVec3 {
-        x: (position.x as f32 / CHUNK_SIZE_F).floor() as i32,
-        y: (position.y as f32 / CHUNK_SIZE_F).floor() as i32,
-        z: (position.z as f32 / CHUNK_SIZE_F).floor() as i32,
-    };
-
+    let chunk_position = chunk_containing(position);
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)

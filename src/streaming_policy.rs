@@ -10,7 +10,7 @@ use bevy::{math::Affine3A, platform::collections::HashSet, prelude::*};
 use rand::{Rng, RngExt};
 
 use crate::{
-    chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I},
+    chunk::{chunk_containing, CHUNK_SIZE_F, CHUNK_SIZE_I},
     configuration::{
         ChunkDespawnStrategy, ChunkSpawnStrategy, LodLevel, VoxelWorldConfig,
     },
@@ -47,7 +47,7 @@ impl CameraSnapshot {
     }
 
     fn chunk_position(&self) -> IVec3 {
-        self.position.as_ivec3() / CHUNK_SIZE_I
+        chunk_containing(self.position.floor().as_ivec3())
     }
 
     /// The ray from the near plane through a point of the viewport, given in
@@ -210,7 +210,7 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
             let mut current = ray.origin;
             let mut t = 0.0;
             while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
-                let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
+                let chunk_pos = chunk_containing(current.floor().as_ivec3());
                 match occupancy(chunk_pos) {
                     // If we hit a full chunk, we can stop the ray early
                     Occupancy::Full => break,
@@ -675,5 +675,47 @@ mod tests {
                 "{position} spawns at the LOD level chunk_lod gives it"
             );
         }
+    }
+
+    /// A chunk whose centre is at negative coordinates on every axis.
+    const NEGATIVE: IVec3 = IVec3::splat(-1);
+
+    #[test]
+    fn a_camera_in_negative_coordinates_protects_its_own_chunk() {
+        let config = TestWorld {
+            spawn_in_view: true,
+            ..default()
+        };
+
+        let plan = plan_with(
+            &config,
+            &[camera(NEGATIVE, Vec3::NEG_Z)],
+            &HashMap::new(),
+            vec![],
+        );
+
+        let spawned = spawned(&plan);
+        let missing: Vec<_> = within(NEGATIVE, 1).difference(&spawned).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "protected chunks did not spawn: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn rays_find_chunks_ahead_of_a_camera_in_negative_coordinates() {
+        let config = TestWorld {
+            spawn_in_view: true,
+            ..default()
+        };
+
+        let plan = plan_with(
+            &config,
+            &[camera(NEGATIVE, Vec3::NEG_Z)],
+            &HashMap::new(),
+            vec![],
+        );
+
+        assert!(spawned(&plan).contains(&(NEGATIVE + IVec3::new(0, 0, -2))));
     }
 }

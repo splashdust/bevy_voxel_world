@@ -23,6 +23,12 @@ pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
 
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
+
+/// The position of the chunk that contains a voxel. Rounds down, so voxel -1
+/// is in chunk -1.
+pub(crate) fn chunk_containing(voxel_position: IVec3) -> IVec3 {
+    voxel_position.div_euclid(IVec3::splat(CHUNK_SIZE_I))
+}
 pub type PaddedChunkShape =
     ConstShape3u32<PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE, PADDED_CHUNK_SIZE>;
 
@@ -254,8 +260,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     /// Returns true if the given voxel is within the bounds of the chunk
     /// and the voxel data at the given position matches the given voxel
     pub fn has_voxel(&self, voxel_pos: IVec3, voxel: WorldVoxel<I>) -> bool {
-        let chunk_pos = voxel_pos / CHUNK_SIZE_I;
-        if self.position != chunk_pos {
+        if self.position != chunk_containing(voxel_pos) {
             return false;
         }
         self.get_voxel_at_world_position(voxel_pos) == Some(voxel)

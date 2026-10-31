@@ -1080,6 +1080,21 @@ fn voxel_line_traversal_ending_on_voxel_boundary() {
 }
 
 #[test]
+fn chunk_data_has_voxels_at_negative_coordinates() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    let chunk_pos = IVec3::splat(-1);
+
+    update_until(&mut app, "the chunk at (-1, -1, -1) to be ready", |app| {
+        chunk_status::<FloorWorld>(app, chunk_pos) == Some(ChunkStatus::Ready)
+    });
+
+    let data = chunk_data::<FloorWorld>(&mut app, chunk_pos).unwrap();
+    assert!(data.has_voxel(IVec3::new(-5, -1, -5), WorldVoxel::Solid(1)));
+}
+
+#[test]
 fn can_get_chunk_data() {
     let mut app = _test_setup_app();
 

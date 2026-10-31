@@ -29,10 +29,6 @@ pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
 /// The edited voxels of one chunk, shared with the chunk tasks that read them.
 type EditBucket<I> = Arc<HashMap<IVec3, WorldVoxel<I>>>;
 
-fn chunk_of(position: IVec3) -> IVec3 {
-    position.div_euclid(IVec3::splat(CHUNK_SIZE_I))
-}
-
 /// Holds every voxel edit, kept between chunk spawn and despawn. Edits are
 /// grouped by chunk, so a chunk task takes the edits it reads when it starts and
 /// holds no lock while it runs.
@@ -51,7 +47,10 @@ impl<C, I> Default for ModifiedVoxels<C, I> {
 impl<C, I: Copy + PartialEq> ModifiedVoxels<C, I> {
     pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel<I>> {
         let buckets = self.0.read().unwrap();
-        buckets.get(&chunk_of(*position))?.get(position).copied()
+        buckets
+            .get(&chunk_containing(*position))?
+            .get(position)
+            .copied()
     }
 
     /// The edits a chunk task at `chunk_pos` reads.
@@ -85,7 +84,7 @@ impl<C, I: Copy + PartialEq> ModifiedVoxels<C, I> {
             self.0.write().unwrap()
         };
         for &(position, voxel) in edits {
-            let bucket = buckets.entry(chunk_of(position)).or_default();
+            let bucket = buckets.entry(chunk_containing(position)).or_default();
             // Skip writes that don't change the voxel, so setting the same value
             // every frame doesn't remesh the chunk every frame.
             if bucket.get(&position) == Some(&voxel) {
@@ -120,7 +119,7 @@ impl<I: Copy> ChunkEdits<I> {
     }
 
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
-        let offset = chunk_of(position) - self.chunk_pos + 1;
+        let offset = chunk_containing(position) - self.chunk_pos + 1;
         if offset.cmplt(IVec3::ZERO).any() || offset.cmpgt(IVec3::splat(2)).any() {
             return None;
         }

@@ -17,6 +17,7 @@
 - Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
 - Fix: frames with voxel edits no longer wait for running chunk tasks either; each chunk task takes the edits it needs when it starts.
 - Fix: spawning rays are spread over the camera's viewport on high-DPI displays and for cameras with a custom viewport. Before, they were picked in physical pixels from the window's corner but cast in logical pixels from the viewport's, so on a 2× display about three quarters of them landed outside it.
+- Fix: chunk positions round down at negative coordinates everywhere. Before, a camera's chunk and the chunks along spawning rays rounded toward zero, so near a camera at negative coordinates the wrong chunks were protected and found by rays, and `ChunkData::has_voxel` returned false for every voxel in a chunk at negative coordinates.
 
 ## 0.18
 
