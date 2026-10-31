@@ -6,6 +6,10 @@
 - Finished chunks are now collected and published in the same frame, one frame sooner than before.
 - `minimal()` worlds now publish generated voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
 - Chunk data is published while the voxel texture is still loading; only showing chunk meshes waits for it.
+- Add `VoxelWorld::chunk_state`, which tells where a chunk is in its lifecycle as a `ChunkStatus`: `Pending`, `Generating`, `Ready` or `Retiring`.
+- Breaking: `get_chunk_data` returns `None` until a chunk's data is first published, and raycasts only cover published chunks. Before, a newly spawned chunk had empty placeholder data.
+- Breaking: a retiring chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query the entity.
+- Breaking: `Chunk<C>` fields are read through getters (`position()`, `lod_level()`, `entity()`, `data_shape()`, `mesh_shape()`), and `Chunk::new` and `Chunk::from` are no longer public. `NeedsDespawn` is removed; use `chunk_state` instead.
 - Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
 
 ## 0.18

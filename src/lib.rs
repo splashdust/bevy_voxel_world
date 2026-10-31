@@ -1,4 +1,5 @@
 mod chunk;
+mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
@@ -12,7 +13,8 @@ mod voxel_world;
 mod voxel_world_internal;
 
 pub mod prelude {
-    pub use crate::chunk::{Chunk, NeedsDespawn};
+    pub use crate::chunk::Chunk;
+    pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};

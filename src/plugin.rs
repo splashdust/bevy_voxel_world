@@ -6,6 +6,7 @@ use bevy::{
 };
 
 use crate::{
+    chunk_lifecycle::ChunkLifecycle,
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
         prepare_texture, prepare_voxel_texture, LoadingTexture, StandardVoxelMaterial,
@@ -109,22 +110,23 @@ where
                         Internals::<C>::update_chunk_lods,
                         Internals::<C>::retire_chunks,
                     )
-                        .chain_ignore_deferred(),
-                    // Starting tasks and despawning need the chunks spawned and marked
-                    // above. No other step depends on an earlier step's commands, so this
-                    // is the only sync point the set needs.
+                        .chain(),
+                    ChunkLifecycle::<C>::apply_requests,
+                    // Starting tasks needs the chunks spawned above. No other step
+                    // depends on an earlier step's commands, so this is the only sync
+                    // point the set needs.
                     ApplyDeferred,
-                    Internals::<C>::remesh_dirty_chunks,
-                    Internals::<C>::collect_chunk_tasks,
+                    ChunkLifecycle::<C>::start_chunk_tasks,
+                    ChunkLifecycle::<C>::collect_chunk_tasks,
                     (
-                        Internals::<C>::flush_chunk_map_buffers,
-                        Internals::<C>::flush_mesh_cache_buffers,
+                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
+                        ChunkLifecycle::<C>::flush_mesh_cache_buffers,
                     ),
                     // Flushing again removes the despawned chunks from the chunk map
                     // this frame.
                     (
-                        Internals::<C>::despawn_retired_chunks,
-                        Internals::<C>::flush_chunk_map_buffers,
+                        ChunkLifecycle::<C>::despawn_retired_chunks,
+                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
                     )
                         .chain(),
                 )

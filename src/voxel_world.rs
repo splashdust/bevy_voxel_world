@@ -9,6 +9,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     chunk::{ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U},
+    chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
     chunk_map::ChunkMap,
     configuration::VoxelWorldConfig,
     traversal_alg::voxel_line_traversal,
@@ -174,7 +175,9 @@ impl<I> VoxelRaycastResult<I> {
 
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
-pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
+pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
+    chunk_index: Res<'w, ChunkIndex<C>>,
+    chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_write_buffer:
@@ -183,7 +186,19 @@ pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
     configuration: Res<'w, C>,
 }
 
-impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
+impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
+    /// Where the chunk at the given chunk position is in the chunk lifecycle, or
+    /// `None` if no chunk is spawned there.
+    pub fn chunk_state(&self, chunk_pos: IVec3) -> Option<ChunkStatus> {
+        let entity = self.chunk_index.get(chunk_pos)?;
+        // A chunk spawned this frame has no state component until commands apply.
+        Some(
+            self.chunk_states
+                .get(entity)
+                .map_or(ChunkStatus::Pending, |state| state.status()),
+        )
+    }
+
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
         self.get_voxel_fn()(position)

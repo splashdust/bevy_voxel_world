@@ -1,4 +1,4 @@
-use bevy::{platform::collections::HashSet, prelude::*, tasks::Task};
+use bevy::{platform::collections::HashSet, prelude::*};
 use ndshape::{ConstShape3u32, RuntimeShape, Shape};
 use std::{
     hash::{Hash, Hasher},
@@ -40,29 +40,6 @@ fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
         CHUNK_SIZE_F / iz as f32,
     )
 }
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub(crate) struct ChunkThread<C: VoxelWorldConfig, I>(
-    pub Task<ChunkTask<C, I>>,
-    PhantomData<C>,
-);
-
-impl<C, I> ChunkThread<C, I>
-where
-    C: VoxelWorldConfig,
-{
-    pub fn new(task: Task<ChunkTask<C, I>>, _pos: IVec3) -> Self {
-        Self(task, PhantomData)
-    }
-}
-
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct NeedsRemesh;
-
-#[derive(Component)]
-pub struct NeedsDespawn;
 
 #[derive(Clone, Debug)]
 pub enum FillType<I> {
@@ -297,19 +274,20 @@ impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
     }
 }
 
-/// A marker component for chunks, with some helpful data
+/// A chunk entity of the voxel world `C`. Its chunk state is read through
+/// `VoxelWorld::chunk_state`.
 #[derive(Component, Clone)]
 pub struct Chunk<C> {
-    pub position: IVec3,
-    pub lod_level: LodLevel,
-    pub entity: Entity,
-    pub data_shape: UVec3,
-    pub mesh_shape: UVec3,
+    pub(crate) position: IVec3,
+    pub(crate) lod_level: LodLevel,
+    pub(crate) entity: Entity,
+    pub(crate) data_shape: UVec3,
+    pub(crate) mesh_shape: UVec3,
     _marker: PhantomData<C>,
 }
 
 impl<C> Chunk<C> {
-    pub fn new(
+    pub(crate) fn new(
         position: IVec3,
         lod_level: LodLevel,
         entity: Entity,
@@ -326,15 +304,25 @@ impl<C> Chunk<C> {
         }
     }
 
-    pub fn from(chunk: &Chunk<C>) -> Self {
-        Self {
-            position: chunk.position,
-            lod_level: chunk.lod_level,
-            entity: chunk.entity,
-            data_shape: chunk.data_shape,
-            mesh_shape: chunk.mesh_shape,
-            _marker: PhantomData,
-        }
+    /// The chunk position, in chunks.
+    pub fn position(&self) -> IVec3 {
+        self.position
+    }
+
+    pub fn lod_level(&self) -> LodLevel {
+        self.lod_level
+    }
+
+    pub fn entity(&self) -> Entity {
+        self.entity
+    }
+
+    pub fn data_shape(&self) -> UVec3 {
+        self.data_shape
+    }
+
+    pub fn mesh_shape(&self) -> UVec3 {
+        self.mesh_shape
     }
 
     pub fn aabb(&self) -> Aabb3d {

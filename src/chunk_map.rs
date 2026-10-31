@@ -19,9 +19,8 @@ pub struct ChunkMapData<I> {
     bounds: Aabb3d,
 }
 
-/// Holds a map of all chunks that are currently spawned spawned
-/// The chunks also exist as entities that can be queried in the ECS,
-/// but having this map in addition allows for faster spatial lookups
+/// Holds the published data of chunks, by chunk position. A chunk has no entry
+/// here until its first chunk task is published.
 #[derive(Resource)]
 pub struct ChunkMap<C, I> {
     map: Arc<RwLock<ChunkMapData<I>>>,
@@ -72,37 +71,15 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
 
     pub(crate) fn apply_buffers(
         &self,
-        insert_buffer: &mut ChunkMapInsertBuffer<C, I>,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
         ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
     ) {
-        if insert_buffer.is_empty()
-            && update_buffer.is_empty()
-            && remove_buffer.is_empty()
-        {
+        if update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
         }
 
         if let Ok(mut write_lock) = self.map.try_write() {
-            for (position, chunk_data) in insert_buffer.iter() {
-                write_lock.data.insert(
-                    *position,
-                    ChunkData {
-                        position: *position,
-                        ..chunk_data.clone()
-                    },
-                );
-
-                let position_f = Vec3A::from(position.as_vec3());
-                if position_f.cmplt(write_lock.bounds.min).any() {
-                    write_lock.bounds.min = position_f.min(write_lock.bounds.min);
-                } else if position_f.cmpgt(write_lock.bounds.max).any() {
-                    write_lock.bounds.max = position_f.max(write_lock.bounds.max);
-                }
-            }
-            insert_buffer.clear();
-
             for (position, chunk_data, evt) in update_buffer.iter() {
                 write_lock.data.insert(
                     *position,
@@ -132,7 +109,9 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
             }
             remove_buffer.clear();
 
-            if need_rebuild_aabb {
+            if write_lock.data.is_empty() {
+                write_lock.bounds = Aabb3d::new(Vec3::ZERO, Vec3::ZERO);
+            } else if need_rebuild_aabb {
                 let mut tmp_vec = Vec::with_capacity(write_lock.data.len());
                 for v in write_lock.data.keys() {
                     tmp_vec.push(Vec3A::from(v.as_vec3()));
@@ -155,12 +134,6 @@ impl<C, I> Default for ChunkMap<C, I> {
         }
     }
 }
-
-#[derive(Resource, Deref, DerefMut, Default, Debug)]
-pub(crate) struct ChunkMapInsertBuffer<C, I>(
-    #[deref] Vec<(IVec3, chunk::ChunkData<I>)>,
-    PhantomData<C>,
-);
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(

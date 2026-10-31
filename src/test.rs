@@ -1,9 +1,10 @@
+use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::chunk_map::{ChunkMap, ChunkMapInsertBuffer, ChunkMapUpdateBuffer};
+use crate::chunk_map::ChunkMapUpdateBuffer;
 use crate::configuration::VoxelWorldConfig;
 use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::meshing::generate_chunk_mesh_for_shape;
@@ -63,18 +64,12 @@ fn chunks_spawn_with_multiple_voxel_world_cameras() {
 
     app.update();
 
-    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
-    let chunk_map = app.world().resource::<ChunkMap<DefaultWorld, Mat>>();
-    let chunk_map_read_lock = chunk_map.get_read_lock();
-
-    assert!(ChunkMap::<DefaultWorld, Mat>::contains_chunk(
-        &IVec3::ZERO,
-        &chunk_map_read_lock,
-    ));
-    assert!(ChunkMap::<DefaultWorld, Mat>::contains_chunk(
-        &(IVec3::new(1000, 10, 10) / CHUNK_SIZE_I),
-        &chunk_map_read_lock,
-    ));
+    for chunk_pos in [IVec3::ZERO, IVec3::new(1000, 10, 10) / CHUNK_SIZE_I] {
+        assert!(
+            chunk_status::<DefaultWorld>(&mut app, chunk_pos).is_some(),
+            "no chunk spawned at {chunk_pos}"
+        );
+    }
 }
 
 #[test]
@@ -132,7 +127,13 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
         }
     });
 
-    app.update();
+    // Raycasts only cover published chunks.
+    update_until(&mut app, "the edited chunks to be ready", |app| {
+        positions.iter().all(|pos| {
+            let (chunk_pos, _) = get_chunk_voxel_position(*pos);
+            chunk_status::<DefaultWorld>(app, chunk_pos) == Some(ChunkStatus::Ready)
+        })
+    });
 
     let check_pos = positions.clone();
 
@@ -212,6 +213,38 @@ fn update_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> boo
     }
 }
 
+fn move_cameras<C: VoxelWorldConfig>(app: &mut App, to: Transform) {
+    let mut cameras = app
+        .world_mut()
+        .query_filtered::<(&mut Transform, &mut GlobalTransform), With<VoxelWorldCamera<C>>>();
+    for (mut transform, mut global) in cameras.iter_mut(app.world_mut()) {
+        *transform = to;
+        *global = GlobalTransform::from(to);
+    }
+}
+
+fn chunk_status<C: VoxelWorldConfig>(
+    app: &mut App,
+    chunk_pos: IVec3,
+) -> Option<ChunkStatus> {
+    app.world_mut()
+        .run_system_once(move |voxel_world: VoxelWorld<C>| {
+            voxel_world.chunk_state(chunk_pos)
+        })
+        .unwrap()
+}
+
+fn chunk_data<C: VoxelWorldConfig>(
+    app: &mut App,
+    chunk_pos: IVec3,
+) -> Option<ChunkData<C::MaterialIndex>> {
+    app.world_mut()
+        .run_system_once(move |voxel_world: VoxelWorld<C>| {
+            voxel_world.get_chunk_data(chunk_pos)
+        })
+        .unwrap()
+}
+
 #[derive(Resource, Default)]
 struct Published(Vec<IVec3>);
 
@@ -224,12 +257,9 @@ fn minimal_world_publishes_generated_voxels() {
     let below_ground = IVec3::new(1, -3, 1);
     update_until(&mut app, "generated voxel to be readable", |app| {
         app.world_mut()
-            .run_system_cached_with(
-                |In(pos): In<IVec3>, voxel_world: VoxelWorld<FloorWorld>| {
-                    voxel_world.get_voxel(pos)
-                },
-                below_ground,
-            )
+            .run_system_once(move |voxel_world: VoxelWorld<FloorWorld>| {
+                voxel_world.get_voxel(below_ground)
+            })
             .unwrap()
             == WorldVoxel::Solid(1)
     });
@@ -262,6 +292,152 @@ fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
     update_until(&mut app, "a chunk to be published", |app| {
         app.world().resource::<Published>().0.len() > 5
     });
+}
+
+#[test]
+fn a_chunk_is_ready_once_it_is_published() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    assert!(chunk_data::<FloorWorld>(&mut app, IVec3::ZERO)
+        .is_some_and(|data| data.has_generated()));
+}
+
+/// A world that never starts a chunk task.
+#[derive(Resource, Clone, Default)]
+struct PausedWorld;
+
+impl VoxelWorldConfig for PausedWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn max_active_chunk_threads(&self) -> usize {
+        0
+    }
+}
+
+#[test]
+fn a_chunk_has_no_data_until_it_is_published() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<PausedWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<PausedWorld>);
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    assert_eq!(
+        chunk_status::<PausedWorld>(&mut app, IVec3::ZERO),
+        Some(ChunkStatus::Pending)
+    );
+    assert!(chunk_data::<PausedWorld>(&mut app, IVec3::ZERO).is_none());
+}
+
+#[derive(Resource, Default)]
+struct Retired(Vec<IVec3>);
+
+#[test]
+fn a_retiring_chunk_can_be_queried_in_the_frame_it_retires() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .init_resource::<Retired>()
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(
+            Update,
+            |mut retired: ResMut<Retired>,
+             mut ev: MessageReader<ChunkWillDespawn<FloorWorld>>,
+             chunks: Query<&Chunk<FloorWorld>>,
+             voxel_world: VoxelWorld<FloorWorld>| {
+                for msg in ev.read() {
+                    let chunk = chunks.get(msg.entity);
+                    assert!(
+                        chunk.is_ok_and(|chunk| chunk.position() == msg.chunk_key),
+                        "retiring chunk {} was already despawned",
+                        msg.chunk_key
+                    );
+                    assert_eq!(
+                        voxel_world.chunk_state(msg.chunk_key),
+                        Some(ChunkStatus::Retiring)
+                    );
+                    retired.0.push(msg.chunk_key);
+                }
+            },
+        );
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+
+    move_cameras::<FloorWorld>(&mut app, Transform::from_xyz(10_000.0, 10.0, 10.0));
+
+    update_until(&mut app, "the chunk at the origin to retire", |app| {
+        app.world().resource::<Retired>().0.contains(&IVec3::ZERO)
+    });
+    app.update();
+    assert_eq!(chunk_status::<FloorWorld>(&mut app, IVec3::ZERO), None);
+}
+
+/// A world whose task slots can be closed while it runs.
+#[derive(Resource, Clone)]
+struct ThrottledWorld {
+    task_slots: usize,
+}
+
+impl Default for ThrottledWorld {
+    fn default() -> Self {
+        Self {
+            task_slots: usize::MAX,
+        }
+    }
+}
+
+impl VoxelWorldConfig for ThrottledWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn max_active_chunk_threads(&self) -> usize {
+        self.task_slots
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+}
+
+#[test]
+fn the_world_survives_despawning_every_published_chunk() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<ThrottledWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<ThrottledWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<ThrottledWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+
+    // No new chunk publishes, so every published chunk is gone once these retire.
+    app.world_mut().resource_mut::<ThrottledWorld>().task_slots = 0;
+    move_cameras::<ThrottledWorld>(&mut app, Transform::from_xyz(10_000.0, 10.0, 10.0));
+    for _ in 0..3 {
+        app.update();
+    }
+
+    assert_eq!(chunk_status::<ThrottledWorld>(&mut app, IVec3::ZERO), None);
+    assert!(chunk_data::<ThrottledWorld>(&mut app, IVec3::ZERO).is_none());
 }
 
 /// A world whose voxel texture never loads.
@@ -439,39 +615,16 @@ fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
         IVec3::new(-1, -1, -1),
     ]);
 
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
-    let camera_transform =
-        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
-    app.world_mut().spawn((
-        Camera::default(),
-        Camera3d::default(),
-        camera_transform,
-        GlobalTransform::from(camera_transform),
-        VoxelWorldCamera::<DefaultWorld>::default(),
-    ));
-    app.update();
-
-    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
-    let mut chunks = Vec::new();
-    for chunk_pos in expected.iter().copied() {
-        let entity = app.world_mut().spawn_empty().id();
-        let shape = UVec3::splat(PADDED_CHUNK_SIZE);
-        app.world_mut()
-            .entity_mut(entity)
-            .insert(Chunk::<DefaultWorld>::new(
-                chunk_pos, 0, entity, shape, shape,
-            ));
-        chunks.push((chunk_pos, ChunkData::<Mat>::with_entity(entity)));
-    }
-
-    app.world_mut()
-        .resource_mut::<ChunkMapInsertBuffer<DefaultWorld, Mat>>()
-        .extend(chunks);
-    app.update();
-    for _ in 0..100 {
-        app.update();
-    }
+    let mut app = _test_setup_app();
+    update_until(
+        &mut app,
+        "the chunks around the origin to be ready",
+        |app| {
+            expected.iter().all(|chunk_pos| {
+                chunk_status::<DefaultWorld>(app, *chunk_pos) == Some(ChunkStatus::Ready)
+            })
+        },
+    );
 
     app.world_mut()
         .resource_mut::<Messages<ChunkWillRemesh<DefaultWorld>>>()
@@ -969,14 +1122,9 @@ fn can_get_chunk_data() {
         voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
     });
 
-    app.update();
-
-    app.add_systems(Update, |voxel_world: VoxelWorld<DefaultWorld>| {
-        let chunk_data = voxel_world.get_chunk_data(IVec3::ZERO);
-        assert!(chunk_data.is_some());
+    update_until(&mut app, "chunk data at the origin", |app| {
+        chunk_data::<DefaultWorld>(app, IVec3::ZERO).is_some()
     });
-
-    app.update();
 }
 
 #[test]
