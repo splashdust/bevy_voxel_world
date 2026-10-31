@@ -4,20 +4,14 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::chunk_map::ChunkMapUpdateBuffer;
 use crate::configuration::VoxelWorldConfig;
-use crate::mesh_cache::MeshCacheInsertBuffer;
 use crate::meshing::generate_chunk_mesh_for_shape;
 use crate::prelude::*;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{
-        Chunk, ChunkData, ChunkTask, FillType, CHUNK_SIZE_F, CHUNK_SIZE_I,
-        PADDED_CHUNK_SIZE,
-    },
+    chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I},
     prelude::VoxelWorldCamera,
     voxel_world::*,
-    voxel_world_internal::{ChunkEdits, ModifiedVoxels},
 };
 use ndshape::{RuntimeShape, Shape};
 use rand::{rngs::StdRng, RngExt, SeedableRng};
@@ -667,64 +661,80 @@ fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
     );
 }
 
-#[test]
-fn chunk_generate_reuses_previous_data_when_configured() {
-    type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;
+/// Voxel lookups by the chunk tasks of the chunk at the origin, in `ReuseWorld`.
+static REUSE_LOOKUPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-    let entity = Entity::from_raw_u32(1).unwrap();
-    let position = IVec3::ZERO;
-    let data_shape = UVec3::splat(PADDED_CHUNK_SIZE);
-    let mesh_shape = data_shape;
+/// A `FloorWorld` that regenerates chunks from their previous data, and counts
+/// the voxel lookups of the chunk at the origin.
+#[derive(Resource, Clone, Default)]
+struct ReuseWorld;
 
-    let data_shape_runtime = RuntimeShape::<u32, 3>::new(data_shape.to_array());
-    let mut voxel_payload =
-        vec![WorldVoxel::Solid(5); data_shape_runtime.size() as usize];
-    let highlighted_block = [1, 1, 1];
-    let highlighted_world_pos = IVec3::new(0, 0, 0);
-    voxel_payload[data_shape_runtime.linearize(highlighted_block) as usize] =
-        WorldVoxel::Solid(9);
-    let voxel_payload: Arc<[WorldVoxel<Mat>]> = Arc::from(voxel_payload);
+impl VoxelWorldConfig for ReuseWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
-    let mut chunk_task = ChunkTask::<DefaultWorld, Mat>::new(
-        entity,
-        position,
-        0,
-        data_shape,
-        mesh_shape,
-        ChunkEdits::default(),
-    );
-
-    let mut previous_data = ChunkData::<Mat>::with_entity(entity);
-    previous_data.position = position;
-    previous_data.data_shape = data_shape;
-    previous_data.mesh_shape = mesh_shape;
-    previous_data.has_generated = true;
-    previous_data.is_full = true;
-    previous_data.is_empty = false;
-    previous_data.fill_type = FillType::Mixed;
-    previous_data.voxels = Some(voxel_payload.clone());
-    previous_data.generate_hash();
-
-    chunk_task.generate(
-        |_pos, _previous| -> WorldVoxel<Mat> {
-            panic!("voxel lookup should not run when reusing previous data");
-        },
-        Some(previous_data),
-        ChunkRegenerateStrategy::Reuse,
-    );
-
-    assert!(chunk_task.chunk_data.voxels.is_some());
-    assert!(chunk_task.is_full());
-    match chunk_task.chunk_data.fill_type {
-        FillType::Mixed => {}
-        ref other => panic!("expected mixed fill type, got {:?}", other),
+    fn spawning_distance(&self) -> u32 {
+        1
     }
 
-    let voxel = chunk_task
-        .chunk_data
-        .get_voxel_at_world_position(highlighted_world_pos)
-        .expect("voxel should be addressable");
-    assert_eq!(voxel, WorldVoxel::Solid(9));
+    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
+        ChunkRegenerateStrategy::Reuse
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|chunk_pos, _, _| {
+            Box::new(move |pos, _| {
+                if chunk_pos == IVec3::ZERO {
+                    REUSE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                floor_voxel(pos)
+            })
+        })
+    }
+}
+
+#[test]
+fn a_remeshed_chunk_reuses_its_previous_data_when_configured() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<ReuseWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<ReuseWorld>)
+        .add_systems(Update, record_announcements::<ReuseWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<ReuseWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    let lookups = REUSE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        lookups > 0,
+        "the first task should look up the chunk's voxels"
+    );
+
+    let edited = IVec3::new(16, 16, 16);
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<ReuseWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(9));
+        })
+        .unwrap();
+    update_until(&mut app, "the edited chunk to be published again", |app| {
+        Announced::count(&app.world().resource::<Announced>().published, IVec3::ZERO) == 2
+    });
+
+    assert_eq!(
+        REUSE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed),
+        lookups,
+        "the remesh should reuse the previous voxels instead of looking them up"
+    );
+    let data = chunk_data::<ReuseWorld>(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(
+        data.get_voxel_at_world_position(edited),
+        Some(WorldVoxel::Solid(9))
+    );
+    assert_eq!(
+        data.get_voxel_at_world_position(IVec3::new(16, -1, 16)),
+        Some(WorldVoxel::Solid(1))
+    );
 }
 
 #[test]
@@ -796,82 +806,41 @@ fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
     }
 }
 
-type RaycastTestBuffers<'w> = (
-    ResMut<
-        'w,
-        ChunkMapUpdateBuffer<
-            DefaultWorld,
-            <DefaultWorld as VoxelWorldConfig>::MaterialIndex,
-        >,
-    >,
-    ResMut<'w, MeshCacheInsertBuffer<DefaultWorld>>,
-);
-
 #[test]
 fn raycast_finds_voxel() {
-    let mut app = _test_setup_app();
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
 
-    // Set up vector och positions to test
-    let positions = vec![IVec3::new(0, 0, -1), IVec3::new(0, 0, 0)];
-
-    let make_pos = positions.clone();
-
-    app.add_systems(
-        Startup,
-        move |mut voxel_world: VoxelWorld<DefaultWorld>, buffers: RaycastTestBuffers| {
-            let test_voxel = crate::voxel::WorldVoxel::Solid(1);
-
-            for pos in make_pos.clone() {
-                voxel_world.set_voxel(pos, test_voxel);
-            }
-
-            let (mut chunk_map_update_buffer, _) = buffers;
-
-            chunk_map_update_buffer.push((
-                IVec3::new(0, 0, 0),
-                ChunkData {
-                    position: IVec3::new(0, 0, 0),
-                    lod_level: 0,
-                    voxels: Some(std::sync::Arc::new([WorldVoxel::Unset; 39304])),
-                    voxels_hash: 0,
-                    is_full: false,
-                    is_empty: false,
-                    fill_type: FillType::Mixed,
-                    entity: Entity::PLACEHOLDER,
-                    has_generated: false,
-                    data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
-                    mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
-                },
-                Entity::PLACEHOLDER,
-            ));
-        },
-    );
-
-    app.update();
-
-    app.add_systems(Update, move |voxel_world: VoxelWorld<DefaultWorld>| {
-        let test_voxel = crate::voxel::WorldVoxel::Solid(1);
-
-        let ray = Ray3d {
-            origin: Vec3::new(0.5, 0.5, 70.0),
-            direction: -Dir3::Z,
-        };
-
-        let Some(result) = voxel_world.raycast(ray, &|(_pos, _vox)| true) else {
-            panic!("No voxel found")
-        };
-
-        assert_eq!(
-            result,
-            VoxelRaycastResult {
-                position: Vec3::ZERO,
-                normal: Some(Vec3::new(0.0, 0.0, 1.0)),
-                voxel: test_voxel,
-            }
-        )
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
     });
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<FloorWorld>| {
+            voxel_world.set_voxel(IVec3::new(0, 0, -1), WorldVoxel::Solid(2));
+            voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(2));
+        })
+        .unwrap();
 
-    app.update();
+    let result = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<FloorWorld>| {
+            let ray = Ray3d {
+                origin: Vec3::new(0.5, 0.5, 70.0),
+                direction: -Dir3::Z,
+            };
+            voxel_world.raycast(ray, &|(_pos, _vox)| true)
+        })
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(VoxelRaycastResult {
+            position: Vec3::ZERO,
+            normal: Some(Vec3::new(0.0, 0.0, 1.0)),
+            voxel: WorldVoxel::Solid(2),
+        })
+    );
 }
 
 struct VisitVoxelTestState<'a> {
@@ -1471,31 +1440,27 @@ fn frames_with_voxel_edits_do_not_wait_for_chunk_tasks() {
 }
 
 #[test]
-fn a_chunk_task_reads_the_edits_made_before_it_started_including_its_padding() {
-    let modified_voxels = ModifiedVoxels::<DefaultWorld, u8>::default();
-    modified_voxels.write(
-        &[
-            (IVec3::new(-1, 0, 0), WorldVoxel::Solid(3)),
-            (IVec3::new(32, 31, 32), WorldVoxel::Solid(4)),
-            (IVec3::new(64, 0, 0), WorldVoxel::Solid(5)),
-        ],
-        |_| {},
-    );
+fn a_published_chunk_includes_the_edits_in_its_padding() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
 
-    let edits = modified_voxels.chunk_edits(IVec3::ZERO);
-    assert_eq!(edits.get(IVec3::new(-1, 0, 0)), Some(WorldVoxel::Solid(3)));
-    assert_eq!(
-        edits.get(IVec3::new(32, 31, 32)),
-        Some(WorldVoxel::Solid(4))
-    );
-    assert_eq!(edits.get(IVec3::new(64, 0, 0)), None);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    // Inside the chunk at x = -1, and in the padding of the chunk at the origin.
+    let edited = IVec3::new(-1, 0, 0);
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<FloorWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(3));
+        })
+        .unwrap();
 
-    modified_voxels.write(&[(IVec3::ZERO, WorldVoxel::Solid(6))], |_| {});
-    assert_eq!(edits.get(IVec3::ZERO), None);
-    assert_eq!(
-        modified_voxels.chunk_edits(IVec3::ZERO).get(IVec3::ZERO),
-        Some(WorldVoxel::Solid(6))
-    );
+    update_until(&mut app, "the edit in the origin chunk's padding", |app| {
+        chunk_data::<FloorWorld>(app, IVec3::ZERO)
+            .and_then(|data| data.get_voxel_at_world_position(edited))
+            == Some(WorldVoxel::Solid(3))
+    });
 }
 
 /// The chunk positions of each `ChunkWillSpawn` and `ChunkPublished` message.
