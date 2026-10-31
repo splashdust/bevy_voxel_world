@@ -44,8 +44,17 @@ pub enum ChunkStatus {
 /// Public only because `VoxelWorld` queries it; this module isn't exported.
 #[derive(Component)]
 pub enum ChunkState<T: Send + Sync + 'static> {
-    Pending,
-    Generating(T),
+    /// `priority` chunks get task slots before the others: follow-ups of
+    /// superseded tasks and remeshes after an edit.
+    Pending {
+        priority: bool,
+    },
+    /// `superseded` turns true when an edit or LOD change makes the running
+    /// task's inputs stale; a follow-up task starts once it is published.
+    Generating {
+        task: T,
+        superseded: bool,
+    },
     Ready,
     /// `kept` turns true once the chunk has lived through a frame while retiring.
     Retiring {
@@ -61,8 +70,10 @@ pub(crate) enum ChunkEvent<T> {
     TaskFinished,
     /// The chunk's task relied on a cached mesh that expired before it finished.
     CachedMeshExpired,
-    /// An edit or LOD change made the chunk's voxel data or mesh stale.
-    Dirty,
+    /// A voxel edit made the chunk's voxel data stale.
+    Edited,
+    /// A LOD change gave the chunk a new data or mesh shape.
+    Reshaped,
     /// The chunk was chosen for despawning.
     Retire,
     /// The despawn step of a frame ran.
@@ -84,7 +95,7 @@ pub(crate) enum Effect {
 impl<T: Send + Sync + 'static> ChunkState<T> {
     /// Moves the chunk to its next state and returns what remains to be done.
     pub(crate) fn apply(&mut self, event: ChunkEvent<T>) -> Effect {
-        let state = std::mem::replace(self, ChunkState::Pending);
+        let state = std::mem::replace(self, ChunkState::Ready);
         let (state, effect) = transition(state, event);
         *self = state;
         effect
@@ -92,16 +103,20 @@ impl<T: Send + Sync + 'static> ChunkState<T> {
 
     pub fn status(&self) -> ChunkStatus {
         match self {
-            ChunkState::Pending => ChunkStatus::Pending,
-            ChunkState::Generating(_) => ChunkStatus::Generating,
+            ChunkState::Pending { .. } => ChunkStatus::Pending,
+            ChunkState::Generating { .. } => ChunkStatus::Generating,
             ChunkState::Ready => ChunkStatus::Ready,
             ChunkState::Retiring { .. } => ChunkStatus::Retiring,
         }
     }
+
+    fn has_priority(&self) -> bool {
+        matches!(self, ChunkState::Pending { priority: true })
+    }
 }
 
 /// The rules of the chunk lifecycle: the state a chunk moves to when `event`
-/// happens to it in `state`. Dropping the old state drops a running task with it.
+/// happens to it in `state`. Retiring is the only way a running task is dropped.
 pub(crate) fn transition<T: Send + Sync + 'static>(
     state: ChunkState<T>,
     event: ChunkEvent<T>,
@@ -118,11 +133,37 @@ pub(crate) fn transition<T: Send + Sync + 'static>(
         }
         (state @ S::Retiring { .. }, _) => (state, Effect::None),
         (_, E::Retire) => (S::Retiring { kept: false }, Effect::AnnounceRetiring),
-        (S::Pending, E::TaskStarted(task)) => (S::Generating(task), Effect::None),
-        (S::Generating(_), E::TaskFinished) => (S::Ready, Effect::Publish),
-        (S::Generating(_), E::CachedMeshExpired) => (S::Pending, Effect::None),
-        // The running task's result would be stale, so it is dropped.
-        (_, E::Dirty) => (S::Pending, Effect::None),
+        (S::Pending { .. }, E::TaskStarted(task)) => (
+            S::Generating {
+                task,
+                superseded: false,
+            },
+            Effect::None,
+        ),
+        (S::Generating { superseded, .. }, E::TaskFinished) => {
+            let state = if superseded {
+                S::Pending { priority: true }
+            } else {
+                S::Ready
+            };
+            (state, Effect::Publish)
+        }
+        // The chunk already had its turn, so it shouldn't wait for another.
+        (S::Generating { .. }, E::CachedMeshExpired) => {
+            (S::Pending { priority: true }, Effect::None)
+        }
+        // The running task finishes and is published, then a follow-up starts.
+        (S::Generating { task, .. }, E::Edited | E::Reshaped) => (
+            S::Generating {
+                task,
+                superseded: true,
+            },
+            Effect::None,
+        ),
+        (S::Pending { .. } | S::Ready, E::Edited) => {
+            (S::Pending { priority: true }, Effect::None)
+        }
+        (S::Ready, E::Reshaped) => (S::Pending { priority: false }, Effect::None),
         (state, _) => (state, Effect::None),
     }
 }
@@ -143,7 +184,9 @@ pub struct ChunkIndex<C> {
     entities: HashMap<IVec3, Entity>,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
-    /// Pending chunks, oldest first. May hold chunks that have since moved on.
+    /// Pending chunks with priority, then the other Pending chunks, oldest first.
+    /// Both may hold chunks that have since moved on.
+    priority: VecDeque<Entity>,
     pending: VecDeque<Entity>,
     generating: HashSet<Entity>,
     retiring: HashSet<Entity>,
@@ -154,6 +197,7 @@ impl<C> Default for ChunkIndex<C> {
     fn default() -> Self {
         Self {
             entities: HashMap::new(),
+            priority: VecDeque::new(),
             pending: VecDeque::new(),
             generating: HashSet::new(),
             retiring: HashSet::new(),
@@ -188,29 +232,30 @@ impl<C> ChunkIndex<C> {
         state: &mut ChunkState<T>,
         event: ChunkEvent<T>,
     ) -> Effect {
-        let before = state.status();
+        let before = (state.status(), state.has_priority());
         let effect = state.apply(event);
-        let after = state.status();
+        let after = (state.status(), state.has_priority());
         if before != after {
-            match before {
+            match before.0 {
                 ChunkStatus::Generating => {
                     self.generating.remove(&entity);
                 }
                 ChunkStatus::Retiring => {
                     self.retiring.remove(&entity);
                 }
-                // Left in the queue; starting tasks skips chunks no longer Pending.
+                // Left in its queue; starting tasks skips chunks no longer Pending.
                 ChunkStatus::Pending | ChunkStatus::Ready => {}
             }
             match after {
-                ChunkStatus::Pending => self.pending.push_back(entity),
-                ChunkStatus::Generating => {
+                (ChunkStatus::Pending, true) => self.priority.push_back(entity),
+                (ChunkStatus::Pending, false) => self.pending.push_back(entity),
+                (ChunkStatus::Generating, _) => {
                     self.generating.insert(entity);
                 }
-                ChunkStatus::Retiring => {
+                (ChunkStatus::Retiring, _) => {
                     self.retiring.insert(entity);
                 }
-                ChunkStatus::Ready => {}
+                (ChunkStatus::Ready, _) => {}
             }
         }
         effect
@@ -274,7 +319,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 continue;
             };
             if let Ok((_, mut state)) = chunks.get_mut(entity) {
-                index.apply(entity, &mut state, ChunkEvent::Dirty);
+                index.apply(entity, &mut state, ChunkEvent::Edited);
             }
             ev_update.write(ChunkWillUpdate::<C>::new(chunk_pos, entity));
         }
@@ -286,7 +331,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
-                ChunkStateOf::<C>::Pending,
+                ChunkStateOf::<C>::Pending { priority: false },
                 Transform::from_translation(chunk_pos.as_vec3() * CHUNK_SIZE_F - 1.0),
             ));
             let entity = chunk_entity.id();
@@ -324,7 +369,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             chunk.data_shape = data_shape;
             chunk.mesh_shape = mesh_shape;
             if reshaped {
-                index.apply(entity, &mut state, ChunkEvent::Dirty);
+                index.apply(entity, &mut state, ChunkEvent::Reshaped);
             }
         }
 
@@ -343,7 +388,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         }
     }
 
-    /// Starts a chunk task for each Pending chunk, as long as task slots are free.
+    /// Starts a chunk task for each Pending chunk, priority chunks first, as long
+    /// as task slots are free.
     pub fn start_chunk_tasks(
         mut index: ResMut<ChunkIndex<C>>,
         mut chunks: Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
@@ -355,7 +401,11 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     ) {
         let thread_pool = AsyncComputeTaskPool::get();
         while index.generating.len() < configuration.max_active_chunk_threads() {
-            let Some(entity) = index.pending.pop_front() else {
+            let Some(entity) = index
+                .priority
+                .pop_front()
+                .or_else(|| index.pending.pop_front())
+            else {
                 break;
             };
             let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
@@ -461,7 +511,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             let Ok((_, mut state, _)) = chunks.get_mut(entity) else {
                 continue;
             };
-            let ChunkState::Generating(task) = &mut *state else {
+            let ChunkState::Generating { task, .. } = &mut *state else {
                 continue;
             };
             if let Some(chunk_task) = future::block_on(future::poll_once(task)) {
@@ -590,49 +640,114 @@ mod tests {
         (state.status(), effect)
     }
 
-    fn live_states() -> [State; 3] {
+    fn generating(superseded: bool) -> State {
+        ChunkState::Generating {
+            task: "task",
+            superseded,
+        }
+    }
+
+    fn live_states() -> [State; 5] {
         [
-            ChunkState::Pending,
-            ChunkState::Generating("task"),
+            ChunkState::Pending { priority: false },
+            ChunkState::Pending { priority: true },
+            generating(false),
+            generating(true),
             ChunkState::Ready,
         ]
     }
 
     #[test]
     fn a_started_task_makes_a_pending_chunk_generating() {
-        let (state, effect) =
-            transition(ChunkState::Pending, ChunkEvent::TaskStarted("task"));
-        assert!(matches!(state, ChunkState::Generating("task")));
-        assert_eq!(effect, Effect::None);
+        for priority in [false, true] {
+            let (state, effect) = transition(
+                ChunkState::Pending { priority },
+                ChunkEvent::TaskStarted("task"),
+            );
+            assert!(matches!(
+                state,
+                ChunkState::Generating {
+                    task: "task",
+                    superseded: false
+                }
+            ));
+            assert_eq!(effect, Effect::None);
+        }
     }
 
     #[test]
     fn a_finished_task_is_published_and_makes_the_chunk_ready() {
         assert_eq!(
-            status_and_effect(ChunkState::Generating("task"), ChunkEvent::TaskFinished),
+            status_and_effect(generating(false), ChunkEvent::TaskFinished),
             (ChunkStatus::Ready, Effect::Publish)
         );
     }
 
     #[test]
-    fn an_expired_cached_mesh_sends_the_chunk_back_to_pending_unpublished() {
-        assert_eq!(
-            status_and_effect(
-                ChunkState::Generating("task"),
-                ChunkEvent::CachedMeshExpired
-            ),
-            (ChunkStatus::Pending, Effect::None)
-        );
+    fn an_expired_cached_mesh_sends_the_chunk_back_to_the_front_unpublished() {
+        for superseded in [false, true] {
+            let (state, effect) =
+                transition(generating(superseded), ChunkEvent::CachedMeshExpired);
+            assert!(matches!(state, ChunkState::Pending { priority: true }));
+            assert_eq!(effect, Effect::None);
+        }
     }
 
     #[test]
-    fn a_dirty_chunk_waits_for_a_new_task() {
-        for state in live_states() {
-            assert_eq!(
-                status_and_effect(state, ChunkEvent::Dirty),
-                (ChunkStatus::Pending, Effect::None)
+    fn an_edit_or_lod_change_supersedes_a_running_task_without_dropping_it() {
+        for edited in [true, false] {
+            for superseded in [false, true] {
+                let event = if edited {
+                    ChunkEvent::Edited
+                } else {
+                    ChunkEvent::Reshaped
+                };
+                let (state, effect) = transition(generating(superseded), event);
+                assert!(matches!(
+                    state,
+                    ChunkState::Generating {
+                        task: "task",
+                        superseded: true
+                    }
+                ));
+                assert_eq!(effect, Effect::None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_superseded_task_is_published_then_followed_up_first() {
+        let (state, effect) = transition(generating(true), ChunkEvent::TaskFinished);
+        assert!(matches!(state, ChunkState::Pending { priority: true }));
+        assert_eq!(effect, Effect::Publish);
+    }
+
+    #[test]
+    fn an_edited_chunk_waits_for_a_task_at_the_front() {
+        let states: [State; 3] = [
+            ChunkState::Pending { priority: false },
+            ChunkState::Pending { priority: true },
+            ChunkState::Ready,
+        ];
+        for state in states {
+            let (state, effect) = transition(state, ChunkEvent::Edited);
+            assert!(matches!(state, ChunkState::Pending { priority: true }));
+            assert_eq!(effect, Effect::None);
+        }
+    }
+
+    #[test]
+    fn a_reshaped_chunk_waits_for_a_task_in_line() {
+        for priority in [false, true] {
+            let (state, _) =
+                transition(State::Pending { priority }, ChunkEvent::Reshaped);
+            assert!(
+                matches!(state, ChunkState::Pending { priority: p } if p == priority)
             );
         }
+        let (state, effect) = transition(State::Ready, ChunkEvent::Reshaped);
+        assert!(matches!(state, ChunkState::Pending { priority: false }));
+        assert_eq!(effect, Effect::None);
     }
 
     #[test]
@@ -671,7 +786,8 @@ mod tests {
             ChunkEvent::TaskStarted("task"),
             ChunkEvent::TaskFinished,
             ChunkEvent::CachedMeshExpired,
-            ChunkEvent::Dirty,
+            ChunkEvent::Edited,
+            ChunkEvent::Reshaped,
         ] {
             assert_eq!(
                 status_and_effect(ChunkState::Retiring { kept: false }, event),

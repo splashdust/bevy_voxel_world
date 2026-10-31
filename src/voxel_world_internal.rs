@@ -367,11 +367,8 @@ where
         };
 
         for (position, voxel) in buffer.iter() {
-            // Skip writes that don't actually change the voxel value.
-            // Without this guard, repeatedly setting a voxel to the same value
-            // every frame causes perpetual chunk remesh cancellation — the
-            // in-progress async meshing task gets dropped before it can finish,
-            // so the chunk never renders.
+            // Skip writes that don't change the voxel, so setting the same value
+            // every frame doesn't remesh the chunk every frame.
             if modified_voxels.get(position) == Some(voxel) {
                 continue;
             }

@@ -7,6 +7,8 @@
 - `minimal()` worlds now publish generated voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
 - Chunk data is published while the voxel texture is still loading; only showing chunk meshes waits for it.
 - Add `VoxelWorld::chunk_state`, which tells where a chunk is in its lifecycle as a `ChunkStatus`: `Pending`, `Generating`, `Ready` or `Retiring`.
+- An edit or LOD change no longer cancels a chunk's running task: the task finishes and is published, then a follow-up task starts. Before, a chunk edited every frame never published.
+- Chunks remeshing after an edit, and follow-up tasks, get task slots before chunks waiting to spawn.
 - Breaking: `get_chunk_data` returns `None` until a chunk's data is first published, and raycasts only cover published chunks. Before, a newly spawned chunk had empty placeholder data.
 - Breaking: a retiring chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query the entity.
 - Breaking: `Chunk<C>` fields are read through getters (`position()`, `lod_level()`, `entity()`, `data_shape()`, `mesh_shape()`), and `Chunk::new` and `Chunk::from` are no longer public. `NeedsDespawn` is removed; use `chunk_state` instead.

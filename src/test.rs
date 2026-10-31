@@ -497,10 +497,10 @@ fn chunks_publish_while_the_voxel_texture_is_loading() {
 fn chunk_will_remesh_event_after_set_voxel() {
     let mut app = _test_setup_app();
 
-    // Run the world a 100 cycles
-    for _ in 0..100 {
-        app.update();
-    }
+    // An edit to a generating chunk remeshes only after its running task.
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<DefaultWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
 
     app.add_systems(Update, |mut voxel_world: VoxelWorld<DefaultWorld>| {
         voxel_world.set_voxel(IVec3::new(0, 0, 0), WorldVoxel::Solid(1));
@@ -1248,12 +1248,9 @@ fn frames_without_voxel_edits_do_not_wait_for_chunk_tasks() {
         ));
     });
 
-    let mut frames = 0;
-    while SLOW_LOOKUP_UNTIL.get().is_none() {
-        app.update();
-        frames += 1;
-        assert!(frames < 100, "no chunk task started");
-    }
+    update_until(&mut app, "a chunk task to start", |_| {
+        SLOW_LOOKUP_UNTIL.get().is_some()
+    });
 
     // Chunk tasks are now generating; no frame should have to wait for them.
     let until = *SLOW_LOOKUP_UNTIL.get().unwrap();
@@ -1264,6 +1261,150 @@ fn frames_without_voxel_edits_do_not_wait_for_chunk_tasks() {
             start.elapsed() < SLOW_LOOKUP_HOLD / 3,
             "frame took {:?} while chunk tasks were generating",
             start.elapsed()
+        );
+    }
+}
+
+/// A world whose chunk tasks each take at least 20 ms, much longer than a frame.
+#[derive(Resource, Clone, Default)]
+struct SlowTaskWorld;
+
+impl VoxelWorldConfig for SlowTaskWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        1
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            let mut slept = false;
+            Box::new(move |pos, _| {
+                if !slept {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    slept = true;
+                }
+                floor_voxel(pos)
+            })
+        })
+    }
+}
+
+#[derive(Resource)]
+struct KeepEditing(bool);
+
+#[test]
+fn a_chunk_edited_every_frame_still_publishes() {
+    const EDITED: IVec3 = IVec3::new(16, 16, 16);
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<SlowTaskWorld>::minimal()))
+        .insert_resource(KeepEditing(true))
+        .add_systems(Startup, spawn_camera::<SlowTaskWorld>)
+        .add_systems(
+            Update,
+            |mut voxel_world: VoxelWorld<SlowTaskWorld>,
+             keep_editing: Res<KeepEditing>,
+             mut frame: Local<u8>| {
+                if keep_editing.0 {
+                    *frame = frame.wrapping_add(1);
+                    voxel_world.set_voxel(EDITED, WorldVoxel::Solid(1 + *frame % 2));
+                }
+            },
+        );
+
+    update_until(&mut app, "the edited chunk to publish", |app| {
+        chunk_data::<SlowTaskWorld>(app, IVec3::ZERO).is_some()
+    });
+
+    app.world_mut().resource_mut::<KeepEditing>().0 = false;
+    let last_edit =
+        app.world_mut()
+            .run_system_once(|voxel_world: VoxelWorld<SlowTaskWorld>| {
+                voxel_world.get_voxel(EDITED)
+            });
+    let last_edit = last_edit.unwrap();
+    update_until(&mut app, "the last edit to publish", |app| {
+        chunk_status::<SlowTaskWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+            && chunk_data::<SlowTaskWorld>(app, IVec3::ZERO)
+                .and_then(|data| data.get_voxel_at_world_position(EDITED))
+                == Some(last_edit)
+    });
+}
+
+#[test]
+fn an_edited_chunk_gets_a_task_slot_before_waiting_spawns() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<ThrottledWorld>::minimal(),
+    ))
+    .insert_resource(ThrottledWorld { task_slots: 1 })
+    .add_systems(Startup, spawn_camera::<ThrottledWorld>);
+
+    let statuses = |app: &mut App| -> Vec<(IVec3, Option<ChunkStatus>)> {
+        let positions: Vec<IVec3> = app
+            .world_mut()
+            .query::<&Chunk<ThrottledWorld>>()
+            .iter(app.world())
+            .map(|chunk| chunk.position())
+            .collect();
+        positions
+            .into_iter()
+            .map(|pos| (pos, chunk_status::<ThrottledWorld>(app, pos)))
+            .collect()
+    };
+    update_until(&mut app, "a chunk to be ready while others wait", |app| {
+        let statuses = statuses(app);
+        statuses.iter().any(|(_, s)| *s == Some(ChunkStatus::Ready))
+            && statuses
+                .iter()
+                .any(|(_, s)| *s == Some(ChunkStatus::Pending))
+    });
+
+    // Close the slots and let running tasks finish, so the queue stands still.
+    app.world_mut().resource_mut::<ThrottledWorld>().task_slots = 0;
+    update_until(&mut app, "running tasks to finish", |app| {
+        statuses(app)
+            .iter()
+            .all(|(_, s)| *s != Some(ChunkStatus::Generating))
+    });
+    let statuses_before = statuses(&mut app);
+    let edited = statuses_before
+        .iter()
+        .find(|(_, s)| *s == Some(ChunkStatus::Ready))
+        .unwrap()
+        .0;
+    let waiting: Vec<IVec3> = statuses_before
+        .iter()
+        .filter(|(_, s)| *s == Some(ChunkStatus::Pending))
+        .map(|(pos, _)| *pos)
+        .collect();
+    assert!(!waiting.is_empty());
+
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<ThrottledWorld>| {
+            voxel_world.set_voxel(edited * CHUNK_SIZE_I + 16, WorldVoxel::Solid(7));
+        })
+        .unwrap();
+    app.update();
+    assert_eq!(
+        chunk_status::<ThrottledWorld>(&mut app, edited),
+        Some(ChunkStatus::Pending)
+    );
+
+    app.world_mut().resource_mut::<ThrottledWorld>().task_slots = 1;
+    app.update();
+    assert_ne!(
+        chunk_status::<ThrottledWorld>(&mut app, edited),
+        Some(ChunkStatus::Pending),
+        "the edited chunk should have taken the free slot"
+    );
+    for pos in waiting {
+        assert_eq!(
+            chunk_status::<ThrottledWorld>(&mut app, pos),
+            Some(ChunkStatus::Pending),
+            "chunk {pos} took the slot before the edited chunk"
         );
     }
 }
