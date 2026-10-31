@@ -66,7 +66,8 @@ pub enum ChunkRegenerateStrategy {
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
     /// Despawn chunks that are further than `spawning_distance` away from the camera
-    /// or outside of the viewport.
+    /// or outside of the viewport. Chunks within `min_despawn_distance` of the
+    /// camera are kept, even when they are outside of the viewport.
     #[default]
     FarAwayOrOutOfView,
 
@@ -82,9 +83,11 @@ pub enum ChunkSpawnStrategy {
     CloseAndInView,
 
     /// Spawn chunks that are within `spawning_distance` of the camera, regardless of whether
-    /// they are in the viewport or not. Will only have an effect if the despawn strategy is
-    /// `FarAway`. If this strategy is used a flood fill will be used to find unspawned chunks
-    /// and therefore it might make sense to lower the `spawning_rays` option.
+    /// they are in the viewport or not. With the `FarAwayOrOutOfView` despawn strategy,
+    /// chunks outside of the viewport are still only spawned within `min_despawn_distance`,
+    /// since they would be despawned right away. If this strategy is used a flood fill will
+    /// be used to find unspawned chunks and therefore it might make sense to lower the
+    /// `spawning_rays` option.
     Close,
 }
 
@@ -104,8 +107,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         10
     }
 
-    /// Minimum distance in chunks to despawn chunks regardless of the [`ChunkSpawnStrategy`].
-    /// As a result, this radius will always remain spawned around the camera.
+    /// Distance in chunks around the camera within which chunks are spawned and never
+    /// despawned, whether or not they are in view, regardless of the [`ChunkSpawnStrategy`]
+    /// and [`ChunkDespawnStrategy`].
     fn min_despawn_distance(&self) -> u32 {
         1
     }
@@ -116,7 +120,6 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     /// Strategy for spawning chunks
-    /// This is only used if the despawn strategy is `FarAway`
     fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
         ChunkSpawnStrategy::default()
     }

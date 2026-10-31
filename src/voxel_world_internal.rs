@@ -189,7 +189,7 @@ where
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
-        chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
+        chunks: Query<&Chunk<C>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
@@ -218,10 +218,9 @@ where
                 None => Occupancy::Spawned,
             }
         };
-        let existing = chunks.iter().map(|(chunk, view_visibility)| ExistingChunk {
+        let existing = chunks.iter().map(|chunk| ExistingChunk {
             position: chunk.position,
             lod_level: chunk.lod_level,
-            view_visible: view_visibility.map(|visibility| visibility.get()),
         });
 
         let plan = streaming_policy::plan(

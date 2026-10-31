@@ -138,9 +138,6 @@ pub(crate) enum Occupancy {
 pub(crate) struct ExistingChunk {
     pub position: IVec3,
     pub lod_level: LodLevel,
-    /// Whether the renderer saw the chunk last frame; `None` for a chunk that
-    /// never had a mesh.
-    pub view_visible: Option<bool>,
 }
 
 /// The chunks to spawn, give a new LOD level and retire this frame.
@@ -175,7 +172,7 @@ pub(crate) fn plan<C: VoxelWorldConfig>(
             plan.change_lod.push((chunk.position, target_lod));
         }
 
-        if should_retire(config, cameras, &chunk) {
+        if should_retire(config, cameras, chunk.position) {
             plan.retire.push(chunk.position);
         }
     }
@@ -192,9 +189,11 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
     let spawning_distance = config.spawning_distance() as i32;
     let spawning_distance_squared = spawning_distance.pow(2);
     let spawn_strategy = config.chunk_spawn_strategy();
-
-    let visibility_margin = 0.0f32;
-    let protected_chunk_radius_sq = (config.min_despawn_distance() as i32).pow(2);
+    // Out of view, only chunks in the protected radius are spawned: when spawning
+    // in view, and when despawning out of view, since any other chunk would be
+    // retired as soon as it existed.
+    let in_view_only = spawn_strategy == ChunkSpawnStrategy::CloseAndInView
+        || config.chunk_despawn_strategy() == ChunkDespawnStrategy::FarAwayOrOutOfView;
 
     let mut spawn = Vec::new();
     let mut visited = HashSet::new();
@@ -271,14 +270,7 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
             continue;
         }
 
-        if spawn_strategy == ChunkSpawnStrategy::CloseAndInView
-            && !chunk_visible_to_any_camera(cameras, chunk_position, visibility_margin)
-            && !chunk_is_close_to_any_camera(
-                cameras,
-                chunk_position,
-                protected_chunk_radius_sq,
-            )
-        {
+        if in_view_only && out_of_view_and_unprotected(config, cameras, chunk_position) {
             continue;
         }
 
@@ -313,34 +305,31 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
 fn should_retire<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
-    chunk: &ExistingChunk,
+    chunk_position: IVec3,
 ) -> bool {
     let spawning_distance_squared = (config.spawning_distance() as i32).pow(2);
-
-    let should_be_culled = match config.chunk_despawn_strategy() {
-        ChunkDespawnStrategy::FarAway => false,
-        ChunkDespawnStrategy::FarAwayOrOutOfView => {
-            let frustum_culled =
-                !chunk_visible_to_any_camera(cameras, chunk.position, 0.0);
-            if let Some(visible) = chunk.view_visible {
-                !visible || frustum_culled
-            } else {
-                frustum_culled
-            }
-        }
-    };
-    let near_camera = chunk_is_close_to_any_camera(
+    if !chunk_is_close_to_any_camera(
         cameras,
-        chunk.position,
-        (CHUNK_SIZE_I * config.min_despawn_distance() as i32).pow(2),
-    );
+        chunk_position,
+        spawning_distance_squared + 1,
+    ) {
+        return true;
+    }
 
-    (should_be_culled && !near_camera)
-        || !chunk_is_close_to_any_camera(
-            cameras,
-            chunk.position,
-            spawning_distance_squared + 1,
-        )
+    config.chunk_despawn_strategy() == ChunkDespawnStrategy::FarAwayOrOutOfView
+        && out_of_view_and_unprotected(config, cameras, chunk_position)
+}
+
+/// Whether no camera sees the chunk and it is outside every camera's
+/// protected radius.
+fn out_of_view_and_unprotected<C: VoxelWorldConfig>(
+    config: &C,
+    cameras: &[CameraSnapshot],
+    chunk_position: IVec3,
+) -> bool {
+    let protected_radius_squared = (config.min_despawn_distance() as i32).pow(2);
+    !chunk_is_close_to_any_camera(cameras, chunk_position, protected_radius_squared)
+        && !chunk_visible_to_any_camera(cameras, chunk_position, 0.0)
 }
 
 fn chunk_is_close_to_any_camera(
@@ -382,7 +371,7 @@ mod tests {
     use bevy::{camera::CameraProjection, platform::collections::HashMap};
     use rand::{rngs::StdRng, SeedableRng};
 
-    #[derive(Resource, Clone)]
+    #[derive(Resource, Clone, Debug)]
     struct TestWorld {
         spawning_distance: u32,
         min_despawn_distance: u32,
@@ -468,7 +457,6 @@ mod tests {
         ExistingChunk {
             position,
             lod_level,
-            view_visible: None,
         }
     }
 
@@ -611,6 +599,97 @@ mod tests {
         );
 
         assert_eq!(plan.retire, vec![retired]);
+    }
+
+    /// Plans for a camera at `C` looking along -z, with chunks behind it just
+    /// inside and just outside the protected radius, and one ahead of it.
+    fn plan_with_chunks_behind_the_camera(config: &TestWorld) -> (StreamingPlan, IVec3) {
+        let protected = C + IVec3::new(0, 0, 1);
+        let unprotected = C + IVec3::new(0, 0, 2);
+        let ahead = C + IVec3::new(0, 0, -2);
+        let occupied = [C, protected, unprotected, ahead]
+            .into_iter()
+            .map(|position| (position, Occupancy::Published))
+            .collect();
+
+        let plan = plan_with(
+            config,
+            &[camera(C, Vec3::NEG_Z)],
+            &occupied,
+            vec![
+                existing(C, 0),
+                existing(protected, 0),
+                existing(unprotected, 0),
+                existing(ahead, 0),
+            ],
+        );
+        (plan, unprotected)
+    }
+
+    #[test]
+    fn out_of_view_despawning_retires_chunks_out_of_view_outside_the_protected_radius() {
+        let config = TestWorld {
+            despawn_out_of_view: true,
+            ..default()
+        };
+
+        let (plan, unprotected) = plan_with_chunks_behind_the_camera(&config);
+
+        assert_eq!(plan.retire, vec![unprotected]);
+    }
+
+    #[test]
+    fn far_away_despawning_keeps_chunks_out_of_view() {
+        let (plan, _) = plan_with_chunks_behind_the_camera(&TestWorld::default());
+
+        assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
+    }
+
+    #[test]
+    fn a_chunk_the_plan_spawns_is_not_retired_by_the_next_plan() {
+        let mut rng = StdRng::seed_from_u64(48);
+        for case in 0..200 {
+            let config = TestWorld {
+                spawning_distance: rng.random_range(1..=4),
+                min_despawn_distance: rng.random_range(0..=2),
+                spawn_in_view: rng.random(),
+                despawn_out_of_view: rng.random(),
+            };
+            let cameras: Vec<_> = (0..rng.random_range(1..=2))
+                .map(|_| {
+                    let chunk = C + IVec3::new(
+                        rng.random_range(-4..=4),
+                        rng.random_range(-4..=4),
+                        rng.random_range(-4..=4),
+                    );
+                    let direction = Vec3::new(
+                        rng.random_range(-1.0..=1.0),
+                        rng.random_range(-0.5..=0.5),
+                        rng.random_range(-1.0..=1.0),
+                    );
+                    camera(chunk, direction.try_normalize().unwrap_or(Vec3::NEG_Z))
+                })
+                .collect();
+
+            let first = plan_with(&config, &cameras, &HashMap::new(), vec![]);
+            let occupied = first
+                .spawn
+                .iter()
+                .map(|(position, _)| (*position, Occupancy::Spawned))
+                .collect();
+            let chunks = first
+                .spawn
+                .iter()
+                .map(|(position, lod_level)| existing(*position, *lod_level))
+                .collect();
+            let next = plan_with(&config, &cameras, &occupied, chunks);
+
+            assert!(
+                next.retire.is_empty(),
+                "case {case}, {config:?}: retired chunks it had just spawned: {:?}",
+                next.retire
+            );
+        }
     }
 
     #[test]
