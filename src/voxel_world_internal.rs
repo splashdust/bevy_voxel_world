@@ -30,23 +30,106 @@ pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
     Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera<C>>>,
 );
 
-/// Holds a map of modified voxels that will persist between chunk spawn/despawn
-#[derive(Resource, Deref, DerefMut, Clone)]
+/// The edited voxels of one chunk, shared with the chunk tasks that read them.
+type EditBucket<I> = Arc<HashMap<IVec3, WorldVoxel<I>>>;
+
+fn chunk_of(position: IVec3) -> IVec3 {
+    position.div_euclid(IVec3::splat(CHUNK_SIZE_I))
+}
+
+/// Holds every voxel edit, kept between chunk spawn and despawn. Edits are
+/// grouped by chunk, so a chunk task takes the edits it reads when it starts and
+/// holds no lock while it runs.
+#[derive(Resource, Clone)]
 pub struct ModifiedVoxels<C, I>(
-    #[deref] Arc<RwLock<HashMap<IVec3, WorldVoxel<I>>>>,
+    Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>,
     PhantomData<C>,
 );
 
-impl<C: VoxelWorldConfig> Default for ModifiedVoxels<C, C::MaterialIndex> {
+impl<C, I> Default for ModifiedVoxels<C, I> {
     fn default() -> Self {
         Self(Arc::new(RwLock::new(HashMap::new())), PhantomData)
     }
 }
 
-impl<C: VoxelWorldConfig> ModifiedVoxels<C, C::MaterialIndex> {
-    pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel<C::MaterialIndex>> {
-        let modified_voxels = self.0.read().unwrap();
-        modified_voxels.get(position).cloned()
+impl<C, I: Copy + PartialEq> ModifiedVoxels<C, I> {
+    pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel<I>> {
+        let buckets = self.0.read().unwrap();
+        buckets.get(&chunk_of(*position))?.get(position).copied()
+    }
+
+    /// The edits a chunk task at `chunk_pos` reads.
+    pub(crate) fn chunk_edits(&self, chunk_pos: IVec3) -> ChunkEdits<I> {
+        let buckets = self.0.read().unwrap();
+        let mut edits = ChunkEdits {
+            chunk_pos,
+            buckets: std::array::from_fn(|_| None),
+        };
+        if buckets.is_empty() {
+            return edits;
+        }
+        for (i, bucket) in edits.buckets.iter_mut().enumerate() {
+            let i = i as i32;
+            let offset = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
+            *bucket = buckets.get(&(chunk_pos + offset)).cloned();
+        }
+        edits
+    }
+
+    /// Writes `edits`, calling `changed` with each position whose voxel changed.
+    /// A chunk's edits are copied only while a running chunk task holds them.
+    pub(crate) fn write(
+        &self,
+        edits: &[(IVec3, WorldVoxel<I>)],
+        mut changed: impl FnMut(IVec3),
+    ) {
+        let mut buckets = {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("wait_modified_voxels_write").entered();
+            self.0.write().unwrap()
+        };
+        for &(position, voxel) in edits {
+            let bucket = buckets.entry(chunk_of(position)).or_default();
+            // Skip writes that don't change the voxel, so setting the same value
+            // every frame doesn't remesh the chunk every frame.
+            if bucket.get(&position) == Some(&voxel) {
+                continue;
+            }
+            Arc::make_mut(bucket).insert(position, voxel);
+            changed(position);
+        }
+    }
+}
+
+/// The voxel edits a chunk task reads, taken when it starts: those of its chunk
+/// and of the neighbouring chunks its padding reaches into.
+pub(crate) struct ChunkEdits<I> {
+    chunk_pos: IVec3,
+    /// By offset from `chunk_pos`, x varying fastest.
+    buckets: [Option<EditBucket<I>>; 27],
+}
+
+impl<I> Default for ChunkEdits<I> {
+    fn default() -> Self {
+        Self {
+            chunk_pos: IVec3::ZERO,
+            buckets: std::array::from_fn(|_| None),
+        }
+    }
+}
+
+impl<I: Copy> ChunkEdits<I> {
+    pub fn is_empty(&self) -> bool {
+        self.buckets.iter().all(Option::is_none)
+    }
+
+    pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
+        let offset = chunk_of(position) - self.chunk_pos + 1;
+        if offset.cmplt(IVec3::ZERO).any() || offset.cmpgt(IVec3::splat(2)).any() {
+            return None;
+        }
+        let i = (offset.x + offset.y * 3 + offset.z * 9) as usize;
+        self.buckets[i].as_ref()?.get(&position).copied()
     }
 }
 
@@ -354,31 +437,14 @@ where
         mut requests: ResMut<ChunkRequests<C>>,
         modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
     ) {
-        // Chunk tasks hold the read lock while they generate, so taking the write
-        // lock waits for all of them; don't, unless there is something to write.
         if buffer.is_empty() {
             return;
         }
-
-        let mut modified_voxels = {
-            #[cfg(feature = "trace")]
-            let _span = bevy::log::info_span!("wait_modified_voxels_write").entered();
-            modified_voxels.write().unwrap()
-        };
-
-        for (position, voxel) in buffer.iter() {
-            // Skip writes that don't change the voxel, so setting the same value
-            // every frame doesn't remesh the chunk every frame.
-            if modified_voxels.get(position) == Some(voxel) {
-                continue;
-            }
-
-            modified_voxels.insert(*position, *voxel);
+        modified_voxels.write(&buffer, |position| {
             requests
                 .edited
-                .extend(get_affected_chunk_positions(*position));
-        }
-
+                .extend(get_affected_chunk_positions(position));
+        });
         buffer.clear();
     }
 

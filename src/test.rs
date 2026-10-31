@@ -17,7 +17,7 @@ use crate::{
     },
     prelude::VoxelWorldCamera,
     voxel_world::*,
-    voxel_world_internal::ModifiedVoxels,
+    voxel_world_internal::{ChunkEdits, ModifiedVoxels},
 };
 use ndshape::{RuntimeShape, Shape};
 use rand::{rngs::StdRng, RngExt, SeedableRng};
@@ -685,14 +685,13 @@ fn chunk_generate_reuses_previous_data_when_configured() {
         WorldVoxel::Solid(9);
     let voxel_payload: Arc<[WorldVoxel<Mat>]> = Arc::from(voxel_payload);
 
-    let modified_voxels = ModifiedVoxels::<DefaultWorld, Mat>::default();
     let mut chunk_task = ChunkTask::<DefaultWorld, Mat>::new(
         entity,
         position,
         0,
         data_shape,
         mesh_shape,
-        modified_voxels,
+        ChunkEdits::default(),
     );
 
     let mut previous_data = ChunkData::<Mat>::with_entity(entity);
@@ -1407,4 +1406,97 @@ fn an_edited_chunk_gets_a_task_slot_before_waiting_spawns() {
             "chunk {pos} took the slot before the edited chunk"
         );
     }
+}
+
+/// How long the first voxel lookup of `SlowEditedWorld` holds up its chunk task.
+const SLOW_EDITED_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+static SLOW_EDITED_UNTIL: std::sync::OnceLock<std::time::Instant> =
+    std::sync::OnceLock::new();
+
+/// Like `SlowLookupWorld`, for a test of its own, since the hold starts once.
+#[derive(Resource, Clone, Default)]
+struct SlowEditedWorld;
+
+impl VoxelWorldConfig for SlowEditedWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            Box::new(|_, _| {
+                let until = *SLOW_EDITED_UNTIL
+                    .get_or_init(|| std::time::Instant::now() + SLOW_EDITED_HOLD);
+                std::thread::sleep(
+                    until.saturating_duration_since(std::time::Instant::now()),
+                );
+                WorldVoxel::Air
+            })
+        })
+    }
+}
+
+#[test]
+fn frames_with_voxel_edits_do_not_wait_for_chunk_tasks() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<SlowEditedWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<SlowEditedWorld>)
+    .add_systems(
+        Update,
+        |mut voxel_world: VoxelWorld<SlowEditedWorld>, mut frame: Local<u8>| {
+            *frame = frame.wrapping_add(1);
+            voxel_world
+                .set_voxel(IVec3::new(16, 16, 16), WorldVoxel::Solid(1 + *frame % 2));
+        },
+    );
+
+    update_until(&mut app, "a chunk task to start", |_| {
+        SLOW_EDITED_UNTIL.get().is_some()
+    });
+
+    // Chunk tasks are now generating; no frame should have to wait for them.
+    let until = *SLOW_EDITED_UNTIL.get().unwrap();
+    while std::time::Instant::now() < until {
+        let start = std::time::Instant::now();
+        app.update();
+        assert!(
+            start.elapsed() < SLOW_EDITED_HOLD / 3,
+            "frame took {:?} while chunk tasks were generating",
+            start.elapsed()
+        );
+    }
+}
+
+#[test]
+fn a_chunk_task_reads_the_edits_made_before_it_started_including_its_padding() {
+    let modified_voxels = ModifiedVoxels::<DefaultWorld, u8>::default();
+    modified_voxels.write(
+        &[
+            (IVec3::new(-1, 0, 0), WorldVoxel::Solid(3)),
+            (IVec3::new(32, 31, 32), WorldVoxel::Solid(4)),
+            (IVec3::new(64, 0, 0), WorldVoxel::Solid(5)),
+        ],
+        |_| {},
+    );
+
+    let edits = modified_voxels.chunk_edits(IVec3::ZERO);
+    assert_eq!(edits.get(IVec3::new(-1, 0, 0)), Some(WorldVoxel::Solid(3)));
+    assert_eq!(
+        edits.get(IVec3::new(32, 31, 32)),
+        Some(WorldVoxel::Solid(4))
+    );
+    assert_eq!(edits.get(IVec3::new(64, 0, 0)), None);
+
+    modified_voxels.write(&[(IVec3::ZERO, WorldVoxel::Solid(6))], |_| {});
+    assert_eq!(edits.get(IVec3::ZERO), None);
+    assert_eq!(
+        modified_voxels.chunk_edits(IVec3::ZERO).get(IVec3::ZERO),
+        Some(WorldVoxel::Solid(6))
+    );
 }

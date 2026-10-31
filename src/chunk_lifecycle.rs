@@ -448,7 +448,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 lod_level,
                 data_shape,
                 mesh_shape,
-                modified_voxels.clone(),
+                modified_voxels.chunk_edits(chunk.position),
             );
 
             let mesh_map = mesh_cache.get_mesh_map();

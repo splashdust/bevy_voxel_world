@@ -13,6 +13,7 @@
 - Breaking: a retiring chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query the entity.
 - Breaking: `Chunk<C>` fields are read through getters (`position()`, `lod_level()`, `entity()`, `data_shape()`, `mesh_shape()`), and `Chunk::new` and `Chunk::from` are no longer public. `NeedsDespawn` is removed; use `chunk_state` instead.
 - Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
+- Fix: frames with voxel edits no longer wait for running chunk tasks either; each chunk task takes the edits it needs when it starts.
 
 ## 0.18
 

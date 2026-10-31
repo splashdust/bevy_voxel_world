@@ -12,7 +12,7 @@ use crate::{
         VoxelWorldConfig,
     },
     voxel::WorldVoxel,
-    voxel_world_internal::ModifiedVoxels,
+    voxel_world_internal::ChunkEdits,
 };
 
 // The size of a chunk in voxels
@@ -343,7 +343,7 @@ where
 {
     pub position: IVec3,
     pub chunk_data: ChunkData<I>,
-    pub modified_voxels: ModifiedVoxels<C, I>,
+    pub edits: ChunkEdits<I>,
     pub mesh: Option<Mesh>,
     pub user_bundle: Option<C::ChunkUserBundle>,
     _marker: PhantomData<C>,
@@ -356,7 +356,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         lod_level: LodLevel,
         data_shape: UVec3,
         mesh_shape: UVec3,
-        modified_voxels: ModifiedVoxels<C, I>,
+        edits: ChunkEdits<I>,
     ) -> Self {
         let mut chunk_data = ChunkData::with_entity(entity);
         chunk_data.lod_level = lod_level;
@@ -366,16 +366,16 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         Self {
             position,
             chunk_data,
-            modified_voxels,
+            edits,
             mesh: None,
             user_bundle: None,
             _marker: PhantomData,
         }
     }
 
-    /// Generate voxel data for the chunk. The supplied `modified_voxels` map is first checked,
-    /// and where no voxeles are modified, the `voxel_data_fn` is called to get data from the
-    /// consumer.
+    /// Generate voxel data for the chunk. The task's edits are first checked, and
+    /// where no voxels are edited, the `voxel_data_fn` is called to get data from
+    /// the consumer.
     pub fn generate<F>(
         &mut self,
         mut voxel_data_fn: F,
@@ -387,11 +387,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         let mut filled_count = 0;
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("generate_chunk").entered();
-        let modified_voxels = {
-            #[cfg(feature = "trace")]
-            let _span = bevy::log::info_span!("wait_modified_voxels_read").entered();
-            (*self.modified_voxels).read().unwrap()
-        };
+        let has_edits = !self.edits.is_empty();
         let mut material_count = HashSet::new();
         let reuse_previous =
             matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
@@ -437,8 +433,13 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
                     + (self.position.z * CHUNK_SIZE_I),
             };
 
-            if let Some(voxel) = modified_voxels.get(&block_pos) {
-                voxels[i as usize] = *voxel;
+            let edit = if has_edits {
+                self.edits.get(block_pos)
+            } else {
+                None
+            };
+            if let Some(voxel) = edit {
+                voxels[i as usize] = voxel;
                 if !voxel.is_unset() && !voxel.is_air() {
                     filled_count += 1;
                 }
