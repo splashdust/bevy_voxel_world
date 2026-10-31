@@ -37,7 +37,7 @@ impl<C> Default for VoxelWorldCamera<C> {
 /// Within a frame, they apply voxel edits, spawn and retire chunks, start chunk
 /// tasks, collect finished ones, publish their data and despawn retired chunks.
 /// A system ordered after this set sees every chunk published so far, and the
-/// `ChunkWillSpawn` messages for chunks published this frame.
+/// `ChunkPublished` and `ChunkWillSpawn` messages of this frame.
 #[derive(SystemSet)]
 pub struct VoxelWorldSet<C>(PhantomData<fn() -> C>);
 
@@ -120,10 +120,17 @@ pub type ChunkWillDespawn<C> = ChunkEvent<C, WillDespawn>;
 pub struct WillDespawn;
 impl ChunkEventType for WillDespawn {}
 
-/// Fired when a chunk is about to be spawned.
+/// Fired once per chunk, when its voxel data is first published and readable
+/// through `VoxelWorld`. A chunk spawned again after despawning fires it again.
 pub type ChunkWillSpawn<C> = ChunkEvent<C, WillSpawn>;
 pub struct WillSpawn;
 impl ChunkEventType for WillSpawn {}
+
+/// Fired every time a chunk's voxel data is published, after which it is
+/// readable through `VoxelWorld`: on its first publish and after every remesh.
+pub type ChunkPublished<C> = ChunkEvent<C, Published>;
+pub struct Published;
+impl ChunkEventType for Published {}
 
 /// Fired when a chunk is about to be remeshed.
 pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;

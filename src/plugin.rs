@@ -134,6 +134,7 @@ where
                     .in_set(VoxelWorldSet::<C>::default()),
             )
             .add_message::<ChunkWillSpawn<C>>()
+            .add_message::<ChunkPublished<C>>()
             .add_message::<ChunkWillDespawn<C>>()
             .add_message::<ChunkWillRemesh<C>>()
             .add_message::<ChunkWillChangeLod<C>>()

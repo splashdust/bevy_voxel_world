@@ -128,7 +128,7 @@ impl<const TERRAIN: u8, const IN_VIEW: bool> VoxelWorldConfig
 // --- Lifecycle observation -------------------------------------------------
 
 /// The message that marks a chunk's voxel data as published.
-type PublishMessage<C> = ChunkWillSpawn<C>;
+type PublishMessage<C> = ChunkPublished<C>;
 
 #[derive(Resource, Default)]
 struct Tracker {

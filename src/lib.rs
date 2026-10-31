@@ -23,8 +23,8 @@ pub mod prelude {
         VoxelWorldSet,
     };
     pub use crate::voxel_world::{
-        ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
-        ChunkWillUpdate,
+        ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
+        ChunkWillSpawn, ChunkWillUpdate,
     };
 }
 

@@ -20,8 +20,8 @@ use crate::{
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
     voxel_world::{
-        ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
-        ChunkWillUpdate,
+        ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
+        ChunkWillSpawn, ChunkWillUpdate,
     },
     voxel_world_internal::{ModifiedVoxels, NeedsMaterial, SpawnMeshes, WorldRoot},
 };
@@ -578,7 +578,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 chunk_map_update_buffer.push((
                     chunk.position,
                     chunk_task.chunk_data,
-                    ChunkWillSpawn::<C>::new(chunk_task.position, entity),
+                    entity,
                 ));
             }
         }
@@ -589,12 +589,14 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     pub fn flush_chunk_map_buffers(
         mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C, C::MaterialIndex>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
+        mut ev_chunk_published: MessageWriter<ChunkPublished<C>>,
         mut ev_chunk_will_spawn: MessageWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     ) {
         chunk_map.apply_buffers(
             &mut chunk_map_update_buffer,
             &mut chunk_map_remove_buffer,
+            &mut ev_chunk_published,
             &mut ev_chunk_will_spawn,
         );
     }

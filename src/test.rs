@@ -274,7 +274,7 @@ fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
         .add_systems(
             PreUpdate,
             (|mut published: ResMut<Published>,
-              mut ev: MessageReader<ChunkWillSpawn<FloorWorld>>,
+              mut ev: MessageReader<ChunkPublished<FloorWorld>>,
               voxel_world: VoxelWorld<FloorWorld>| {
                 for msg in ev.read() {
                     let chunk_data = voxel_world.get_chunk_data(msg.chunk_key);
@@ -842,10 +842,7 @@ fn raycast_finds_voxel() {
                     data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
                     mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
                 },
-                ChunkWillSpawn::<DefaultWorld>::new(
-                    IVec3::new(0, 0, 0),
-                    Entity::PLACEHOLDER,
-                ),
+                Entity::PLACEHOLDER,
             ));
         },
     );
@@ -1499,4 +1496,81 @@ fn a_chunk_task_reads_the_edits_made_before_it_started_including_its_padding() {
         modified_voxels.chunk_edits(IVec3::ZERO).get(IVec3::ZERO),
         Some(WorldVoxel::Solid(6))
     );
+}
+
+/// The chunk positions of each `ChunkWillSpawn` and `ChunkPublished` message.
+#[derive(Resource, Default)]
+struct Announced {
+    will_spawn: Vec<IVec3>,
+    published: Vec<IVec3>,
+}
+
+impl Announced {
+    fn count(list: &[IVec3], chunk_pos: IVec3) -> usize {
+        list.iter().filter(|pos| **pos == chunk_pos).count()
+    }
+}
+
+fn record_announcements<C: VoxelWorldConfig>(
+    mut announced: ResMut<Announced>,
+    mut will_spawn: MessageReader<ChunkWillSpawn<C>>,
+    mut published: MessageReader<ChunkPublished<C>>,
+) {
+    announced
+        .will_spawn
+        .extend(will_spawn.read().map(|msg| msg.chunk_key));
+    announced
+        .published
+        .extend(published.read().map(|msg| msg.chunk_key));
+}
+
+#[test]
+fn a_remeshed_chunk_is_published_again_but_spawns_once() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(Update, record_announcements::<FloorWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<FloorWorld>| {
+            voxel_world.set_voxel(IVec3::new(16, 16, 16), WorldVoxel::Solid(7));
+        })
+        .unwrap();
+    update_until(&mut app, "the edited chunk to be published again", |app| {
+        Announced::count(&app.world().resource::<Announced>().published, IVec3::ZERO) == 2
+    });
+
+    let announced = app.world().resource::<Announced>();
+    assert_eq!(Announced::count(&announced.will_spawn, IVec3::ZERO), 1);
+}
+
+#[test]
+fn a_chunk_spawned_again_after_despawning_announces_its_spawn_again() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<ThrottledWorld>::minimal(),
+    ))
+    .init_resource::<Announced>()
+    .add_systems(Startup, spawn_camera::<ThrottledWorld>)
+    .add_systems(Update, record_announcements::<ThrottledWorld>);
+    let ready = |app: &mut App| {
+        chunk_status::<ThrottledWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    };
+
+    update_until(&mut app, "the chunk at the origin to be ready", ready);
+    let home = Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
+    move_cameras::<ThrottledWorld>(&mut app, Transform::from_xyz(10_000.0, 10.0, 10.0));
+    update_until(&mut app, "the chunk at the origin to despawn", |app| {
+        chunk_status::<ThrottledWorld>(app, IVec3::ZERO).is_none()
+    });
+    move_cameras::<ThrottledWorld>(&mut app, home);
+    update_until(&mut app, "the chunk at the origin to be ready again", ready);
+
+    let announced = app.world().resource::<Announced>();
+    assert_eq!(Announced::count(&announced.will_spawn, IVec3::ZERO), 2);
 }

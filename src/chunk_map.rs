@@ -7,7 +7,7 @@ use crate::{
     chunk::{self, ChunkData, CHUNK_SIZE_F},
     configuration::VoxelWorldConfig,
     voxel::VOXEL_SIZE,
-    voxel_world::ChunkWillSpawn,
+    voxel_world::{ChunkPublished, ChunkWillSpawn},
 };
 use bevy::{math::Vec3A, prelude::*};
 use hashbrown::HashMap;
@@ -73,6 +73,7 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         &self,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
+        ev_chunk_published: &mut MessageWriter<ChunkPublished<C>>,
         ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
     ) {
         if update_buffer.is_empty() && remove_buffer.is_empty() {
@@ -80,8 +81,8 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         }
 
         if let Ok(mut write_lock) = self.map.try_write() {
-            for (position, chunk_data, evt) in update_buffer.iter() {
-                write_lock.data.insert(
+            for (position, chunk_data, entity) in update_buffer.iter() {
+                let previous = write_lock.data.insert(
                     *position,
                     ChunkData {
                         position: *position,
@@ -96,7 +97,12 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
                     write_lock.bounds.max = position_f.max(write_lock.bounds.max);
                 }
 
-                ev_chunk_will_spawn.write((*evt).clone());
+                // Despawning a chunk removes its data, so a chunk without
+                // previous data is published for the first time.
+                if previous.is_none() {
+                    ev_chunk_will_spawn.write(ChunkWillSpawn::new(*position, *entity));
+                }
+                ev_chunk_published.write(ChunkPublished::new(*position, *entity));
             }
             update_buffer.clear();
 
@@ -137,7 +143,7 @@ impl<C, I> Default for ChunkMap<C, I> {
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(
-    #[deref] Vec<(IVec3, chunk::ChunkData<I>, ChunkWillSpawn<C>)>,
+    #[deref] Vec<(IVec3, chunk::ChunkData<I>, Entity)>,
     PhantomData<C>,
 );
 
