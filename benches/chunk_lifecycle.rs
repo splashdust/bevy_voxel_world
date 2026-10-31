@@ -17,10 +17,17 @@
 //! times each, then compares them.
 //!
 //! Results and saved binaries are written to `target/bench/chunk_lifecycle/`.
+//!
+//! To see what a scenario's slow frames are doing, run it once under Tracy. Start
+//! the Tracy profiler (or `tracy-capture -o <file>.tracy`) first, then:
+//!     cargo bench --bench chunk_lifecycle --features trace_tracy -- profile <scenario>
+//! The Tracy version must match the protocol of the `tracy-client` crate Bevy uses;
+//! see the version table in the `tracy-client` README.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,6 +60,13 @@ const FLY_FRAMES: usize = 1200;
 const FLY_SPEED: f32 = 180.0;
 const CAMERA_START: Vec3 = Vec3::new(16.0, 30.0, 16.0);
 const STORM_FRAMES: u32 = 300;
+/// Far enough that no chunk around the start stays wanted after the jump.
+const TELEPORT: Vec3 = Vec3::new(1000.0, 0.0, 0.0);
+/// Frames slower than these count as stutters.
+const STUTTER_MS: [u32; 2] = [4, 8];
+
+/// Set by `profile`: apps also send their traces to Tracy.
+static PROFILING: AtomicBool = AtomicBool::new(false);
 
 const SINE: u8 = 0;
 const FLAT: u8 = 1;
@@ -168,6 +182,16 @@ fn move_camera<C: VoxelWorldConfig>(
     }
 }
 
+fn teleport_camera<C: VoxelWorldConfig>(app: &mut App, offset: Vec3) {
+    let world = app.world_mut();
+    let mut cameras =
+        world.query_filtered::<(&mut Transform, &mut GlobalTransform), With<VoxelWorldCamera<C>>>();
+    for (mut transform, mut global) in cameras.iter_mut(world) {
+        transform.translation += offset;
+        *global = GlobalTransform::from(*transform);
+    }
+}
+
 /// Voxel edits issued every frame while active.
 #[derive(Resource, Default)]
 struct EditStorm {
@@ -254,10 +278,26 @@ fn build_app<C: VoxelWorldConfig<MaterialIndex = u8>>(config: C) -> App {
         .add_systems(First, move_camera::<C>)
         .add_systems(Update, edit_storm::<C>)
         .add_systems(Last, track::<C>);
+    if PROFILING.load(Ordering::Relaxed) {
+        add_profiling(&mut app);
+    }
     app.finish();
     app.cleanup();
     app
 }
+
+#[cfg(feature = "trace_tracy")]
+fn add_profiling(app: &mut App) {
+    // Rendering normally marks frame boundaries for Tracy; there is no renderer here.
+    fn frame_mark() {
+        bevy::log::info!(message = "finished frame", tracy.frame_mark = true);
+    }
+    app.add_plugins(bevy::log::LogPlugin::default())
+        .add_systems(Last, frame_mark);
+}
+
+#[cfg(not(feature = "trace_tracy"))]
+fn add_profiling(_: &mut App) {}
 
 fn spawn_camera<C: VoxelWorldConfig>(mut commands: Commands) {
     // Positive coordinates throughout, so chunk rounding conventions agree.
@@ -334,18 +374,23 @@ type Metrics = BTreeMap<String, f64>;
 struct StreamIn {
     time_ms: f64,
     frames: u32,
+    /// Duration of each frame up to the last lifecycle change.
+    frame_times: Vec<f64>,
 }
 
 /// Runs frames until the lifecycle has been quiet for `SETTLE_FRAMES`.
 fn stream_in<C: VoxelWorldConfig>(app: &mut App) -> StreamIn {
     let start = Instant::now();
-    let mut last_count = 0;
+    let mut frame_times = Vec::new();
+    let mut last_count = chunk_count::<C>(app);
     let mut last_change = (0, 0.0);
     for frame in 1..=MAX_FRAMES {
+        let frame_start = Instant::now();
         app.update();
+        frame_times.push(frame_start.elapsed().as_secs_f64() * 1000.0);
         let count = chunk_count::<C>(app);
-        let tracker_change = app.world().resource::<Tracker>().last_change;
-        if count != last_count || tracker_change == frame {
+        let tracker = app.world().resource::<Tracker>();
+        if count != last_count || tracker.last_change == tracker.frame {
             last_change = (frame, start.elapsed().as_secs_f64() * 1000.0);
         }
         last_count = count;
@@ -353,9 +398,11 @@ fn stream_in<C: VoxelWorldConfig>(app: &mut App) -> StreamIn {
             break;
         }
     }
+    frame_times.truncate(last_change.0 as usize);
     StreamIn {
         frames: last_change.0,
         time_ms: last_change.1,
+        frame_times,
     }
 }
 
@@ -384,6 +431,20 @@ fn frame_metrics(prefix: &str, times: &[f64], metrics: &mut Metrics) {
     for (name, p) in [("p50_ms", 0.5), ("p95_ms", 0.95), ("p99_ms", 0.99)] {
         metrics.insert(format!("{prefix}.{name}"), percentile(times, p));
     }
+    // p99 is the 12th-slowest of 1200 frames, so a short burst of long frames
+    // barely moves it; these see every one of them.
+    let mut slowest = times.to_vec();
+    slowest.sort_by(|a, b| b.total_cmp(a));
+    let worst = &slowest[..times.len().div_ceil(100)];
+    metrics.insert(
+        format!("{prefix}.worst_1pct_ms"),
+        worst.iter().sum::<f64>() / worst.len() as f64,
+    );
+    metrics.insert(format!("{prefix}.max_ms"), slowest[0]);
+    for limit in STUTTER_MS {
+        let count = times.iter().filter(|t| **t > limit as f64).count();
+        metrics.insert(format!("{prefix}.over_{limit}ms"), count as f64);
+    }
 }
 
 fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
@@ -406,6 +467,25 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
         format!("{prefix}.coverage"),
         coverage::<C>(&mut app, &wanted_offsets()),
     );
+    frame_metrics(prefix, &result.frame_times, &mut metrics);
+    metrics
+}
+
+/// Every chunk around the camera becomes unwanted, and a whole new area wanted, on
+/// the same frame.
+fn scenario_teleport() -> Metrics {
+    let mut app = build_app(SineWorld::default());
+    stream_in::<SineWorld>(&mut app);
+    teleport_camera::<SineWorld>(&mut app, TELEPORT);
+    let result = stream_in::<SineWorld>(&mut app);
+    let mut metrics = Metrics::new();
+    metrics.insert("teleport.time_ms".into(), result.time_ms);
+    metrics.insert("teleport.frames".into(), result.frames as f64);
+    metrics.insert(
+        "teleport.coverage".into(),
+        coverage::<SineWorld>(&mut app, &wanted_offsets()),
+    );
+    frame_metrics("teleport", &result.frame_times, &mut metrics);
     metrics
 }
 
@@ -521,18 +601,23 @@ fn warn_if_noisy() {
     }
 }
 
-/// Runs every scenario, or only those named in `only` (comma-separated).
+/// Runs every scenario, or only those named in `only` (comma-separated). When
+/// profiling, each runs once, without a warm-up.
 fn run_all(only: Option<&str>) -> Metrics {
-    warn_if_noisy();
-    // Unrecorded: the first scenario after a build or idle period runs measurably off.
-    eprintln!("warm-up...");
-    scenario_stream_in::<SineWorld>("warm_up");
+    let profiling = PROFILING.load(Ordering::Relaxed);
+    if !profiling {
+        warn_if_noisy();
+        // Unrecorded: the first scenario after a build or idle period runs measurably off.
+        eprintln!("warm-up...");
+        scenario_stream_in::<SineWorld>("warm_up");
+    }
 
     let mut metrics = Metrics::new();
     let mut step = |name: &str, runs: usize, scenario: &dyn Fn() -> Metrics| {
         if only.is_some_and(|only| !only.split(',').any(|s| s == name)) {
             return;
         }
+        let runs = if profiling { 1 } else { runs };
         eprintln!("{name} ({runs} runs)...");
         metrics.extend(run_repeatedly(runs, scenario));
     };
@@ -546,6 +631,7 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("fly_through", MANY_RUNS, &|| {
         scenario_fly_through::<SineWorld>("fly_through")
     });
+    step("teleport", MANY_RUNS, &scenario_teleport);
     step("edit_storm", RUNS, &scenario_edit_storm);
     step("in_view_fly_through", RUNS, &|| {
         scenario_fly_through::<InViewWorld>("in_view_fly_through")
@@ -558,8 +644,11 @@ fn run_all(only: Option<&str>) -> Metrics {
 enum Gate {
     /// Higher is worse; regression when the relative increase exceeds the limit.
     Lower(f64),
-    /// Like `Lower`, for small frame counts: also needs more than one frame of increase.
-    LowerFrames(f64),
+    /// Like `Lower`, for small counts: also needs an increase of more than `min`.
+    LowerCount {
+        limit: f64,
+        min: f64,
+    },
     /// Lower is worse; regression when the relative decrease exceeds the limit.
     Higher(f64),
     ReportOnly,
@@ -571,8 +660,18 @@ fn gate(key: &str) -> Gate {
     }
     match key.rsplit('.').next().unwrap() {
         "p50_ms" | "time_ms" => Gate::Lower(0.05),
-        "frames_to_publish" => Gate::LowerFrames(0.05),
+        "frames_to_publish" => Gate::LowerCount {
+            limit: 0.05,
+            min: 1.0,
+        },
         "p99_ms" => Gate::Lower(0.10),
+        // Stutter metrics rest on a handful of frames; with identical code they
+        // still move by up to about 10% (worst 1%) and 5 frames (counts).
+        "worst_1pct_ms" => Gate::Lower(0.15),
+        suffix if suffix.starts_with("over_") => Gate::LowerCount {
+            limit: 0.20,
+            min: 5.0,
+        },
         "chunks_per_s" | "coverage" => Gate::Higher(0.05),
         _ => Gate::ReportOnly,
     }
@@ -586,10 +685,16 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
     );
     for (key, b) in before {
         let Some(a) = after.get(key) else { continue };
-        let change = if *b == 0.0 { 0.0 } else { (a - b) / b };
+        let change = match (*b, *a) {
+            (0.0, 0.0) => 0.0,
+            (0.0, _) => f64::INFINITY,
+            _ => (a - b) / b,
+        };
         let verdict = match gate(key) {
             Gate::Lower(limit) if change > limit => "REGRESSED",
-            Gate::LowerFrames(limit) if change > limit && a - b > 1.0 => "REGRESSED",
+            Gate::LowerCount { limit, min } if change > limit && a - b > min => {
+                "REGRESSED"
+            }
             Gate::Higher(limit) if -change > limit => "REGRESSED",
             Gate::ReportOnly => "report",
             _ => "ok",
@@ -718,6 +823,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        ["profile", scenario] => {
+            if !cfg!(feature = "trace_tracy") {
+                eprintln!("profile needs a Tracy build: add `--features trace_tracy`");
+                std::process::exit(2);
+            }
+            PROFILING.store(true, Ordering::Relaxed);
+            for (key, value) in &run_all(Some(scenario)) {
+                println!("{key:<38} {value:>12.3}");
+            }
+        }
         ["save-binary", name] => save_binary(name),
         ["ab", baseline] => {
             if !ab(baseline) {
@@ -728,7 +843,7 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: chunk_lifecycle run <label> [<scenario>,…] | compare <before> <after> \
-                 | save-binary <name> | ab <baseline>"
+                 | save-binary <name> | ab <baseline> | profile <scenario>"
             );
             std::process::exit(2);
         }

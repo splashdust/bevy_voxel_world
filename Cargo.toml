@@ -16,6 +16,10 @@ categories = ["game-development", "graphics"]
 [features]
 default = []
 navigation = []
+# Profiling spans for the crate's own work, alongside Bevy's.
+trace = ["bevy/trace"]
+# `trace`, sent to the Tracy profiler.
+trace_tracy = ["trace", "bevy/trace_tracy"]
 
 [[example]]
 name = "fast_traversal_ray"
