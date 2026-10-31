@@ -725,6 +725,148 @@ fn a_remeshed_chunk_reuses_its_previous_data_when_configured() {
     );
 }
 
+/// A world solid all through, so every chunk is full of one material.
+#[derive(Resource, Clone, Default)]
+struct SolidWorld;
+
+impl VoxelWorldConfig for SolidWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        1
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|_, _| WorldVoxel::Solid(1)))
+    }
+}
+
+#[test]
+fn a_full_chunk_keeps_an_edited_voxel_of_another_material() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<SolidWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<SolidWorld>)
+        .add_systems(Update, record_announcements::<SolidWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<SolidWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    let edited = IVec3::new(16, 16, 16);
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<SolidWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(2));
+        })
+        .unwrap();
+    update_until(&mut app, "the edited chunk to be published again", |app| {
+        Announced::count(&app.world().resource::<Announced>().published, IVec3::ZERO) == 2
+    });
+
+    let data = chunk_data::<SolidWorld>(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(
+        data.get_voxel_at_world_position(edited),
+        Some(WorldVoxel::Solid(2))
+    );
+    assert_eq!(
+        data.get_voxel_at_world_position(IVec3::new(16, 15, 16)),
+        Some(WorldVoxel::Solid(1))
+    );
+}
+
+/// The LOD level of every `LodWorld` chunk.
+static LOD_WORLD_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+/// The voxel lookups of the `LodWorld` chunk below the origin.
+static LOD_WORLD_LOOKUPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+const BELOW_ORIGIN: IVec3 = IVec3::new(0, -1, 0);
+
+/// A `FloorWorld` whose chunks are half resolution at LOD level 1.
+#[derive(Resource, Clone, Default)]
+struct LodWorld;
+
+impl VoxelWorldConfig for LodWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn chunk_lod(&self, _: IVec3, _: Option<LodLevel>, _: Vec3) -> LodLevel {
+        LOD_WORLD_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
+        crate::configuration::padded_chunk_shape_uniform(32 >> lod_level)
+    }
+
+    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
+        crate::configuration::padded_chunk_shape_uniform(32 >> lod_level)
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|chunk_pos, _, _| {
+            Box::new(move |pos, _| {
+                if chunk_pos == BELOW_ORIGIN {
+                    LOD_WORLD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                floor_voxel(pos)
+            })
+        })
+    }
+}
+
+#[test]
+fn a_refined_chunk_reuses_its_coarse_voxels() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<LodWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<LodWorld>)
+        .add_systems(Update, record_announcements::<LodWorld>);
+
+    update_until(&mut app, "the coarse chunk to be published", |app| {
+        Announced::count(&app.world().resource::<Announced>().published, BELOW_ORIGIN)
+            == 1
+    });
+    let coarse_lookups = LOD_WORLD_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(coarse_lookups, 18usize.pow(3));
+
+    LOD_WORLD_LEVEL.store(0, std::sync::atomic::Ordering::Relaxed);
+    update_until(&mut app, "the refined chunk to be published", |app| {
+        Announced::count(&app.world().resource::<Announced>().published, BELOW_ORIGIN)
+            == 2
+    });
+
+    // The coarse voxels sit at every other position from the chunk's origin,
+    // 17 along each axis, and the refined chunk looks up only the rest.
+    let refined_lookups =
+        LOD_WORLD_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed) - coarse_lookups;
+    assert_eq!(refined_lookups, 34usize.pow(3) - 17usize.pow(3));
+    let data = chunk_data::<LodWorld>(&mut app, BELOW_ORIGIN).unwrap();
+    assert_eq!(data.data_shape(), UVec3::splat(34));
+    for z in -1..=32 {
+        for y in -33..=0 {
+            for x in -1..=32 {
+                let position = IVec3::new(x, y, z);
+                assert_eq!(
+                    data.get_voxel_at_world_position(position),
+                    Some(floor_voxel(position)),
+                    "at {position}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
     type Mat = <DefaultWorld as VoxelWorldConfig>::MaterialIndex;

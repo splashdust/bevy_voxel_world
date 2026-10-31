@@ -1,7 +1,7 @@
-use bevy::{platform::collections::HashSet, prelude::*};
+use bevy::{platform::hash::FixedHasher, prelude::*};
 use ndshape::{ConstShape3u32, RuntimeShape, Shape};
 use std::{
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     marker::PhantomData,
     sync::Arc,
 };
@@ -45,6 +45,36 @@ fn voxel_size_from_shape(shape: &RuntimeShape<u32, 3>) -> Vec3 {
         CHUNK_SIZE_F / iy as f32,
         CHUNK_SIZE_F / iz as f32,
     )
+}
+
+/// The data coordinate along one axis of the voxel `offset` voxels from a
+/// chunk's origin, where the chunk's data voxels are `scale` voxels apart and
+/// `extent` long. `None` when no data voxel sits there.
+fn data_coordinate(offset: i32, scale: f32, extent: u32) -> Option<u32> {
+    if scale <= f32::EPSILON || extent == 0 {
+        return None;
+    }
+
+    let raw = ((offset as f32) + 1.0) / scale;
+    let chunk_block = raw.ceil();
+
+    if chunk_block < 0.0 {
+        return None;
+    }
+
+    let chunk_block_i = chunk_block as i32;
+
+    if chunk_block_i < 0 || chunk_block_i >= extent as i32 {
+        return None;
+    }
+
+    let reconstructed = ((chunk_block - 1.0) * scale) as i32;
+
+    if reconstructed != offset {
+        return None;
+    }
+
+    Some(chunk_block_i as u32)
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +133,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
 
     pub(crate) fn generate_hash(&mut self) {
         if let Some(voxels) = &self.voxels {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut hasher = FixedHasher.build_hasher();
             self.data_shape.to_array().hash(&mut hasher);
             self.mesh_shape.to_array().hash(&mut hasher);
             voxels.hash(&mut hasher);
@@ -125,11 +155,16 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             let shape = RuntimeShape::<u32, 3>::new(self.data_shape.to_array());
             voxels[shape.linearize(position.to_array()) as usize]
         } else {
-            match self.fill_type {
-                FillType::Uniform(voxel) => voxel,
-                FillType::Empty => WorldVoxel::Unset,
-                FillType::Mixed => unreachable!(),
-            }
+            self.fill_voxel()
+        }
+    }
+
+    /// The voxel everywhere in a chunk that stores no voxels.
+    fn fill_voxel(&self) -> WorldVoxel<I> {
+        match self.fill_type {
+            FillType::Uniform(voxel) => voxel,
+            FillType::Empty => WorldVoxel::Unset,
+            FillType::Mixed => unreachable!(),
         }
     }
 
@@ -143,37 +178,10 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         let chunk_origin = self.position * CHUNK_SIZE_I;
         let offset = world_position - chunk_origin;
 
-        let to_index = |component: i32, scale: f32, max: u32| -> Option<u32> {
-            if scale <= f32::EPSILON || max == 0 {
-                return None;
-            }
-
-            let raw = ((component as f32) + 1.0) / scale;
-            let chunk_block = raw.ceil();
-
-            if chunk_block < 0.0 {
-                return None;
-            }
-
-            let chunk_block_i = chunk_block as i32;
-
-            if chunk_block_i < 0 || chunk_block_i >= max as i32 {
-                return None;
-            }
-
-            let reconstructed = ((chunk_block - 1.0) * scale) as i32;
-
-            if reconstructed != component {
-                return None;
-            }
-
-            Some(chunk_block_i as u32)
-        };
-
         let chunk_block = match (
-            to_index(offset.x, scale.x, self.data_shape.x),
-            to_index(offset.y, scale.y, self.data_shape.y),
-            to_index(offset.z, scale.z, self.data_shape.z),
+            data_coordinate(offset.x, scale.x, self.data_shape.x),
+            data_coordinate(offset.y, scale.y, self.data_shape.y),
+            data_coordinate(offset.z, scale.z, self.data_shape.z),
         ) {
             (Some(x), Some(y), Some(z)) => UVec3::new(x, y, z),
             _ => return None,
@@ -340,6 +348,46 @@ impl<C> Chunk<C> {
     }
 }
 
+/// Reads a chunk's previous voxels at the world positions of a task's data
+/// voxels, as [`ChunkData::get_voxel_at_world_position`] would.
+struct PreviousVoxels<'a, I> {
+    data: &'a ChunkData<I>,
+    // For each axis, what each of the task's coordinates along it adds to the
+    // previous data's index, or `None` where no previous voxel sits.
+    index_parts: [Vec<Option<u32>>; 3],
+}
+
+impl<'a, I: Hash + Copy + PartialEq> PreviousVoxels<'a, I> {
+    /// `world_coordinates` holds the world coordinates of the task's data
+    /// voxels along each axis.
+    fn new(data: &'a ChunkData<I>, world_coordinates: &[Vec<i32>; 3]) -> Self {
+        let shape = data.data_shape;
+        let scale = voxel_size_from_shape(&RuntimeShape::<u32, 3>::new(shape.to_array()));
+        let origin = data.position * CHUNK_SIZE_I;
+        let strides = [1, shape.x, shape.x * shape.y];
+        let index_parts = std::array::from_fn(|axis| {
+            world_coordinates[axis]
+                .iter()
+                .map(|&world| {
+                    data_coordinate(world - origin[axis], scale[axis], shape[axis])
+                        .map(|coordinate| coordinate * strides[axis])
+                })
+                .collect()
+        });
+        Self { data, index_parts }
+    }
+
+    /// The previous voxel at the task's data coordinates `x`, `y` and `z`.
+    fn get(&self, x: usize, y: usize, z: usize) -> Option<WorldVoxel<I>> {
+        let [xs, ys, zs] = &self.index_parts;
+        let index = xs[x]? + ys[y]? + zs[z]?;
+        Some(match &self.data.voxels {
+            Some(voxels) => voxels[index as usize],
+            None => self.data.fill_voxel(),
+        })
+    }
+}
+
 /// Holds all data needed to generate and mesh a chunk
 #[derive(Component)]
 pub(crate) struct ChunkTask<C, I>
@@ -389,11 +437,9 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     ) where
         F: FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + 'static,
     {
-        let mut filled_count = 0;
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("generate_chunk").entered();
         let has_edits = !self.edits.is_empty();
-        let mut material_count = HashSet::new();
         let reuse_previous =
             matches!(strategy, ChunkRegenerateStrategy::Reuse) && previous_data.is_some();
 
@@ -419,78 +465,78 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
 
         self.chunk_data.data_shape = active_shape;
         let data_shape = RuntimeShape::<u32, 3>::new(active_shape.to_array());
-
-        let mut voxels = vec![WorldVoxel::Unset; data_shape.size() as usize];
-
         let scale = voxel_size_from_shape(&data_shape);
+        let origin = self.position * CHUNK_SIZE_I;
+        // The world coordinates of the data voxels along each axis.
+        let world_coordinates: [Vec<i32>; 3] = std::array::from_fn(|axis| {
+            (0..active_shape[axis])
+                .map(|c| ((c as f32 - 1.0) * scale[axis]) as i32 + origin[axis])
+                .collect()
+        });
+        let previous_voxels = previous_data
+            .as_ref()
+            .map(|chunk| PreviousVoxels::new(chunk, &world_coordinates));
 
         self.chunk_data.has_generated = true;
 
-        for i in 0..data_shape.size() {
-            let chunk_block = data_shape.delinearize(i);
-
-            let block_pos = IVec3 {
-                x: ((chunk_block[0] as f32 - 1.0) * scale[0]) as i32
-                    + (self.position.x * CHUNK_SIZE_I),
-                y: ((chunk_block[1] as f32 - 1.0) * scale[1]) as i32
-                    + (self.position.y * CHUNK_SIZE_I),
-                z: ((chunk_block[2] as f32 - 1.0) * scale[2]) as i32
-                    + (self.position.z * CHUNK_SIZE_I),
-            };
-
-            let edit = if has_edits {
-                self.edits.get(block_pos)
-            } else {
-                None
-            };
-            if let Some(voxel) = edit {
-                voxels[i as usize] = voxel;
-                if !voxel.is_unset() && !voxel.is_air() {
-                    filled_count += 1;
+        // The voxel at `block_pos`, which is at data coordinates `x`, `y` and `z`.
+        let mut voxel_at = |block_pos: IVec3, x: usize, y: usize, z: usize| {
+            if has_edits {
+                if let Some(voxel) = self.edits.get(block_pos) {
+                    return voxel;
                 }
-                continue;
             }
-
-            let previous_voxel = previous_data
+            let previous_voxel = previous_voxels
                 .as_ref()
-                .and_then(|chunk| chunk.get_voxel_at_world_position(block_pos));
+                .and_then(|previous| previous.get(x, y, z));
+            match previous_voxel {
+                Some(voxel) if reuse_previous && !voxel.is_unset() => voxel,
+                _ => voxel_data_fn(block_pos, previous_voxel),
+            }
+        };
 
-            if reuse_previous {
-                if let Some(prev_voxel) = previous_voxel {
-                    if !prev_voxel.is_unset() {
-                        voxels[i as usize] = prev_voxel;
-                        if let WorldVoxel::Solid(m) = prev_voxel {
-                            filled_count += 1;
-                            material_count.insert(m);
+        let mut voxels = Vec::with_capacity(data_shape.usize());
+        let mut filled_count = 0;
+        // The first solid voxel, and whether every solid voxel is the same as it.
+        let mut first_solid = None;
+        let mut one_material = true;
+
+        // Data voxels are stored x fastest, then y, then z.
+        let [xs, ys, zs] = &world_coordinates;
+        for (z_index, &z) in zs.iter().enumerate() {
+            for (y_index, &y) in ys.iter().enumerate() {
+                for (x_index, &x) in xs.iter().enumerate() {
+                    let voxel = voxel_at(IVec3::new(x, y, z), x_index, y_index, z_index);
+                    voxels.push(voxel);
+
+                    if voxel.is_solid() {
+                        filled_count += 1;
+                        match first_solid {
+                            None => first_solid = Some(voxel),
+                            Some(first) => one_material &= voxel == first,
                         }
-                        continue;
                     }
                 }
-            }
-
-            let voxel = voxel_data_fn(block_pos, previous_voxel);
-
-            voxels[i as usize] = voxel;
-
-            if let WorldVoxel::Solid(m) = voxel {
-                filled_count += 1;
-                material_count.insert(m);
             }
         }
 
         self.chunk_data.is_empty = filled_count == 0;
-        self.chunk_data.is_full = filled_count == data_shape.size();
+        self.chunk_data.is_full = filled_count == voxels.len();
 
-        if self.chunk_data.is_full && material_count.len() == 1 {
-            self.chunk_data.fill_type = FillType::Uniform(voxels[0]);
-            self.chunk_data.voxels = None;
-        } else if filled_count > 0 {
-            self.chunk_data.fill_type = FillType::Mixed;
-            self.chunk_data.voxels = Some(Arc::from(voxels));
-        } else {
-            self.chunk_data.fill_type = FillType::Empty;
-            self.chunk_data.voxels = None;
-        };
+        match first_solid {
+            Some(voxel) if self.chunk_data.is_full && one_material => {
+                self.chunk_data.fill_type = FillType::Uniform(voxel);
+                self.chunk_data.voxels = None;
+            }
+            Some(_) => {
+                self.chunk_data.fill_type = FillType::Mixed;
+                self.chunk_data.voxels = Some(Arc::from(voxels));
+            }
+            None => {
+                self.chunk_data.fill_type = FillType::Empty;
+                self.chunk_data.voxels = None;
+            }
+        }
 
         self.chunk_data.generate_hash();
     }
