@@ -16,6 +16,7 @@
 - Breaking: `Chunk<C>` fields are read through getters (`position()`, `lod_level()`, `entity()`, `data_shape()`, `mesh_shape()`), and `Chunk::new` and `Chunk::from` are no longer public. `NeedsDespawn` is removed; use `chunk_state` instead.
 - Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
 - Fix: frames with voxel edits no longer wait for running chunk tasks either; each chunk task takes the edits it needs when it starts.
+- Fix: spawning rays are spread over the camera's viewport on high-DPI displays and for cameras with a custom viewport. Before, they were picked in physical pixels from the window's corner but cast in logical pixels from the viewport's, so on a 2× display about three quarters of them landed outside it.
 
 ## 0.18
 

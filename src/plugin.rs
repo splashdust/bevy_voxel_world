@@ -105,12 +105,7 @@ where
                 PreUpdate,
                 (
                     Internals::<C>::flush_voxel_write_buffer,
-                    (
-                        Internals::<C>::spawn_chunks,
-                        Internals::<C>::update_chunk_lods,
-                        Internals::<C>::retire_chunks,
-                    )
-                        .chain(),
+                    Internals::<C>::stream_chunks,
                     ChunkLifecycle::<C>::apply_requests,
                     // Starting tasks needs the chunks spawned above. No other step
                     // depends on an earlier step's commands, so this is the only sync

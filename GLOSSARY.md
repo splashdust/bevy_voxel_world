@@ -40,3 +40,13 @@ _Avoid_: cancelled task
 
 **Publish**:
 To make a finished chunk task's voxel data readable through the voxel world, independent of whether a mesh is ever shown.
+
+### Streaming
+
+**Streaming policy**:
+The rules that decide, from the cameras' positions and views, which chunks should exist, at which LOD level, and which should be retired.
+_Avoid_: spawn policy, chunk spawner
+
+**Protected radius**:
+The distance around each camera within which chunks are spawned and never retired, whether or not they are in view.
+_Avoid_: min despawn distance

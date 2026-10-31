@@ -2,13 +2,8 @@
 /// Voxel World internals
 /// This module contains the internal systems and resources used to implement bevy_voxel_world.
 ///
-use bevy::{
-    ecs::system::SystemParam,
-    platform::collections::{HashMap, HashSet},
-    prelude::*,
-};
+use bevy::{ecs::system::SystemParam, platform::collections::HashMap, prelude::*};
 use std::{
-    collections::VecDeque,
     marker::PhantomData,
     sync::{Arc, RwLock},
 };
@@ -17,9 +12,10 @@ use crate::{
     chunk::*,
     chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
-    configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfig},
+    configuration::VoxelWorldConfig,
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
+    streaming_policy::{self, CameraSnapshot, ExistingChunk, Occupancy},
     voxel::WorldVoxel,
     voxel_material::LoadingTexture,
     voxel_world::{get_affected_chunk_positions, VoxelWorldCamera},
@@ -189,247 +185,56 @@ where
         configuration.init_root(commands, world_root)
     }
 
-    /// Find chunks in need of spawning and request them
-    pub fn spawn_chunks(
+    /// Plan this frame's spawns, LOD changes and retirements, and request them.
+    pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
         let cameras: Vec<_> = camera_info
             .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
+            .map(|(camera, transform)| {
+                CameraSnapshot::new(
+                    transform.affine(),
+                    camera.clip_from_view(),
+                    camera.physical_viewport_size().unwrap_or_default(),
+                )
+            })
             .collect();
         if cameras.is_empty() {
             return;
         }
-
-        let spawning_distance = configuration.spawning_distance() as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-        let spawn_strategy = configuration.chunk_spawn_strategy();
-
-        let visibility_margin = 0.0f32;
-        let protected_chunk_radius_sq =
-            (configuration.min_despawn_distance() as i32).pow(2);
-
-        let mut visited = HashSet::new();
-        let mut chunks_deque = VecDeque::with_capacity(
-            configuration.spawning_rays() * spawning_distance as usize,
-        );
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
-
-        // Shoots a ray from the given point, and queue all (non-spawned) chunks intersecting the ray
-        let queue_chunks_intersecting_ray_from_point =
-            |camera: &TrackedCamera, point: Vec2, queue: &mut VecDeque<IVec3>| {
-                let Ok(ray) = camera.camera.viewport_to_world(camera.transform, point)
-                else {
-                    return;
-                };
-                let mut current = ray.origin;
-                let mut t = 0.0;
-                while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
-                    let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-                    if let Some(chunk) = ChunkMap::<C, C::MaterialIndex>::get(
-                        &chunk_pos,
-                        &chunk_map_read_lock,
-                    ) {
-                        if chunk.is_full {
-                            // If we hit a full chunk, we can stop the ray early
-                            break;
-                        }
-                    } else {
-                        queue.push_back(chunk_pos);
-                    }
-                    t += CHUNK_SIZE_F;
-                    current = ray.origin + ray.direction * t;
-                }
-            };
-
-        // Each frame we pick some random points on the screen
-        let m = configuration.spawning_ray_margin();
-        for _ in 0..configuration.spawning_rays() {
-            let camera = &cameras[rand::random_range(0..cameras.len())];
-            let viewport_size =
-                camera.camera.physical_viewport_size().unwrap_or_default();
-            let random_point_in_viewport = {
-                let x =
-                    rand::random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
-                let y =
-                    rand::random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
-                Vec2::new(x, y)
-            };
-
-            // Then, for each point, we cast a ray, picking up any unspawned chunks along the ray
-            queue_chunks_intersecting_ray_from_point(
-                camera,
-                random_point_in_viewport,
-                &mut chunks_deque,
-            );
-        }
-
-        // We also queue the chunks closest to every camera to make sure they will always spawn early.
-        let protected_distance = configuration.min_despawn_distance() as i32;
-        for camera in &cameras {
-            for x in -protected_distance..=protected_distance {
-                for y in -protected_distance..=protected_distance {
-                    for z in -protected_distance..=protected_distance {
-                        let queue_pos = camera.chunk_position + IVec3::new(x, y, z);
-                        chunks_deque.push_back(queue_pos);
-                    }
-                }
+        let occupancy = |position: IVec3| {
+            if !index.contains(position) {
+                return Occupancy::Missing;
             }
-        }
-
-        // Then, when we have a queue of chunks, we can set them up for spawning
-        while let Some(chunk_position) = chunks_deque.pop_front() {
-            if visited.contains(&chunk_position)
-                || chunks_deque.len() > configuration.max_spawn_per_frame()
-            {
-                continue;
+            match chunk_map_read_lock.get(&position) {
+                Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
+                Some(_) => Occupancy::Published,
+                None => Occupancy::Spawned,
             }
-            visited.insert(chunk_position);
-
-            if !chunk_is_close_to_any_camera(
-                &cameras,
-                chunk_position,
-                spawning_distance_squared,
-            ) {
-                continue;
-            }
-
-            if spawn_strategy == ChunkSpawnStrategy::CloseAndInView
-                && !chunk_visible_to_any_camera(
-                    &cameras,
-                    chunk_position,
-                    visibility_margin,
-                )
-                && !chunk_is_close_to_any_camera(
-                    &cameras,
-                    chunk_position,
-                    protected_chunk_radius_sq,
-                )
-            {
-                continue;
-            }
-
-            if index.contains(chunk_position) {
-                continue;
-            }
-            let camera_position =
-                closest_camera_position_to_chunk(&cameras, chunk_position);
-            let lod_level =
-                configuration.chunk_lod(chunk_position, None, camera_position);
-            requests.spawn.push((chunk_position, lod_level));
-
-            if spawn_strategy != ChunkSpawnStrategy::Close {
-                continue;
-            }
-
-            // If we get here, we queue the neighbors
-            for x in -1..=1 {
-                for y in -1..=1 {
-                    for z in -1..=1 {
-                        let queue_pos = chunk_position + IVec3::new(x, y, z);
-                        if queue_pos == chunk_position {
-                            continue;
-                        }
-                        chunks_deque.push_back(queue_pos);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Request LOD changes for chunks whose LOD level should change.
-    pub fn update_chunk_lods(
-        mut requests: ResMut<ChunkRequests<C>>,
-        chunks: Query<&Chunk<C>>,
-        configuration: Res<C>,
-        camera_info: CameraInfo<C>,
-    ) {
-        let cameras: Vec<_> = camera_info
-            .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
-            .collect();
-        if cameras.is_empty() {
-            return;
-        }
-
-        for chunk in chunks.iter() {
-            let camera_position =
-                closest_camera_position_to_chunk(&cameras, chunk.position);
-            let target_lod = configuration.chunk_lod(
-                chunk.position,
-                Some(chunk.lod_level),
-                camera_position,
-            );
-            if target_lod != chunk.lod_level {
-                requests.change_lod.push((chunk.position, target_lod));
-            }
-        }
-    }
-
-    /// Request despawning of chunks that are eligible for it
-    pub fn retire_chunks(
-        mut requests: ResMut<ChunkRequests<C>>,
-        all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
-        configuration: Res<C>,
-        camera_info: CameraInfo<C>,
-    ) {
-        let spawning_distance = configuration.spawning_distance() as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-
-        let cameras: Vec<_> = camera_info
-            .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
-            .collect();
-        if cameras.is_empty() {
-            return;
-        }
-
-        let chunks_to_remove = {
-            let mut remove = Vec::with_capacity(1000);
-            for (chunk, view_visibility) in all_chunks.iter() {
-                let should_be_culled = {
-                    match configuration.chunk_despawn_strategy() {
-                        ChunkDespawnStrategy::FarAway => false,
-                        ChunkDespawnStrategy::FarAwayOrOutOfView => {
-                            let frustum_culled = !chunk_visible_to_any_camera(
-                                &cameras,
-                                chunk.position,
-                                0.0,
-                            );
-                            if let Some(visibility) = view_visibility {
-                                !visibility.get() || frustum_culled
-                            } else {
-                                frustum_culled
-                            }
-                        }
-                    }
-                };
-                let near_camera = chunk_is_close_to_any_camera(
-                    &cameras,
-                    chunk.position,
-                    (CHUNK_SIZE_I * configuration.min_despawn_distance() as i32).pow(2),
-                );
-                if (should_be_culled && !near_camera)
-                    || !chunk_is_close_to_any_camera(
-                        &cameras,
-                        chunk.position,
-                        spawning_distance_squared + 1,
-                    )
-                {
-                    remove.push(chunk);
-                }
-            }
-            remove
         };
+        let existing = chunks.iter().map(|(chunk, view_visibility)| ExistingChunk {
+            position: chunk.position,
+            lod_level: chunk.lod_level,
+            view_visible: view_visibility.map(|visibility| visibility.get()),
+        });
 
-        requests
-            .retire
-            .extend(chunks_to_remove.into_iter().map(|chunk| chunk.position));
+        let plan = streaming_policy::plan(
+            configuration.as_ref(),
+            &cameras,
+            existing,
+            occupancy,
+            &mut rand::rng(),
+        );
+        requests.spawn.extend(plan.spawn);
+        requests.change_lod.extend(plan.change_lod);
+        requests.retire.extend(plan.retire);
     }
 
     pub fn flush_voxel_write_buffer(
@@ -470,138 +275,5 @@ where
                 .insert(*transform)
                 .remove::<NeedsMaterial<C>>();
         }
-    }
-}
-
-struct TrackedCamera<'a> {
-    camera: &'a Camera,
-    transform: &'a GlobalTransform,
-    position: Vec3,
-    chunk_position: IVec3,
-}
-
-impl<'a> TrackedCamera<'a> {
-    fn new(camera: &'a Camera, transform: &'a GlobalTransform) -> Self {
-        let position = transform.translation();
-        Self {
-            camera,
-            transform,
-            position,
-            chunk_position: position.as_ivec3() / CHUNK_SIZE_I,
-        }
-    }
-}
-
-fn chunk_is_close_to_any_camera(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-    distance_squared: i32,
-) -> bool {
-    cameras.iter().any(|camera| {
-        chunk_position.distance_squared(camera.chunk_position) <= distance_squared
-    })
-}
-
-fn closest_camera_position_to_chunk(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-) -> Vec3 {
-    let chunk_world_position = chunk_position.as_vec3() * CHUNK_SIZE_F;
-    cameras
-        .iter()
-        .min_by(|a, b| {
-            a.position
-                .distance_squared(chunk_world_position)
-                .total_cmp(&b.position.distance_squared(chunk_world_position))
-        })
-        .map(|camera| camera.position)
-        .unwrap_or(Vec3::ZERO)
-}
-
-fn chunk_visible_to_any_camera(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-    ndc_margin: f32,
-) -> bool {
-    cameras.iter().any(|camera| {
-        chunk_visible_to_camera(
-            camera.camera,
-            camera.transform,
-            chunk_position,
-            ndc_margin,
-        )
-    })
-}
-
-fn chunk_visible_to_camera(
-    camera: &Camera,
-    cam_gtf: &GlobalTransform,
-    chunk_position: IVec3,
-    ndc_margin: f32,
-) -> bool {
-    let chunk_min = chunk_position.as_vec3() * CHUNK_SIZE_F;
-    let chunk_max = chunk_min + Vec3::splat(CHUNK_SIZE_F);
-
-    let cam_pos = cam_gtf.translation();
-    if cam_pos.x >= chunk_min.x
-        && cam_pos.x <= chunk_max.x
-        && cam_pos.y >= chunk_min.y
-        && cam_pos.y <= chunk_max.y
-        && cam_pos.z >= chunk_min.z
-        && cam_pos.z <= chunk_max.z
-    {
-        return true;
-    }
-
-    let limit = 1.0 + ndc_margin;
-    let point_in_ndc = |point: Vec3| -> bool {
-        if let Some(ndc) = camera.world_to_ndc(cam_gtf, point) {
-            ndc.x >= -limit
-                && ndc.x <= limit
-                && ndc.y >= -limit
-                && ndc.y <= limit
-                && ndc.z >= -ndc_margin
-                && ndc.z <= 1.0 + ndc_margin
-        } else {
-            false
-        }
-    };
-
-    if point_in_ndc((chunk_min + chunk_max) * 0.5) {
-        return true;
-    }
-
-    for &x in &[chunk_min.x, chunk_max.x] {
-        for &y in &[chunk_min.y, chunk_max.y] {
-            for &z in &[chunk_min.z, chunk_max.z] {
-                if point_in_ndc(Vec3::new(x, y, z)) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if the given world point is within the camera's view
-#[inline]
-#[allow(dead_code)]
-fn is_in_view(
-    world_point: Vec3,
-    camera: &Camera,
-    cam_global_transform: &GlobalTransform,
-) -> bool {
-    if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
-        // When the position is within the viewport the values returned will be between
-        // -1.0 and 1.0 on the X and Y axes, and between 0.0 and 1.0 on the Z axis.
-        chunk_vp.x >= -1.0
-            && chunk_vp.x <= 1.0
-            && chunk_vp.y >= -1.0
-            && chunk_vp.y <= 1.0
-            && chunk_vp.z >= 0.0
-            && chunk_vp.z <= 1.0
-    } else {
-        false
     }
 }
