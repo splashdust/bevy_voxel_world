@@ -2,30 +2,45 @@
 
 ## 0.19 (unreleased)
 
-- Add `VoxelWorldSet<C>`, the system set in `PreUpdate` that runs the chunk lifecycle of world `C`. Order your systems after it to see chunks published this frame.
-- Finished chunks are now collected and published in the same frame, one frame sooner than before.
-- `minimal()` worlds now publish generated voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
-- Chunk data is published while the voxel texture is still loading; only showing chunk meshes waits for it.
-- Add `VoxelWorld::chunk_state`, which tells where a chunk is in its lifecycle as a `ChunkStatus`: `Pending`, `Generating`, `Ready` or `Retiring`.
-- An edit or LOD change no longer cancels a chunk's running task: the task finishes and is published, then a follow-up task starts. Before, a chunk edited every frame never published.
-- Chunks remeshing after an edit, and follow-up tasks, get task slots before chunks waiting to spawn.
-- Add `ChunkPublished<C>`, fired every time a chunk's voxel data is published: on its first publish and after every remesh.
-- Breaking: `ChunkWillSpawn` fires once per chunk, when its data is first published. Before, it fired again after every remesh; read `ChunkPublished` for that.
-- Breaking: `get_chunk_data` returns `None` until a chunk's data is first published, and raycasts only cover published chunks. Before, a newly spawned chunk had empty placeholder data.
-- Breaking: a retiring chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query the entity.
-- Breaking: `Chunk<C>` fields are read through getters (`position()`, `lod_level()`, `entity()`, `data_shape()`, `mesh_shape()`), and `Chunk::new` and `Chunk::from` are no longer public. `NeedsDespawn` is removed; use `chunk_state` instead.
-- Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
-- Fix: frames with voxel edits no longer wait for running chunk tasks either; each chunk task takes the edits it needs when it starts.
-- Fix: spawning rays are spread over the camera's viewport on high-DPI displays and for cameras with a custom viewport. Before, they were picked in physical pixels from the window's corner but cast in logical pixels from the viewport's, so on a 2× display about three quarters of them landed outside it.
-- Fix: chunk positions round down at negative coordinates everywhere. Before, a camera's chunk and the chunks along spawning rays rounded toward zero, so near a camera at negative coordinates the wrong chunks were protected and found by rays, and `ChunkData::has_voxel` returned false for every voxel in a chunk at negative coordinates.
-- Fix: `ChunkDespawnStrategy::FarAwayOrOutOfView` despawns chunks out of view beyond `min_despawn_distance` chunks from every camera. Before, it multiplied that distance by the chunk size, so with the default settings no chunk was despawned for being out of view.
-- Despawning out of view now only checks the cameras' views. Before, it also used the renderer's visibility, which is a frame behind the camera.
-- With `ChunkDespawnStrategy::FarAwayOrOutOfView`, chunks out of view are only spawned within `min_despawn_distance`, whatever the `ChunkSpawnStrategy`. Before, `ChunkSpawnStrategy::Close` spawned chunks that would be despawned the next frame.
-- Fix: `max_spawn_per_frame` is the most chunks spawned in a frame, and chunks within `min_despawn_distance` of a camera spawn first, nearest first. Before, it limited a queue of candidate chunks, which neither bounded how many chunks spawned nor favoured the ones nearest a camera.
-- Fix: with several cameras, a chunk's LOD level is chosen with the camera nearest the chunk's centre. Before, it was the camera nearest the chunk's minimum corner, which could be the farther camera.
-- Fix: when `set_voxel` sets the same position more than once, the last voxel set wins. Before, `get_voxel` returned the first voxel set there until the start of the next frame. Setting a voxel that was set in an earlier frame to another voxel and back within one frame no longer remeshes its chunk.
-- Systems that use `VoxelWorld` can run in parallel, including ones that call `set_voxel`. Before, each `VoxelWorld` held the voxel edits mutably, so Bevy ran these systems one at a time.
-- `get_voxel`, `get_voxel_fn` and `raycast_fn` no longer copy the voxels set this frame, and `get_voxel` no longer builds a closure on every call.
+- Add `VoxelWorldSet<C>`, the system set in `PreUpdate` that runs world `C`. Order your systems after it to see this frame's chunks.
+- Add `VoxelWorld::chunk_state`, which returns a chunk's `ChunkStatus`: `Pending`, `Generating`, `Ready` or `Retiring`.
+- Add `ChunkPublished<C>`, fired whenever a chunk's voxel data is published, including after each remesh.
+- Add the `voxel_animation` example, which animates water by setting voxels every frame.
+- Systems that use `VoxelWorld` can run in parallel, including ones that call `set_voxel`.
+- `minimal()` worlds publish voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
+- Chunk data no longer waits for the voxel texture to load; only meshes do.
+- A chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query it.
+- Performance: in the `chunk_lifecycle` benchmark, chunks stream in 1.5× faster (2.6× on flat terrain), and frames while voxels are being edited take a quarter of the time (worst 1% from 2.15 ms to 0.45 ms).
+- Fix: a chunk edited every frame now publishes. Before, each edit cancelled its running task.
+- Fix: when `set_voxel` sets a position more than once, the last voxel set wins, in `get_voxel` too. Setting an edited voxel to another voxel and back within a frame no longer remeshes its chunk.
+- Fix: spawning rays cover the whole viewport on high-DPI displays and with custom viewports.
+- Fix: chunk positions round down at negative coordinates, so the right chunks spawn and stay around a camera there, and `ChunkData::has_voxel` works there.
+- Fix: `ChunkSpawnStrategy::Close` with `FarAwayOrOutOfView` no longer spawns chunks that are despawned the next frame.
+- Fix: with several cameras, a chunk's LOD level comes from the camera nearest the chunk's centre.
+
+### Migrating from 0.18
+
+- `Chunk` fields are now methods.
+  - Before: `chunk.position`
+  - Now: `chunk.position()`. The same goes for `lod_level`, `entity`, `data_shape` and `mesh_shape`.
+- `NeedsDespawn` is removed.
+  - Before: `Query<&Chunk<C>, Without<NeedsDespawn>>`
+  - Now: `voxel_world.chunk_state(chunk.position()) != Some(ChunkStatus::Retiring)`
+- `ChunkWillSpawn` fires once per chunk.
+  - Before: `ChunkWillSpawn` fired again after every remesh.
+  - Now: read `ChunkPublished` to react to every remesh.
+- `get_chunk_data` returns `None` for a chunk that hasn't been published yet.
+  - Before: a newly spawned chunk returned empty data.
+  - Now: wait for `ChunkWillSpawn` before reading it. Raycasts skip unpublished chunks too.
+- `VoxelWorld` has a second lifetime.
+  - Before: `VoxelWorld<'_, MyWorld>`
+  - Now: `VoxelWorld<'_, '_, MyWorld>`, or just `VoxelWorld<MyWorld>`.
+- `ChunkDespawnStrategy::FarAwayOrOutOfView`, the default, despawns chunks that are out of view.
+  - Before: a bug kept every chunk out of view within `spawning_distance`.
+  - Now: chunks out of view are despawned beyond `min_despawn_distance`. To keep them, return `ChunkDespawnStrategy::FarAway` from `chunk_despawn_strategy`.
+- `max_spawn_per_frame` caps spawns.
+  - Before: it limited a queue of candidate chunks, not how many spawned.
+  - Now: it is the most chunks spawned in a frame, nearest a camera first. If you set it, check the value still suits you.
 
 ## 0.18
 
