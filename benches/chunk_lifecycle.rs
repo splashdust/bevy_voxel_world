@@ -539,6 +539,9 @@ fn scenario_edit_storm() -> Metrics {
     storm.active = false;
     let expected = storm_value(storm.tick);
 
+    // Gate on wall-clock time: frames here are far shorter than in a rendering
+    // app, so a frame count mostly reflects how fast the frame loop spins.
+    let start = Instant::now();
     let mut frames_to_publish = MAX_FRAMES;
     for frame in 1..=MAX_FRAMES {
         app.update();
@@ -549,6 +552,10 @@ fn scenario_edit_storm() -> Metrics {
     }
     let mut metrics = Metrics::new();
     frame_metrics("edit_storm", &times, &mut metrics);
+    metrics.insert(
+        "edit_storm.time_to_publish_ms".into(),
+        start.elapsed().as_secs_f64() * 1000.0,
+    );
     metrics.insert(
         "edit_storm.frames_to_publish".into(),
         frames_to_publish as f64,
@@ -660,11 +667,7 @@ fn gate(key: &str) -> Gate {
     }
     match key.rsplit('.').next().unwrap() {
         "p50_ms" | "time_ms" => Gate::Lower(0.05),
-        "frames_to_publish" => Gate::LowerCount {
-            limit: 0.05,
-            min: 1.0,
-        },
-        "p99_ms" => Gate::Lower(0.10),
+        "p99_ms" | "time_to_publish_ms" => Gate::Lower(0.10),
         // Stutter metrics rest on a handful of frames; with identical code they
         // still move by up to about 10% (worst 1%) and 5 frames (counts).
         "worst_1pct_ms" => Gate::Lower(0.15),
