@@ -160,21 +160,161 @@ fn set_voxel_can_be_found_by_2d_coordinate() {
     app.update();
 }
 
-// ChunkWillSpawn event now fires from the mesh spawning system, which cannot run in tests.
-#[ignore]
-#[test]
-fn chunk_will_spawn_events() {
-    let mut app = _test_setup_app();
+/// A world with solid ground below y = 0 and air above it.
+#[derive(Resource, Clone, Default)]
+struct FloorWorld;
 
-    app.add_systems(
-        Update,
-        |mut ev_chunk_will_spawn: MessageReader<ChunkWillSpawn<DefaultWorld>>| {
-            let spawn_count = ev_chunk_will_spawn.read().count();
-            assert!(spawn_count > 0);
-        },
-    );
+impl VoxelWorldConfig for FloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
 
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    // Chunks out of view stay, so a still camera never retires a chunk.
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|pos, _| floor_voxel(pos)))
+    }
+}
+
+fn floor_voxel(position: IVec3) -> WorldVoxel {
+    if position.y < 0 {
+        WorldVoxel::Solid(1)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+fn spawn_camera<C: VoxelWorldConfig>(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        VoxelWorldCamera::<C>::default(),
+    ));
+}
+
+/// Runs `app` at least once and until `done` holds, failing the test if it takes
+/// too long.
+fn update_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     app.update();
+    while !done(app) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        app.update();
+    }
+}
+
+#[derive(Resource, Default)]
+struct Published(Vec<IVec3>);
+
+#[test]
+fn minimal_world_publishes_generated_voxels() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+
+    let below_ground = IVec3::new(1, -3, 1);
+    update_until(&mut app, "generated voxel to be readable", |app| {
+        app.world_mut()
+            .run_system_cached_with(
+                |In(pos): In<IVec3>, voxel_world: VoxelWorld<FloorWorld>| {
+                    voxel_world.get_voxel(pos)
+                },
+                below_ground,
+            )
+            .unwrap()
+            == WorldVoxel::Solid(1)
+    });
+}
+
+#[test]
+fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .init_resource::<Published>()
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(
+            PreUpdate,
+            (|mut published: ResMut<Published>,
+              mut ev: MessageReader<ChunkWillSpawn<FloorWorld>>,
+              voxel_world: VoxelWorld<FloorWorld>| {
+                for msg in ev.read() {
+                    let chunk_data = voxel_world.get_chunk_data(msg.chunk_key);
+                    assert!(
+                        chunk_data.is_some_and(|data| data.has_generated()),
+                        "chunk {} was announced before its data was readable",
+                        msg.chunk_key
+                    );
+                    published.0.push(msg.chunk_key);
+                }
+            })
+            .after(VoxelWorldSet::<FloorWorld>::default()),
+        );
+
+    update_until(&mut app, "a chunk to be published", |app| {
+        app.world().resource::<Published>().0.len() > 5
+    });
+}
+
+/// A world whose voxel texture never loads.
+#[derive(Resource, Clone, Default)]
+struct MissingTextureWorld;
+
+impl VoxelWorldConfig for MissingTextureWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        Some(("does_not_exist.png".into(), 4))
+    }
+}
+
+#[test]
+fn chunks_publish_while_the_voxel_texture_is_loading() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::asset::AssetPlugin::default(),
+        bevy::image::ImagePlugin::default(),
+        bevy::mesh::MeshPlugin,
+        TransformPlugin,
+        bevy::camera::CameraPlugin,
+    ))
+    // Normally registered by RenderPlugin; the voxel material loads a shader.
+    .init_asset::<bevy::shader::Shader>()
+    .add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
+    .add_systems(Startup, spawn_camera::<MissingTextureWorld>);
+
+    update_until(&mut app, "a chunk mesh to be published", |app| {
+        app.world_mut()
+            .query::<&crate::mesh_cache::MeshRef>()
+            .iter(app.world())
+            .next()
+            .is_some()
+    });
+
+    let shown = app
+        .world_mut()
+        .query_filtered::<(), With<Mesh3d>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(shown, 0, "meshes were shown before the texture loaded");
 }
 
 #[test]

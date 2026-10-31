@@ -18,6 +18,7 @@ pub mod prelude {
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
+        VoxelWorldSet,
     };
     pub use crate::voxel_world::{
         ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,

@@ -63,6 +63,16 @@ pub struct VoxelWriteBuffer<C, I>(#[deref] Vec<(IVec3, WorldVoxel<I>)>, PhantomD
 #[derive(Component)]
 pub(crate) struct NeedsMaterial<C>(PhantomData<C>);
 
+/// Whether chunks get meshes. Off in `minimal()` worlds, which only keep voxel data.
+#[derive(Resource)]
+pub(crate) struct SpawnMeshes<C>(pub bool, PhantomData<C>);
+
+impl<C> SpawnMeshes<C> {
+    pub fn new(spawn_meshes: bool) -> Self {
+        Self(spawn_meshes, PhantomData)
+    }
+}
+
 pub(crate) struct Internals<C>(PhantomData<C>);
 
 #[derive(Component)]
@@ -521,95 +531,54 @@ where
         }
     }
 
-    /// Inserts new meshes for chunks that have just finished remeshing
+    /// Collects finished chunk tasks, queues their data for publishing and, when
+    /// the world spawns meshes, gives each chunk its mesh.
     #[allow(clippy::type_complexity)]
-    pub fn spawn_meshes(
+    pub fn collect_chunk_tasks(
         mut commands: Commands,
-        mut chunking_threads: Query<
+        mut chunk_tasks: Query<
             (
                 Entity,
                 &mut ChunkThread<C, C::MaterialIndex>,
-                &mut Chunk<C>,
+                &Chunk<C>,
                 &Transform,
             ),
             Without<NeedsRemesh>,
         >,
-        mut mesh_assets: ResMut<Assets<Mesh>>,
+        mesh_assets: Option<ResMut<Assets<Mesh>>>,
+        spawn_meshes: Res<SpawnMeshes<C>>,
         buffers: (
             ResMut<ChunkMapUpdateBuffer<C, C::MaterialIndex>>,
             ResMut<MeshCacheInsertBuffer<C>>,
         ),
-        res: (Res<MeshCache<C>>, Res<LoadingTexture>),
+        mesh_cache: Res<MeshCache<C>>,
     ) {
-        let (mesh_cache, loading_texture) = res;
-
-        if !loading_texture.is_loaded {
-            return;
-        }
-
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
+        let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
-        for (entity, mut thread, chunk, transform) in &mut chunking_threads {
-            let thread_result = future::block_on(future::poll_once(&mut thread.0));
-
-            if thread_result.is_none() {
+        for (entity, mut thread, chunk, transform) in &mut chunk_tasks {
+            let Some(mut chunk_task) = future::block_on(future::poll_once(&mut thread.0))
+            else {
                 continue;
-            }
+            };
 
-            let chunk_task = thread_result.unwrap();
-
-            if chunk_task.is_empty() || chunk_task.is_full() {
-                commands
-                    .entity(entity)
-                    .remove::<Mesh3d>()
-                    .remove::<MeshRef>()
-                    .remove::<NeedsMaterial<C>>()
-                    .remove::<C::ChunkUserBundle>();
-            } else {
-                let mesh_handle = {
-                    if let Some(mesh_handle) =
-                        mesh_cache.get_mesh_handle(&chunk_task.voxels_hash())
-                    {
-                        if let Some(user_bundle) =
-                            mesh_cache.get_user_bundle(&chunk_task.voxels_hash())
-                        {
-                            commands.entity(entity).insert(user_bundle);
-                        }
-
-                        mesh_handle
+            if let Some(mesh_assets) = mesh_assets.as_mut() {
+                let hash = chunk_task.voxels_hash();
+                let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
+                    None
+                } else if let Some(mesh_handle) = mesh_cache.get_mesh_handle(&hash) {
+                    if let Some(user_bundle) = mesh_cache.get_user_bundle(&hash) {
+                        commands.entity(entity).insert(user_bundle);
+                    }
+                    Some(mesh_handle)
+                } else if let Some(mesh) = chunk_task.mesh.take() {
+                    // Bevy 0.19 mesh slab allocator can emit use-after-free
+                    // errors if zero-vertex meshes are uploaded.
+                    if mesh.count_vertices() == 0 {
+                        None
                     } else {
-                        let hash = chunk_task.voxels_hash();
-                        let Some(mesh) = chunk_task.mesh else {
-                            commands
-                                .entity(chunk.entity)
-                                .try_insert(NeedsRemesh)
-                                .remove::<ChunkThread<C, C::MaterialIndex>>();
-                            continue;
-                        };
-
-                        // Bevy 0.19 mesh slab allocator can emit use-after-free
-                        // errors if zero-vertex meshes are uploaded.
-                        if mesh.count_vertices() == 0 {
-                            commands
-                                .entity(entity)
-                                .remove::<Mesh3d>()
-                                .remove::<MeshRef>()
-                                .remove::<NeedsMaterial<C>>()
-                                .remove::<C::ChunkUserBundle>();
-                            chunk_map_update_buffer.push((
-                                chunk.position,
-                                chunk_task.chunk_data,
-                                ChunkWillSpawn::<C>::new(chunk_task.position, entity),
-                            ));
-                            commands
-                                .entity(chunk.entity)
-                                .remove::<ChunkThread<C, C::MaterialIndex>>();
-                            continue;
-                        }
-
                         let mesh_ref = Arc::new(mesh_assets.add(mesh));
-                        let user_bundle = chunk_task.user_bundle;
-
+                        let user_bundle = chunk_task.user_bundle.take();
                         mesh_cache_insert_buffer.push((
                             hash,
                             mesh_ref.clone(),
@@ -618,15 +587,32 @@ where
                         if let Some(bundle) = user_bundle {
                             commands.entity(entity).insert(bundle);
                         }
-                        mesh_ref
+                        Some(mesh_ref)
                     }
+                } else {
+                    // The task skipped meshing for a cached mesh that has since
+                    // expired, so mesh the chunk again.
+                    commands
+                        .entity(chunk.entity)
+                        .try_insert(NeedsRemesh)
+                        .remove::<ChunkThread<C, C::MaterialIndex>>();
+                    continue;
                 };
 
-                commands.entity(entity).try_insert((
-                    *transform,
-                    MeshRef(mesh_handle),
-                    NeedsMaterial::<C>(PhantomData),
-                ));
+                if let Some(mesh_handle) = mesh_handle {
+                    commands.entity(entity).try_insert((
+                        *transform,
+                        MeshRef(mesh_handle),
+                        NeedsMaterial::<C>(PhantomData),
+                    ));
+                } else {
+                    commands
+                        .entity(entity)
+                        .remove::<Mesh3d>()
+                        .remove::<MeshRef>()
+                        .remove::<NeedsMaterial<C>>()
+                        .remove::<C::ChunkUserBundle>();
+                }
             }
 
             chunk_map_update_buffer.push((
@@ -718,14 +704,19 @@ where
         );
     }
 
+    /// Shows the meshes of chunks once the voxel texture has loaded.
     pub(crate) fn assign_material<M: Material>(
         mut commands: Commands,
         mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial<C>>>,
         material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
+        loading_texture: Res<LoadingTexture>,
     ) {
         let Some(material_handle) = material_handle else {
             return;
         };
+        if !loading_texture.is_loaded {
+            return;
+        }
 
         for (entity, mesh_ref, transform) in needs_material.iter_mut() {
             commands

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19 (unreleased)
+
+- Add `VoxelWorldSet<C>`, the system set in `PreUpdate` that runs the chunk lifecycle of world `C`. Order your systems after it to see chunks published this frame.
+- Finished chunks are now collected and published in the same frame, one frame sooner than before.
+- `minimal()` worlds now publish generated voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
+- Chunk data is published while the voxel texture is still loading; only showing chunk meshes waits for it.
+- Fix: frames without voxel edits no longer wait for running chunk tasks, which removes most stutters while chunks stream in.
+
 ## 0.18
 
 - Update to Bevy 0.20

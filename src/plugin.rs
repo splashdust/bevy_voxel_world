@@ -12,7 +12,7 @@ use crate::{
         TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
-    voxel_world_internal::Internals,
+    voxel_world_internal::{Internals, SpawnMeshes},
 };
 
 #[derive(Resource)]
@@ -99,29 +99,37 @@ where
     fn build(&self, app: &mut App) {
         app.init_resource::<C>()
             .add_systems(PreStartup, Internals::<C>::setup)
+            .insert_resource(SpawnMeshes::<C>::new(self.spawn_meshes))
             .add_systems(
                 PreUpdate,
                 (
+                    Internals::<C>::flush_voxel_write_buffer,
                     (
-                        (
-                            Internals::<C>::spawn_chunks,
-                            Internals::<C>::update_chunk_lods,
-                            Internals::<C>::retire_chunks,
-                        )
-                            .chain(),
-                        Internals::<C>::remesh_dirty_chunks,
+                        Internals::<C>::spawn_chunks,
+                        Internals::<C>::update_chunk_lods,
+                        Internals::<C>::retire_chunks,
                     )
-                        .chain(),
+                        .chain_ignore_deferred(),
+                    // Starting tasks and despawning need the chunks spawned and marked
+                    // above. No other step depends on an earlier step's commands, so this
+                    // is the only sync point the set needs.
+                    ApplyDeferred,
+                    Internals::<C>::remesh_dirty_chunks,
+                    Internals::<C>::collect_chunk_tasks,
                     (
-                        Internals::<C>::flush_voxel_write_buffer,
+                        Internals::<C>::flush_chunk_map_buffers,
+                        Internals::<C>::flush_mesh_cache_buffers,
+                    ),
+                    // Flushing again removes the despawned chunks from the chunk map
+                    // this frame.
+                    (
                         Internals::<C>::despawn_retired_chunks,
-                        (
-                            Internals::<C>::flush_chunk_map_buffers,
-                            Internals::<C>::flush_mesh_cache_buffers,
-                        ),
+                        Internals::<C>::flush_chunk_map_buffers,
                     )
                         .chain(),
-                ),
+                )
+                    .chain_ignore_deferred()
+                    .in_set(VoxelWorldSet::<C>::default()),
             )
             .add_message::<ChunkWillSpawn<C>>()
             .add_message::<ChunkWillDespawn<C>>()
@@ -138,8 +146,6 @@ where
                 "shaders/voxel_texture.wesl",
                 Shader::from_wesl
             );
-
-            app.add_systems(Update, Internals::<C>::spawn_meshes);
         }
 
         if !self.use_custom_material && self.spawn_meshes {

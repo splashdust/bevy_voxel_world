@@ -31,6 +31,47 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
+/// The systems that run the chunk lifecycle of the voxel world `C`, in `PreUpdate`.
+///
+/// Within a frame, they apply voxel edits, spawn and retire chunks, start chunk
+/// tasks, collect finished ones, publish their data and despawn retired chunks.
+/// A system ordered after this set sees every chunk published so far, and the
+/// `ChunkWillSpawn` messages for chunks published this frame.
+#[derive(SystemSet)]
+pub struct VoxelWorldSet<C>(PhantomData<fn() -> C>);
+
+impl<C> Default for VoxelWorldSet<C> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<C> Clone for VoxelWorldSet<C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for VoxelWorldSet<C> {}
+
+impl<C> PartialEq for VoxelWorldSet<C> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<C> Eq for VoxelWorldSet<C> {}
+
+impl<C> std::hash::Hash for VoxelWorldSet<C> {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl<C> std::fmt::Debug for VoxelWorldSet<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VoxelWorldSet<{}>", std::any::type_name::<C>())
+    }
+}
+
 pub trait ChunkEventType: Send + Sync + 'static {}
 
 #[derive(Event)]
