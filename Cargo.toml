@@ -42,6 +42,10 @@ name = "custom_meshing"
 path = "examples/custom_meshing.rs"
 
 [[example]]
+name = "marching_cubes"
+path = "examples/marching_cubes.rs"
+
+[[example]]
 name = "multiple_worlds"
 path = "examples/multiple_worlds.rs"
 
@@ -92,6 +96,7 @@ bevy = { version = "0.20", default-features = false, features = [
 bevy_panorbit_camera = { version = "0.36.0" }
 libc = "0.2"
 noise = { version = "0.9.0" }
+transvoxel = "2.0.0"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
@@ -99,3 +104,6 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.bench]
+codegen-units = 1
