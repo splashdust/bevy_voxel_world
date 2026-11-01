@@ -18,7 +18,7 @@ struct FpsText;
 /// The terrain lies between these level-0 chunk rows: below the sea level at
 /// y = 0 everything is rock, and the highest peaks (about y = 170) end in row
 /// 5, so every chunk above that row is air.
-const LOWEST_TERRAIN_CHUNK: i32 = 0;
+const LOWEST_TERRAIN_CHUNK: i32 = -1;
 const HIGHEST_TERRAIN_CHUNK: i32 = 5;
 
 /// What fills the chunk at `key` when no terrain crosses it: rock below the
@@ -58,7 +58,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        800
+        500
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -151,13 +151,13 @@ impl VoxelWorldConfig for MainWorld {
         // far bands hold few, large chunks.
         if distance < 60.0 {
             0
-        } else if distance < 150.0 {
+        } else if distance < 120.0 {
             1
-        } else if distance < 200.0 {
+        } else if distance < 180.0 {
             2
-        } else if distance < 500.0 {
+        } else if distance < 250.0 {
             3
-        } else if distance < 600.0 {
+        } else if distance < 300.0 {
             4
         } else {
             5
@@ -181,7 +181,7 @@ fn main() {
         .add_plugins((DefaultPlugins, FrameTimeDiagnosticsPlugin::default()))
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_camera, update_fps_text))
+        .add_systems(Update, (move_camera, update_fps_text, edit_terrain))
         .run();
 }
 
@@ -193,8 +193,8 @@ fn setup(mut commands: Commands) {
             order: 0,
             ..default()
         },
-        Transform::from_xyz(-200.0, 160.0, -200.0)
-            .looking_at(Vec3::new(0.0, 70.0, 0.0), Vec3::Y),
+        Transform::from_xyz(-200.0, 260.0, -200.0)
+            .looking_at(Vec3::new(0.0, 170.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
         DistanceFog {
@@ -256,6 +256,54 @@ fn setup(mut commands: Commands) {
         },
         FpsText,
     ));
+}
+
+/// Left click digs a hole and shift + left click adds a mound where the
+/// cursor points. Edits go through the usual voxel API and the terrain keeps
+/// updating like any other voxel change.
+fn edit_terrain(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    window: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MainWorld>>>,
+    mut voxel_world: VoxelWorld<MainWorld>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let (Ok(window), Ok((camera, camera_transform))) = (window.single(), camera.single())
+    else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor) else {
+        return;
+    };
+    let Some(hit) = voxel_world.raycast(ray, &|_| true) else {
+        return;
+    };
+
+    let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let center = hit.voxel_pos();
+    let radius = 32;
+    for x in -radius..=radius {
+        for y in -radius..=radius {
+            for z in -radius..=radius {
+                let offset = IVec3::new(x, y, z);
+                if offset.length_squared() <= radius * radius {
+                    let voxel = if add {
+                        WorldVoxel::Solid(0)
+                    } else {
+                        WorldVoxel::Air
+                    };
+                    voxel_world.set_voxel(center + offset, voxel);
+                }
+            }
+        }
+    }
 }
 
 fn move_camera(
