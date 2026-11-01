@@ -14,7 +14,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        25
+        50
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -23,6 +23,20 @@ impl VoxelWorldConfig for MainWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(move |_chunk_pos, _lod, _previous| get_voxel_fn())
+    }
+
+    // The terrain lies between chunk rows 0 and 5: below the sea level at y = 1
+    // everything is rock, and the highest peaks (about y = 170) end in row 5.
+    // Telling the streaming policy so lets its rays walk through the air and
+    // stop at the rock without spawning either.
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
+        if key.position.y + key.extent() <= 0 {
+            FillHint::Uniform(WorldVoxel::Solid(3))
+        } else if key.position.y > 5 {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else {
+            FillHint::Unknown
+        }
     }
 
     fn texture_index_mapper(
@@ -51,7 +65,8 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-200.0, 180.0, -200.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-200.0, 160.0, -200.0)
+            .looking_at(Vec3::new(0.0, 70.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
@@ -130,5 +145,6 @@ fn move_camera(
     if let Ok(mut transform) = cam_transform.single_mut() {
         transform.translation.x += time.delta_secs() * 12.0;
         transform.translation.z += time.delta_secs() * 24.0;
+        transform.rotate_y(time.delta_secs() * 0.1);
     }
 }
