@@ -10,7 +10,7 @@
 - `minimal()` worlds publish voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
 - Chunk data no longer waits for the voxel texture to load; only meshes do.
 - A chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query it.
-- Performance: in the `chunk_lifecycle` benchmark, chunks stream in 2.5× faster (4.9× on flat terrain), edits are published 2.6× sooner, and frames while voxels are being edited take a quarter of the time (worst 1% from 2.06 ms to 0.49 ms).
+- Performance: in the `chunk_lifecycle` benchmark, chunks stream in 2.5× faster (4.9× on flat terrain), edits are published 2.6× sooner, and frames while voxels are being edited take a quarter of the time (worst 1% from 2.06 ms to 0.49 ms). Meshing a chunk of noise terrain is 1.5× faster.
 - Fix: a chunk edited every frame now publishes. Before, each edit cancelled its running task.
 - Fix: when `set_voxel` sets a position more than once, the last voxel set wins, in `get_voxel` too. Setting an edited voxel to another voxel and back within a frame no longer remeshes its chunk.
 - Fix: a voxel set to another material inside a chunk that is otherwise all one material stays in that chunk's data. Before, `get_chunk_data` reported the chunk's material there.

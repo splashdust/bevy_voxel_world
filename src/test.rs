@@ -1,13 +1,16 @@
 use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
 use bevy::ecs::system::RunSystemOnce;
-use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::configuration::VoxelWorldConfig;
-use crate::meshing::generate_chunk_mesh_for_shape;
+use crate::meshing::{
+    binary_chunk_mesh, block_mesh_chunk_mesh, generate_chunk_mesh_for_shape,
+};
 use crate::prelude::*;
+use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I},
@@ -933,6 +936,100 @@ fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
                 mesh_shape
             );
         }
+    }
+}
+
+/// The quads of `mesh`, sorted. Each holds its indices relative to its first
+/// vertex, then its four vertices' attributes, with floats as their bits.
+fn sorted_quads(mesh: &Mesh) -> Vec<Vec<u32>> {
+    let attribute = |id| -> Vec<Vec<u32>> {
+        match mesh.attribute(id) {
+            Some(VertexAttributeValues::Float32x2(values)) => values
+                .iter()
+                .map(|value| value.map(f32::to_bits).to_vec())
+                .collect(),
+            Some(VertexAttributeValues::Float32x3(values)) => values
+                .iter()
+                .map(|value| value.map(f32::to_bits).to_vec())
+                .collect(),
+            Some(VertexAttributeValues::Float32x4(values)) => values
+                .iter()
+                .map(|value| value.map(f32::to_bits).to_vec())
+                .collect(),
+            Some(VertexAttributeValues::Uint32x3(values)) => {
+                values.iter().map(|value| value.to_vec()).collect()
+            }
+            other => panic!("unexpected attribute layout: {other:?}"),
+        }
+    };
+    let attributes = [
+        Mesh::ATTRIBUTE_POSITION,
+        Mesh::ATTRIBUTE_NORMAL,
+        Mesh::ATTRIBUTE_UV_0,
+        ATTRIBUTE_TEX_INDEX,
+        Mesh::ATTRIBUTE_COLOR,
+    ]
+    .map(attribute);
+    let Some(Indices::U32(indices)) = mesh.indices() else {
+        panic!("expected u32 indices");
+    };
+    assert_eq!(attributes[0].len() * 6, indices.len() * 4);
+
+    let mut quads: Vec<Vec<u32>> = indices
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .map(|quad_indices| {
+            let first = *quad_indices.iter().min().unwrap();
+            let mut quad: Vec<u32> = quad_indices.iter().map(|i| i - first).collect();
+            for vertex in first..first + 4 {
+                for values in &attributes {
+                    quad.extend(&values[vertex as usize]);
+                }
+            }
+            quad
+        })
+        .collect();
+    quads.sort();
+    quads
+}
+
+#[test]
+fn binary_meshing_matches_block_mesh() {
+    let mut rng = StdRng::seed_from_u64(0x5EED);
+    let texture_index_mapper: TextureIndexMapperFn<u8> =
+        Arc::new(|material| [material as u32, material as u32 + 4, material as u32 + 8]);
+
+    for round in 0..40 {
+        let shape = if round == 0 {
+            UVec3::splat(34)
+        } else {
+            let dim = |rng: &mut StdRng| rng.random_range(3..=64);
+            UVec3::new(dim(&mut rng), dim(&mut rng), dim(&mut rng))
+        };
+        let solid_chance = [0.1, 0.5, 0.9][round % 3];
+        let runtime_shape = RuntimeShape::<u32, 3>::new(shape.to_array());
+        let voxels: Vec<WorldVoxel<u8>> = (0..runtime_shape.size())
+            .map(|_| {
+                if rng.random_bool(solid_chance) {
+                    WorldVoxel::Solid(rng.random_range(1..4))
+                } else if rng.random_bool(0.5) {
+                    WorldVoxel::Air
+                } else {
+                    WorldVoxel::Unset
+                }
+            })
+            .collect();
+
+        let binary =
+            binary_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone());
+        let reference =
+            block_mesh_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone());
+        assert_eq!(
+            sorted_quads(&binary),
+            sorted_quads(&reference),
+            "shape {shape}, solid chance {solid_chance}"
+        );
     }
 }
 
