@@ -8,7 +8,7 @@ use bevy::{
     prelude::*,
     ui::{PositionType, Val},
 };
-use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
+use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
@@ -39,7 +39,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        200
+        800
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -56,9 +56,10 @@ impl VoxelWorldConfig for MainWorld {
                 return Box::new(|_, _| WorldVoxel::Air);
             }
 
+            // A chunk at level L spans CHUNK_SIZE << L voxels.
             let chunk_min = chunk_pos * CHUNK_SIZE_I;
-            let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I);
-            let skirt_enabled = lod_level == 2;
+            let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I << lod_level);
+            let skirt_enabled = lod_level == 1;
             let noise = Arc::clone(&chunk_noise);
 
             // We use this to cache the noise value for each y column so we only need
@@ -118,14 +119,6 @@ impl VoxelWorldConfig for MainWorld {
         })
     }
 
-    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
-    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
     fn chunk_lod(
         &self,
         chunk_position: IVec3,
@@ -135,19 +128,21 @@ impl VoxelWorldConfig for MainWorld {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
-        // directly set lod values to our stride lengths
-        if distance < 10.0 {
+        // The LOD level by distance in chunks. A chunk at level L spans
+        // 32 << L voxels and samples the terrain every 1 << L voxels, so the
+        // far bands hold few, large chunks.
+        if distance < 60.0 {
+            0
+        } else if distance < 150.0 {
             1
-        } else if distance < 25.0 {
+        } else if distance < 200.0 {
             2
-        } else if distance < 50.0 {
+        } else if distance < 500.0 {
+            3
+        } else if distance < 600.0 {
             4
-        } else if distance < 85.0 {
-            8
-        } else if distance < 125.0 {
-            16
         } else {
-            32
+            5
         }
     }
 
@@ -173,8 +168,8 @@ fn setup(mut commands: Commands) {
             order: 0,
             ..default()
         },
-        Transform::from_xyz(-200.0, 180.0, -200.0)
-            .looking_at(Vec3::new(0.0, 60.0, 0.0), Vec3::Y),
+        Transform::from_xyz(-200.0, 160.0, -200.0)
+            .looking_at(Vec3::new(0.0, 70.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
         DistanceFog {

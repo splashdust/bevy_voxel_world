@@ -18,12 +18,12 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{Chunk, ChunkKey, ChunkTask, LevelCounts},
+    chunk::{chunk_containing, Chunk, ChunkKey, ChunkTask, LevelCounts},
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
-    configuration::VoxelWorldConfig,
+    configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
-    voxel_edits::VoxelEdits,
+    voxel_edits::{chunks_including, VoxelEdits},
     voxel_world::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate, VoxelWorldCamera,
@@ -231,10 +231,21 @@ impl<C> ChunkIndex<C> {
     /// The key of the finest chunk that covers the voxel at `voxel_position`,
     /// if any chunk does.
     pub fn chunk_at(&self, voxel_position: IVec3) -> Option<ChunkKey> {
+        self.covering_chunk(chunk_containing(voxel_position))
+    }
+
+    /// The key of the finest chunk that covers the level-0 chunk at
+    /// `chunk_position`, if any chunk does.
+    pub(crate) fn covering_chunk(&self, chunk_position: IVec3) -> Option<ChunkKey> {
         self.levels.in_use().find_map(|lod_level| {
-            let key = ChunkKey::containing(voxel_position, lod_level);
+            let key = ChunkKey::containing_chunk(chunk_position, lod_level);
             self.entities.contains_key(&key).then_some(key)
         })
+    }
+
+    /// The LOD levels with chunks, finest first.
+    pub(crate) fn levels_in_use(&self) -> impl Iterator<Item = LodLevel> {
+        self.levels.in_use()
     }
 
     fn spawned(&mut self, key: ChunkKey, entity: Entity) {
@@ -327,7 +338,8 @@ fn distance_squared_to_nearest_camera(key: ChunkKey, cameras: &[Vec3]) -> f32 {
 /// ignored, except spawning.
 #[derive(Resource)]
 pub(crate) struct ChunkRequests<C> {
-    /// Level-0 chunk positions whose padded voxels were edited.
+    /// Voxels whose edits changed, which make the chunks at every level whose
+    /// padded voxels include them stale.
     pub edited: Vec<IVec3>,
     /// Chunks to spawn.
     pub spawn: Vec<ChunkKey>,
@@ -370,9 +382,13 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
 
-        let edited: HashSet<IVec3> = requests.edited.drain(..).collect();
-        for chunk_pos in edited {
-            let key = ChunkKey::new(chunk_pos, 0);
+        let mut stale: HashSet<ChunkKey> = HashSet::new();
+        for voxel in requests.edited.drain(..) {
+            for lod_level in index.levels_in_use() {
+                stale.extend(chunks_including(voxel, lod_level));
+            }
+        }
+        for key in stale {
             let Some(entity) = index.get(key) else {
                 continue;
             };
@@ -700,7 +716,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             key,
             data_shape,
             mesh_shape,
-            self.voxel_edits.chunk_edits(key.position),
+            self.voxel_edits.chunk_edits(key),
         );
 
         let mesh_map = self.mesh_cache.get_mesh_map();

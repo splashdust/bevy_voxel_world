@@ -8,6 +8,10 @@
 - Add `ChunkKey`, a chunk's position and LOD level. Chunk messages carry one, and `chunk_state` and `get_chunk_data` take one.
 - Add `VoxelWorld::chunk_at`, which finds the finest spawned chunk covering a voxel.
 - `LodLevel` is a level of detail: 0 is full detail, and a chunk at level `L` spans `CHUNK_SIZE << L` voxels on a side, contains the eight level `L - 1` chunks in that space, and by default samples every `1 << L` voxels.
+- Chunks stream at the LOD level `chunk_lod` asks for, chosen top down from the coarsest chunk containing a position, so a far region takes as many chunks as a near one a fraction of its size and spawning rays cross far air in a few coarse steps. When a position's level changes, the chunks of the new level spawn first and the old ones retire once they are covered. In the `noise_terrain_lod` example with a spawning distance of 800 chunks, headless at 60 fps with three generation threads, the whole view to the horizon is covered by 64,000 chunks, all published after 4.4 s; before, 537,000 chunks were spawned in 10 s and the streaming front stood 250 chunks out. See the README's Level of Detail section.
+- Voxel edits apply at every LOD level: a coarse chunk whose padded samples include an edited voxel regenerates with it.
+- `get_voxel`, `raycast` and `ChunkData::get_voxel_at_world_position` answer inside a coarse chunk with the sample that stands for the position, as the chunk's mesh shows it.
+- The default mesher scales its texture coordinates with the LOD level, so a texture keeps its size at every level.
 - Add the `voxel_animation` example, which animates water by setting voxels every frame.
 - Systems that use `VoxelWorld` can run in parallel, including ones that call `set_voxel`.
 - `minimal()` worlds publish voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
@@ -22,7 +26,7 @@
 - Fix: spawning rays cover the whole viewport on high-DPI displays and with custom viewports.
 - Fix: chunk positions round down at negative coordinates, so the right chunks spawn and stay around a camera there, and `ChunkData::has_voxel` works there.
 - Fix: `ChunkSpawnStrategy::Close` with `FarAwayOrOutOfView` no longer spawns chunks that are despawned the next frame.
-- Fix: with several cameras, a chunk's LOD level comes from the camera nearest the chunk's centre.
+- Fix: with several cameras, a chunk's LOD level comes from the camera nearest the chunk.
 
 ### Migrating from 0.18
 
@@ -58,7 +62,10 @@
   - Now: `voxel_world.get_chunk_data(ChunkKey::new(chunk_pos, 0))`, or `voxel_world.chunk_at(voxel_pos)` for the key of the chunk covering a voxel.
 - `ChunkWillChangeLod` and `ChunkRegenerateStrategy` are removed.
   - Before: a chunk given a new LOD level by `chunk_lod` was regenerated in place, reusing or repopulating its voxels.
-  - Now: a chunk keeps its LOD level for as long as it exists. A remesh after a voxel edit reuses the chunk's generated voxels, as `ChunkRegenerateStrategy::Reuse` did.
+  - Now: a chunk keeps its LOD level for as long as it exists. When `chunk_lod` asks for another level at its position, chunks of that level spawn first and the chunk retires once they cover it. A remesh after a voxel edit reuses the chunk's generated voxels, as `ChunkRegenerateStrategy::Reuse` did.
+- `chunk_lod` returns a LOD level, not a sample stride.
+  - Before: any `u8`, which `chunk_data_shape` and `chunk_meshing_shape` turned into a shape, such as `padded_chunk_shape_uniform(CHUNK_SIZE_U / stride)`.
+  - Now: level 0 is full detail and a chunk at level `L` spans `CHUNK_SIZE << L` voxels, sampled every `1 << L` voxels with the default shapes. Return `0, 1, 2, …` where you returned strides of `1, 2, 4, …`, and drop shape overrides that divided by the stride. The level must not get finer with distance. `previous_lod` is the level the position has now, or `None` where no chunk covers it yet. The chunk position passed is the chunk's level-0 chunk nearest the camera, which for a coarse chunk need not be its minimum corner.
 
 ## 0.18
 

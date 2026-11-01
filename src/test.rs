@@ -227,10 +227,16 @@ fn chunk_status<C: VoxelWorldConfig>(
     app: &mut App,
     chunk_pos: IVec3,
 ) -> Option<ChunkStatus> {
+    chunk_status_of::<C>(app, ChunkKey::new(chunk_pos, 0))
+}
+
+/// The chunk state of the chunk with the given key.
+fn chunk_status_of<C: VoxelWorldConfig>(
+    app: &mut App,
+    key: ChunkKey,
+) -> Option<ChunkStatus> {
     app.world_mut()
-        .run_system_once(move |voxel_world: VoxelWorld<C>| {
-            voxel_world.chunk_state(ChunkKey::new(chunk_pos, 0))
-        })
+        .run_system_once(move |voxel_world: VoxelWorld<C>| voxel_world.chunk_state(key))
         .unwrap()
 }
 
@@ -932,6 +938,182 @@ fn chunk_at_finds_the_chunk_covering_a_voxel() {
     assert_eq!(found[0], Some(ChunkKey::new(IVec3::ZERO, 0)));
     assert_eq!(found[1], Some(ChunkKey::new(IVec3::new(-1, 0, 0), 0)));
     assert_eq!(found[2], None);
+}
+
+/// Solid ground below y = 0, streamed at level 0 within two chunks of the
+/// camera and at level 1 beyond, all around the camera.
+#[derive(Resource, Clone, Default)]
+struct LevelsWorld;
+
+impl VoxelWorldConfig for LevelsWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        3
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|pos, _| floor_voxel(pos)))
+    }
+
+    fn chunk_lod(
+        &self,
+        chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        camera_position: Vec3,
+    ) -> LodLevel {
+        let camera_chunk = (camera_position / CHUNK_SIZE_F).floor().as_ivec3();
+        if chunk_position.distance_squared(camera_chunk) < 4 {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+/// A level-1 chunk two chunks from the camera of `levels_world_app`, below
+/// ground, and a voxel in it at one of its samples.
+const COARSE: ChunkKey = ChunkKey {
+    position: IVec3::new(2, -2, 0),
+    lod_level: 1,
+};
+const COARSE_SAMPLE: IVec3 = IVec3::new(68, -2, 6);
+
+/// A `LevelsWorld` app with the camera in the chunk at the origin, run until
+/// the chunk `COARSE` is ready.
+fn levels_world_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<LevelsWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<LevelsWorld>);
+    update_until(&mut app, "the coarse chunk to be ready", |app| {
+        chunk_status_of::<LevelsWorld>(app, COARSE) == Some(ChunkStatus::Ready)
+    });
+    app
+}
+
+#[test]
+fn chunks_stream_at_the_level_chunk_lod_wants_and_answer_for_every_voxel() {
+    let mut app = levels_world_app();
+
+    let (near, far, voxels) = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<LevelsWorld>| {
+            (
+                voxel_world.chunk_at(IVec3::new(5, -2, 5)),
+                voxel_world.chunk_at(COARSE_SAMPLE),
+                [
+                    voxel_world.get_voxel(COARSE_SAMPLE),
+                    // Between samples: answered by the sample below it.
+                    voxel_world.get_voxel(IVec3::new(69, -1, 7)),
+                    voxel_world.get_voxel(IVec3::new(68, -64, 6)),
+                ],
+            )
+        })
+        .unwrap();
+    assert_eq!(near, Some(ChunkKey::new(IVec3::new(0, -1, 0), 0)));
+    assert_eq!(far, Some(COARSE));
+    assert_eq!(voxels, [WorldVoxel::Solid(1); 3]);
+}
+
+/// The chunk keys `ChunkWillUpdate` was fired for.
+#[derive(Resource, Default)]
+struct UpdatedKeys(Vec<ChunkKey>);
+
+fn record_updated_keys<C: VoxelWorldConfig>(
+    mut updated: ResMut<UpdatedKeys>,
+    mut ev: MessageReader<ChunkWillUpdate<C>>,
+) {
+    updated.0.extend(ev.read().map(|msg| msg.chunk_key));
+}
+
+#[test]
+fn an_edit_updates_the_coarse_chunk_covering_it() {
+    let mut app = levels_world_app();
+    app.init_resource::<UpdatedKeys>()
+        .add_systems(Update, record_updated_keys::<LevelsWorld>);
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<LevelsWorld>| {
+            voxel_world.set_voxel(COARSE_SAMPLE, WorldVoxel::Solid(7));
+        })
+        .unwrap();
+
+    update_until(&mut app, "the coarse chunk to show the edit", |app| {
+        app.world_mut()
+            .run_system_once(|voxel_world: VoxelWorld<LevelsWorld>| {
+                voxel_world
+                    .get_chunk_data(COARSE)
+                    .and_then(|data| data.get_voxel_at_world_position(COARSE_SAMPLE))
+            })
+            .unwrap()
+            == Some(WorldVoxel::Solid(7))
+    });
+    assert!(app.world().resource::<UpdatedKeys>().0.contains(&COARSE));
+}
+
+/// The frame of each `ChunkPublished` and `ChunkWillDespawn`.
+#[derive(Resource, Default)]
+struct LifecycleLog {
+    frame: u32,
+    published: Vec<(u32, ChunkKey)>,
+    despawned: Vec<(u32, ChunkKey)>,
+}
+
+fn record_lifecycle<C: VoxelWorldConfig>(
+    mut log: ResMut<LifecycleLog>,
+    mut published: MessageReader<ChunkPublished<C>>,
+    mut despawned: MessageReader<ChunkWillDespawn<C>>,
+) {
+    log.frame += 1;
+    let frame = log.frame;
+    let keys: Vec<_> = published.read().map(|msg| (frame, msg.chunk_key)).collect();
+    log.published.extend(keys);
+    let keys: Vec<_> = despawned.read().map(|msg| (frame, msg.chunk_key)).collect();
+    log.despawned.extend(keys);
+}
+
+#[test]
+fn a_coarse_chunk_retires_once_the_finer_chunks_replacing_it_are_published() {
+    let mut app = levels_world_app();
+    app.init_resource::<LifecycleLog>()
+        .add_systems(Update, record_lifecycle::<LevelsWorld>);
+
+    // Into the coarse chunk, which then wants level 0.
+    move_cameras::<LevelsWorld>(
+        &mut app,
+        Transform::from_translation((COARSE.position.as_vec3() + 0.5) * CHUNK_SIZE_F),
+    );
+    update_until(&mut app, "the coarse chunk to be gone", |app| {
+        chunk_status_of::<LevelsWorld>(app, COARSE).is_none()
+    });
+
+    let log = app.world().resource::<LifecycleLog>();
+    let (retired_at, _) = log
+        .despawned
+        .iter()
+        .find(|(_, key)| *key == COARSE)
+        .expect("the coarse chunk was retired");
+    for child in COARSE.children() {
+        let (published_at, _) = log
+            .published
+            .iter()
+            .find(|(_, key)| *key == child)
+            .unwrap_or_else(|| panic!("{child} was published"));
+        // Chunk data is published before the streaming policy runs in a frame,
+        // so the retirement can follow a publish within the same frame.
+        assert!(
+            published_at <= retired_at,
+            "{child} published in frame {published_at}, the coarse chunk retired in {retired_at}"
+        );
+    }
 }
 
 #[test]

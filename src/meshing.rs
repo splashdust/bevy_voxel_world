@@ -433,6 +433,22 @@ impl MeshBuffers {
     }
 }
 
+/// Multiplies the mesh's texture coordinates by `factor`. Does nothing to a
+/// mesh without any, or when the factor is one.
+pub fn scale_texture_coordinates(mesh: &mut Mesh, factor: f32) {
+    if factor == 1.0 {
+        return;
+    }
+    if let Some(VertexAttributeValues::Float32x2(coordinates)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
+    {
+        for coordinate in coordinates.iter_mut() {
+            coordinate[0] *= factor;
+            coordinate[1] *= factor;
+        }
+    }
+}
+
 /// The vertex color of a corner with the ambient occlusion `ao`.
 fn ao_color(ao: u32) -> [f32; 4] {
     match ao {

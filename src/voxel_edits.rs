@@ -10,13 +10,11 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-use bevy::{
-    platform::collections::{HashMap, HashSet},
-    prelude::*,
-};
+use bevy::{platform::collections::HashMap, prelude::*};
 
 use crate::{
-    chunk::{chunk_containing, CHUNK_SIZE_I},
+    chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I},
+    configuration::LodLevel,
     voxel::WorldVoxel,
 };
 
@@ -71,77 +69,111 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Commits the pending edits and returns the chunks they make stale: those
-    /// whose padded voxel data includes a voxel that changed. An edit that sets
-    /// a voxel to its committed edit changes nothing, so setting the same voxel
-    /// every frame, or setting a voxel and back, doesn't remesh its chunk. A
-    /// chunk's edits are copied only while a running chunk task holds them.
-    pub(crate) fn commit(&self) -> HashSet<IVec3> {
+    /// Commits the pending edits and returns the positions of the voxels that
+    /// changed; [`chunks_including`] tells which chunks each makes stale. An
+    /// edit that sets a voxel to its committed edit changes nothing, so setting
+    /// the same voxel every frame, or setting a voxel and back, doesn't remesh
+    /// its chunk. A chunk's edits are copied only while a running chunk task
+    /// holds them.
+    pub(crate) fn commit(&self) -> Vec<IVec3> {
         // The pending edits stay locked until they are committed, so a reader
         // made meanwhile finds each edit pending or committed.
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() {
-            return HashSet::new();
+            return Vec::new();
         }
         let mut buckets = {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("wait_voxel_edits_write").entered();
             self.committed.write().unwrap()
         };
-        let mut stale = HashSet::new();
+        let mut changed = Vec::new();
         for (&position, &voxel) in pending.iter() {
             let bucket = buckets.entry(chunk_containing(position)).or_default();
             if bucket.get(&position) == Some(&voxel) {
                 continue;
             }
             Arc::make_mut(bucket).insert(position, voxel);
-            add_chunks_including(position, &mut stale);
+            changed.push(position);
         }
         match Arc::get_mut(&mut pending) {
             Some(voxels) => voxels.clear(),
             None => *pending = Arc::default(),
         }
-        stale
+        changed
     }
 
-    /// The edits a chunk task at `chunk_pos` reads.
-    pub(crate) fn chunk_edits(&self, chunk_pos: IVec3) -> ChunkEdits<I> {
+    /// The edits the chunk task of the chunk at `key` reads: those within the
+    /// chunk's extent and the data voxel of padding around it.
+    pub(crate) fn chunk_edits(&self, key: ChunkKey) -> ChunkEdits<I> {
         let buckets = self.committed.read().unwrap();
-        let mut edits = ChunkEdits {
+        let chunk_pos = key.position;
+        if key.lod_level == 0 {
+            let mut around: [Option<EditBucket<I>>; 27] = std::array::from_fn(|_| None);
+            if !buckets.is_empty() {
+                for (i, bucket) in around.iter_mut().enumerate() {
+                    let i = i as i32;
+                    let offset = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
+                    *bucket = buckets.get(&(chunk_pos + offset)).cloned();
+                }
+            }
+            return ChunkEdits {
+                chunk_pos,
+                buckets: Buckets::Around(around),
+            };
+        }
+
+        // The padding is one data voxel, `1 << L` voxels, which reaches into
+        // this many level-0 chunks around the extent.
+        let padding = ((1 << key.lod_level) + CHUNK_SIZE_I - 1) / CHUNK_SIZE_I;
+        let min = chunk_pos - padding;
+        let max = chunk_pos + key.extent() + padding;
+        let within = buckets
+            .iter()
+            .filter(|(position, _)| {
+                position.cmpge(min).all() && position.cmplt(max).all()
+            })
+            .map(|(position, bucket)| (*position, bucket.clone()))
+            .collect();
+        ChunkEdits {
             chunk_pos,
-            buckets: std::array::from_fn(|_| None),
-        };
-        if buckets.is_empty() {
-            return edits;
+            buckets: Buckets::Within(within),
         }
-        for (i, bucket) in edits.buckets.iter_mut().enumerate() {
-            let i = i as i32;
-            let offset = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
-            *bucket = buckets.get(&(chunk_pos + offset)).cloned();
-        }
-        edits
     }
 }
 
-/// Adds to `stale` the chunks whose padded voxel data includes the voxel at
-/// `position`: its own chunk, and the chunks across each face, edge and corner
-/// of it that the voxel lies on.
-fn add_chunks_including(position: IVec3, stale: &mut HashSet<IVec3>) {
-    const LAST: i32 = CHUNK_SIZE_I - 1;
-    let chunk_pos = chunk_containing(position);
-    let in_chunk = position - chunk_pos * CHUNK_SIZE_I;
-    let offsets = |coordinate| match coordinate {
-        0 => -1..=0,
-        LAST => 0..=1,
-        _ => 0..=0,
+/// The chunks at `lod_level` whose padded voxel data includes the voxel at
+/// `position`: the chunk containing it, and the chunks across each face, edge
+/// and corner of that chunk that the voxel lies within one data voxel of, which
+/// is `1 << lod_level` voxels with the default shapes.
+pub(crate) fn chunks_including(
+    position: IVec3,
+    lod_level: LodLevel,
+) -> impl Iterator<Item = ChunkKey> {
+    let key = ChunkKey::containing(position, lod_level);
+    let in_chunk = position - key.min_voxel();
+    let padding = 1 << lod_level;
+    let last = key.voxel_extent() - padding;
+    let offsets = move |coordinate: i32| {
+        let low = if coordinate < padding { -1 } else { 0 };
+        let high = if coordinate >= last { 1 } else { 0 };
+        low..=high
     };
-    for x in offsets(in_chunk.x) {
-        for y in offsets(in_chunk.y) {
-            for z in offsets(in_chunk.z) {
-                stale.insert(chunk_pos + IVec3::new(x, y, z));
-            }
-        }
-    }
+    let [xs, ys, zs] = [
+        offsets(in_chunk.x),
+        offsets(in_chunk.y),
+        offsets(in_chunk.z),
+    ];
+    let extent = key.extent();
+    xs.flat_map(move |x| {
+        let zs = zs.clone();
+        ys.clone().flat_map(move |y| {
+            zs.clone().map(move |z| ChunkKey {
+                position: key.position + IVec3::new(x, y, z) * extent,
+                lod_level,
+            })
+        })
+    })
 }
 
 /// Reads voxel edits from any thread.
@@ -164,61 +196,83 @@ impl<I: Copy> VoxelEditReader<I> {
     }
 }
 
-/// The voxel edits a chunk task reads, taken when it starts: those of its chunk
-/// and of the neighbouring chunks its padding reaches into.
+/// The voxel edits a chunk task reads, taken when it starts: those of the
+/// level-0 chunks in its extent and of the ones its padding reaches into.
 pub(crate) struct ChunkEdits<I> {
+    /// The chunk's minimum corner, in level-0 chunks.
     chunk_pos: IVec3,
-    /// By offset from `chunk_pos`, x varying fastest.
-    buckets: [Option<EditBucket<I>>; 27],
+    buckets: Buckets<I>,
 }
 
-impl<I> Default for ChunkEdits<I> {
-    fn default() -> Self {
-        Self {
-            chunk_pos: IVec3::ZERO,
-            buckets: std::array::from_fn(|_| None),
-        }
-    }
+/// The edit buckets a chunk task reads, by level-0 chunk.
+enum Buckets<I> {
+    /// For a level-0 chunk: by offset from the chunk, x varying fastest.
+    Around([Option<EditBucket<I>>; 27]),
+    /// For a chunk above level 0: by level-0 chunk position.
+    Within(HashMap<IVec3, EditBucket<I>>),
 }
 
 impl<I: Copy> ChunkEdits<I> {
     pub fn is_empty(&self) -> bool {
-        self.buckets.iter().all(Option::is_none)
+        match &self.buckets {
+            Buckets::Around(around) => around.iter().all(Option::is_none),
+            Buckets::Within(within) => within.is_empty(),
+        }
     }
 
     #[inline]
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
-        let offset = chunk_containing(position) - self.chunk_pos + 1;
-        if offset.cmplt(IVec3::ZERO).any() || offset.cmpgt(IVec3::splat(2)).any() {
-            return None;
+        let chunk_pos = chunk_containing(position);
+        match &self.buckets {
+            Buckets::Around(around) => {
+                let offset = chunk_pos - self.chunk_pos + 1;
+                if offset.cmplt(IVec3::ZERO).any() || offset.cmpgt(IVec3::splat(2)).any()
+                {
+                    return None;
+                }
+                let i = (offset.x + offset.y * 3 + offset.z * 9) as usize;
+                around[i].as_ref()?.get(&position).copied()
+            }
+            Buckets::Within(within) => within.get(&chunk_pos)?.get(&position).copied(),
         }
-        let i = (offset.x + offset.y * 3 + offset.z * 9) as usize;
-        self.buckets[i].as_ref()?.get(&position).copied()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::platform::collections::HashSet;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     type Edits = VoxelEdits<(), u8>;
 
     const LAST: i32 = CHUNK_SIZE_I - 1;
 
-    /// Sets one voxel and commits it, returning the chunks it makes stale.
-    fn commit_one(edits: &Edits, position: IVec3, voxel: WorldVoxel) -> HashSet<IVec3> {
+    /// Sets one voxel and commits it, returning the voxels that changed.
+    fn commit_one(edits: &Edits, position: IVec3, voxel: WorldVoxel) -> Vec<IVec3> {
         edits.set(position, voxel);
         edits.commit()
     }
 
-    /// The chunks that one edit at `position` makes stale.
-    fn stale_after_editing(position: IVec3) -> HashSet<IVec3> {
-        commit_one(&Edits::default(), position, WorldVoxel::Solid(1))
+    /// The level-0 chunks that an edit at `position` makes stale.
+    fn stale_after_editing(position: IVec3) -> HashSet<ChunkKey> {
+        chunks_including(position, 0).collect()
     }
 
-    fn chunks(positions: &[[i32; 3]]) -> HashSet<IVec3> {
-        positions.iter().copied().map(IVec3::from_array).collect()
+    fn chunks(positions: &[[i32; 3]]) -> HashSet<ChunkKey> {
+        positions
+            .iter()
+            .copied()
+            .map(|position| ChunkKey::new(IVec3::from_array(position), 0))
+            .collect()
+    }
+
+    fn level_1_chunks(positions: &[[i32; 3]]) -> HashSet<ChunkKey> {
+        positions
+            .iter()
+            .copied()
+            .map(|position| ChunkKey::new(IVec3::from_array(position), 1))
+            .collect()
     }
 
     #[test]
@@ -310,32 +364,32 @@ mod tests {
     }
 
     #[test]
-    fn committing_the_same_voxel_again_makes_no_chunk_stale() {
+    fn committing_the_same_voxel_again_changes_nothing() {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
 
         assert_eq!(
             commit_one(&edits, position, WorldVoxel::Solid(1)),
-            chunks(&[[0, 0, 0]])
+            vec![position]
         );
         assert!(commit_one(&edits, position, WorldVoxel::Solid(1)).is_empty());
     }
 
     #[test]
-    fn committing_a_different_voxel_makes_its_chunk_stale_again() {
+    fn committing_a_different_voxel_changes_it_again() {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
         commit_one(&edits, position, WorldVoxel::Solid(1));
 
         assert_eq!(
             commit_one(&edits, position, WorldVoxel::Solid(2)),
-            chunks(&[[0, 0, 0]])
+            vec![position]
         );
         assert_eq!(edits.reader().get(position), Some(WorldVoxel::Solid(2)));
     }
 
     #[test]
-    fn setting_a_committed_voxel_and_back_makes_no_chunk_stale() {
+    fn setting_a_committed_voxel_and_back_changes_nothing() {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
         commit_one(&edits, position, WorldVoxel::Solid(1));
@@ -418,17 +472,58 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_within_a_data_voxel_of_a_coarse_chunks_face_makes_its_neighbour_stale() {
+        // Level-1 chunks are 64 voxels wide and their padding two voxels deep.
+        let stale = |x: i32| -> HashSet<ChunkKey> {
+            chunks_including(IVec3::new(x, 5, 5), 1).collect()
+        };
+        assert_eq!(stale(2), level_1_chunks(&[[0, 0, 0]]));
+        assert_eq!(stale(1), level_1_chunks(&[[0, 0, 0], [-2, 0, 0]]));
+        assert_eq!(stale(61), level_1_chunks(&[[0, 0, 0]]));
+        assert_eq!(stale(62), level_1_chunks(&[[0, 0, 0], [2, 0, 0]]));
+        assert_eq!(stale(65), level_1_chunks(&[[0, 0, 0], [2, 0, 0]]));
+        assert_eq!(stale(66), level_1_chunks(&[[2, 0, 0]]));
+    }
+
+    #[test]
     fn a_chunk_task_reads_the_edits_its_padding_reaches() {
         let edits = Edits::default();
         let position = IVec3::new(-1, 5, 5);
         commit_one(&edits, position, WorldVoxel::Solid(1));
 
         for chunk_pos in [IVec3::new(-1, 0, 0), IVec3::ZERO] {
-            let chunk_edits = edits.chunk_edits(chunk_pos);
+            let chunk_edits = edits.chunk_edits(ChunkKey::new(chunk_pos, 0));
             assert!(!chunk_edits.is_empty());
             assert_eq!(chunk_edits.get(position), Some(WorldVoxel::Solid(1)));
         }
-        assert!(edits.chunk_edits(IVec3::new(1, 0, 0)).is_empty());
+        assert!(edits
+            .chunk_edits(ChunkKey::new(IVec3::new(1, 0, 0), 0))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_coarse_chunk_task_reads_the_edits_in_its_extent_and_padding() {
+        let edits = Edits::default();
+        let inside = IVec3::new(40, 5, 5);
+        let in_padding = IVec3::new(-1, 5, 5);
+        let beyond = IVec3::new(200, 5, 5);
+        for position in [inside, in_padding, beyond] {
+            commit_one(&edits, position, WorldVoxel::Solid(1));
+        }
+
+        // Level-0 chunks 0 and 1, with chunks -1 and 2 as padding.
+        let chunk_edits = edits.chunk_edits(ChunkKey::new(IVec3::ZERO, 1));
+        assert!(!chunk_edits.is_empty());
+        assert_eq!(chunk_edits.get(inside), Some(WorldVoxel::Solid(1)));
+        assert_eq!(chunk_edits.get(in_padding), Some(WorldVoxel::Solid(1)));
+        assert_eq!(chunk_edits.get(beyond), None);
+
+        let farther = edits.chunk_edits(ChunkKey::new(IVec3::new(4, 0, 0), 1));
+        assert_eq!(farther.get(beyond), Some(WorldVoxel::Solid(1)));
+        assert_eq!(farther.get(inside), None);
+        assert!(edits
+            .chunk_edits(ChunkKey::new(IVec3::new(8, 0, 0), 1))
+            .is_empty());
     }
 
     #[test]
@@ -436,13 +531,15 @@ mod tests {
         let edits = Edits::default();
         let position = IVec3::new(5, 5, 5);
         commit_one(&edits, position, WorldVoxel::Solid(1));
-        let started_with = edits.chunk_edits(IVec3::ZERO);
+        let started_with = edits.chunk_edits(ChunkKey::new(IVec3::ZERO, 0));
 
         commit_one(&edits, position, WorldVoxel::Solid(2));
 
         assert_eq!(started_with.get(position), Some(WorldVoxel::Solid(1)));
         assert_eq!(
-            edits.chunk_edits(IVec3::ZERO).get(position),
+            edits
+                .chunk_edits(ChunkKey::new(IVec3::ZERO, 0))
+                .get(position),
             Some(WorldVoxel::Solid(2))
         );
     }

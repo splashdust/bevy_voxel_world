@@ -9,14 +9,51 @@ use crate::{
     chunk::*,
     chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
-    configuration::VoxelWorldConfig,
+    configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
-    streaming_policy::{self, CameraSnapshot, Occupancy},
+    streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
     voxel_edits::VoxelEdits,
     voxel_material::LoadingTexture,
     voxel_world::VoxelWorldCamera,
 };
+
+/// What the streaming policy sees of the chunks: the chunk index for which
+/// chunks exist, and the chunk map for what is published.
+struct Chunks<'a, C: VoxelWorldConfig> {
+    index: &'a ChunkIndex<C>,
+    chunk_map: &'a ChunkMapData<C::MaterialIndex>,
+}
+
+impl<C: VoxelWorldConfig> Chunks<'_, C> {
+    /// What is at a chunk that exists.
+    fn published(&self, key: ChunkKey) -> Occupancy {
+        match self.chunk_map.get(&key) {
+            None => Occupancy::Unpublished,
+            Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
+            Some(chunk_data) if chunk_data.is_empty => Occupancy::Empty,
+            Some(_) => Occupancy::Mixed,
+        }
+    }
+}
+
+impl<C: VoxelWorldConfig> ChunkLookup for Chunks<'_, C> {
+    fn covering(&self, chunk_position: IVec3) -> Option<(ChunkKey, Occupancy)> {
+        let key = self.index.covering_chunk(chunk_position)?;
+        Some((key, self.published(key)))
+    }
+
+    fn occupancy(&self, key: ChunkKey) -> Occupancy {
+        if !self.index.contains(key) {
+            return Occupancy::Missing;
+        }
+        self.published(key)
+    }
+
+    fn coarsest_level(&self) -> LodLevel {
+        self.index.levels_in_use().last().unwrap_or(0)
+    }
+}
 
 #[derive(SystemParam, Deref)]
 pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
@@ -99,16 +136,9 @@ where
         }
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
-        let occupancy = |key: ChunkKey| {
-            if !index.contains(key) {
-                return Occupancy::Missing;
-            }
-            match chunk_map_read_lock.get(&key) {
-                None => Occupancy::Unpublished,
-                Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
-                Some(chunk_data) if chunk_data.is_empty => Occupancy::Empty,
-                Some(_) => Occupancy::Mixed,
-            }
+        let lookup = Chunks::<C> {
+            index: &index,
+            chunk_map: &chunk_map_read_lock,
         };
 
         #[cfg(feature = "trace")]
@@ -117,7 +147,7 @@ where
             configuration.as_ref(),
             &cameras,
             chunks.iter().map(|chunk| chunk.key),
-            occupancy,
+            &lookup,
             index.spawn_budget(configuration.max_active_chunk_threads()),
             &mut rand::rng(),
         );

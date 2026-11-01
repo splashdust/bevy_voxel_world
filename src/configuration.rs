@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkData, VoxelArray, PADDED_CHUNK_SIZE};
-use crate::meshing::generate_chunk_mesh_for_shape;
+use crate::meshing::{generate_chunk_mesh_for_shape, scale_texture_coordinates};
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
 
@@ -168,6 +168,10 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// index mapper function. The mesh is built as for a level-0 chunk, with the
     /// corner of the chunk's first voxel at (1, 1, 1), one voxel in past the
     /// padding; the mesh of a chunk above level 0 is then scaled to its extent.
+    /// Its other attributes are left as built, so a delegate whose texture
+    /// coordinates count one per voxel, as the default mesher's do, scales them
+    /// by `1 << lod_level` itself to keep the texture the same size at every
+    /// level.
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
@@ -189,15 +193,24 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     /// The LOD level the chunk at `chunk_position`, in level-0 chunks, should
-    /// have for the camera at `camera_position`.
+    /// have for the camera at `camera_position`. Defaults to `0` for all chunks.
     ///
-    /// `previous_lod` is the level the chunk currently has, or `None` when none
-    /// exists there yet; implementors can use it to add hysteresis. The level must
-    /// not get finer with distance: a chunk farther from the camera than another
-    /// gets a level at least as coarse. Defaults to `0` for all chunks.
+    /// The streaming policy picks the level of a position top down: the coarsest
+    /// chunk containing it is split while this asks for a finer level than the
+    /// chunk's, asked about the chunk's level-0 chunk nearest the camera, so a
+    /// chunk is as coarse as its nearest point allows. The coarsest level in use
+    /// is what this returns at the spawning distance. When a position's level
+    /// changes, the chunks of the new level spawn first and the old ones retire
+    /// once they are covered, so the levels overlap briefly instead of leaving a
+    /// hole.
     ///
-    /// Every chunk is spawned at level 0 for now; the streaming policy doesn't
-    /// consult this yet.
+    /// The level must not get finer with distance: for one camera and one
+    /// `previous_lod`, a chunk farther from the camera than another gets a level
+    /// at least as coarse. The policy relies on that to ask about few chunks.
+    ///
+    /// `previous_lod` is the level the position has now, or `None` when no chunk
+    /// covers it yet; implementors can use it to add hysteresis. While a level
+    /// change is under way, the position has the finest level spawned there.
     fn chunk_lod(
         &self,
         _chunk_position: IVec3,
@@ -244,7 +257,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
 
 pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     pos: IVec3,
-    _lod: LodLevel,
+    lod_level: LodLevel,
     data_shape: UVec3,
     mesh_shape: UVec3,
     _previous_data: Option<ChunkData<I>>,
@@ -266,13 +279,16 @@ pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
             };
 
             let voxels_slice: Arc<[WorldVoxel<I>]> = voxels.clone();
-            let mesh = generate_chunk_mesh_for_shape(
+            let mut mesh = generate_chunk_mesh_for_shape(
                 voxels_slice,
                 pos,
                 data_shape,
                 mesh_shape,
                 texture_index_mapper,
             );
+            // The texture coordinates count one per voxel; a coarse chunk's mesh
+            // is scaled to its extent, so they scale with it.
+            scale_texture_coordinates(&mut mesh, (1 << lod_level) as f32);
             (mesh, None)
         },
     )

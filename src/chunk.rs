@@ -22,6 +22,11 @@ pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 
+/// `log2(CHUNK_SIZE)`: chunk and level arithmetic shifts instead of dividing,
+/// since a division by a divisor only known at run time costs tens of cycles.
+const CHUNK_SIZE_SHIFT: i32 = CHUNK_SIZE_U.trailing_zeros() as i32;
+const _: () = assert!(CHUNK_SIZE_U.is_power_of_two());
+
 /// The coarsest LOD level a chunk can have. A chunk at this level spans
 /// `CHUNK_SIZE << MAX_LOD_LEVEL` voxels on a side.
 pub const MAX_LOD_LEVEL: LodLevel = 15;
@@ -29,7 +34,7 @@ pub const MAX_LOD_LEVEL: LodLevel = 15;
 /// The position of the level-0 chunk that contains a voxel. Rounds down, so
 /// voxel -1 is in chunk -1.
 pub(crate) fn chunk_containing(voxel_position: IVec3) -> IVec3 {
-    voxel_position.div_euclid(IVec3::splat(CHUNK_SIZE_I))
+    voxel_position >> CHUNK_SIZE_SHIFT
 }
 
 /// Addresses a chunk of a voxel world: where it is, and at which LOD level.
@@ -66,11 +71,41 @@ impl ChunkKey {
     /// The key of the chunk at `lod_level` that contains the voxel at
     /// `voxel_position`.
     pub fn containing(voxel_position: IVec3, lod_level: LodLevel) -> Self {
-        let voxels = IVec3::splat(CHUNK_SIZE_I << lod_level);
+        // Arithmetic shifts round down, as the chunk grid needs.
+        let lod_level_i = lod_level as i32;
         Self {
-            position: voxel_position.div_euclid(voxels) * (1 << lod_level),
+            position: (voxel_position >> (CHUNK_SIZE_SHIFT + lod_level_i)) << lod_level_i,
             lod_level,
         }
+    }
+
+    /// The key of the chunk at `lod_level` that contains the level-0 chunk at
+    /// `chunk_position`.
+    pub fn containing_chunk(chunk_position: IVec3, lod_level: LodLevel) -> Self {
+        let lod_level_i = lod_level as i32;
+        Self {
+            position: (chunk_position >> lod_level_i) << lod_level_i,
+            lod_level,
+        }
+    }
+
+    /// The key of the chunk one level above this one that contains it.
+    pub fn parent(&self) -> Self {
+        debug_assert!(self.lod_level < MAX_LOD_LEVEL, "{self} has no parent");
+        Self::containing_chunk(self.position, self.lod_level + 1)
+    }
+
+    /// The keys of the eight chunks one level below this one that it contains.
+    pub fn children(&self) -> impl Iterator<Item = Self> {
+        debug_assert!(self.lod_level > 0, "{self} has no children");
+        let lod_level = self.lod_level.saturating_sub(1);
+        let half = 1 << lod_level;
+        let position = self.position;
+        (0..8).map(move |corner: i32| Self {
+            position: position
+                + IVec3::new(corner & 1, (corner >> 1) & 1, corner >> 2) * half,
+            lod_level,
+        })
     }
 
     /// How many level-0 chunks the chunk spans on a side.
@@ -114,28 +149,44 @@ impl fmt::Display for ChunkKey {
 
 /// How many chunks there are at each LOD level, so that a lookup by position
 /// visits only the levels in use.
-pub(crate) struct LevelCounts([usize; MAX_LOD_LEVEL as usize + 1]);
+pub(crate) struct LevelCounts {
+    counts: [usize; MAX_LOD_LEVEL as usize + 1],
+    /// Bit `L` is set while level `L` has chunks.
+    in_use: u16,
+}
 
 impl LevelCounts {
     pub fn new() -> Self {
-        Self([0; MAX_LOD_LEVEL as usize + 1])
+        Self {
+            counts: [0; MAX_LOD_LEVEL as usize + 1],
+            in_use: 0,
+        }
     }
 
     pub fn add(&mut self, lod_level: LodLevel) {
-        self.0[lod_level as usize] += 1;
+        self.counts[lod_level as usize] += 1;
+        self.in_use |= 1 << lod_level;
     }
 
     pub fn remove(&mut self, lod_level: LodLevel) {
-        self.0[lod_level as usize] -= 1;
+        let count = &mut self.counts[lod_level as usize];
+        *count -= 1;
+        if *count == 0 {
+            self.in_use &= !(1 << lod_level);
+        }
     }
 
     /// The levels with chunks, finest first.
-    pub fn in_use(&self) -> impl Iterator<Item = LodLevel> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .filter(|(_, count)| **count > 0)
-            .map(|(lod_level, _)| lod_level as LodLevel)
+    pub fn in_use(&self) -> impl Iterator<Item = LodLevel> {
+        let mut bits = self.in_use;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            let lod_level = bits.trailing_zeros() as LodLevel;
+            bits &= bits - 1;
+            Some(lod_level)
+        })
     }
 }
 
@@ -151,34 +202,24 @@ fn sample_spacing(shape: UVec3, lod_level: LodLevel) -> Vec3 {
     Vec3::splat((CHUNK_SIZE_I << lod_level) as f32) / interior.as_vec3()
 }
 
-/// The data coordinate along one axis of the voxel `offset` voxels from a
-/// chunk's origin, where the chunk's data voxels are `scale` voxels apart and
-/// `extent` long. `None` when no data voxel sits there.
+/// The data coordinate along one axis of the data voxel covering the voxel
+/// `offset` voxels from a chunk's origin, where the chunk's data voxels are
+/// `scale` voxels apart and `extent` long: the last data voxel at or before the
+/// offset, so that a coarse chunk answers for every voxel in its extent with
+/// the sample that stands for it. `None` outside the padded data.
 fn data_coordinate(offset: i32, scale: f32, extent: u32) -> Option<u32> {
     if scale <= f32::EPSILON || extent == 0 {
         return None;
     }
 
-    let raw = ((offset as f32) + 1.0) / scale;
-    let chunk_block = raw.ceil();
-
-    if chunk_block < 0.0 {
+    // Data voxel `c` sits at `floor((c - 1) * scale)`, so it covers the offset
+    // when `(c - 1) * scale < offset + 1`.
+    let chunk_block = ((offset as f32 + 1.0) / scale).ceil();
+    if chunk_block < 0.0 || chunk_block >= extent as f32 {
         return None;
     }
 
-    let chunk_block_i = chunk_block as i32;
-
-    if chunk_block_i < 0 || chunk_block_i >= extent as i32 {
-        return None;
-    }
-
-    let reconstructed = ((chunk_block - 1.0) * scale) as i32;
-
-    if reconstructed != offset {
-        return None;
-    }
-
-    Some(chunk_block_i as u32)
+    Some(chunk_block as u32)
 }
 
 #[derive(Clone, Debug)]
@@ -273,8 +314,11 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
     }
 
-    /// Returns the voxel at the given world-space position if this chunk has a
-    /// data voxel there.
+    /// Returns the voxel at the given world-space position: the data voxel
+    /// covering it, if the position is within the chunk's padded data. Above
+    /// LOD level 0 a data voxel covers several voxels, `1 << L` on a side with
+    /// the default shapes, so this answers for every voxel of a coarse chunk
+    /// with the sample that stands for it, as the chunk's mesh shows it.
     pub fn get_voxel_at_world_position(
         &self,
         world_position: IVec3,
@@ -770,11 +814,66 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_contains_the_eight_chunks_below_it_and_has_one_parent() {
+        let key = ChunkKey::new(IVec3::new(4, -4, 0), 2);
+        let children: Vec<_> = key.children().collect();
+        assert_eq!(children.len(), 8);
+        for child in &children {
+            assert_eq!(child.lod_level, 1);
+            assert_eq!(child.parent(), key);
+            assert_eq!(ChunkKey::containing_chunk(child.position, 2), key);
+        }
+        assert!(children.contains(&ChunkKey::new(IVec3::new(4, -4, 0), 1)));
+        assert!(children.contains(&ChunkKey::new(IVec3::new(6, -2, 2), 1)));
+        assert_eq!(
+            ChunkKey::containing_chunk(IVec3::new(-1, 0, 7), 2),
+            ChunkKey::new(IVec3::new(-4, 0, 4), 2)
+        );
+    }
+
+    #[test]
+    fn levels_in_use_are_those_with_chunks_finest_first() {
+        let mut levels = LevelCounts::new();
+        assert_eq!(levels.in_use().count(), 0);
+        levels.add(3);
+        levels.add(0);
+        levels.add(3);
+        assert_eq!(levels.in_use().collect::<Vec<_>>(), vec![0, 3]);
+        levels.remove(3);
+        assert_eq!(levels.in_use().collect::<Vec<_>>(), vec![0, 3]);
+        levels.remove(3);
+        assert_eq!(levels.in_use().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
     fn a_coarse_chunk_samples_every_other_voxel_by_default() {
         let spacing = sample_spacing(UVec3::splat(PADDED_CHUNK_SIZE), 1);
         assert_eq!(spacing, Vec3::splat(2.0));
         let oversampled = sample_spacing(UVec3::splat(2 * CHUNK_SIZE_U + 2), 1);
         assert_eq!(oversampled, Vec3::splat(1.0));
+    }
+
+    #[test]
+    fn a_data_voxel_covers_the_voxels_up_to_the_next_one() {
+        // Level 0: one data voxel per voxel, padding at -1 and 32.
+        assert_eq!(data_coordinate(-2, 1.0, 34), None);
+        assert_eq!(data_coordinate(-1, 1.0, 34), Some(0));
+        assert_eq!(data_coordinate(0, 1.0, 34), Some(1));
+        assert_eq!(data_coordinate(32, 1.0, 34), Some(33));
+        assert_eq!(data_coordinate(33, 1.0, 34), None);
+        // Level 1: data voxels two voxels apart, each covering two voxels.
+        assert_eq!(data_coordinate(-3, 2.0, 34), None);
+        assert_eq!(data_coordinate(-2, 2.0, 34), Some(0));
+        assert_eq!(data_coordinate(-1, 2.0, 34), Some(0));
+        assert_eq!(data_coordinate(0, 2.0, 34), Some(1));
+        assert_eq!(data_coordinate(1, 2.0, 34), Some(1));
+        assert_eq!(data_coordinate(2, 2.0, 34), Some(2));
+        assert_eq!(data_coordinate(63, 2.0, 34), Some(32));
+        assert_eq!(data_coordinate(65, 2.0, 34), Some(33));
+        assert_eq!(data_coordinate(66, 2.0, 34), None);
+        // An uneven spacing still picks the last data voxel at or before the offset.
+        assert_eq!(data_coordinate(5, 3.2, 12), Some(2));
+        assert_eq!(data_coordinate(6, 3.2, 12), Some(3));
     }
 
     #[test]
