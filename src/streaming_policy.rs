@@ -428,6 +428,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         let config = self.config;
         let cameras = self.cameras;
         let spawn_strategy = config.chunk_spawn_strategy();
+        let camera_positions: Vec<CameraPosition> =
+            cameras.iter().map(CameraPosition::from).collect();
 
         let mut spawn = Vec::new();
         let mut visited = HashSet::new();
@@ -529,7 +531,10 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             if self.lookup.occupancy(key) != Occupancy::Missing {
                 continue;
             }
-            spawn.push((distance_squared_to_nearest_camera(cameras, key), key));
+            spawn.push((
+                StartOrder::of(key, &camera_positions, config.min_despawn_distance()),
+                key,
+            ));
 
             if spawn_strategy != ChunkSpawnStrategy::Close {
                 continue;
@@ -553,8 +558,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             }
         }
 
-        // Nearest a camera first, which is the order the chunks spawn in.
-        spawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // In start order, which is the order the chunks spawn in.
+        spawn.sort_by_key(|&(order, _)| order);
         spawn.into_iter().map(|(_, key)| key).collect()
     }
 
@@ -640,14 +645,85 @@ fn nearest_chunk(key: ChunkKey, chunk_position: IVec3) -> IVec3 {
     chunk_position.clamp(key.position, key.position + (key.extent() - 1))
 }
 
-/// The squared distance from the chunk's centre to the nearest camera.
-fn distance_squared_to_nearest_camera(cameras: &[CameraSnapshot], key: ChunkKey) -> f32 {
-    let centre = key.centre();
-    cameras
-        .iter()
-        .map(|camera| camera.position.distance_squared(centre))
-        .fold(f32::INFINITY, f32::min)
+// --- Start order ------------------------------------------------------------
+
+/// A camera's position, as the start order measures it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CameraPosition {
+    position: Vec3,
+    /// The level-0 chunk the camera is in.
+    chunk_position: IVec3,
 }
+
+impl CameraPosition {
+    #[inline]
+    pub fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            chunk_position: chunk_containing(position.floor().as_ivec3()),
+        }
+    }
+}
+
+impl From<&CameraSnapshot> for CameraPosition {
+    fn from(camera: &CameraSnapshot) -> Self {
+        Self {
+            position: camera.position,
+            chunk_position: camera.chunk_position,
+        }
+    }
+}
+
+/// Where a chunk stands in the order chunks spawn and their tasks start in.
+/// Chunks within a camera's protected radius come first, nearest first; the
+/// rest follow by their size on screen, largest first. A chunk's size on screen
+/// goes as its extent over its distance, so a chunk at level `L` ranks with a
+/// chunk at level `L - 1` half as far: in a world with LOD levels the far,
+/// coarse bands fill in alongside the near ones instead of after all of them.
+///
+/// One integer, since every pending chunk is ordered every frame: the squared
+/// distance from the nearest camera to the chunk's centre over the chunk's
+/// squared extent, as the bits of that non-negative `f32`, which order as the
+/// float does, with the sign bit set for chunks outside the protected radius.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct StartOrder(u32);
+
+impl StartOrder {
+    /// `protected_distance` is the protected radius in chunks,
+    /// `min_despawn_distance`.
+    #[inline]
+    pub fn of(
+        key: ChunkKey,
+        cameras: &[CameraPosition],
+        protected_distance: u32,
+    ) -> Self {
+        let centre = key.centre();
+        let extent = key.voxel_extent() as f32;
+        let distance_squared = cameras
+            .iter()
+            .map(|camera| camera.position.distance_squared(centre))
+            .fold(f32::INFINITY, f32::min);
+        let distance_squared_in_extents = distance_squared / (extent * extent);
+        debug_assert!(distance_squared_in_extents.is_sign_positive());
+
+        // A protected chunk has a level-0 chunk within the protected radius of
+        // the camera's, so its centre is within half its diagonal plus the
+        // radius of the camera. Every pending chunk is ordered every frame, so
+        // only chunks that close take the exact test.
+        let protected_distance_squared = (protected_distance as i32).pow(2);
+        let near_enough = (HALF_DIAGONAL + protected_distance as f32).powi(2);
+        let protected = distance_squared_in_extents <= near_enough
+            && cameras.iter().any(|camera| {
+                nearest_chunk(key, camera.chunk_position)
+                    .distance_squared(camera.chunk_position)
+                    <= protected_distance_squared
+            });
+        Self(distance_squared_in_extents.to_bits() | ((!protected as u32) << 31))
+    }
+}
+
+/// Half the diagonal of a cube of side 1 (`√3 / 2`, rounded up).
+const HALF_DIAGONAL: f32 = 0.87;
 
 #[cfg(test)]
 mod tests {
@@ -1207,25 +1283,51 @@ mod tests {
     }
 
     #[test]
-    fn spawns_are_listed_nearest_a_camera_first() {
+    fn spawns_are_listed_in_the_protected_radius_first_then_nearest_a_camera_first() {
         let a = camera(C, Vec3::NEG_Z);
         let b = camera(C + IVec3::new(20, 0, 0), Vec3::NEG_Z);
+        let config = TestWorld::default();
 
-        let plan = plan_with(&TestWorld::default(), &[a, b], &Occupied::new());
+        let plan = plan_with(&config, &[a, b], &Occupied::new());
 
-        let distances: Vec<f32> = plan
+        let protected_distance_squared = (config.min_despawn_distance as i32).pow(2);
+        let order: Vec<(bool, f32)> = plan
             .spawn
             .iter()
             .map(|key| {
+                let unprotected = [a, b].iter().all(|camera| {
+                    key.position.distance_squared(camera.chunk_position)
+                        > protected_distance_squared
+                });
                 let centre = key.centre();
-                a.position.distance(centre).min(b.position.distance(centre))
+                let distance =
+                    a.position.distance(centre).min(b.position.distance(centre));
+                (unprotected, distance)
             })
             .collect();
-        assert!(distances.len() > 2);
-        assert!(
-            distances.windows(2).all(|pair| pair[0] <= pair[1]),
-            "{distances:?}"
-        );
+        assert!(order.iter().filter(|(unprotected, _)| *unprotected).count() > 2);
+        assert!(order.iter().filter(|(unprotected, _)| !unprotected).count() > 2);
+        assert!(order.windows(2).all(|pair| pair[0] <= pair[1]), "{order:?}");
+    }
+
+    #[test]
+    fn chunks_start_within_the_protected_radius_first_then_largest_on_screen() {
+        let cameras = [CameraPosition::new((C.as_vec3() + 0.5) * CHUNK_SIZE_F)];
+        let order = |key: ChunkKey| StartOrder::of(key, &cameras, 2);
+
+        // Two chunks from the camera, at the edge of the protected radius.
+        let protected = ChunkKey::new(C + IVec3::new(2, 0, 0), 0);
+        // Level 5, 32 chunks on a side, 22 chunks away: a chunk 1.4 times its
+        // extent away, which looks larger than the level-0 chunk 3 chunks away.
+        let coarse = ChunkKey::containing_chunk(C + IVec3::new(32, 0, 0), 5);
+        let fine = ChunkKey::new(C + IVec3::new(3, 0, 0), 0);
+        // Level 1, 2 chunks on a side, 6.5 chunks away: 3.3 extents.
+        let middling = ChunkKey::containing_chunk(C + IVec3::new(6, 0, 0), 1);
+        let far = ChunkKey::new(C + IVec3::new(0, 0, -4), 0);
+
+        let mut keys = vec![far, middling, fine, coarse, protected];
+        keys.sort_by_key(|&key| order(key));
+        assert_eq!(keys, vec![protected, coarse, fine, middling, far]);
     }
 
     // --- LOD levels ---------------------------------------------------------

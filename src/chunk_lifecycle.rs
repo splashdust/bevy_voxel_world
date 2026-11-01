@@ -23,6 +23,7 @@ use crate::{
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
+    streaming_policy::{CameraPosition, StartOrder},
     voxel_edits::{chunks_including, VoxelEdits},
     voxel_world::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
@@ -324,15 +325,6 @@ impl<C> ChunkIndex<C> {
     }
 }
 
-/// The squared distance from the chunk's centre to the nearest camera.
-fn distance_squared_to_nearest_camera(key: ChunkKey, cameras: &[Vec3]) -> f32 {
-    let centre = key.centre();
-    cameras
-        .iter()
-        .map(|camera| camera.distance_squared(centre))
-        .fold(f32::INFINITY, f32::min)
-}
-
 /// What the rest of the crate asks of the chunk lifecycle this frame, by chunk
 /// key. Requests for chunks that don't exist, or that are retiring, are
 /// ignored, except spawning.
@@ -437,7 +429,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 
     /// Starts chunk tasks for Pending chunks: priority chunks first, oldest
-    /// first, then the chunks nearest a camera. Priority chunks are few and
+    /// first, then the others in their [`StartOrder`]: chunks in a camera's
+    /// protected radius, then the largest on screen. Priority chunks are few and
     /// waited for, so they start whenever the cap allows. Of the others, only as
     /// many run at once as keep the task pool busy until the next frame, so the
     /// chunks still waiting can be started in whatever order the cameras are in
@@ -482,27 +475,28 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             return;
         }
 
-        let camera_positions: Vec<Vec3> = cameras
+        let camera_positions: Vec<CameraPosition> = cameras
             .iter()
-            .map(|transform| transform.translation())
+            .map(|transform| CameraPosition::new(transform.translation()))
             .collect();
-        let mut nearest: Vec<(f32, Entity)> = index
+        let protected_distance = configuration.min_despawn_distance();
+        let mut first: Vec<(StartOrder, Entity)> = index
             .pending
             .iter()
             .map(|(&entity, &key)| {
                 (
-                    distance_squared_to_nearest_camera(key, &camera_positions),
+                    StartOrder::of(key, &camera_positions, protected_distance),
                     entity,
                 )
             })
             .collect();
-        if nearest.len() > slots {
-            nearest.select_nth_unstable_by(slots - 1, |a, b| a.0.total_cmp(&b.0));
-            nearest.truncate(slots);
+        if first.len() > slots {
+            first.select_nth_unstable_by_key(slots - 1, |&(order, _)| order);
+            first.truncate(slots);
         }
         // The task pool runs tasks in the order they start.
-        nearest.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        for (_, entity) in nearest {
+        first.sort_unstable_by_key(|&(order, _)| order);
+        for (_, entity) in first {
             starter.start(entity, &mut index, &mut chunks, &mut ev_chunk_will_remesh);
         }
     }

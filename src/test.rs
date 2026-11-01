@@ -447,61 +447,145 @@ fn the_world_survives_despawning_every_published_chunk() {
     assert!(chunk_data::<ThrottledWorld>(&mut app, IVec3::ZERO).is_none());
 }
 
+/// Where a chunk should stand in the order chunk tasks start in: chunks within
+/// `protected_distance` chunks of the camera first, then the largest on screen
+/// first, by the distance to the chunk's centre over its extent.
+fn start_order(key: ChunkKey, camera: Vec3, protected_distance: i32) -> (bool, f32) {
+    let camera_chunk = (camera / CHUNK_SIZE_F).floor().as_ivec3();
+    let nearest = camera_chunk.clamp(key.position, key.position + key.extent() - 1);
+    (
+        nearest.distance_squared(camera_chunk) > protected_distance.pow(2),
+        key.centre().distance(camera) / key.voxel_extent() as f32,
+    )
+}
+
+/// Runs a world that generates one chunk at a time until every chunk is ready,
+/// and returns the chunks in the order they were published, which is the order
+/// their tasks started, and the camera's position.
+fn chunks_in_publish_order<C: VoxelWorldConfig>(app: &mut App) -> (Vec<ChunkKey>, Vec3) {
+    app.init_resource::<LifecycleLog>()
+        .add_systems(Last, record_lifecycle::<C>);
+    update_until(app, "every chunk to be ready", |app| {
+        let keys: Vec<ChunkKey> = app
+            .world_mut()
+            .query::<&Chunk<C>>()
+            .iter(app.world())
+            .map(|chunk| chunk.key())
+            .collect();
+        !keys.is_empty()
+            && keys
+                .into_iter()
+                .all(|key| chunk_status_of::<C>(app, key) == Some(ChunkStatus::Ready))
+    });
+
+    let published = app
+        .world()
+        .resource::<LifecycleLog>()
+        .published
+        .iter()
+        .map(|(_, key)| *key)
+        .collect();
+    let camera = app
+        .world_mut()
+        .query_filtered::<&GlobalTransform, With<VoxelWorldCamera<C>>>()
+        .single(app.world())
+        .unwrap()
+        .translation();
+    (published, camera)
+}
+
 #[test]
-fn chunks_are_generated_nearest_the_camera_first() {
+fn chunks_are_generated_around_the_camera_first_then_nearest_first() {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         VoxelWorldPlugin::<ThrottledWorld>::minimal(),
     ))
-    // One task at a time, so chunks publish in the order their tasks start.
     .insert_resource(ThrottledWorld { task_slots: 1 })
-    .init_resource::<Published>()
-    .add_systems(Startup, spawn_camera::<ThrottledWorld>)
-    .add_systems(
-        Last,
-        |mut published: ResMut<Published>,
-         mut ev: MessageReader<ChunkPublished<ThrottledWorld>>| {
-            published
-                .0
-                .extend(ev.read().map(|msg| msg.chunk_key.position));
-        },
-    );
+    .add_systems(Startup, spawn_camera::<ThrottledWorld>);
 
-    update_until(&mut app, "every chunk to be ready", |app| {
-        let positions: Vec<IVec3> = app
-            .world_mut()
-            .query::<&Chunk<ThrottledWorld>>()
-            .iter(app.world())
-            .map(|chunk| chunk.position())
-            .collect();
-        !positions.is_empty()
-            && positions.into_iter().all(|pos| {
-                chunk_status::<ThrottledWorld>(app, pos) == Some(ChunkStatus::Ready)
-            })
-    });
+    let (published, camera) = chunks_in_publish_order::<ThrottledWorld>(&mut app);
 
-    let camera = app
-        .world_mut()
-        .query_filtered::<&GlobalTransform, With<VoxelWorldCamera<ThrottledWorld>>>()
-        .single(app.world())
-        .unwrap()
-        .translation();
-    let distances: Vec<f32> = app
-        .world()
-        .resource::<Published>()
-        .0
+    let order: Vec<(bool, f32)> = published
         .iter()
-        .map(|pos| ((pos.as_vec3() + 0.5) * CHUNK_SIZE_F).distance(camera))
+        .map(|&key| start_order(key, camera, 1))
+        .collect();
+    assert!(order.len() > 10, "only {} chunks published", order.len());
+    assert!(
+        order.windows(2).all(|pair| pair[0] <= pair[1]),
+        "chunks published out of order: {order:?}"
+    );
+}
+
+/// Solid ground below y = 0, streamed all around the camera to three chunks
+/// away, at level 0 next to the camera and at level 1 beyond, one chunk task at
+/// a time.
+#[derive(Resource, Clone, Default)]
+struct OneTaskLevelsWorld;
+
+impl VoxelWorldConfig for OneTaskLevelsWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        3
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn max_active_chunk_threads(&self) -> usize {
+        1
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|pos, _| floor_voxel(pos)))
+    }
+
+    fn chunk_lod(
+        &self,
+        chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        camera_position: Vec3,
+    ) -> LodLevel {
+        let camera_chunk = (camera_position / CHUNK_SIZE_F).floor().as_ivec3();
+        if chunk_position.distance_squared(camera_chunk) < 2 {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+#[test]
+fn coarse_chunks_are_generated_alongside_the_fine_chunks_as_large_on_screen() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<OneTaskLevelsWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<OneTaskLevelsWorld>);
+
+    let (published, camera) = chunks_in_publish_order::<OneTaskLevelsWorld>(&mut app);
+
+    let first_coarse = published.iter().position(|key| key.lod_level == 1);
+    let last_fine = published.iter().rposition(|key| key.lod_level == 0);
+    assert!(
+        matches!((first_coarse, last_fine), (Some(coarse), Some(fine)) if coarse < fine),
+        "no coarse chunk was generated before a fine one: {published:?}"
+    );
+    let order: Vec<(bool, f32)> = published
+        .iter()
+        .map(|&key| start_order(key, camera, 1))
         .collect();
     assert!(
-        distances.len() > 10,
-        "only {} chunks published",
-        distances.len()
-    );
-    assert!(
-        distances.windows(2).all(|pair| pair[0] <= pair[1]),
-        "chunks published out of distance order: {distances:?}"
+        order.windows(2).all(|pair| pair[0] <= pair[1]),
+        "chunks published out of order: {order:?}"
     );
 }
 

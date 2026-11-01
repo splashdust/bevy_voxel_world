@@ -114,8 +114,10 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         ChunkSpawnStrategy::default()
     }
 
-    /// Maximum number of chunks spawned in a frame. Chunks spawn nearest a camera
-    /// first, those within `min_despawn_distance` of one before any other.
+    /// Maximum number of chunks spawned in a frame. Chunks within
+    /// `min_despawn_distance` of a camera spawn first, nearest first, then the
+    /// others largest on screen first: by their distance over their extent, so a
+    /// coarse chunk far away ranks with a fine chunk near by.
     fn max_spawn_per_frame(&self) -> usize {
         10000
     }
@@ -202,7 +204,8 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// is what this returns at the spawning distance. When a position's level
     /// changes, the chunks of the new level spawn first and the old ones retire
     /// once they are covered, so the levels overlap briefly instead of leaving a
-    /// hole.
+    /// hole. Chunks generate largest on screen first, so the coarse chunks of a
+    /// far region fill in alongside the fine chunks of a near one.
     ///
     /// The level must not get finer with distance: for one camera and one
     /// `previous_lod`, a chunk farther from the camera than another gets a level
@@ -234,10 +237,11 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         UVec3::splat(PADDED_CHUNK_SIZE)
     }
 
-    /// Maximum number of chunk tasks that may run at once. Chunk tasks start
-    /// nearest the cameras first, and only as many at a time as keep the task pool
-    /// busy until the next frame, so a cap below that holds chunks back further,
-    /// leaving room on the pool for other work.
+    /// Maximum number of chunk tasks that may run at once. Chunk tasks start in
+    /// the order chunks spawn in (see [`max_spawn_per_frame`](Self::max_spawn_per_frame)),
+    /// and only as many at a time as keep the task pool busy until the next
+    /// frame, so a cap below that holds chunks back further, leaving room on the
+    /// pool for other work.
     fn max_active_chunk_threads(&self) -> usize {
         usize::MAX
     }
