@@ -14,7 +14,12 @@
 //!     cargo bench --bench chunk_lifecycle -- save-binary baseline   # on the baseline commit
 //!     cargo bench --bench chunk_lifecycle -- ab baseline            # on the candidate
 //! `ab` runs the saved baseline binary and this build alternately, `AB_ROUNDS`
-//! times each, then compares them.
+//! times each, then compares them. Build both sides with one codegen unit:
+//!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- …
+//! The voxel world's generic code is compiled inside this crate, and how the
+//! default sixteen units group it has moved flat terrain's generation
+//! throughput by 15% between builds that differ only in code the bench never
+//! runs; one unit makes such builds identical.
 //!
 //! Results and saved binaries are written to `target/bench/chunk_lifecycle/`.
 //!

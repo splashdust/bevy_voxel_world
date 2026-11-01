@@ -2,7 +2,6 @@
 /// VoxelWorld
 /// This module implements most of the public API for bevy_voxel_world.
 ///
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
@@ -12,7 +11,7 @@ use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
-    configuration::VoxelWorldConfig,
+    configuration::{FillHint, VoxelWorldConfig},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
@@ -184,7 +183,6 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    #[allow(unused)]
     configuration: Res<'w, C>,
 }
 
@@ -208,11 +206,15 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         self.chunk_index.chunk_at(voxel_position)
     }
 
-    /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
+    /// Get the voxel at the given position: its voxel edit if it has one, else
+    /// its voxel in the finest published chunk covering it, else what the
+    /// [fill hint](VoxelWorldConfig::chunk_fill_hint) of its level-0 chunk says.
+    /// The voxel will be `WorldVoxel::Unset` if none of these has a voxel there.
     pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
         voxel_at(
             &self.voxel_edits.reader(),
             &self.chunk_map.get_map(),
+            self.configuration.as_ref(),
             position,
         )
     }
@@ -233,8 +235,11 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let voxel_edits = self.voxel_edits.reader();
         let chunk_map = self.chunk_map.get_map();
+        let configuration = self.configuration.as_ref().clone();
 
-        Arc::new(move |position| voxel_at(&voxel_edits, &chunk_map, position))
+        Arc::new(move |position| {
+            voxel_at(&voxel_edits, &chunk_map, &configuration, position)
+        })
     }
 
     /// The published data of the chunk with the given key, or `None` if no chunk
@@ -330,6 +335,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
 
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
+    ///
+    /// The ray is traced through the bounds of the published chunks, reading
+    /// voxels as [`get_voxel`](Self::get_voxel) does, so within those bounds a
+    /// voxel no chunk covers is what its chunk's fill hint says.
     ///
     /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
     /// Returns `None` if no voxel was intersected
@@ -438,20 +447,28 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     (chunk_position, voxel_position)
 }
 
-/// The voxel at `position`: its voxel edit if it has one, or else its voxel in the
-/// published data of the finest chunk covering it.
-fn voxel_at<I: Hash + Copy + PartialEq>(
-    voxel_edits: &VoxelEditReader<I>,
-    chunk_map: &RwLock<ChunkMapData<I>>,
+/// The voxel at `position`: its voxel edit if it has one, else its voxel in the
+/// published data of the finest chunk covering it, else the voxel the fill hint
+/// of its level-0 chunk says is everywhere in it.
+fn voxel_at<C: VoxelWorldConfig>(
+    voxel_edits: &VoxelEditReader<C::MaterialIndex>,
+    chunk_map: &RwLock<ChunkMapData<C::MaterialIndex>>,
+    configuration: &C,
     position: IVec3,
-) -> WorldVoxel<I> {
+) -> WorldVoxel<C::MaterialIndex> {
     if let Some(voxel) = voxel_edits.get(position) {
         return voxel;
     }
-    chunk_map
+    let published = chunk_map
         .read()
         .unwrap()
         .finest_covering(position)
-        .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
-        .unwrap_or(WorldVoxel::Unset)
+        .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position));
+    match published {
+        Some(voxel) => voxel,
+        None => match configuration.chunk_fill_hint(ChunkKey::containing(position, 0)) {
+            FillHint::Uniform(voxel) => voxel,
+            FillHint::Unknown => WorldVoxel::Unset,
+        },
+    }
 }

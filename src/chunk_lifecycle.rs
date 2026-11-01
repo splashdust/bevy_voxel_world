@@ -20,7 +20,7 @@ use futures_lite::future;
 use crate::{
     chunk::{chunk_containing, Chunk, ChunkKey, ChunkTask, LevelCounts},
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
-    configuration::{LodLevel, VoxelWorldConfig},
+    configuration::{FillHint, LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
     streaming_policy::{CameraPosition, StartOrder},
@@ -202,6 +202,9 @@ pub struct ChunkIndex<C> {
     retiring: HashSet<Entity>,
     /// How many chunk tasks finished in the last frame.
     finished_last_frame: usize,
+    /// How many generated chunks disagreed with their fill hint. Counted in
+    /// debug builds; the first one is reported.
+    pub(crate) hint_mismatches: usize,
     _marker: PhantomData<C>,
 }
 
@@ -215,6 +218,7 @@ impl<C> Default for ChunkIndex<C> {
             generating: HashSet::new(),
             retiring: HashSet::new(),
             finished_last_frame: 0,
+            hint_mismatches: 0,
             _marker: PhantomData,
         }
     }
@@ -540,6 +544,23 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 continue;
             };
 
+            if chunk_task.disagrees_with_hint {
+                index.hint_mismatches += 1;
+                if index.hint_mismatches == 1 {
+                    let hinted = match chunk_task.hint {
+                        FillHint::Uniform(voxel) if voxel.is_solid() => "solid",
+                        _ => "empty",
+                    };
+                    warn!(
+                        "The chunk {} was hinted {hinted} but generated other voxels. \
+                         A fill hint must hold for every voxel in the chunk; the \
+                         streaming policy trusts it and leaves hinted chunks \
+                         unspawned. Further mismatches in this world are not reported.",
+                        chunk.key
+                    );
+                }
+            }
+
             if let Some(mesh_assets) = mesh_assets.as_mut() {
                 let hash = chunk_task.voxels_hash();
                 let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
@@ -711,6 +732,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             data_shape,
             mesh_shape,
             self.voxel_edits.chunk_edits(key),
+            self.configuration.chunk_fill_hint(key),
         );
 
         let mesh_map = self.mesh_cache.get_mesh_map();
@@ -719,6 +741,8 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("chunk_task").entered();
             chunk_task.generate(voxel_data_fn, previous_chunk_data);
+            #[cfg(debug_assertions)]
+            chunk_task.check_hint();
 
             // No need to mesh if the chunk is empty or full
             if chunk_task.is_empty() || chunk_task.is_full() {

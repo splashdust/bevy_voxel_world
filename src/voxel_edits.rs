@@ -7,7 +7,7 @@
 ///
 use std::{
     marker::PhantomData,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
 use bevy::{platform::collections::HashMap, prelude::*};
@@ -112,9 +112,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             let mut around: [Option<EditBucket<I>>; 27] = std::array::from_fn(|_| None);
             if !buckets.is_empty() {
                 for (i, bucket) in around.iter_mut().enumerate() {
-                    let i = i as i32;
-                    let offset = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
-                    *bucket = buckets.get(&(chunk_pos + offset)).cloned();
+                    *bucket = buckets.get(&(chunk_pos + around_offset(i))).cloned();
                 }
             }
             return ChunkEdits {
@@ -123,11 +121,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             };
         }
 
-        // The padding is one data voxel, `1 << L` voxels, which reaches into
-        // this many level-0 chunks around the extent.
-        let padding = ((1 << key.lod_level) + CHUNK_SIZE_I - 1) / CHUNK_SIZE_I;
-        let min = chunk_pos - padding;
-        let max = chunk_pos + key.extent() + padding;
+        let (min, max) = buckets_read_by(key);
         let within = buckets
             .iter()
             .filter(|(position, _)| {
@@ -140,6 +134,55 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             buckets: Buckets::Within(within),
         }
     }
+
+    /// The committed edits, read once for a frame.
+    pub(crate) fn committed(&self) -> CommittedEdits<'_, I> {
+        CommittedEdits(self.committed.read().unwrap())
+    }
+}
+
+/// The committed edits, held for reading.
+pub(crate) struct CommittedEdits<'a, I>(
+    RwLockReadGuard<'a, HashMap<IVec3, EditBucket<I>>>,
+);
+
+impl<I> CommittedEdits<'_, I> {
+    /// Whether an edit lies in a level-0 chunk that a chunk task of the chunk at
+    /// `key` reads: one within its extent or one its padding reaches into. Such
+    /// an edit may change the chunk's voxels, so a fill hint cannot stand for it.
+    pub fn reach(&self, key: ChunkKey) -> bool {
+        let buckets = &self.0;
+        if buckets.is_empty() {
+            return false;
+        }
+        if key.lod_level == 0 {
+            return (0..27)
+                .any(|i| buckets.contains_key(&(key.position + around_offset(i))));
+        }
+        let (min, max) = buckets_read_by(key);
+        buckets
+            .keys()
+            .any(|position| position.cmpge(min).all() && position.cmplt(max).all())
+    }
+}
+
+/// The offset of the `i`th of the 27 level-0 chunks around a chunk, x varying
+/// fastest, as [`Buckets::Around`] stores them.
+fn around_offset(i: usize) -> IVec3 {
+    let i = i as i32;
+    IVec3::new(i % 3, i / 3 % 3, i / 9) - 1
+}
+
+/// The level-0 chunk positions whose edits a chunk task of the chunk at `key`,
+/// above level 0, reads: `min` inclusive to `max` exclusive on every axis. The
+/// padding is one data voxel, `1 << L` voxels, which reaches into this many
+/// level-0 chunks around the extent.
+fn buckets_read_by(key: ChunkKey) -> (IVec3, IVec3) {
+    let padding = ((1 << key.lod_level) + CHUNK_SIZE_I - 1) / CHUNK_SIZE_I;
+    (
+        key.position - padding,
+        key.position + key.extent() + padding,
+    )
 }
 
 /// The chunks at `lod_level` whose padded voxel data includes the voxel at
@@ -524,6 +567,25 @@ mod tests {
         assert!(edits
             .chunk_edits(ChunkKey::new(IVec3::new(8, 0, 0), 1))
             .is_empty());
+    }
+
+    #[test]
+    fn an_edit_reaches_the_chunks_whose_tasks_read_it() {
+        let edits = Edits::default();
+        assert!(!edits.committed().reach(ChunkKey::new(IVec3::ZERO, 0)));
+
+        // In chunk -1, one voxel from chunk 0.
+        commit_one(&edits, IVec3::new(-1, 5, 5), WorldVoxel::Solid(1));
+        let committed = edits.committed();
+
+        for chunk_pos in [IVec3::new(-1, 0, 0), IVec3::ZERO] {
+            assert!(committed.reach(ChunkKey::new(chunk_pos, 0)), "{chunk_pos}");
+        }
+        assert!(!committed.reach(ChunkKey::new(IVec3::new(1, 0, 0), 0)));
+        // Level-0 chunks 0 and 1, with chunks -1 and 2 as padding.
+        assert!(committed.reach(ChunkKey::new(IVec3::ZERO, 1)));
+        assert!(committed.reach(ChunkKey::new(IVec3::new(-2, 0, 0), 1)));
+        assert!(!committed.reach(ChunkKey::new(IVec3::new(2, 0, 0), 1)));
     }
 
     #[test]

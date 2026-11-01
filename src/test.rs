@@ -15,6 +15,7 @@ use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
+    chunk_lifecycle::ChunkIndex,
     prelude::VoxelWorldCamera,
     voxel_world::*,
 };
@@ -1196,6 +1197,230 @@ fn a_coarse_chunk_retires_once_the_finer_chunks_replacing_it_are_published() {
         assert!(
             published_at <= retired_at,
             "{child} published in frame {published_at}, the coarse chunk retired in {retired_at}"
+        );
+    }
+}
+
+/// `FloorWorld` with every chunk's fill hinted: the floor is level, so a chunk
+/// row at or above y = 0 is air and a row below it solid. Streams all around the
+/// camera to four chunks away.
+#[derive(Resource, Clone, Default)]
+struct HintedFloorWorld;
+
+impl VoxelWorldConfig for HintedFloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        4
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        if key.position.y >= 0 {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else if key.position.y + key.extent() <= 0 {
+            FillHint::Uniform(WorldVoxel::Solid(1))
+        } else {
+            FillHint::Unknown
+        }
+    }
+}
+
+/// The keys of the level-0 chunks within one chunk of the chunk at the origin:
+/// a camera's protected radius there.
+fn protected_around_origin() -> HashSet<ChunkKey> {
+    let mut keys = HashSet::new();
+    for x in -1..=1 {
+        for y in -1..=1 {
+            for z in -1..=1 {
+                let offset = IVec3::new(x, y, z);
+                if offset.length_squared() <= 1 {
+                    keys.insert(ChunkKey::new(offset, 0));
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn chunk_keys<C: VoxelWorldConfig>(app: &mut App) -> HashSet<ChunkKey> {
+    app.world_mut()
+        .query::<&Chunk<C>>()
+        .iter(app.world())
+        .map(|chunk| chunk.key())
+        .collect()
+}
+
+#[test]
+fn hinted_chunks_are_not_spawned_and_get_voxel_answers_from_their_hints() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<HintedFloorWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<HintedFloorWorld>);
+
+    // The camera is in the chunk at the origin, whose protected radius spawns
+    // whatever the hints say.
+    update_until(&mut app, "the chunk below the camera to be ready", |app| {
+        chunk_status::<HintedFloorWorld>(app, IVec3::new(0, -1, 0))
+            == Some(ChunkStatus::Ready)
+    });
+    for _ in 0..5 {
+        app.update();
+    }
+
+    assert_eq!(
+        chunk_keys::<HintedFloorWorld>(&mut app),
+        protected_around_origin()
+    );
+    let (air, rock, covering) = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<HintedFloorWorld>| {
+            (
+                voxel_world.get_voxel(IVec3::new(100, 5, 100)),
+                voxel_world.get_voxel(IVec3::new(100, -5, 100)),
+                voxel_world.chunk_at(IVec3::new(100, -5, 100)),
+            )
+        })
+        .unwrap();
+    assert_eq!(air, WorldVoxel::Air);
+    assert_eq!(rock, WorldVoxel::Solid(1));
+    assert_eq!(covering, None, "no chunk was spawned there");
+    assert_eq!(
+        app.world()
+            .resource::<ChunkIndex<HintedFloorWorld>>()
+            .hint_mismatches,
+        0
+    );
+}
+
+#[test]
+fn the_raycast_hits_hinted_ground_where_no_chunk_exists() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<HintedFloorWorld>::minimal(),
+    ))
+    // Two cameras six chunks apart, so that the published chunks' bounds, which
+    // the raycast is traced through, span hinted chunks between them.
+    .add_systems(Startup, |mut commands: Commands| {
+        for chunk_z in [0.0, 6.0] {
+            let transform =
+                Transform::from_xyz(10.0, 10.0, 10.0 + chunk_z * CHUNK_SIZE_F);
+            commands.spawn((
+                Camera3d::default(),
+                transform,
+                GlobalTransform::from(transform),
+                VoxelWorldCamera::<HintedFloorWorld>::default(),
+            ));
+        }
+    });
+    update_until(
+        &mut app,
+        "the chunks below both cameras to be ready",
+        |app| {
+            [IVec3::new(0, -1, 0), IVec3::new(0, -1, 6)]
+                .into_iter()
+                .all(|chunk_pos| {
+                    chunk_status::<HintedFloorWorld>(app, chunk_pos)
+                        == Some(ChunkStatus::Ready)
+                })
+        },
+    );
+
+    let (result, covering) = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<HintedFloorWorld>| {
+            let ray = Ray3d {
+                origin: Vec3::new(16.5, 16.5, 100.5),
+                direction: -Dir3::Y,
+            };
+            (
+                voxel_world.raycast(ray, &|_| true),
+                voxel_world.chunk_at(IVec3::new(16, -1, 100)),
+            )
+        })
+        .unwrap();
+
+    assert_eq!(covering, None, "no chunk was spawned there");
+    assert_eq!(
+        result,
+        Some(VoxelRaycastResult {
+            position: Vec3::new(16.0, -1.0, 100.0),
+            normal: Some(Vec3::Y),
+            voxel: WorldVoxel::Solid(1),
+        })
+    );
+}
+
+/// `FloorWorld` hinted air everywhere, which is wrong below the floor.
+#[derive(Resource, Clone, Default)]
+struct MisHintedWorld;
+
+impl VoxelWorldConfig for MisHintedWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn chunk_fill_hint(&self, _key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        FillHint::Uniform(WorldVoxel::Air)
+    }
+}
+
+#[test]
+fn a_hinted_chunk_in_the_protected_radius_is_generated_and_a_wrong_hint_is_noticed() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<MisHintedWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<MisHintedWorld>);
+    let below = IVec3::new(0, -1, 0);
+    update_until(&mut app, "the chunk below the camera to be ready", |app| {
+        chunk_status::<MisHintedWorld>(app, below) == Some(ChunkStatus::Ready)
+    });
+
+    // The hint never fills the chunk's data: it was generated, and is solid.
+    let voxel = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<MisHintedWorld>| {
+            voxel_world.get_voxel(IVec3::new(5, -5, 5))
+        })
+        .unwrap();
+    assert_eq!(voxel, WorldVoxel::Solid(1));
+    assert!(chunk_data::<MisHintedWorld>(&mut app, below)
+        .is_some_and(|data| data.has_generated()));
+    if cfg!(debug_assertions) {
+        assert!(
+            app.world()
+                .resource::<ChunkIndex<MisHintedWorld>>()
+                .hint_mismatches
+                > 0,
+            "the wrong hint went unnoticed"
         );
     }
 }

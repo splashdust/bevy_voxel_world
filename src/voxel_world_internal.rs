@@ -13,27 +13,26 @@ use crate::{
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
     streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
-    voxel_edits::VoxelEdits,
+    voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
     voxel_world::VoxelWorldCamera,
 };
 
 /// What the streaming policy sees of the chunks: the chunk index for which
-/// chunks exist, and the chunk map for what is published.
+/// chunks exist, the chunk map for what is published, and the committed voxel
+/// edits for the chunks a fill hint cannot stand for.
 struct Chunks<'a, C: VoxelWorldConfig> {
     index: &'a ChunkIndex<C>,
     chunk_map: &'a ChunkMapData<C::MaterialIndex>,
+    edits: &'a CommittedEdits<'a, C::MaterialIndex>,
 }
 
 impl<C: VoxelWorldConfig> Chunks<'_, C> {
     /// What is at a chunk that exists.
     fn published(&self, key: ChunkKey) -> Occupancy {
-        match self.chunk_map.get(&key) {
-            None => Occupancy::Unpublished,
-            Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
-            Some(chunk_data) if chunk_data.is_empty => Occupancy::Empty,
-            Some(_) => Occupancy::Mixed,
-        }
+        self.chunk_map
+            .get(&key)
+            .map_or(Occupancy::Unpublished, Occupancy::of_data)
     }
 }
 
@@ -52,6 +51,10 @@ impl<C: VoxelWorldConfig> ChunkLookup for Chunks<'_, C> {
 
     fn coarsest_level(&self) -> LodLevel {
         self.index.levels_in_use().last().unwrap_or(0)
+    }
+
+    fn edits_reach(&self, key: ChunkKey) -> bool {
+        self.edits.reach(key)
     }
 }
 
@@ -115,6 +118,7 @@ where
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunks: Query<&Chunk<C>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
@@ -136,9 +140,11 @@ where
         }
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
+        let committed_edits = voxel_edits.committed();
         let lookup = Chunks::<C> {
             index: &index,
             chunk_map: &chunk_map_read_lock,
+            edits: &committed_edits,
         };
 
         #[cfg(feature = "trace")]

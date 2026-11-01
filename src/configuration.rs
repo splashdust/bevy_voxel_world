@@ -1,7 +1,7 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use crate::chunk::{ChunkData, VoxelArray, PADDED_CHUNK_SIZE};
+use crate::chunk::{ChunkData, ChunkKey, VoxelArray, PADDED_CHUNK_SIZE};
 use crate::meshing::{generate_chunk_mesh_for_shape, scale_texture_coordinates};
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
@@ -65,6 +65,18 @@ pub enum ChunkDespawnStrategy {
     FarAway,
 }
 
+/// What a world knows about a chunk's voxels before the chunk is generated. See
+/// [`VoxelWorldConfig::chunk_fill_hint`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FillHint<I = u8> {
+    /// Nothing is known: the chunk is generated to find out.
+    #[default]
+    Unknown,
+    /// Every voxel in the chunk is this one. `Uniform(WorldVoxel::Air)` says the
+    /// chunk is empty; `Uniform(WorldVoxel::Unset)` is taken the same way.
+    Uniform(WorldVoxel<I>),
+}
+
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkSpawnStrategy {
     /// Spawn chunks that are within `spawning_distance` of the camera
@@ -123,12 +135,44 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     /// Number of rays to cast when spawning chunks. A ray walks through the chunks
-    /// in its way whose voxels are generated and not all solid, and spawns the
-    /// first chunks past them, so chunks spawn from the camera outwards as the
-    /// chunks in front of them are generated. Higher values will result in more
-    /// chunks being spawned per frame, but will also increase cpu load.
+    /// in its way whose voxels are generated and not all solid, and through
+    /// missing chunks whose [fill hint](Self::chunk_fill_hint) says they are
+    /// empty, and spawns the first chunks past them, so chunks spawn from the
+    /// camera outwards as the chunks in front of them are generated. Higher
+    /// values will result in more chunks being spawned per frame, but will also
+    /// increase cpu load.
     fn spawning_rays(&self) -> usize {
         100
+    }
+
+    /// What the world knows about the voxels of the chunk at `key` before it is
+    /// generated: [`FillHint::Uniform`] when every voxel in the chunk is the same,
+    /// else [`FillHint::Unknown`], the default. An optional accelerator: the world
+    /// works fully without hints, and a hint never fills a chunk's data.
+    ///
+    /// Spawning rays walk through missing chunks hinted empty and stop at ones
+    /// hinted solid, spawning neither, so a world that says where its open air
+    /// and its bedrock are streams only the chunks in between, and its rays reach
+    /// the terrain as far as the spawning distance in one frame instead of
+    /// discovering it chunk by chunk. [`get_voxel`](crate::prelude::VoxelWorld::get_voxel)
+    /// and [`raycast`](crate::prelude::VoxelWorld::raycast) answer from the hint
+    /// of a voxel's level-0 chunk where no chunk covers it.
+    ///
+    /// Chunks within `min_despawn_distance` of a camera spawn whatever their
+    /// hint, and are generated through the voxel lookup delegate like any other;
+    /// in debug builds a generated chunk whose voxels disagree with its hint
+    /// warns, once per world. A chunk that a voxel edit reaches (within the chunk
+    /// or the level-0 chunks its padding samples) is treated as `Unknown`, since
+    /// the hint cannot know about edits.
+    ///
+    /// This is called for every missing chunk a spawning ray steps through, and,
+    /// with [`ChunkSpawnStrategy::Close`], for every hinted chunk within the
+    /// spawning distance each frame, since the flood fill continues through
+    /// hinted chunks without spawning them. Keep it cheap: a few comparisons on
+    /// the key, not a noise sample. The hint must hold at every level: a chunk
+    /// above level 0 is uniform only when all of its extent is.
+    fn chunk_fill_hint(&self, _key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        FillHint::Unknown
     }
 
     /// How far outside of the viewports spawning rays should get cast. Higher values will

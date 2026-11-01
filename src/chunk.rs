@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::{
-    prelude::{ChunkMeshingFn, LodLevel, TextureIndexMapperFn, VoxelWorldConfig},
+    prelude::{
+        ChunkMeshingFn, FillHint, LodLevel, TextureIndexMapperFn, VoxelWorldConfig,
+    },
     voxel::WorldVoxel,
     voxel_edits::ChunkEdits,
 };
@@ -432,6 +434,33 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
     pub fn has_generated(&self) -> bool {
         self.has_generated
     }
+
+    /// Whether every voxel of the chunk, its padding aside, is `voxel`, taking
+    /// `Air` and `Unset` as the same: nothing there.
+    #[cfg(debug_assertions)]
+    pub(crate) fn interior_is(&self, voxel: WorldVoxel<I>) -> bool {
+        let same = |other: WorldVoxel<I>| {
+            if voxel.is_solid() {
+                other == voxel
+            } else {
+                !other.is_solid()
+            }
+        };
+        let Some(voxels) = &self.voxels else {
+            return same(self.fill_voxel());
+        };
+        let shape = self.data_shape;
+        let row = shape.x as usize;
+        let slab = (shape.x * shape.y) as usize;
+        (1..shape.z as usize - 1).all(|z| {
+            (1..shape.y as usize - 1).all(|y| {
+                let start = z * slab + y * row + 1;
+                voxels[start..start + shape.x as usize - 2]
+                    .iter()
+                    .all(|&other| same(other))
+            })
+        })
+    }
 }
 
 impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
@@ -618,6 +647,10 @@ where
     pub key: ChunkKey,
     pub chunk_data: ChunkData<I>,
     pub edits: ChunkEdits<I>,
+    /// The world's fill hint for the chunk, which the generated voxels are
+    /// checked against in debug builds.
+    pub hint: FillHint<I>,
+    pub disagrees_with_hint: bool,
     pub mesh: Option<Mesh>,
     pub user_bundle: Option<C::ChunkUserBundle>,
     _marker: PhantomData<C>,
@@ -630,6 +663,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         data_shape: UVec3,
         mesh_shape: UVec3,
         edits: ChunkEdits<I>,
+        hint: FillHint<I>,
     ) -> Self {
         let mut chunk_data = ChunkData::with_entity(entity);
         chunk_data.key = key;
@@ -640,9 +674,22 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             key,
             chunk_data,
             edits,
+            hint,
+            disagrees_with_hint: false,
             mesh: None,
             user_bundle: None,
             _marker: PhantomData,
+        }
+    }
+
+    /// Checks the generated voxels against the chunk's fill hint, which a world
+    /// gives for the chunk without its edits, so a chunk with edits is not
+    /// checked. Debug builds only.
+    #[cfg(debug_assertions)]
+    pub fn check_hint(&mut self) {
+        if let FillHint::Uniform(voxel) = self.hint {
+            self.disagrees_with_hint =
+                self.edits.is_empty() && !self.chunk_data.interior_is(voxel);
         }
     }
 

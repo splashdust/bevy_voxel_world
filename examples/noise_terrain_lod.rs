@@ -15,6 +15,25 @@ use noise::{HybridMulti, NoiseFn, Perlin};
 #[derive(Component)]
 struct FpsText;
 
+/// The terrain lies between these level-0 chunk rows: below the sea level at
+/// y = 0 everything is rock, and the highest peaks (about y = 170) end in row
+/// 5, so every chunk above that row is air.
+const LOWEST_TERRAIN_CHUNK: i32 = 0;
+const HIGHEST_TERRAIN_CHUNK: i32 = 5;
+
+/// What fills the chunk at `key` when no terrain crosses it: rock below the
+/// terrain, air above it. Used as the chunk's fill hint, so that the streaming
+/// policy spawns neither, and by the voxel lookup to skip the noise there.
+fn terrain_fill(key: ChunkKey) -> FillHint {
+    if key.position.y + key.extent() <= LOWEST_TERRAIN_CHUNK {
+        FillHint::Uniform(WorldVoxel::Solid(3))
+    } else if key.position.y > HIGHEST_TERRAIN_CHUNK {
+        FillHint::Uniform(WorldVoxel::Air)
+    } else {
+        FillHint::Unknown
+    }
+}
+
 #[derive(Resource, Clone)]
 struct MainWorld {
     noise: Arc<HybridMulti<Perlin>>,
@@ -49,11 +68,10 @@ impl VoxelWorldConfig for MainWorld {
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
         Box::new(move |chunk_pos, lod_level, _previous| {
-            if chunk_pos.y < -1 {
-                return Box::new(|_, _| WorldVoxel::Solid(3));
-            }
-            if chunk_pos.y > 4 {
-                return Box::new(|_, _| WorldVoxel::Air);
+            if let FillHint::Uniform(voxel) =
+                terrain_fill(ChunkKey::new(chunk_pos, lod_level))
+            {
+                return Box::new(move |_, _| voxel);
             }
 
             // A chunk at level L spans CHUNK_SIZE << L voxels.
@@ -144,6 +162,13 @@ impl VoxelWorldConfig for MainWorld {
         } else {
             5
         }
+    }
+
+    // Spawning rays walk through the air above the terrain and stop at the rock
+    // below it without spawning either, so only the chunks the terrain crosses
+    // are generated, and the rays reach the terrain at the horizon at once.
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
+        terrain_fill(key)
     }
 
     fn attach_chunks_to_root(&self) -> bool {
