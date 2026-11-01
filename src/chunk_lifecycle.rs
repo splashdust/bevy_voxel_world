@@ -1,7 +1,7 @@
 ///
 /// Chunk lifecycle
 /// The state of every chunk, the chunk tasks that generate and mesh chunks, and
-/// publishing their results. Spawn, retire and LOD decisions and voxel edits are
+/// publishing their results. Spawn and retire decisions and voxel edits are
 /// made elsewhere and reach the lifecycle as `ChunkRequests`.
 ///
 use std::{
@@ -18,16 +18,15 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{Chunk, ChunkTask, CHUNK_SIZE_F},
+    chunk::{Chunk, ChunkKey, ChunkTask, LevelCounts},
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
-    configuration::{LodLevel, VoxelWorldConfig},
+    configuration::VoxelWorldConfig,
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
-    streaming_policy::chunk_centre,
     voxel_edits::VoxelEdits,
     voxel_world::{
-        ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
-        ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
+        ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkWillUpdate, VoxelWorldCamera,
     },
     voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
 };
@@ -59,8 +58,8 @@ pub enum ChunkState<T: Send + Sync + 'static> {
     Pending {
         priority: bool,
     },
-    /// `superseded` turns true when an edit or LOD change makes the running
-    /// task's inputs stale; a follow-up task starts once it is published.
+    /// `superseded` turns true when a voxel edit makes the running task's
+    /// inputs stale; a follow-up task starts once it is published.
     Generating {
         task: T,
         superseded: bool,
@@ -82,8 +81,6 @@ pub(crate) enum ChunkEvent<T> {
     CachedMeshExpired,
     /// A voxel edit made the chunk's voxel data stale.
     Edited,
-    /// A LOD change gave the chunk a new data or mesh shape.
-    Reshaped,
     /// The chunk was chosen for despawning.
     Retire,
     /// The despawn step of a frame ran.
@@ -163,7 +160,7 @@ pub(crate) fn transition<T: Send + Sync + 'static>(
             (S::Pending { priority: true }, Effect::None)
         }
         // The running task finishes and is published, then a follow-up starts.
-        (S::Generating { task, .. }, E::Edited | E::Reshaped) => (
+        (S::Generating { task, .. }, E::Edited) => (
             S::Generating {
                 task,
                 superseded: true,
@@ -173,7 +170,6 @@ pub(crate) fn transition<T: Send + Sync + 'static>(
         (S::Pending { .. } | S::Ready, E::Edited) => {
             (S::Pending { priority: true }, Effect::None)
         }
-        (S::Ready, E::Reshaped) => (S::Pending { priority: false }, Effect::None),
         (state, _) => (state, Effect::None),
     }
 }
@@ -185,20 +181,22 @@ pub(crate) type ChunkTaskHandle<C> =
 /// The chunk state component of the voxel world `C`.
 pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 
-/// The live chunks of the voxel world `C` by chunk position, from spawning until
+/// The live chunks of the voxel world `C` by chunk key, from spawning until
 /// despawning.
 ///
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
 pub struct ChunkIndex<C> {
-    entities: HashMap<IVec3, Entity>,
+    entities: HashMap<ChunkKey, Entity>,
+    /// How many chunks there are at each LOD level.
+    levels: LevelCounts,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
     /// Pending chunks with priority, oldest first. May hold chunks that have
     /// since moved on.
     priority: VecDeque<Entity>,
-    /// The other Pending chunks, with their chunk positions.
-    pending: HashMap<Entity, IVec3>,
+    /// The other Pending chunks, with their chunk keys.
+    pending: HashMap<Entity, ChunkKey>,
     generating: HashSet<Entity>,
     retiring: HashSet<Entity>,
     /// How many chunk tasks finished in the last frame.
@@ -210,6 +208,7 @@ impl<C> Default for ChunkIndex<C> {
     fn default() -> Self {
         Self {
             entities: HashMap::new(),
+            levels: LevelCounts::new(),
             priority: VecDeque::new(),
             pending: HashMap::new(),
             generating: HashSet::new(),
@@ -221,21 +220,33 @@ impl<C> Default for ChunkIndex<C> {
 }
 
 impl<C> ChunkIndex<C> {
-    pub fn get(&self, chunk_pos: IVec3) -> Option<Entity> {
-        self.entities.get(&chunk_pos).copied()
+    pub fn get(&self, key: ChunkKey) -> Option<Entity> {
+        self.entities.get(&key).copied()
     }
 
-    pub fn contains(&self, chunk_pos: IVec3) -> bool {
-        self.entities.contains_key(&chunk_pos)
+    pub fn contains(&self, key: ChunkKey) -> bool {
+        self.entities.contains_key(&key)
     }
 
-    fn spawned(&mut self, chunk_pos: IVec3, entity: Entity) {
-        self.entities.insert(chunk_pos, entity);
-        self.pending.insert(entity, chunk_pos);
+    /// The key of the finest chunk that covers the voxel at `voxel_position`,
+    /// if any chunk does.
+    pub fn chunk_at(&self, voxel_position: IVec3) -> Option<ChunkKey> {
+        self.levels.in_use().find_map(|lod_level| {
+            let key = ChunkKey::containing(voxel_position, lod_level);
+            self.entities.contains_key(&key).then_some(key)
+        })
     }
 
-    fn despawned(&mut self, chunk_pos: IVec3, entity: Entity) {
-        self.entities.remove(&chunk_pos);
+    fn spawned(&mut self, key: ChunkKey, entity: Entity) {
+        self.entities.insert(key, entity);
+        self.levels.add(key.lod_level);
+        self.pending.insert(entity, key);
+    }
+
+    fn despawned(&mut self, key: ChunkKey, entity: Entity) {
+        if self.entities.remove(&key).is_some() {
+            self.levels.remove(key.lod_level);
+        }
         self.retiring.remove(&entity);
     }
 
@@ -257,12 +268,12 @@ impl<C> ChunkIndex<C> {
         )
     }
 
-    /// Applies `event` to the state of the chunk at `chunk_pos`, and files the
-    /// chunk under its new state.
+    /// Applies `event` to the state of the chunk `key`, and files the chunk
+    /// under its new state.
     fn apply<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
-        chunk_pos: IVec3,
+        key: ChunkKey,
         state: &mut ChunkState<T>,
         event: ChunkEvent<T>,
     ) -> Effect {
@@ -287,7 +298,7 @@ impl<C> ChunkIndex<C> {
             match after {
                 (ChunkStatus::Pending, true) => self.priority.push_back(entity),
                 (ChunkStatus::Pending, false) => {
-                    self.pending.insert(entity, chunk_pos);
+                    self.pending.insert(entity, key);
                 }
                 (ChunkStatus::Generating, _) => {
                     self.generating.insert(entity);
@@ -303,8 +314,8 @@ impl<C> ChunkIndex<C> {
 }
 
 /// The squared distance from the chunk's centre to the nearest camera.
-fn distance_squared_to_nearest_camera(chunk_pos: IVec3, cameras: &[Vec3]) -> f32 {
-    let centre = chunk_centre(chunk_pos);
+fn distance_squared_to_nearest_camera(key: ChunkKey, cameras: &[Vec3]) -> f32 {
+    let centre = key.centre();
     cameras
         .iter()
         .map(|camera| camera.distance_squared(centre))
@@ -312,18 +323,16 @@ fn distance_squared_to_nearest_camera(chunk_pos: IVec3, cameras: &[Vec3]) -> f32
 }
 
 /// What the rest of the crate asks of the chunk lifecycle this frame, by chunk
-/// position. Requests for chunks that don't exist, or that are retiring, are
+/// key. Requests for chunks that don't exist, or that are retiring, are
 /// ignored, except spawning.
 #[derive(Resource)]
 pub(crate) struct ChunkRequests<C> {
-    /// Chunks whose voxels were edited.
+    /// Level-0 chunk positions whose padded voxels were edited.
     pub edited: Vec<IVec3>,
-    /// Chunks to spawn, with their LOD level.
-    pub spawn: Vec<(IVec3, LodLevel)>,
-    /// Chunks whose LOD level should change.
-    pub change_lod: Vec<(IVec3, LodLevel)>,
+    /// Chunks to spawn.
+    pub spawn: Vec<ChunkKey>,
     /// Chunks to despawn.
-    pub retire: Vec<IVec3>,
+    pub retire: Vec<ChunkKey>,
     _marker: PhantomData<C>,
 }
 
@@ -332,7 +341,6 @@ impl<C> Default for ChunkRequests<C> {
         Self {
             edited: Vec::new(),
             spawn: Vec::new(),
-            change_lod: Vec::new(),
             retire: Vec::new(),
             _marker: PhantomData,
         }
@@ -343,96 +351,71 @@ impl<C> Default for ChunkRequests<C> {
 pub(crate) struct ChunkLifecycle<C>(PhantomData<C>);
 
 impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
-    /// Applies this frame's requests: edits, then spawns, LOD changes and
-    /// retirements.
+    /// Applies this frame's requests: edits, then spawns and retirements.
     #[allow(clippy::type_complexity)]
     pub fn apply_requests(
         mut commands: Commands,
         mut requests: ResMut<ChunkRequests<C>>,
         mut index: ResMut<ChunkIndex<C>>,
-        mut chunks: Query<(&mut Chunk<C>, &mut ChunkStateOf<C>)>,
+        mut chunks: Query<&mut ChunkStateOf<C>>,
         world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         mut messages: (
             MessageWriter<ChunkWillUpdate<C>>,
-            MessageWriter<ChunkWillChangeLod<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
     ) {
-        let (ev_update, ev_change_lod, ev_despawn) = &mut messages;
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("apply_requests").entered();
+        let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
 
         let edited: HashSet<IVec3> = requests.edited.drain(..).collect();
         for chunk_pos in edited {
-            let Some(entity) = index.get(chunk_pos) else {
+            let key = ChunkKey::new(chunk_pos, 0);
+            let Some(entity) = index.get(key) else {
                 continue;
             };
-            if let Ok((_, mut state)) = chunks.get_mut(entity) {
-                index.apply(entity, chunk_pos, &mut state, ChunkEvent::Edited);
+            if let Ok(mut state) = chunks.get_mut(entity) {
+                index.apply(entity, key, &mut state, ChunkEvent::Edited);
             }
-            ev_update.write(ChunkWillUpdate::<C>::new(chunk_pos, entity));
+            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
         }
 
         let world_root = world_root.single().unwrap();
         let attach_to_root = configuration.attach_chunks_to_root();
-        for (chunk_pos, lod_level) in requests.spawn.drain(..) {
-            if index.contains(chunk_pos) {
+        for key in requests.spawn.drain(..) {
+            if index.contains(key) {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
                 ChunkStateOf::<C>::Pending { priority: false },
-                Transform::from_translation(chunk_pos.as_vec3() * CHUNK_SIZE_F - 1.0),
+                Transform::from_translation(key.world_position() - 1.0),
             ));
             let entity = chunk_entity.id();
             chunk_entity.insert(Chunk::<C>::new(
-                chunk_pos,
-                lod_level,
+                key,
                 entity,
-                configuration.chunk_data_shape(lod_level),
-                configuration.chunk_meshing_shape(lod_level),
+                configuration.chunk_data_shape(key.lod_level),
+                configuration.chunk_meshing_shape(key.lod_level),
             ));
             if attach_to_root {
                 commands.entity(world_root).add_child(entity);
             }
-            index.spawned(chunk_pos, entity);
+            index.spawned(key, entity);
         }
 
-        for (chunk_pos, lod_level) in requests.change_lod.drain(..) {
-            let Some(entity) = index.get(chunk_pos) else {
+        for key in requests.retire.drain(..) {
+            let Some(entity) = index.get(key) else {
                 continue;
             };
-            let Ok((mut chunk, mut state)) = chunks.get_mut(entity) else {
+            let Ok(mut state) = chunks.get_mut(entity) else {
                 continue;
             };
-            if chunk.lod_level == lod_level || state.status() == ChunkStatus::Retiring {
-                continue;
-            }
-
-            ev_change_lod.write(ChunkWillChangeLod::<C>::new(chunk_pos, entity));
-
-            let data_shape = configuration.chunk_data_shape(lod_level);
-            let mesh_shape = configuration.chunk_meshing_shape(lod_level);
-            let reshaped =
-                chunk.data_shape != data_shape || chunk.mesh_shape != mesh_shape;
-            chunk.lod_level = lod_level;
-            chunk.data_shape = data_shape;
-            chunk.mesh_shape = mesh_shape;
-            if reshaped {
-                index.apply(entity, chunk_pos, &mut state, ChunkEvent::Reshaped);
-            }
-        }
-
-        for chunk_pos in requests.retire.drain(..) {
-            let Some(entity) = index.get(chunk_pos) else {
-                continue;
-            };
-            let Ok((_, mut state)) = chunks.get_mut(entity) else {
-                continue;
-            };
-            if index.apply(entity, chunk_pos, &mut state, ChunkEvent::Retire)
+            if index.apply(entity, key, &mut state, ChunkEvent::Retire)
                 == Effect::AnnounceRetiring
             {
-                ev_despawn.write(ChunkWillDespawn::<C>::new(chunk_pos, entity));
+                ev_despawn.write(ChunkWillDespawn::<C>::new(key, entity));
             }
         }
     }
@@ -454,6 +437,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("start_chunk_tasks").entered();
         let cap = configuration.max_active_chunk_threads();
         if index.generating.len() >= cap {
             return;
@@ -488,9 +473,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let mut nearest: Vec<(f32, Entity)> = index
             .pending
             .iter()
-            .map(|(&entity, &chunk_pos)| {
+            .map(|(&entity, &key)| {
                 (
-                    distance_squared_to_nearest_camera(chunk_pos, &camera_positions),
+                    distance_squared_to_nearest_camera(key, &camera_positions),
                     entity,
                 )
             })
@@ -521,6 +506,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         ),
         mesh_cache: Res<MeshCache<C>>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
         let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
@@ -573,7 +560,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 } else {
                     index.apply(
                         entity,
-                        chunk.position,
+                        chunk.key,
                         &mut state,
                         ChunkEvent::CachedMeshExpired,
                     );
@@ -596,14 +583,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 }
             }
 
-            if index.apply(entity, chunk.position, &mut state, ChunkEvent::TaskFinished)
+            if index.apply(entity, chunk.key, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
-                chunk_map_update_buffer.push((
-                    chunk.position,
-                    chunk_task.chunk_data,
-                    entity,
-                ));
+                chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
             }
         }
     }
@@ -617,6 +600,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut ev_chunk_will_spawn: MessageWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("flush_chunk_map_buffers").entered();
         chunk_map.apply_buffers(
             &mut chunk_map_update_buffer,
             &mut chunk_map_remove_buffer,
@@ -629,6 +614,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut mesh_cache_insert_buffer: ResMut<MeshCacheInsertBuffer<C>>,
         mesh_cache: Res<MeshCache<C>>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("flush_mesh_cache_buffers").entered();
         mesh_cache.apply_buffers(&mut mesh_cache_insert_buffer);
     }
 
@@ -639,17 +626,19 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut index: ResMut<ChunkIndex<C>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("despawn_retired_chunks").entered();
         let retiring: Vec<Entity> = index.retiring.iter().copied().collect();
         for entity in retiring {
             let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
                 continue;
             };
-            if index.apply(entity, chunk.position, &mut state, ChunkEvent::DespawnStep)
+            if index.apply(entity, chunk.key, &mut state, ChunkEvent::DespawnStep)
                 == Effect::Despawn
             {
                 commands.entity(entity).despawn();
-                index.despawned(chunk.position, entity);
-                chunk_map_remove_buffer.push(chunk.position);
+                index.despawned(chunk.key, entity);
+                chunk_map_remove_buffer.push(chunk.key);
             }
         }
     }
@@ -684,13 +673,12 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             return false;
         }
 
+        let key = chunk.key;
         let previous_chunk_data =
-            ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, self.chunk_map);
-        let lod_level = chunk.lod_level;
-        let regenerate_strategy = self.configuration.chunk_regenerate_strategy();
+            ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map);
         let voxel_data_fn = (self.configuration.voxel_lookup_delegate())(
-            chunk.position,
-            lod_level,
+            key.position,
+            key.lod_level,
             previous_chunk_data.clone(),
         );
         let data_shape = chunk.data_shape;
@@ -699,8 +687,8 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             .configuration
             .chunk_meshing_delegate()
             .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
-            chunk.position,
-            lod_level,
+            key.position,
+            key.lod_level,
             data_shape,
             mesh_shape,
             previous_chunk_data.clone(),
@@ -709,11 +697,10 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
 
         let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
             chunk.entity,
-            chunk.position,
-            lod_level,
+            key,
             data_shape,
             mesh_shape,
-            self.voxel_edits.chunk_edits(chunk.position),
+            self.voxel_edits.chunk_edits(key.position),
         );
 
         let mesh_map = self.mesh_cache.get_mesh_map();
@@ -721,11 +708,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         let task = self.thread_pool.spawn(async move {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("chunk_task").entered();
-            chunk_task.generate(
-                voxel_data_fn,
-                previous_chunk_data.clone(),
-                regenerate_strategy,
-            );
+            chunk_task.generate(voxel_data_fn, previous_chunk_data);
 
             // No need to mesh if the chunk is empty or full
             if chunk_task.is_empty() || chunk_task.is_full() {
@@ -746,14 +729,8 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             chunk_task
         });
 
-        index.apply(
-            entity,
-            chunk.position,
-            &mut state,
-            ChunkEvent::TaskStarted(task),
-        );
-        ev_chunk_will_remesh
-            .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
+        index.apply(entity, key, &mut state, ChunkEvent::TaskStarted(task));
+        ev_chunk_will_remesh.write(ChunkWillRemesh::<C>::new(key, chunk.entity));
         true
     }
 }
@@ -824,24 +801,17 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_or_lod_change_supersedes_a_running_task_without_dropping_it() {
-        for edited in [true, false] {
-            for superseded in [false, true] {
-                let event = if edited {
-                    ChunkEvent::Edited
-                } else {
-                    ChunkEvent::Reshaped
-                };
-                let (state, effect) = transition(generating(superseded), event);
-                assert!(matches!(
-                    state,
-                    ChunkState::Generating {
-                        task: "task",
-                        superseded: true
-                    }
-                ));
-                assert_eq!(effect, Effect::None);
-            }
+    fn an_edit_supersedes_a_running_task_without_dropping_it() {
+        for superseded in [false, true] {
+            let (state, effect) = transition(generating(superseded), ChunkEvent::Edited);
+            assert!(matches!(
+                state,
+                ChunkState::Generating {
+                    task: "task",
+                    superseded: true
+                }
+            ));
+            assert_eq!(effect, Effect::None);
         }
     }
 
@@ -864,20 +834,6 @@ mod tests {
             assert!(matches!(state, ChunkState::Pending { priority: true }));
             assert_eq!(effect, Effect::None);
         }
-    }
-
-    #[test]
-    fn a_reshaped_chunk_waits_for_a_task_in_line() {
-        for priority in [false, true] {
-            let (state, _) =
-                transition(State::Pending { priority }, ChunkEvent::Reshaped);
-            assert!(
-                matches!(state, ChunkState::Pending { priority: p } if p == priority)
-            );
-        }
-        let (state, effect) = transition(State::Ready, ChunkEvent::Reshaped);
-        assert!(matches!(state, ChunkState::Pending { priority: false }));
-        assert_eq!(effect, Effect::None);
     }
 
     #[test]
@@ -917,7 +873,6 @@ mod tests {
             ChunkEvent::TaskFinished,
             ChunkEvent::CachedMeshExpired,
             ChunkEvent::Edited,
-            ChunkEvent::Reshaped,
         ] {
             assert_eq!(
                 status_and_effect(ChunkState::Retiring { kept: false }, event),

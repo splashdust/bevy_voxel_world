@@ -12,7 +12,7 @@ use crate::{
     configuration::VoxelWorldConfig,
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
-    streaming_policy::{self, CameraSnapshot, ExistingChunk, Occupancy},
+    streaming_policy::{self, CameraSnapshot, Occupancy},
     voxel_edits::VoxelEdits,
     voxel_material::LoadingTexture,
     voxel_world::VoxelWorldCamera,
@@ -73,7 +73,7 @@ where
         configuration.init_root(commands, world_root)
     }
 
-    /// Plan this frame's spawns, LOD changes and retirements, and request them.
+    /// Plan this frame's spawns and retirements, and request them.
     pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
@@ -82,6 +82,8 @@ where
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("stream_chunks").entered();
         let cameras: Vec<_> = camera_info
             .iter()
             .map(|(camera, transform)| {
@@ -97,32 +99,29 @@ where
         }
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
-        let occupancy = |position: IVec3| {
-            if !index.contains(position) {
+        let occupancy = |key: ChunkKey| {
+            if !index.contains(key) {
                 return Occupancy::Missing;
             }
-            match chunk_map_read_lock.get(&position) {
+            match chunk_map_read_lock.get(&key) {
                 None => Occupancy::Unpublished,
                 Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
                 Some(chunk_data) if chunk_data.is_empty => Occupancy::Empty,
                 Some(_) => Occupancy::Mixed,
             }
         };
-        let existing = chunks.iter().map(|chunk| ExistingChunk {
-            position: chunk.position,
-            lod_level: chunk.lod_level,
-        });
 
+        #[cfg(feature = "trace")]
+        let _plan_span = bevy::log::info_span!("streaming_policy_plan").entered();
         let plan = streaming_policy::plan(
             configuration.as_ref(),
             &cameras,
-            existing,
+            chunks.iter().map(|chunk| chunk.key),
             occupancy,
             index.spawn_budget(configuration.max_active_chunk_threads()),
             &mut rand::rng(),
         );
         requests.spawn.extend(plan.spawn);
-        requests.change_lod.extend(plan.change_lod);
         requests.retire.extend(plan.retire);
     }
 
@@ -132,6 +131,8 @@ where
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
     ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("commit_voxel_edits").entered();
         requests.edited.extend(voxel_edits.commit());
     }
 

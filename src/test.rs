@@ -222,24 +222,26 @@ fn move_cameras<C: VoxelWorldConfig>(app: &mut App, to: Transform) {
     }
 }
 
+/// The chunk state of the level-0 chunk at `chunk_pos`.
 fn chunk_status<C: VoxelWorldConfig>(
     app: &mut App,
     chunk_pos: IVec3,
 ) -> Option<ChunkStatus> {
     app.world_mut()
         .run_system_once(move |voxel_world: VoxelWorld<C>| {
-            voxel_world.chunk_state(chunk_pos)
+            voxel_world.chunk_state(ChunkKey::new(chunk_pos, 0))
         })
         .unwrap()
 }
 
+/// The published data of the level-0 chunk at `chunk_pos`.
 fn chunk_data<C: VoxelWorldConfig>(
     app: &mut App,
     chunk_pos: IVec3,
 ) -> Option<ChunkData<C::MaterialIndex>> {
     app.world_mut()
         .run_system_once(move |voxel_world: VoxelWorld<C>| {
-            voxel_world.get_chunk_data(chunk_pos)
+            voxel_world.get_chunk_data(ChunkKey::new(chunk_pos, 0))
         })
         .unwrap()
 }
@@ -282,7 +284,7 @@ fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
                         "chunk {} was announced before its data was readable",
                         msg.chunk_key
                     );
-                    published.0.push(msg.chunk_key);
+                    published.0.push(msg.chunk_key.position);
                 }
             })
             .after(VoxelWorldSet::<FloorWorld>::default()),
@@ -358,7 +360,7 @@ fn a_retiring_chunk_can_be_queried_in_the_frame_it_retires() {
                 for msg in ev.read() {
                     let chunk = chunks.get(msg.entity);
                     assert!(
-                        chunk.is_ok_and(|chunk| chunk.position() == msg.chunk_key),
+                        chunk.is_ok_and(|chunk| chunk.key() == msg.chunk_key),
                         "retiring chunk {} was already despawned",
                         msg.chunk_key
                     );
@@ -366,7 +368,7 @@ fn a_retiring_chunk_can_be_queried_in_the_frame_it_retires() {
                         voxel_world.chunk_state(msg.chunk_key),
                         Some(ChunkStatus::Retiring)
                     );
-                    retired.0.push(msg.chunk_key);
+                    retired.0.push(msg.chunk_key.position);
                 }
             },
         );
@@ -454,7 +456,9 @@ fn chunks_are_generated_nearest_the_camera_first() {
         Last,
         |mut published: ResMut<Published>,
          mut ev: MessageReader<ChunkPublished<ThrottledWorld>>| {
-            published.0.extend(ev.read().map(|msg| msg.chunk_key));
+            published
+                .0
+                .extend(ev.read().map(|msg| msg.chunk_key.position));
         },
     );
 
@@ -691,7 +695,9 @@ fn record_updates(
     mut updated: ResMut<Updated>,
     mut ev: MessageReader<ChunkWillUpdate<DefaultWorld>>,
 ) {
-    updated.0.extend(ev.read().map(|msg| msg.chunk_key));
+    updated
+        .0
+        .extend(ev.read().map(|msg| msg.chunk_key.position));
 }
 
 /// A `DefaultWorld` app that sets `voxel` at the origin every frame once the
@@ -757,7 +763,7 @@ fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
             remeshed_chunks_writer
                 .lock()
                 .unwrap()
-                .extend(events.read().map(|event| event.chunk_key));
+                .extend(events.read().map(|event| event.chunk_key.position));
         },
     );
 
@@ -784,8 +790,7 @@ fn set_voxel_on_chunk_boundary_marks_padding_neighbors_for_remesh() {
 static REUSE_LOOKUPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// A `FloorWorld` that regenerates chunks from their previous data, and counts
-/// the voxel lookups of the chunk at the origin.
+/// A `FloorWorld` that counts the voxel lookups of the chunk at the origin.
 #[derive(Resource, Clone, Default)]
 struct ReuseWorld;
 
@@ -795,10 +800,6 @@ impl VoxelWorldConfig for ReuseWorld {
 
     fn spawning_distance(&self) -> u32 {
         1
-    }
-
-    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
-        ChunkRegenerateStrategy::Reuse
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
@@ -814,7 +815,7 @@ impl VoxelWorldConfig for ReuseWorld {
 }
 
 #[test]
-fn a_remeshed_chunk_reuses_its_previous_data_when_configured() {
+fn a_remeshed_chunk_reuses_its_previous_data() {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<ReuseWorld>::minimal()))
         .init_resource::<Announced>()
@@ -909,93 +910,52 @@ fn a_full_chunk_keeps_an_edited_voxel_of_another_material() {
     );
 }
 
-/// The LOD level of every `LodWorld` chunk.
-static LOD_WORLD_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
-/// The voxel lookups of the `LodWorld` chunk below the origin.
-static LOD_WORLD_LOOKUPS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-const BELOW_ORIGIN: IVec3 = IVec3::new(0, -1, 0);
+#[test]
+fn chunk_at_finds_the_chunk_covering_a_voxel() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
 
-/// A `FloorWorld` whose chunks are half resolution at LOD level 1.
-#[derive(Resource, Clone, Default)]
-struct LodWorld;
-
-impl VoxelWorldConfig for LodWorld {
-    type MaterialIndex = u8;
-    type ChunkUserBundle = ();
-
-    fn spawning_distance(&self) -> u32 {
-        2
-    }
-
-    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
-        ChunkDespawnStrategy::FarAway
-    }
-
-    fn chunk_lod(&self, _: IVec3, _: Option<LodLevel>, _: Vec3) -> LodLevel {
-        LOD_WORLD_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
-        crate::configuration::padded_chunk_shape_uniform(32 >> lod_level)
-    }
-
-    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
-        crate::configuration::padded_chunk_shape_uniform(32 >> lod_level)
-    }
-
-    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        Box::new(|chunk_pos, _, _| {
-            Box::new(move |pos, _| {
-                if chunk_pos == BELOW_ORIGIN {
-                    LOD_WORLD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                floor_voxel(pos)
-            })
+    let found = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<FloorWorld>| {
+            [
+                voxel_world.chunk_at(IVec3::new(5, 3, 31)),
+                voxel_world.chunk_at(IVec3::new(-1, 0, 0)),
+                voxel_world.chunk_at(IVec3::splat(10_000)),
+            ]
         })
-    }
+        .unwrap();
+    assert_eq!(found[0], Some(ChunkKey::new(IVec3::ZERO, 0)));
+    assert_eq!(found[1], Some(ChunkKey::new(IVec3::new(-1, 0, 0), 0)));
+    assert_eq!(found[2], None);
 }
 
 #[test]
-fn a_refined_chunk_reuses_its_coarse_voxels() {
+fn a_chunk_is_found_by_its_exact_key_only() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<LodWorld>::minimal()))
-        .init_resource::<Announced>()
-        .add_systems(Startup, spawn_camera::<LodWorld>)
-        .add_systems(Update, record_announcements::<LodWorld>);
-
-    update_until(&mut app, "the coarse chunk to be published", |app| {
-        Announced::count(&app.world().resource::<Announced>().published, BELOW_ORIGIN)
-            == 1
-    });
-    let coarse_lookups = LOD_WORLD_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(coarse_lookups, 18usize.pow(3));
-
-    LOD_WORLD_LEVEL.store(0, std::sync::atomic::Ordering::Relaxed);
-    update_until(&mut app, "the refined chunk to be published", |app| {
-        Announced::count(&app.world().resource::<Announced>().published, BELOW_ORIGIN)
-            == 2
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
     });
 
-    // The coarse voxels sit at every other position from the chunk's origin,
-    // 17 along each axis, and the refined chunk looks up only the rest.
-    let refined_lookups =
-        LOD_WORLD_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed) - coarse_lookups;
-    assert_eq!(refined_lookups, 34usize.pow(3) - 17usize.pow(3));
-    let data = chunk_data::<LodWorld>(&mut app, BELOW_ORIGIN).unwrap();
-    assert_eq!(data.data_shape(), UVec3::splat(34));
-    for z in -1..=32 {
-        for y in -33..=0 {
-            for x in -1..=32 {
-                let position = IVec3::new(x, y, z);
-                assert_eq!(
-                    data.get_voxel_at_world_position(position),
-                    Some(floor_voxel(position)),
-                    "at {position}"
-                );
-            }
-        }
-    }
+    // The level-1 chunk covering the origin has the same position.
+    let coarser = ChunkKey::new(IVec3::ZERO, 1);
+    let (state, has_data) = app
+        .world_mut()
+        .run_system_once(move |voxel_world: VoxelWorld<FloorWorld>| {
+            (
+                voxel_world.chunk_state(coarser),
+                voxel_world.get_chunk_data(coarser).is_some(),
+            )
+        })
+        .unwrap();
+    assert_eq!(state, None);
+    assert!(!has_data);
 }
 
 #[test]
@@ -2066,10 +2026,10 @@ fn record_announcements<C: VoxelWorldConfig>(
 ) {
     announced
         .will_spawn
-        .extend(will_spawn.read().map(|msg| msg.chunk_key));
+        .extend(will_spawn.read().map(|msg| msg.chunk_key.position));
     announced
         .published
-        .extend(published.read().map(|msg| msg.chunk_key));
+        .extend(published.read().map(|msg| msg.chunk_key.position));
 }
 
 #[test]

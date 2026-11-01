@@ -5,6 +5,9 @@
 - Add `VoxelWorldSet<C>`, the system set in `PreUpdate` that runs world `C`. Order your systems after it to see this frame's chunks.
 - Add `VoxelWorld::chunk_state`, which returns a chunk's `ChunkStatus`: `Pending`, `Generating`, `Ready` or `Retiring`.
 - Add `ChunkPublished<C>`, fired whenever a chunk's voxel data is published, including after each remesh.
+- Add `ChunkKey`, a chunk's position and LOD level. Chunk messages carry one, and `chunk_state` and `get_chunk_data` take one.
+- Add `VoxelWorld::chunk_at`, which finds the finest spawned chunk covering a voxel.
+- `LodLevel` is a level of detail: 0 is full detail, and a chunk at level `L` spans `CHUNK_SIZE << L` voxels on a side, contains the eight level `L - 1` chunks in that space, and by default samples every `1 << L` voxels.
 - Add the `voxel_animation` example, which animates water by setting voxels every frame.
 - Systems that use `VoxelWorld` can run in parallel, including ones that call `set_voxel`.
 - `minimal()` worlds publish voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
@@ -28,7 +31,7 @@
   - Now: `chunk.position()`. The same goes for `lod_level`, `entity`, `data_shape` and `mesh_shape`.
 - `NeedsDespawn` is removed.
   - Before: `Query<&Chunk<C>, Without<NeedsDespawn>>`
-  - Now: `voxel_world.chunk_state(chunk.position()) != Some(ChunkStatus::Retiring)`
+  - Now: `voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Retiring)`
 - `ChunkWillSpawn` fires once per chunk.
   - Before: `ChunkWillSpawn` fired again after every remesh.
   - Now: read `ChunkPublished` to react to every remesh.
@@ -47,6 +50,15 @@
 - A chunk mesh quad can cover many voxels.
   - Before: each quad was one voxel's face, with texture coordinates from 0 to 1.
   - Now: texture coordinates still count one per voxel, so they run from 0 to the quad's width and height. A custom material that samples a texture with them needs a repeating sampler (`ImageAddressMode::Repeat`), as the built-in material has.
+- Chunk messages carry a `ChunkKey`.
+  - Before: `msg.chunk_key` was the chunk's position, an `IVec3`.
+  - Now: `msg.chunk_key.position` is the position and `msg.chunk_key.lod_level` the LOD level.
+- `chunk_state` and `get_chunk_data` take a `ChunkKey`.
+  - Before: `voxel_world.get_chunk_data(chunk_pos)`
+  - Now: `voxel_world.get_chunk_data(ChunkKey::new(chunk_pos, 0))`, or `voxel_world.chunk_at(voxel_pos)` for the key of the chunk covering a voxel.
+- `ChunkWillChangeLod` and `ChunkRegenerateStrategy` are removed.
+  - Before: a chunk given a new LOD level by `chunk_lod` was regenerated in place, reusing or repopulating its voxels.
+  - Now: a chunk keeps its LOD level for as long as it exists. A remesh after a voxel edit reuses the chunk's generated voxels, as `ChunkRegenerateStrategy::Reuse` did.
 
 ## 0.18
 

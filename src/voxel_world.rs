@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    chunk::{chunk_containing, ChunkData, CHUNK_SIZE_I},
+    chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::VoxelWorldConfig,
@@ -76,13 +76,14 @@ impl<C> std::fmt::Debug for VoxelWorldSet<C> {
 
 pub trait ChunkEventType: Send + Sync + 'static {}
 
+/// A message about a chunk, which it names by its chunk key and its entity.
 #[derive(Event)]
 pub struct ChunkEvent<C, E>
 where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
-    pub chunk_key: IVec3,
+    pub chunk_key: ChunkKey,
     pub entity: Entity,
     _marker: (PhantomData<C>, PhantomData<E>),
 }
@@ -92,7 +93,7 @@ where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
-    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+    pub fn new(chunk_key: ChunkKey, entity: Entity) -> Self {
         Self {
             chunk_key,
             entity,
@@ -137,11 +138,6 @@ impl ChunkEventType for Published {}
 pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;
 pub struct WillRemesh;
 impl ChunkEventType for WillRemesh {}
-
-/// Fired when a chunk's LOD value changes.
-pub type ChunkWillChangeLod<C> = ChunkEvent<C, WillChangeLod>;
-pub struct WillChangeLod;
-impl ChunkEventType for WillChangeLod {}
 
 /// Fired when a chunk is about to be updated, typically when `set_voxel` was called on a voxel
 /// within the chunk.
@@ -193,16 +189,23 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
-    /// Where the chunk at the given chunk position is in the chunk lifecycle, or
-    /// `None` if no chunk is spawned there.
-    pub fn chunk_state(&self, chunk_pos: IVec3) -> Option<ChunkStatus> {
-        let entity = self.chunk_index.get(chunk_pos)?;
+    /// Where the chunk with the given key is in the chunk lifecycle, or `None`
+    /// if no chunk with that key is spawned. [`VoxelWorld::chunk_at`] finds the
+    /// key of the chunk covering a voxel.
+    pub fn chunk_state(&self, key: ChunkKey) -> Option<ChunkStatus> {
+        let entity = self.chunk_index.get(key)?;
         // A chunk spawned this frame has no state component until commands apply.
         Some(
             self.chunk_states
                 .get(entity)
                 .map_or(ChunkStatus::Pending, |state| state.status()),
         )
+    }
+
+    /// The key of the finest spawned chunk that covers the voxel at
+    /// `voxel_position`, or `None` if no chunk does.
+    pub fn chunk_at(&self, voxel_position: IVec3) -> Option<ChunkKey> {
+        self.chunk_index.chunk_at(voxel_position)
     }
 
     /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
@@ -234,28 +237,22 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         Arc::new(move |position| voxel_at(&voxel_edits, &chunk_map, position))
     }
 
-    /// Get the ChunkData for the given chunk position
+    /// The published data of the chunk with the given key, or `None` if no chunk
+    /// with that key is spawned or published.
     ///
-    /// The position should be the chunk position, measured in CHUNK_SIZE units (32 by default)
-    ///
-    /// You can `floor(voxel_position / CHUNK_SIZE)` to get the chunk position from a voxel position
-    pub fn get_chunk_data(
-        &self,
-        chunk_pos: IVec3,
-    ) -> Option<ChunkData<C::MaterialIndex>> {
-        self.chunk_map
-            .get_map()
-            .read()
-            .unwrap()
-            .get(&chunk_pos)
-            .cloned()
+    /// The level-0 chunk at a chunk position has the key
+    /// `ChunkKey::new(chunk_pos, 0)`, where `chunk_pos` is
+    /// `floor(voxel_position / CHUNK_SIZE)`; [`VoxelWorld::chunk_at`] finds the
+    /// key of the chunk covering a voxel at any level.
+    pub fn get_chunk_data(&self, key: ChunkKey) -> Option<ChunkData<C::MaterialIndex>> {
+        self.chunk_map.get_map().read().unwrap().get(&key).cloned()
     }
 
     pub fn get_chunk_data_fn(
         &self,
-    ) -> Arc<dyn Fn(IVec3) -> Option<ChunkData<C::MaterialIndex>> + Send + Sync> {
+    ) -> Arc<dyn Fn(ChunkKey) -> Option<ChunkData<C::MaterialIndex>> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
-        Arc::new(move |chunk_pos| chunk_map.read().unwrap().get(&chunk_pos).cloned())
+        Arc::new(move |key| chunk_map.read().unwrap().get(&key).cloned())
     }
 
     /// Get the closes surface voxel to the given position
@@ -442,7 +439,7 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
 }
 
 /// The voxel at `position`: its voxel edit if it has one, or else its voxel in the
-/// published chunk data.
+/// published data of the finest chunk covering it.
 fn voxel_at<I: Hash + Copy + PartialEq>(
     voxel_edits: &VoxelEditReader<I>,
     chunk_map: &RwLock<ChunkMapData<I>>,
@@ -454,7 +451,7 @@ fn voxel_at<I: Hash + Copy + PartialEq>(
     chunk_map
         .read()
         .unwrap()
-        .get(&chunk_containing(position))
+        .finest_covering(position)
         .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
         .unwrap_or(WorldVoxel::Unset)
 }

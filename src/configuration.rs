@@ -8,7 +8,17 @@ use bevy::prelude::*;
 
 pub type VoxelLookupFn<I = u8> =
     Box<dyn FnMut(IVec3, Option<WorldVoxel<I>>) -> WorldVoxel<I> + Send + Sync>;
+/// The level of detail of a chunk. Level 0 is full detail: a chunk of
+/// `CHUNK_SIZE` voxels, sampled one by one. A chunk at level `L` spans
+/// `CHUNK_SIZE << L` voxels on a side, contains the eight level `L - 1` chunks
+/// in that space, and with the default shapes holds as many samples as a level-0
+/// chunk, one every `1 << L` voxels. At most [`MAX_LOD_LEVEL`].
+///
+/// [`MAX_LOD_LEVEL`]: crate::prelude::MAX_LOD_LEVEL
 pub type LodLevel = u8;
+/// Makes the voxel lookup function of a chunk, given the chunk's position in
+/// level-0 chunks, its LOD level and its previous data, if it was generated
+/// before.
 pub type VoxelLookupDelegate<I = u8> =
     Box<dyn Fn(IVec3, LodLevel, Option<ChunkData<I>>) -> VoxelLookupFn<I> + Send + Sync>;
 
@@ -42,26 +52,6 @@ pub type ChunkMeshingDelegate<I, UB> = Option<
             + Sync,
     >,
 >;
-
-/// Controls how voxel payloads are handled when a chunk changes LOD.
-///
-/// `Reuse` keeps previously generated voxel data even when the requested
-/// `chunk_data_shape` shrinks. This avoids the cost of
-/// regenerating high-resolution data if the chunk is later promoted to a finer
-/// LOD at the expense of retaining the larger voxel buffer while the chunk is
-/// coarse.
-///
-/// `Repopulate` always rebuilds voxel data for the requested shape, discarding
-/// any excess high-resolution data so that downgraded chunks keep only the
-/// coarse payload.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub enum ChunkRegenerateStrategy {
-    /// Attempt to reuse previously generated chunk data before invoking the voxel lookup delegate, retaining the existing voxel payload when possible.
-    #[default]
-    Reuse,
-    /// Always regenerate voxel data using the voxel lookup delegate, discarding any higher-resolution data that is no longer needed.
-    Repopulate,
-}
 
 #[derive(Default, PartialEq, Eq)]
 pub enum ChunkDespawnStrategy {
@@ -175,7 +165,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// happens on a separate thread.
     ///
     /// The input to the function is the voxel array for the chunk, the position of the chunk and the texture
-    /// index mapper function
+    /// index mapper function. The mesh is built as for a level-0 chunk, with the
+    /// corner of the chunk's first voxel at (1, 1, 1), one voxel in past the
+    /// padding; the mesh of a chunk above level 0 is then scaled to its extent.
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
@@ -196,11 +188,16 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         true
     }
 
-    /// Compute the level of detail for a chunk at a world-space position.
+    /// The LOD level the chunk at `chunk_position`, in level-0 chunks, should
+    /// have for the camera at `camera_position`.
     ///
-    /// `previous_lod` will be `None` when the chunk is first spawned and `Some(current_lod)`
-    /// when an existing chunk is being re-evaluated. Implementors can use this to add hysteresis.
-    /// Defaults to `0` for all chunks.
+    /// `previous_lod` is the level the chunk currently has, or `None` when none
+    /// exists there yet; implementors can use it to add hysteresis. The level must
+    /// not get finer with distance: a chunk farther from the camera than another
+    /// gets a level at least as coarse. Defaults to `0` for all chunks.
+    ///
+    /// Every chunk is spawned at level 0 for now; the streaming policy doesn't
+    /// consult this yet.
     fn chunk_lod(
         &self,
         _chunk_position: IVec3,
@@ -210,19 +207,18 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         0
     }
 
-    /// Define the padded voxel dimensions used for data generation for a given LOD level.
+    /// The padded shape of the voxel data generated for a chunk at the given LOD
+    /// level. The default is the padded `CHUNK_SIZE` cube at every level, so a
+    /// chunk at level `L` samples the world every `1 << L` voxels; a larger shape
+    /// at a level oversamples its chunks.
     fn chunk_data_shape(&self, _lod_level: LodLevel) -> UVec3 {
         UVec3::splat(PADDED_CHUNK_SIZE)
     }
 
-    /// Define the padded voxel dimensions used for meshing for a given LOD level.
+    /// The padded shape the chunks at the given LOD level are meshed at. The
+    /// default is the padded `CHUNK_SIZE` cube at every level.
     fn chunk_meshing_shape(&self, _lod_level: LodLevel) -> UVec3 {
         UVec3::splat(PADDED_CHUNK_SIZE)
-    }
-
-    /// Determine how voxel data should be regenerated for a chunk. Defaults to reusing previous data.
-    fn chunk_regenerate_strategy(&self) -> ChunkRegenerateStrategy {
-        ChunkRegenerateStrategy::default()
     }
 
     /// Maximum number of chunk tasks that may run at once. Chunk tasks start

@@ -7,7 +7,15 @@ A Bevy plugin that streams a chunked voxel world around one or more cameras, gen
 ### Chunks
 
 **Chunk**:
-A cubic region of the voxel world, addressed by its chunk position, that is generated, meshed and despawned as a unit.
+A cubic region of the voxel world, addressed by its chunk key, that is generated, meshed and despawned as a unit. A chunk above LOD level 0 spans twice the width of a chunk one level below it and contains eight of them.
+
+**Chunk key**:
+The address of a chunk: its position and its LOD level. Two chunks at different LOD levels can share a position.
+_Avoid_: chunk position (only half of the address), chunk id
+
+**LOD level**:
+How coarsely a chunk samples the voxel world. Level 0 samples every voxel; each level above it samples half as often along each axis and spans twice the width.
+_Avoid_: stride, resolution, detail level
 
 **Chunk lifecycle**:
 The sequence of states a chunk moves through from being requested to being despawned, and the rules for moving between them.
@@ -35,7 +43,7 @@ The off-main-thread work that generates a chunk's voxel data and builds its mesh
 _Avoid_: chunk thread
 
 **Superseded task**:
-A chunk task whose inputs went stale while it ran, because of a voxel edit or LOD change; it still finishes and is published, and a fresh chunk task follows it.
+A chunk task whose inputs went stale while it ran, because of a voxel edit; it still finishes and is published, and a fresh chunk task follows it.
 _Avoid_: cancelled task
 
 **Publish**:
@@ -56,3 +64,15 @@ _Avoid_: spawn policy, chunk spawner
 **Protected radius**:
 The distance around each camera within which chunks are spawned and never retired, whether or not they are in view.
 _Avoid_: min despawn distance
+
+**Split**:
+Replacing a chunk with the eight chunks one LOD level below it. They spawn first; the chunk retires once they are Ready.
+_Avoid_: refine, subdivide
+
+**Merge**:
+Replacing eight chunks with the chunk one LOD level above them. It spawns first; they retire once it is Ready.
+_Avoid_: coarsen, collapse
+
+**Fill hint**:
+A world's declaration that a chunk is uniformly one voxel, or that it doesn't know. An optional accelerator for the streaming policy; the world works fully without it.
+_Avoid_: air hint, solid hint

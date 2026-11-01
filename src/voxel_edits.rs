@@ -186,6 +186,7 @@ impl<I: Copy> ChunkEdits<I> {
         self.buckets.iter().all(Option::is_none)
     }
 
+    #[inline]
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
         let offset = chunk_containing(position) - self.chunk_pos + 1;
         if offset.cmplt(IVec3::ZERO).any() || offset.cmpgt(IVec3::splat(2)).any() {

@@ -1,8 +1,8 @@
 ///
 /// Streaming policy
-/// Decides, from the cameras and the chunks that exist, which chunks to spawn,
-/// which to give a new LOD level and which to retire. It reads no Bevy world
-/// state, so it can be tested with plain values.
+/// Decides, from the cameras and the chunks that exist, which chunks to spawn
+/// and which to retire. It reads no Bevy world state, so it can be tested with
+/// plain values. Every chunk is planned at LOD level 0 for now.
 ///
 use std::collections::VecDeque;
 
@@ -10,10 +10,8 @@ use bevy::{math::Affine3A, platform::collections::HashSet, prelude::*};
 use rand::{Rng, RngExt};
 
 use crate::{
-    chunk::{chunk_containing, CHUNK_SIZE_F, CHUNK_SIZE_I},
-    configuration::{
-        ChunkDespawnStrategy, ChunkSpawnStrategy, LodLevel, VoxelWorldConfig,
-    },
+    chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_I},
+    configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfig},
 };
 
 /// What the streaming policy needs to know about one camera. View and
@@ -22,6 +20,9 @@ use crate::{
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CameraSnapshot {
     position: Vec3,
+    /// The level-0 chunk the camera is in, computed once since every chunk's
+    /// distance to the camera is measured from it.
+    chunk_position: IVec3,
     world_from_view: Affine3A,
     view_from_world: Affine3A,
     clip_from_view: Mat4,
@@ -36,8 +37,10 @@ impl CameraSnapshot {
         clip_from_view: Mat4,
         viewport_size: UVec2,
     ) -> Self {
+        let position: Vec3 = world_from_view.translation.into();
         Self {
-            position: world_from_view.translation.into(),
+            position,
+            chunk_position: chunk_containing(position.floor().as_ivec3()),
             world_from_view,
             view_from_world: world_from_view.inverse(),
             clip_from_view,
@@ -47,7 +50,7 @@ impl CameraSnapshot {
     }
 
     fn chunk_position(&self) -> IVec3 {
-        chunk_containing(self.position.floor().as_ivec3())
+        self.chunk_position
     }
 
     /// The ray from the near plane through a point of the viewport, given in
@@ -150,30 +153,22 @@ const MAX_RAYS_PER_SPAWNING_RAY: usize = 16;
 /// view, where a chunk covers around a hundredth of the viewport.
 const RAY_JITTER: f32 = 1.0 / 16.0;
 
-/// A chunk that exists in the world.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ExistingChunk {
-    pub position: IVec3,
-    pub lod_level: LodLevel,
-}
-
-/// The chunks to spawn, give a new LOD level and retire this frame.
+/// The chunks to spawn and retire this frame.
 #[derive(Debug, Default)]
 pub(crate) struct StreamingPlan {
-    pub spawn: Vec<(IVec3, LodLevel)>,
-    pub change_lod: Vec<(IVec3, LodLevel)>,
-    pub retire: Vec<IVec3>,
+    pub spawn: Vec<ChunkKey>,
+    pub retire: Vec<ChunkKey>,
 }
 
-/// Plans this frame's spawns, LOD changes and retirements. `occupancy` tells
-/// what is at a chunk position, `wanted` how many chunks the lifecycle could
-/// start right away beyond those already waiting, and `rng` picks where to cast
-/// spawning rays.
+/// Plans this frame's spawns and retirements. `chunks` are the chunks that
+/// exist, `occupancy` tells what is at a chunk key, `wanted` how many chunks
+/// the lifecycle could start right away beyond those already waiting, and `rng`
+/// picks where to cast spawning rays.
 pub(crate) fn plan<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
-    chunks: impl IntoIterator<Item = ExistingChunk>,
-    occupancy: impl Fn(IVec3) -> Occupancy,
+    chunks: impl IntoIterator<Item = ChunkKey>,
+    occupancy: impl Fn(ChunkKey) -> Occupancy,
     wanted: usize,
     rng: &mut impl Rng,
 ) -> StreamingPlan {
@@ -183,17 +178,9 @@ pub(crate) fn plan<C: VoxelWorldConfig>(
     }
 
     plan.spawn = chunks_to_spawn(config, cameras, occupancy, wanted, rng);
-
-    for chunk in chunks {
-        let camera_position = closest_camera_position(cameras, chunk.position);
-        let target_lod =
-            config.chunk_lod(chunk.position, Some(chunk.lod_level), camera_position);
-        if target_lod != chunk.lod_level {
-            plan.change_lod.push((chunk.position, target_lod));
-        }
-
-        if should_retire(config, cameras, chunk.position) {
-            plan.retire.push(chunk.position);
+    for key in chunks {
+        if should_retire(config, cameras, key.position) {
+            plan.retire.push(key);
         }
     }
 
@@ -203,10 +190,10 @@ pub(crate) fn plan<C: VoxelWorldConfig>(
 fn chunks_to_spawn<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
-    occupancy: impl Fn(IVec3) -> Occupancy,
+    occupancy: impl Fn(ChunkKey) -> Occupancy,
     wanted: usize,
     rng: &mut impl Rng,
-) -> Vec<(IVec3, LodLevel)> {
+) -> Vec<ChunkKey> {
     let spawning_distance = config.spawning_distance() as i32;
     let spawning_distance_squared = spawning_distance.pow(2);
     let spawn_strategy = config.chunk_spawn_strategy();
@@ -266,7 +253,7 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
             let mut t = 0.0;
             while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
                 let chunk_pos = chunk_containing(current.floor().as_ivec3());
-                match occupancy(chunk_pos) {
+                match occupancy(ChunkKey::new(chunk_pos, 0)) {
                     Occupancy::Empty => {}
                     // Past a chunk with solid voxels, the next one is likely solid.
                     Occupancy::Mixed => lookahead = lookahead.min(1),
@@ -356,14 +343,11 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
             continue;
         }
 
-        if occupancy(chunk_position) != Occupancy::Missing {
+        let key = ChunkKey::new(chunk_position, 0);
+        if occupancy(key) != Occupancy::Missing {
             continue;
         }
-        let camera_position = closest_camera_position(cameras, chunk_position);
-        let lod_level = config.chunk_lod(chunk_position, None, camera_position);
-        let distance_squared =
-            camera_position.distance_squared(chunk_centre(chunk_position));
-        spawn.push((distance_squared, chunk_position, lod_level));
+        spawn.push((distance_squared_to_nearest_camera(cameras, key), key));
 
         if spawn_strategy != ChunkSpawnStrategy::Close {
             continue;
@@ -385,10 +369,7 @@ fn chunks_to_spawn<C: VoxelWorldConfig>(
 
     // Nearest a camera first, which is the order the chunks spawn in.
     spawn.sort_by(|a, b| a.0.total_cmp(&b.0));
-    spawn
-        .into_iter()
-        .map(|(_, position, lod_level)| (position, lod_level))
-        .collect()
+    spawn.into_iter().map(|(_, key)| key).collect()
 }
 
 /// Chunks are retired only beyond the spawning distance plus this margin, in
@@ -436,22 +417,13 @@ fn chunk_is_close_to_any_camera(
     })
 }
 
-pub(crate) fn chunk_centre(chunk_position: IVec3) -> Vec3 {
-    (chunk_position.as_vec3() + 0.5) * CHUNK_SIZE_F
-}
-
-/// The position of the camera nearest the chunk's centre.
-fn closest_camera_position(cameras: &[CameraSnapshot], chunk_position: IVec3) -> Vec3 {
-    let chunk_centre = chunk_centre(chunk_position);
+/// The squared distance from the chunk's centre to the nearest camera.
+fn distance_squared_to_nearest_camera(cameras: &[CameraSnapshot], key: ChunkKey) -> f32 {
+    let centre = key.centre();
     cameras
         .iter()
-        .min_by(|a, b| {
-            a.position
-                .distance_squared(chunk_centre)
-                .total_cmp(&b.position.distance_squared(chunk_centre))
-        })
-        .map(|camera| camera.position)
-        .unwrap_or(Vec3::ZERO)
+        .map(|camera| camera.position.distance_squared(centre))
+        .fold(f32::INFINITY, f32::min)
 }
 
 fn chunk_visible_to_any_camera(
@@ -530,18 +502,6 @@ mod tests {
         fn spawning_rays(&self) -> usize {
             self.spawning_rays
         }
-
-        /// LOD level 1 for chunks whose centre is more than one and a half
-        /// chunks from the camera, 0 otherwise.
-        fn chunk_lod(
-            &self,
-            chunk_position: IVec3,
-            _previous_lod: Option<LodLevel>,
-            camera_position: Vec3,
-        ) -> LodLevel {
-            let centre = (chunk_position.as_vec3() + 0.5) * CHUNK_SIZE_F;
-            (centre.distance(camera_position) > 1.5 * CHUNK_SIZE_F) as LodLevel
-        }
     }
 
     /// Far enough from the origin that no test position is negative.
@@ -564,11 +524,9 @@ mod tests {
         )
     }
 
-    fn existing(position: IVec3, lod_level: LodLevel) -> ExistingChunk {
-        ExistingChunk {
-            position,
-            lod_level,
-        }
+    /// The key of the level-0 chunk at `position`.
+    fn existing(position: IVec3) -> ChunkKey {
+        ChunkKey::new(position, 0)
     }
 
     /// Plans with `occupied` as the only chunk positions that are not missing,
@@ -577,7 +535,7 @@ mod tests {
         config: &TestWorld,
         cameras: &[CameraSnapshot],
         occupied: &HashMap<IVec3, Occupancy>,
-        chunks: Vec<ExistingChunk>,
+        chunks: Vec<ChunkKey>,
     ) -> StreamingPlan {
         plan_wanting(config, cameras, occupied, chunks, 0)
     }
@@ -586,16 +544,16 @@ mod tests {
         config: &TestWorld,
         cameras: &[CameraSnapshot],
         occupied: &HashMap<IVec3, Occupancy>,
-        chunks: Vec<ExistingChunk>,
+        chunks: Vec<ChunkKey>,
         wanted: usize,
     ) -> StreamingPlan {
         plan(
             config,
             cameras,
             chunks,
-            |position| {
+            |key| {
                 occupied
-                    .get(&position)
+                    .get(&key.position)
                     .copied()
                     .unwrap_or(Occupancy::Missing)
             },
@@ -623,8 +581,7 @@ mod tests {
 
     /// The positions a plan spawns, checking none is spawned twice.
     fn spawned(plan: &StreamingPlan) -> HashSet<IVec3> {
-        let positions: HashSet<_> =
-            plan.spawn.iter().map(|(position, _)| *position).collect();
+        let positions: HashSet<_> = plan.spawn.iter().map(|key| key.position).collect();
         assert_eq!(
             positions.len(),
             plan.spawn.len(),
@@ -639,11 +596,10 @@ mod tests {
             &TestWorld::default(),
             &[],
             &HashMap::new(),
-            vec![existing(C, 0)],
+            vec![existing(C)],
         );
 
         assert!(plan.spawn.is_empty());
-        assert!(plan.change_lod.is_empty());
         assert!(plan.retire.is_empty());
     }
 
@@ -722,10 +678,10 @@ mod tests {
             &TestWorld::default(),
             &[camera(C, Vec3::NEG_Z)],
             &occupied,
-            vec![existing(C, 0), existing(kept, 0), existing(retired, 0)],
+            vec![existing(C), existing(kept), existing(retired)],
         );
 
-        assert_eq!(plan.retire, vec![retired]);
+        assert_eq!(plan.retire, vec![existing(retired)]);
     }
 
     /// Plans for a camera at `C` looking along -z, with chunks behind it just
@@ -744,10 +700,10 @@ mod tests {
             &[camera(C, Vec3::NEG_Z)],
             &occupied,
             vec![
-                existing(C, 0),
-                existing(protected, 0),
-                existing(unprotected, 0),
-                existing(ahead, 0),
+                existing(C),
+                existing(protected),
+                existing(unprotected),
+                existing(ahead),
             ],
         );
         (plan, unprotected)
@@ -762,7 +718,7 @@ mod tests {
 
         let (plan, unprotected) = plan_with_chunks_behind_the_camera(&config);
 
-        assert_eq!(plan.retire, vec![unprotected]);
+        assert_eq!(plan.retire, vec![existing(unprotected)]);
     }
 
     #[test]
@@ -803,14 +759,9 @@ mod tests {
             let occupied = first
                 .spawn
                 .iter()
-                .map(|(position, _)| (*position, Occupancy::Unpublished))
+                .map(|key| (key.position, Occupancy::Unpublished))
                 .collect();
-            let chunks = first
-                .spawn
-                .iter()
-                .map(|(position, lod_level)| existing(*position, *lod_level))
-                .collect();
-            let next = plan_with(&config, &cameras, &occupied, chunks);
+            let next = plan_with(&config, &cameras, &occupied, first.spawn.clone());
 
             assert!(
                 next.retire.is_empty(),
@@ -839,66 +790,14 @@ mod tests {
             &config,
             &[camera(a, Vec3::NEG_Z), camera(b, Vec3::NEG_Z)],
             &occupied,
-            vec![existing(near_b, 0), existing(between, 0)],
+            vec![existing(near_b), existing(between)],
         );
 
         let mut expected: HashSet<_> =
             within(a, 2).union(&within(b, 2)).copied().collect();
         expected.remove(&near_b);
         assert_eq!(spawned(&plan), expected);
-        assert_eq!(plan.retire, vec![between]);
-    }
-
-    #[test]
-    fn lod_changes_are_planned_for_chunks_whose_level_should_change() {
-        let config = TestWorld::default();
-        let near = C + IVec3::X;
-        let far = C + IVec3::new(3, 0, 0);
-        let coarse_but_near = C + IVec3::Y;
-        let occupied = [near, far, coarse_but_near]
-            .into_iter()
-            .map(|position| (position, Occupancy::Unpublished))
-            .collect();
-        let camera = camera(C, Vec3::NEG_Z);
-
-        let plan = plan_with(
-            &config,
-            &[camera],
-            &occupied,
-            vec![
-                existing(near, 0),
-                existing(far, 0),
-                existing(coarse_but_near, 1),
-            ],
-        );
-
-        let changes: HashSet<_> = plan.change_lod.iter().copied().collect();
-        let expected: HashSet<_> = [(far, 1), (coarse_but_near, 0)].into_iter().collect();
-        assert_eq!(changes, expected);
-        for (position, lod_level) in &plan.spawn {
-            assert_eq!(
-                *lod_level,
-                config.chunk_lod(*position, None, camera.position),
-                "{position} spawns at the LOD level chunk_lod gives it"
-            );
-        }
-    }
-
-    #[test]
-    fn lod_levels_are_chosen_with_the_camera_nearest_the_chunk_centre() {
-        // `a` is nearer the chunk's corner, `b` nearer its centre.
-        let a = camera(C - IVec3::ONE, Vec3::NEG_Z);
-        let b = camera(C + IVec3::X, Vec3::NEG_Z);
-        let occupied = [(C, Occupancy::Unpublished)].into_iter().collect();
-
-        let plan = plan_with(
-            &TestWorld::default(),
-            &[a, b],
-            &occupied,
-            vec![existing(C, 1)],
-        );
-
-        assert_eq!(plan.change_lod, vec![(C, 0)]);
+        assert_eq!(plan.retire, vec![existing(between)]);
     }
 
     #[test]
@@ -1083,8 +982,8 @@ mod tests {
         let distances: Vec<f32> = plan
             .spawn
             .iter()
-            .map(|(position, _)| {
-                let centre = chunk_centre(*position);
+            .map(|key| {
+                let centre = key.centre();
                 a.position.distance(centre).min(b.position.distance(centre))
             })
             .collect();

@@ -154,11 +154,11 @@ fn track<C: VoxelWorldConfig>(
     let mut changed = remeshed.read().count() > 0;
     for msg in published.read() {
         tracker.publishes += 1;
-        tracker.ready.insert(msg.chunk_key, msg.entity);
+        tracker.ready.insert(msg.chunk_key.position, msg.entity);
         changed = true;
     }
     for msg in despawned.read() {
-        tracker.ready.remove(&msg.chunk_key);
+        tracker.ready.remove(&msg.chunk_key.position);
         changed = true;
     }
     if changed {
@@ -545,7 +545,7 @@ fn edits_published(app: &mut App, expected: WorldVoxel<u8>) -> bool {
     storm_positions().all(|pos| {
         let (chunk_pos, _) = get_chunk_voxel_position(pos);
         voxel_world
-            .get_chunk_data(chunk_pos)
+            .get_chunk_data(ChunkKey::new(chunk_pos, 0))
             .and_then(|data| data.get_voxel_at_world_position(pos))
             == Some(expected)
     })

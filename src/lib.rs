@@ -15,7 +15,7 @@ mod voxel_world;
 mod voxel_world_internal;
 
 pub mod prelude {
-    pub use crate::chunk::Chunk;
+    pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
     pub use crate::plugin::VoxelWorldPlugin;
@@ -25,8 +25,8 @@ pub mod prelude {
         VoxelWorldSet,
     };
     pub use crate::voxel_world::{
-        ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
-        ChunkWillSpawn, ChunkWillUpdate,
+        ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkWillUpdate,
     };
 }
 
