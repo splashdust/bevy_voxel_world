@@ -439,6 +439,133 @@ fn the_world_survives_despawning_every_published_chunk() {
     assert!(chunk_data::<ThrottledWorld>(&mut app, IVec3::ZERO).is_none());
 }
 
+#[test]
+fn chunks_are_generated_nearest_the_camera_first() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<ThrottledWorld>::minimal(),
+    ))
+    // One task at a time, so chunks publish in the order their tasks start.
+    .insert_resource(ThrottledWorld { task_slots: 1 })
+    .init_resource::<Published>()
+    .add_systems(Startup, spawn_camera::<ThrottledWorld>)
+    .add_systems(
+        Last,
+        |mut published: ResMut<Published>,
+         mut ev: MessageReader<ChunkPublished<ThrottledWorld>>| {
+            published.0.extend(ev.read().map(|msg| msg.chunk_key));
+        },
+    );
+
+    update_until(&mut app, "every chunk to be ready", |app| {
+        let positions: Vec<IVec3> = app
+            .world_mut()
+            .query::<&Chunk<ThrottledWorld>>()
+            .iter(app.world())
+            .map(|chunk| chunk.position())
+            .collect();
+        !positions.is_empty()
+            && positions.into_iter().all(|pos| {
+                chunk_status::<ThrottledWorld>(app, pos) == Some(ChunkStatus::Ready)
+            })
+    });
+
+    let camera = app
+        .world_mut()
+        .query_filtered::<&GlobalTransform, With<VoxelWorldCamera<ThrottledWorld>>>()
+        .single(app.world())
+        .unwrap()
+        .translation();
+    let distances: Vec<f32> = app
+        .world()
+        .resource::<Published>()
+        .0
+        .iter()
+        .map(|pos| ((pos.as_vec3() + 0.5) * CHUNK_SIZE_F).distance(camera))
+        .collect();
+    assert!(
+        distances.len() > 10,
+        "only {} chunks published",
+        distances.len()
+    );
+    assert!(
+        distances.windows(2).all(|pair| pair[0] <= pair[1]),
+        "chunks published out of distance order: {distances:?}"
+    );
+}
+
+/// A world that spawns every chunk within two chunks of the camera, in view or not.
+#[derive(Resource, Clone, Default)]
+struct AllAroundWorld;
+
+impl VoxelWorldConfig for AllAroundWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+}
+
+#[test]
+fn every_edited_chunk_gets_a_task_in_the_same_frame() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<AllAroundWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<AllAroundWorld>);
+
+    let positions = |app: &mut App| -> Vec<IVec3> {
+        app.world_mut()
+            .query::<&Chunk<AllAroundWorld>>()
+            .iter(app.world())
+            .map(|chunk| chunk.position())
+            .collect()
+    };
+    update_until(&mut app, "every chunk to be ready", |app| {
+        let positions = positions(app);
+        !positions.is_empty()
+            && positions.into_iter().all(|pos| {
+                chunk_status::<AllAroundWorld>(app, pos) == Some(ChunkStatus::Ready)
+            })
+    });
+
+    // Far more chunks than the task pool finishes in an idle frame.
+    let edited = positions(&mut app);
+    assert!(edited.len() > 30, "only {} chunks", edited.len());
+    let to_edit = edited.clone();
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<AllAroundWorld>| {
+            for pos in &to_edit {
+                voxel_world.set_voxel(pos * CHUNK_SIZE_I + 16, WorldVoxel::Solid(7));
+            }
+        })
+        .unwrap();
+    app.update();
+
+    for pos in edited {
+        assert_ne!(
+            chunk_status::<AllAroundWorld>(&mut app, pos),
+            Some(ChunkStatus::Pending),
+            "edited chunk {pos} is still waiting for a task"
+        );
+    }
+}
+
 /// A world whose voxel texture never loads.
 #[derive(Resource, Clone, Default)]
 struct MissingTextureWorld;

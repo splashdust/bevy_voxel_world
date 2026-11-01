@@ -11,6 +11,7 @@
 - Chunk data no longer waits for the voxel texture to load; only meshes do.
 - A chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query it.
 - Chunk meshes merge neighbouring faces that look the same into one quad: a chunk of noise terrain has 41% fewer quads, and flat ground is one quad per chunk.
+- Chunks are generated nearest the camera first, and spawning rays stop at chunks that aren't generated yet instead of spawning everything behind them, so chunks hidden underground are hardly ever spawned. With the `noise_terrain` example's settings at 60 fps, half of the visible terrain is ready after 2.6 s instead of 3.3 s and 95% after 4.1 s instead of 10 s, from 23,600 generated chunks instead of 64,000.
 - Performance: in the `chunk_lifecycle` benchmark, chunks stream in 2.5× faster (4.9× on flat terrain), edits are published 2.6× sooner, and frames while voxels are being edited take a quarter of the time (worst 1% from 2.06 ms to 0.49 ms). Meshing a chunk of noise terrain is 1.5× faster.
 - Fix: a chunk edited every frame now publishes. Before, each edit cancelled its running task.
 - Fix: when `set_voxel` sets a position more than once, the last voxel set wins, in `get_voxel` too. Setting an edited voxel to another voxel and back within a frame no longer remeshes its chunk.

@@ -4,7 +4,11 @@
 /// publishing their results. Spawn, retire and LOD decisions and voxel edits are
 /// made elsewhere and reach the lifecycle as `ChunkRequests`.
 ///
-use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
+use std::{
+    collections::VecDeque,
+    marker::PhantomData,
+    sync::{Arc, RwLockReadGuard},
+};
 
 use bevy::{
     platform::collections::{HashMap, HashSet},
@@ -15,17 +19,22 @@ use futures_lite::future;
 
 use crate::{
     chunk::{Chunk, ChunkTask, CHUNK_SIZE_F},
-    chunk_map::{ChunkMap, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
+    chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     prelude::default_chunk_meshing_delegate,
+    streaming_policy::chunk_centre,
     voxel_edits::VoxelEdits,
     voxel_world::{
         ChunkPublished, ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh,
-        ChunkWillSpawn, ChunkWillUpdate,
+        ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
     },
     voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
 };
+
+/// The fewest chunk tasks kept running per task pool thread. More run once the
+/// pool finishes more than half as many in a frame.
+const MIN_TASKS_PER_THREAD: usize = 4;
 
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -185,12 +194,15 @@ pub struct ChunkIndex<C> {
     entities: HashMap<IVec3, Entity>,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
-    /// Pending chunks with priority, then the other Pending chunks, oldest first.
-    /// Both may hold chunks that have since moved on.
+    /// Pending chunks with priority, oldest first. May hold chunks that have
+    /// since moved on.
     priority: VecDeque<Entity>,
-    pending: VecDeque<Entity>,
+    /// The other Pending chunks, with their chunk positions.
+    pending: HashMap<Entity, IVec3>,
     generating: HashSet<Entity>,
     retiring: HashSet<Entity>,
+    /// How many chunk tasks finished in the last frame.
+    finished_last_frame: usize,
     _marker: PhantomData<C>,
 }
 
@@ -199,9 +211,10 @@ impl<C> Default for ChunkIndex<C> {
         Self {
             entities: HashMap::new(),
             priority: VecDeque::new(),
-            pending: VecDeque::new(),
+            pending: HashMap::new(),
             generating: HashSet::new(),
             retiring: HashSet::new(),
+            finished_last_frame: 0,
             _marker: PhantomData,
         }
     }
@@ -218,7 +231,7 @@ impl<C> ChunkIndex<C> {
 
     fn spawned(&mut self, chunk_pos: IVec3, entity: Entity) {
         self.entities.insert(chunk_pos, entity);
-        self.pending.push_back(entity);
+        self.pending.insert(entity, chunk_pos);
     }
 
     fn despawned(&mut self, chunk_pos: IVec3, entity: Entity) {
@@ -226,10 +239,30 @@ impl<C> ChunkIndex<C> {
         self.retiring.remove(&entity);
     }
 
-    /// Applies `event` to a chunk's state, and files the chunk under its new state.
+    /// How many chunk tasks to keep running, within `cap`: enough to keep the
+    /// task pool busy until the next frame, judged by how many finished in the
+    /// last one.
+    fn running_tasks_target(&self, cap: usize) -> usize {
+        let threads = AsyncComputeTaskPool::get().thread_num().max(1);
+        (2 * self.finished_last_frame)
+            .max(MIN_TASKS_PER_THREAD * threads)
+            .min(cap)
+    }
+
+    /// How many chunks could start a task right away, beyond those waiting for
+    /// one, with `cap` running tasks at most.
+    pub(crate) fn spawn_budget(&self, cap: usize) -> usize {
+        self.running_tasks_target(cap).saturating_sub(
+            self.generating.len() + self.pending.len() + self.priority.len(),
+        )
+    }
+
+    /// Applies `event` to the state of the chunk at `chunk_pos`, and files the
+    /// chunk under its new state.
     fn apply<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
+        chunk_pos: IVec3,
         state: &mut ChunkState<T>,
         event: ChunkEvent<T>,
     ) -> Effect {
@@ -237,19 +270,25 @@ impl<C> ChunkIndex<C> {
         let effect = state.apply(event);
         let after = (state.status(), state.has_priority());
         if before != after {
-            match before.0 {
-                ChunkStatus::Generating => {
+            match before {
+                (ChunkStatus::Pending, false) => {
+                    self.pending.remove(&entity);
+                }
+                // Left in the queue; starting tasks skips chunks no longer Pending.
+                (ChunkStatus::Pending, true) => {}
+                (ChunkStatus::Generating, _) => {
                     self.generating.remove(&entity);
                 }
-                ChunkStatus::Retiring => {
+                (ChunkStatus::Retiring, _) => {
                     self.retiring.remove(&entity);
                 }
-                // Left in its queue; starting tasks skips chunks no longer Pending.
-                ChunkStatus::Pending | ChunkStatus::Ready => {}
+                (ChunkStatus::Ready, _) => {}
             }
             match after {
                 (ChunkStatus::Pending, true) => self.priority.push_back(entity),
-                (ChunkStatus::Pending, false) => self.pending.push_back(entity),
+                (ChunkStatus::Pending, false) => {
+                    self.pending.insert(entity, chunk_pos);
+                }
                 (ChunkStatus::Generating, _) => {
                     self.generating.insert(entity);
                 }
@@ -261,6 +300,15 @@ impl<C> ChunkIndex<C> {
         }
         effect
     }
+}
+
+/// The squared distance from the chunk's centre to the nearest camera.
+fn distance_squared_to_nearest_camera(chunk_pos: IVec3, cameras: &[Vec3]) -> f32 {
+    let centre = chunk_centre(chunk_pos);
+    cameras
+        .iter()
+        .map(|camera| camera.distance_squared(centre))
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// What the rest of the crate asks of the chunk lifecycle this frame, by chunk
@@ -320,7 +368,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 continue;
             };
             if let Ok((_, mut state)) = chunks.get_mut(entity) {
-                index.apply(entity, &mut state, ChunkEvent::Edited);
+                index.apply(entity, chunk_pos, &mut state, ChunkEvent::Edited);
             }
             ev_update.write(ChunkWillUpdate::<C>::new(chunk_pos, entity));
         }
@@ -370,7 +418,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             chunk.data_shape = data_shape;
             chunk.mesh_shape = mesh_shape;
             if reshaped {
-                index.apply(entity, &mut state, ChunkEvent::Reshaped);
+                index.apply(entity, chunk_pos, &mut state, ChunkEvent::Reshaped);
             }
         }
 
@@ -381,7 +429,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             let Ok((_, mut state)) = chunks.get_mut(entity) else {
                 continue;
             };
-            if index.apply(entity, &mut state, ChunkEvent::Retire)
+            if index.apply(entity, chunk_pos, &mut state, ChunkEvent::Retire)
                 == Effect::AnnounceRetiring
             {
                 ev_despawn.write(ChunkWillDespawn::<C>::new(chunk_pos, entity));
@@ -389,103 +437,72 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         }
     }
 
-    /// Starts a chunk task for each Pending chunk, priority chunks first, as long
-    /// as task slots are free.
+    /// Starts chunk tasks for Pending chunks: priority chunks first, oldest
+    /// first, then the chunks nearest a camera. Priority chunks are few and
+    /// waited for, so they start whenever the cap allows. Of the others, only as
+    /// many run at once as keep the task pool busy until the next frame, so the
+    /// chunks still waiting can be started in whatever order the cameras are in
+    /// by then.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_chunk_tasks(
         mut index: ResMut<ChunkIndex<C>>,
         mut chunks: Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
+        cameras: Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
         mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
         mesh_cache: Res<MeshCache<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
     ) {
-        let thread_pool = AsyncComputeTaskPool::get();
-        while index.generating.len() < configuration.max_active_chunk_threads() {
-            let Some(entity) = index
-                .priority
-                .pop_front()
-                .or_else(|| index.pending.pop_front())
-            else {
+        let cap = configuration.max_active_chunk_threads();
+        if index.generating.len() >= cap {
+            return;
+        }
+
+        let chunk_map_read_lock = chunk_map.get_read_lock();
+        let starter = TaskStarter::<C> {
+            thread_pool: AsyncComputeTaskPool::get(),
+            configuration: configuration.as_ref(),
+            mesh_cache: mesh_cache.as_ref(),
+            voxel_edits: voxel_edits.as_ref(),
+            chunk_map: &chunk_map_read_lock,
+        };
+
+        while index.generating.len() < cap {
+            let Some(entity) = index.priority.pop_front() else {
                 break;
             };
-            let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
-                continue;
-            };
-            if state.status() != ChunkStatus::Pending {
-                continue;
-            }
+            starter.start(entity, &mut index, &mut chunks, &mut ev_chunk_will_remesh);
+        }
 
-            let previous_chunk_data = {
-                let read_lock = chunk_map.get_read_lock();
-                ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
-            };
+        let target = index.running_tasks_target(cap);
+        let slots = target.saturating_sub(index.generating.len());
+        if slots == 0 || index.pending.is_empty() {
+            return;
+        }
 
-            let lod_level = chunk.lod_level;
-
-            let regenerate_strategy = configuration.chunk_regenerate_strategy();
-
-            let voxel_data_fn = (configuration.voxel_lookup_delegate())(
-                chunk.position,
-                lod_level,
-                previous_chunk_data.clone(),
-            );
-            let data_shape = chunk.data_shape;
-            let mesh_shape = chunk.mesh_shape;
-            let chunk_meshing_fn = (configuration
-                .chunk_meshing_delegate()
-                .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
-                chunk.position,
-                lod_level,
-                data_shape,
-                mesh_shape,
-                previous_chunk_data.clone(),
-            );
-            let texture_index_mapper = configuration.texture_index_mapper().clone();
-
-            let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
-                chunk.entity,
-                chunk.position,
-                lod_level,
-                data_shape,
-                mesh_shape,
-                voxel_edits.chunk_edits(chunk.position),
-            );
-
-            let mesh_map = mesh_cache.get_mesh_map();
-
-            let task = thread_pool.spawn(async move {
-                #[cfg(feature = "trace")]
-                let _span = bevy::log::info_span!("chunk_task").entered();
-                chunk_task.generate(
-                    voxel_data_fn,
-                    previous_chunk_data.clone(),
-                    regenerate_strategy,
-                );
-
-                // No need to mesh if the chunk is empty or full
-                if chunk_task.is_empty() || chunk_task.is_full() {
-                    return chunk_task;
-                }
-
-                // Also no need to mesh if a matching mesh is already cached
-                let mesh_cache_hit = {
-                    #[cfg(feature = "trace")]
-                    let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
-                    mesh_map.read().unwrap()
-                }
-                .contains_key(&chunk_task.voxels_hash());
-                if !mesh_cache_hit {
-                    chunk_task.mesh(chunk_meshing_fn, texture_index_mapper);
-                }
-
-                chunk_task
-            });
-
-            index.apply(entity, &mut state, ChunkEvent::TaskStarted(task));
-
-            ev_chunk_will_remesh
-                .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
+        let camera_positions: Vec<Vec3> = cameras
+            .iter()
+            .map(|transform| transform.translation())
+            .collect();
+        let mut nearest: Vec<(f32, Entity)> = index
+            .pending
+            .iter()
+            .map(|(&entity, &chunk_pos)| {
+                (
+                    distance_squared_to_nearest_camera(chunk_pos, &camera_positions),
+                    entity,
+                )
+            })
+            .collect();
+        if nearest.len() > slots {
+            nearest.select_nth_unstable_by(slots - 1, |a, b| a.0.total_cmp(&b.0));
+            nearest.truncate(slots);
+        }
+        // The task pool runs tasks in the order they start.
+        nearest.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, entity) in nearest {
+            starter.start(entity, &mut index, &mut chunks, &mut ev_chunk_will_remesh);
         }
     }
 
@@ -519,6 +536,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 finished.push((entity, chunk_task));
             }
         }
+        index.finished_last_frame = finished.len();
 
         for (entity, mut chunk_task) in finished {
             let Ok((chunk, mut state, transform)) = chunks.get_mut(entity) else {
@@ -553,7 +571,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                         Some(mesh_ref)
                     }
                 } else {
-                    index.apply(entity, &mut state, ChunkEvent::CachedMeshExpired);
+                    index.apply(
+                        entity,
+                        chunk.position,
+                        &mut state,
+                        ChunkEvent::CachedMeshExpired,
+                    );
                     continue;
                 };
 
@@ -573,7 +596,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 }
             }
 
-            if index.apply(entity, &mut state, ChunkEvent::TaskFinished)
+            if index.apply(entity, chunk.position, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
                 chunk_map_update_buffer.push((
@@ -621,13 +644,117 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
                 continue;
             };
-            if index.apply(entity, &mut state, ChunkEvent::DespawnStep) == Effect::Despawn
+            if index.apply(entity, chunk.position, &mut state, ChunkEvent::DespawnStep)
+                == Effect::Despawn
             {
                 commands.entity(entity).despawn();
                 index.despawned(chunk.position, entity);
                 chunk_map_remove_buffer.push(chunk.position);
             }
         }
+    }
+}
+
+/// What starting a chunk task needs from the world, taken once per frame.
+struct TaskStarter<'a, C: VoxelWorldConfig> {
+    thread_pool: &'a AsyncComputeTaskPool,
+    configuration: &'a C,
+    mesh_cache: &'a MeshCache<C>,
+    voxel_edits: &'a VoxelEdits<C, C::MaterialIndex>,
+    chunk_map: &'a RwLockReadGuard<'a, ChunkMapData<C::MaterialIndex>>,
+}
+
+impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
+    /// Starts the chunk's task, unless the chunk is no longer Pending, and says
+    /// whether it did.
+    #[allow(clippy::type_complexity)]
+    fn start(
+        &self,
+        entity: Entity,
+        index: &mut ChunkIndex<C>,
+        chunks: &mut Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
+        ev_chunk_will_remesh: &mut MessageWriter<ChunkWillRemesh<C>>,
+    ) -> bool {
+        let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
+            // Despawned behind the lifecycle's back.
+            index.pending.remove(&entity);
+            return false;
+        };
+        if state.status() != ChunkStatus::Pending {
+            return false;
+        }
+
+        let previous_chunk_data =
+            ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, self.chunk_map);
+        let lod_level = chunk.lod_level;
+        let regenerate_strategy = self.configuration.chunk_regenerate_strategy();
+        let voxel_data_fn = (self.configuration.voxel_lookup_delegate())(
+            chunk.position,
+            lod_level,
+            previous_chunk_data.clone(),
+        );
+        let data_shape = chunk.data_shape;
+        let mesh_shape = chunk.mesh_shape;
+        let chunk_meshing_fn = (self
+            .configuration
+            .chunk_meshing_delegate()
+            .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
+            chunk.position,
+            lod_level,
+            data_shape,
+            mesh_shape,
+            previous_chunk_data.clone(),
+        );
+        let texture_index_mapper = self.configuration.texture_index_mapper().clone();
+
+        let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
+            chunk.entity,
+            chunk.position,
+            lod_level,
+            data_shape,
+            mesh_shape,
+            self.voxel_edits.chunk_edits(chunk.position),
+        );
+
+        let mesh_map = self.mesh_cache.get_mesh_map();
+
+        let task = self.thread_pool.spawn(async move {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("chunk_task").entered();
+            chunk_task.generate(
+                voxel_data_fn,
+                previous_chunk_data.clone(),
+                regenerate_strategy,
+            );
+
+            // No need to mesh if the chunk is empty or full
+            if chunk_task.is_empty() || chunk_task.is_full() {
+                return chunk_task;
+            }
+
+            // Also no need to mesh if a matching mesh is already cached
+            let mesh_cache_hit = {
+                #[cfg(feature = "trace")]
+                let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
+                mesh_map.read().unwrap()
+            }
+            .contains_key(&chunk_task.voxels_hash());
+            if !mesh_cache_hit {
+                chunk_task.mesh(chunk_meshing_fn, texture_index_mapper);
+            }
+
+            chunk_task
+        });
+
+        index.apply(
+            entity,
+            chunk.position,
+            &mut state,
+            ChunkEvent::TaskStarted(task),
+        );
+        ev_chunk_will_remesh
+            .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
+        true
     }
 }
 

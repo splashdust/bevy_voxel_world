@@ -47,6 +47,9 @@ const IO_THREADS: usize = 1;
 const NOISY_LOAD: f64 = 8.0;
 const AB_ROUNDS: usize = 3;
 const SPAWNING_DISTANCE: i32 = 10;
+/// Chunks within this distance of the camera are the near ones, whose time to
+/// become Ready says how soon the player sees ground.
+const NEAR_DISTANCE: i32 = 4;
 /// Frames without any lifecycle change before stream-in counts as converged.
 const SETTLE_FRAMES: u32 = 30;
 const MAX_FRAMES: u32 = 5000;
@@ -352,7 +355,14 @@ fn coverage<C: VoxelWorldConfig>(app: &mut App, offsets: &[IVec3]) -> f64 {
 }
 
 fn wanted_offsets() -> Vec<IVec3> {
-    let r = SPAWNING_DISTANCE;
+    offsets_within(SPAWNING_DISTANCE)
+}
+
+fn near_offsets() -> Vec<IVec3> {
+    offsets_within(NEAR_DISTANCE)
+}
+
+fn offsets_within(r: i32) -> Vec<IVec3> {
     let mut offsets = Vec::new();
     for x in -r..=r {
         for y in -r..=r {
@@ -373,6 +383,9 @@ type Metrics = BTreeMap<String, f64>;
 
 struct StreamIn {
     time_ms: f64,
+    /// Time until every chunk within `NEAR_DISTANCE` of the camera was Ready, or
+    /// `time_ms` if that never happened.
+    near_time_ms: f64,
     frames: u32,
     /// Duration of each frame up to the last lifecycle change.
     frame_times: Vec<f64>,
@@ -381,6 +394,8 @@ struct StreamIn {
 /// Runs frames until the lifecycle has been quiet for `SETTLE_FRAMES`.
 fn stream_in<C: VoxelWorldConfig>(app: &mut App) -> StreamIn {
     let start = Instant::now();
+    let near = near_offsets();
+    let mut near_time_ms = None;
     let mut frame_times = Vec::new();
     let mut last_count = chunk_count::<C>(app);
     let mut last_change = (0, 0.0);
@@ -388,6 +403,9 @@ fn stream_in<C: VoxelWorldConfig>(app: &mut App) -> StreamIn {
         let frame_start = Instant::now();
         app.update();
         frame_times.push(frame_start.elapsed().as_secs_f64() * 1000.0);
+        if near_time_ms.is_none() && coverage::<C>(app, &near) >= 1.0 {
+            near_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        }
         let count = chunk_count::<C>(app);
         let tracker = app.world().resource::<Tracker>();
         if count != last_count || tracker.last_change == tracker.frame {
@@ -402,6 +420,7 @@ fn stream_in<C: VoxelWorldConfig>(app: &mut App) -> StreamIn {
     StreamIn {
         frames: last_change.0,
         time_ms: last_change.1,
+        near_time_ms: near_time_ms.unwrap_or(last_change.1),
         frame_times,
     }
 }
@@ -456,6 +475,7 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     let publishes = app.world().resource::<Tracker>().publishes;
     let mut metrics = Metrics::new();
     metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
+    metrics.insert(format!("{prefix}.near_time_ms"), result.near_time_ms);
     metrics.insert(format!("{prefix}.frames"), result.frames as f64);
     metrics.insert(format!("{prefix}.ready_chunks"), ready as f64);
     metrics.insert(format!("{prefix}.publishes"), publishes as f64);
@@ -480,6 +500,7 @@ fn scenario_teleport() -> Metrics {
     let result = stream_in::<SineWorld>(&mut app);
     let mut metrics = Metrics::new();
     metrics.insert("teleport.time_ms".into(), result.time_ms);
+    metrics.insert("teleport.near_time_ms".into(), result.near_time_ms);
     metrics.insert("teleport.frames".into(), result.frames as f64);
     metrics.insert(
         "teleport.coverage".into(),
@@ -581,7 +602,7 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
         match key.rsplit('.').next().unwrap() {
-            "time_ms" => percentile(values, 0.0),
+            "time_ms" | "near_time_ms" => percentile(values, 0.0),
             "chunks_per_s" => percentile(values, 1.0),
             _ => percentile(values, 0.5),
         }
@@ -667,7 +688,7 @@ fn gate(key: &str) -> Gate {
     }
     match key.rsplit('.').next().unwrap() {
         "p50_ms" | "time_ms" => Gate::Lower(0.05),
-        "p99_ms" | "time_to_publish_ms" => Gate::Lower(0.10),
+        "p99_ms" | "time_to_publish_ms" | "near_time_ms" => Gate::Lower(0.10),
         // Stutter metrics rest on a handful of frames; with identical code they
         // still move by up to about 10% (worst 1%) and 5 frames (counts).
         "worst_1pct_ms" => Gate::Lower(0.15),

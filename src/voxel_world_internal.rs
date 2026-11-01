@@ -102,8 +102,10 @@ where
                 return Occupancy::Missing;
             }
             match chunk_map_read_lock.get(&position) {
+                None => Occupancy::Unpublished,
                 Some(chunk_data) if chunk_data.is_full => Occupancy::Full,
-                _ => Occupancy::Spawned,
+                Some(chunk_data) if chunk_data.is_empty => Occupancy::Empty,
+                Some(_) => Occupancy::Mixed,
             }
         };
         let existing = chunks.iter().map(|chunk| ExistingChunk {
@@ -116,6 +118,7 @@ where
             &cameras,
             existing,
             occupancy,
+            index.spawn_budget(configuration.max_active_chunk_threads()),
             &mut rand::rng(),
         );
         requests.spawn.extend(plan.spawn);

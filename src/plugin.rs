@@ -105,6 +105,15 @@ where
                 PreUpdate,
                 (
                     Internals::<C>::commit_voxel_edits,
+                    // Finished tasks are published before the chunks are streamed, so
+                    // spawning rays see this frame's results, and before tasks start,
+                    // so a chunk whose task finished gets its follow-up task, and the
+                    // task pool its next tasks, without waiting for the next frame.
+                    ChunkLifecycle::<C>::collect_chunk_tasks,
+                    (
+                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
+                        ChunkLifecycle::<C>::flush_mesh_cache_buffers,
+                    ),
                     Internals::<C>::stream_chunks,
                     ChunkLifecycle::<C>::apply_requests,
                     // Starting tasks needs the chunks spawned above. No other step
@@ -112,11 +121,6 @@ where
                     // point the set needs.
                     ApplyDeferred,
                     ChunkLifecycle::<C>::start_chunk_tasks,
-                    ChunkLifecycle::<C>::collect_chunk_tasks,
-                    (
-                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
-                        ChunkLifecycle::<C>::flush_mesh_cache_buffers,
-                    ),
                     // Flushing again removes the despawned chunks from the chunk map
                     // this frame.
                     (

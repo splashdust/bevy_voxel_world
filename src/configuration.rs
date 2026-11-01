@@ -124,16 +124,17 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         ChunkSpawnStrategy::default()
     }
 
-    /// Maximum number of chunks spawned in a frame. Chunks within `min_despawn_distance`
-    /// of a camera are spawned first, nearest first. In some scenarios, reducing this
-    /// number can help with performance, due to less thread contention.
+    /// Maximum number of chunks spawned in a frame. Chunks spawn nearest a camera
+    /// first, those within `min_despawn_distance` of one before any other.
     fn max_spawn_per_frame(&self) -> usize {
         10000
     }
 
-    /// Number of rays to cast when spawning chunks. Higher values will result in more
-    /// chunks being spawned per frame, but will also increase cpu load, and can lead to
-    /// thread contention.
+    /// Number of rays to cast when spawning chunks. A ray walks through the chunks
+    /// in its way whose voxels are generated and not all solid, and spawns the
+    /// first chunks past them, so chunks spawn from the camera outwards as the
+    /// chunks in front of them are generated. Higher values will result in more
+    /// chunks being spawned per frame, but will also increase cpu load.
     fn spawning_rays(&self) -> usize {
         100
     }
@@ -224,7 +225,10 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
         ChunkRegenerateStrategy::default()
     }
 
-    /// Maximum number of chunk generation tasks that may be active simultaneously.
+    /// Maximum number of chunk tasks that may run at once. Chunk tasks start
+    /// nearest the cameras first, and only as many at a time as keep the task pool
+    /// busy until the next frame, so a cap below that holds chunks back further,
+    /// leaving room on the pool for other work.
     fn max_active_chunk_threads(&self) -> usize {
         usize::MAX
     }
