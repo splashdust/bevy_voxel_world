@@ -164,9 +164,10 @@ impl VoxelWorldConfig for MainWorld {
         }
     }
 
-    // Spawning rays walk through the air above the terrain and stop at the rock
-    // below it without spawning either, so only the chunks the terrain crosses
-    // are generated, and the rays reach the terrain at the horizon at once.
+    // With these fill hints, spawning rays pass through the air above the
+    // terrain and stop at the rock below it, without spawning chunks for
+    // either. Only the chunks the terrain crosses are generated, and the rays
+    // reach the terrain at the horizon right away.
     fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
         terrain_fill(key)
     }

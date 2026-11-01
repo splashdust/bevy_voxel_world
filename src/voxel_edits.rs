@@ -1,9 +1,11 @@
 ///
 /// Voxel edits
 /// Every voxel edit of a voxel world, kept for as long as the world exists, and
-/// which chunks each edit makes stale. Edits can be set from systems running in
-/// parallel, and are committed once a frame. It reads no Bevy world state, so it
-/// can be tested with plain values.
+/// which chunks each voxel edit makes stale.
+///
+/// Voxel edits can be set from systems running in parallel, and are committed
+/// once a frame. The module reads no Bevy world state, so it can be tested with
+/// plain values.
 ///
 use std::{
     marker::PhantomData,
@@ -36,7 +38,8 @@ type Committed<I> = Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>;
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
 pub struct VoxelEdits<C, I> {
-    /// Copied only when an edit is set while a reader holds it.
+    /// The edits set since the last commit. The map is copied only when an edit
+    /// is set while a reader holds it.
     pending: Mutex<Arc<Voxels<I>>>,
     committed: Committed<I>,
     _marker: PhantomData<C>,
@@ -60,8 +63,10 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         Arc::make_mut(&mut pending).insert(position, voxel);
     }
 
-    /// Reads the edits from any thread: the pending edits as they were when it
-    /// was made, and the committed edits as they are when read.
+    /// Returns a reader that works from any thread.
+    ///
+    /// The reader sees the pending edits as they were when it was made, and the
+    /// committed edits as they are at the time of each read.
     pub(crate) fn reader(&self) -> VoxelEditReader<I> {
         VoxelEditReader {
             pending: self.pending.lock().unwrap().clone(),
@@ -69,15 +74,18 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Commits the pending edits and returns the positions of the voxels that
-    /// changed; [`chunks_including`] tells which chunks each makes stale. An
-    /// edit that sets a voxel to its committed edit changes nothing, so setting
-    /// the same voxel every frame, or setting a voxel and back, doesn't remesh
-    /// its chunk. A chunk's edits are copied only while a running chunk task
-    /// holds them.
+    /// Commits the pending edits. Returns the positions of the voxels that
+    /// changed; [`chunks_including`] gives the chunks each one makes stale.
+    ///
+    /// An edit that sets a voxel to the voxel already committed there changes
+    /// nothing. So setting the same voxel every frame, or setting a voxel and
+    /// then back, doesn't remesh its chunk.
+    ///
+    /// A chunk's committed edits are copied only when a running chunk task
+    /// still holds them.
     pub(crate) fn commit(&self) -> Vec<IVec3> {
         // The pending edits stay locked until they are committed, so a reader
-        // made meanwhile finds each edit pending or committed.
+        // made during the commit finds each edit either pending or committed.
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() {
             return Vec::new();
@@ -104,7 +112,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     }
 
     /// The edits the chunk task of the chunk at `key` reads: those within the
-    /// chunk's extent and the data voxel of padding around it.
+    /// chunk's extent and its padding, one data voxel deep.
     pub(crate) fn chunk_edits(&self, key: ChunkKey) -> ChunkEdits<I> {
         let buckets = self.committed.read().unwrap();
         let chunk_pos = key.position;
@@ -147,9 +155,11 @@ pub(crate) struct CommittedEdits<'a, I>(
 );
 
 impl<I> CommittedEdits<'_, I> {
-    /// Whether an edit lies in a level-0 chunk that a chunk task of the chunk at
-    /// `key` reads: one within its extent or one its padding reaches into. Such
-    /// an edit may change the chunk's voxels, so a fill hint cannot stand for it.
+    /// Whether an edit lies in a level-0 chunk that the chunk task of the chunk
+    /// at `key` reads, within its extent or reached by its padding.
+    ///
+    /// Such an edit may change the chunk's voxels, so the chunk's fill hint
+    /// can't be trusted.
     pub fn reach(&self, key: ChunkKey) -> bool {
         let buckets = &self.0;
         if buckets.is_empty() {
@@ -173,10 +183,12 @@ fn around_offset(i: usize) -> IVec3 {
     IVec3::new(i % 3, i / 3 % 3, i / 9) - 1
 }
 
-/// The level-0 chunk positions whose edits a chunk task of the chunk at `key`,
-/// above level 0, reads: `min` inclusive to `max` exclusive on every axis. The
-/// padding is one data voxel, `1 << L` voxels, which reaches into this many
-/// level-0 chunks around the extent.
+/// The level-0 chunk positions whose edits the chunk task of the chunk at
+/// `key`, above level 0, reads. Returns `min` inclusive to `max` exclusive on
+/// every axis.
+///
+/// The padding is one data voxel deep, which is `1 << L` voxels, so it reaches
+/// that many voxels' worth of level-0 chunks past the extent.
 fn buckets_read_by(key: ChunkKey) -> (IVec3, IVec3) {
     let padding = ((1 << key.lod_level) + CHUNK_SIZE_I - 1) / CHUNK_SIZE_I;
     (
@@ -186,9 +198,11 @@ fn buckets_read_by(key: ChunkKey) -> (IVec3, IVec3) {
 }
 
 /// The chunks at `lod_level` whose padded voxel data includes the voxel at
-/// `position`: the chunk containing it, and the chunks across each face, edge
-/// and corner of that chunk that the voxel lies within one data voxel of, which
-/// is `1 << lod_level` voxels with the default shapes.
+/// `position`.
+///
+/// That is the chunk containing the voxel, plus each neighbouring chunk across
+/// a face, edge or corner that the voxel lies within one data voxel of. One
+/// data voxel is `1 << lod_level` voxels with the default shapes.
 pub(crate) fn chunks_including(
     position: IVec3,
     lod_level: LodLevel,
@@ -367,9 +381,9 @@ mod tests {
     fn a_reader_made_during_a_commit_sees_each_edit_pending_or_committed() {
         const ROUNDS: u32 = 100_000;
         let edits = VoxelEdits::<(), u32>::default();
-        // The last voxel read. Each edit is committed only once it has been read
-        // while pending, so that a reader made during the commit could tell if
-        // the edit went missing.
+        // The last voxel read. The writer commits each edit only once a reader
+        // has seen it pending, so a reader made during the commit would notice
+        // if the edit went missing.
         let read = AtomicU32::new(0);
         let went_back = std::thread::scope(|scope| {
             scope.spawn(|| {

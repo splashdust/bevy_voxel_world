@@ -18,9 +18,11 @@ use crate::{
     voxel_world::VoxelWorldCamera,
 };
 
-/// What the streaming policy sees of the chunks: the chunk index for which
-/// chunks exist, the chunk map for what is published, and the committed voxel
-/// edits for the chunks a fill hint cannot stand for.
+/// What the streaming policy sees of the chunks.
+///
+/// The chunk index tells which chunks exist, and the chunk map which are
+/// published. The committed voxel edits tell which chunks' fill hints can't be
+/// trusted.
 struct Chunks<'a, C: VoxelWorldConfig> {
     index: &'a ChunkIndex<C>,
     chunk_map: &'a ChunkMapData<C::MaterialIndex>,
@@ -28,7 +30,7 @@ struct Chunks<'a, C: VoxelWorldConfig> {
 }
 
 impl<C: VoxelWorldConfig> Chunks<'_, C> {
-    /// What is at a chunk that exists.
+    /// The occupancy of a chunk that exists.
     fn published(&self, key: ChunkKey) -> Occupancy {
         self.chunk_map
             .get(&key)
@@ -113,7 +115,7 @@ where
         configuration.init_root(commands, world_root)
     }
 
-    /// Plan this frame's spawns and retirements, and request them.
+    /// Plans this frame's spawns and retirements, and requests them.
     pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,

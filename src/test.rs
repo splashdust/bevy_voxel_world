@@ -448,9 +448,11 @@ fn the_world_survives_despawning_every_published_chunk() {
     assert!(chunk_data::<ThrottledWorld>(&mut app, IVec3::ZERO).is_none());
 }
 
-/// Where a chunk should stand in the order chunk tasks start in: chunks within
-/// `protected_distance` chunks of the camera first, then the largest on screen
-/// first, by the distance to the chunk's centre over its extent.
+/// The expected place of a chunk in the order chunk tasks start in.
+///
+/// Chunks within `protected_distance` chunks of the camera come first. The
+/// rest follow largest on screen first, ranked by the distance to the chunk's
+/// centre divided by its extent.
 fn start_order(key: ChunkKey, camera: Vec3, protected_distance: i32) -> (bool, f32) {
     let camera_chunk = (camera / CHUNK_SIZE_F).floor().as_ivec3();
     let nearest = camera_chunk.clamp(key.position, key.position + key.extent() - 1);
@@ -1097,7 +1099,7 @@ fn chunks_stream_at_the_level_chunk_lod_wants_and_answer_for_every_voxel() {
                 voxel_world.chunk_at(COARSE_SAMPLE),
                 [
                     voxel_world.get_voxel(COARSE_SAMPLE),
-                    // Between samples: answered by the sample below it.
+                    // Between two data voxels: answered by the one below it.
                     voxel_world.get_voxel(IVec3::new(69, -1, 7)),
                     voxel_world.get_voxel(IVec3::new(68, -64, 6)),
                 ],
@@ -1518,8 +1520,10 @@ fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
     }
 }
 
-/// A quad of a chunk mesh, with its corners on the voxel grid and its other
-/// floats, but for texture coordinates, as their bits.
+/// A quad of a chunk mesh.
+///
+/// Corners are snapped to the voxel grid. The other float attributes, except
+/// texture coordinates, are stored as their bits so they compare exactly.
 #[derive(Clone, Copy, Debug)]
 struct MeshQuad {
     /// Its indices, counted from its first vertex.
@@ -1532,7 +1536,7 @@ struct MeshQuad {
 }
 
 impl MeshQuad {
-    /// A key that tells apart the faces of a chunk.
+    /// A key that is different for every face of a chunk.
     fn face_key(&self) -> ([u32; 3], [[i32; 3]; 4]) {
         (
             self.normals[0],
@@ -1540,9 +1544,11 @@ impl MeshQuad {
         )
     }
 
-    /// The faces this quad covers, one quad each, as they look in it. Its
-    /// ambient occlusion must not change along an axis it spans more than one
-    /// face of.
+    /// Splits the quad into one quad per voxel face it covers, each with the
+    /// attributes the quad has there.
+    ///
+    /// The quad's ambient occlusion must not change along an axis on which it
+    /// covers more than one face.
     fn faces(&self) -> Vec<MeshQuad> {
         let [c0, c1, c2, c3] = self.corners;
         let [uv0, uv1, uv2, uv3] = self.tex_coords;
@@ -2413,7 +2419,8 @@ const SLOW_EDITED_HOLD: std::time::Duration = std::time::Duration::from_millis(1
 static SLOW_EDITED_UNTIL: std::sync::OnceLock<std::time::Instant> =
     std::sync::OnceLock::new();
 
-/// Like `SlowLookupWorld`, for a test of its own, since the hold starts once.
+/// Like `SlowLookupWorld`, but for a separate test. Each hold starts only once,
+/// from its own static, so two tests can't share one world.
 #[derive(Resource, Clone, Default)]
 struct SlowEditedWorld;
 

@@ -55,7 +55,7 @@ const SPAWNING_DISTANCE: i32 = 10;
 /// Chunks within this distance of the camera are the near ones, whose time to
 /// become Ready says how soon the player sees ground.
 const NEAR_DISTANCE: i32 = 4;
-/// Frames without any lifecycle change before stream-in counts as converged.
+/// How many frames in a row without any lifecycle change end `stream_in`.
 const SETTLE_FRAMES: u32 = 30;
 const MAX_FRAMES: u32 = 5000;
 
@@ -64,7 +64,8 @@ const MANY_RUNS: usize = 9;
 const RUNS: usize = 5;
 const IDLE_FRAMES: usize = 2000;
 const FLY_FRAMES: usize = 1200;
-/// Voxels per second of wall-clock time; just under what stream-in sustains.
+/// Camera speed in voxels per second of wall-clock time, just under the speed
+/// `stream_in` can keep up with.
 const FLY_SPEED: f32 = 180.0;
 const CAMERA_START: Vec3 = Vec3::new(16.0, 30.0, 16.0);
 const STORM_FRAMES: u32 = 300;
@@ -456,7 +457,8 @@ fn frame_metrics(prefix: &str, times: &[f64], metrics: &mut Metrics) {
         metrics.insert(format!("{prefix}.{name}"), percentile(times, p));
     }
     // p99 is the 12th-slowest of 1200 frames, so a short burst of long frames
-    // barely moves it; these see every one of them.
+    // barely moves it. The worst-1% mean, the maximum and the stutter counts
+    // below reflect every slow frame.
     let mut slowest = times.to_vec();
     slowest.sort_by(|a, b| b.total_cmp(a));
     let worst = &slowest[..times.len().div_ceil(100)];
@@ -675,14 +677,15 @@ fn run_all(only: Option<&str>) -> Metrics {
 // --- Gating ----------------------------------------------------------------
 
 enum Gate {
-    /// Higher is worse; regression when the relative increase exceeds the limit.
+    /// Lower is better: a regression when the relative increase exceeds the limit.
     Lower(f64),
-    /// Like `Lower`, for small counts: also needs an increase of more than `min`.
+    /// Like `Lower`, for small counts: a regression also needs an increase of
+    /// more than `min`.
     LowerCount {
         limit: f64,
         min: f64,
     },
-    /// Lower is worse; regression when the relative decrease exceeds the limit.
+    /// Higher is better: a regression when the relative decrease exceeds the limit.
     Higher(f64),
     ReportOnly,
 }

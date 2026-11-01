@@ -7,10 +7,7 @@ use bevy::{
     prelude::*,
     ui::{PositionType, Val},
 };
-use bevy_voxel_world::{
-    custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_U},
-    prelude::*,
-};
+use bevy_voxel_world::{custom_meshing::CHUNK_SIZE_F, prelude::*};
 use noise::{HybridMulti, NoiseFn, Perlin};
 
 const PATROL_RANGE: f32 = 180.0;
@@ -65,14 +62,6 @@ impl VoxelWorldConfig for MainWorld {
         })
     }
 
-    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
-    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
     fn chunk_lod(
         &self,
         chunk_position: IVec3,
@@ -82,12 +71,13 @@ impl VoxelWorldConfig for MainWorld {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
-        // directly set lod values to our stride lengths
+        // Full detail near the camera. Beyond four chunks, level 2: chunks four
+        // times as wide that sample every fourth voxel.
         if distance > 4.0 {
-            return 4;
+            return 2;
         }
 
-        1
+        0
     }
 }
 

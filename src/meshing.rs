@@ -79,11 +79,13 @@ const FACE_AXES: [[usize; 3]; 6] = [
 ];
 
 /// Meshes `voxels`, finding the visible faces with bitwise operations on columns
-/// of voxels. Neighbouring faces of one material whose eight neighbours in front
-/// are opaque alike merge into one quad, so ambient occlusion varies only across
-/// the axis a quad isn't merged along, and the mesh looks the same as
-/// [`block_mesh_chunk_mesh`]'s. `shape` is at most [`MAX_BINARY_MESH_EXTENT`]
-/// voxels along each axis.
+/// of voxels. `shape` is at most [`MAX_BINARY_MESH_EXTENT`] voxels along each
+/// axis.
+///
+/// Neighbouring faces merge into one quad when they have the same material and
+/// the same opaque voxels among the eight around the voxel in front of them.
+/// Their ambient occlusion is then the same, so the mesh looks the same as
+/// [`block_mesh_chunk_mesh`]'s.
 pub(crate) fn binary_chunk_mesh<I: PartialEq + Copy>(
     voxels: &[WorldVoxel<I>],
     shape: &RuntimeShape<u32, 3>,
@@ -167,8 +169,9 @@ pub(crate) fn binary_chunk_mesh<I: PartialEq + Copy>(
 
     let strides = [1, size_x, size_x * size_y];
     let row_length = MAX_BINARY_MESH_EXTENT as usize;
-    // How the face at u and v of a layer looks, at u + v * row_length: which
-    // voxels around the one in front of it are opaque, and its voxel.
+    // What decides how the face at u and v of a layer looks, stored at
+    // u + v * row_length: which voxels around the one in front of it are
+    // opaque, and its voxel.
     let mut looks = vec![(0, WorldVoxel::Unset); row_length * row_length];
     let mut quads = Vec::new();
     for (face, [normal_axis, u_axis, v_axis]) in FACE_AXES.into_iter().enumerate() {
@@ -241,11 +244,13 @@ fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
     })
 }
 
-/// Merges the faces in `rows`, where bit u of `rows[v]` is set for the face at
-/// u and v, into rectangles of faces that `looks` the same, and clears `rows`.
-/// Bit v of `row_mask` is set where `rows[v]` has a face. Calls `merged` with
-/// each rectangle's first face's u and v, its width along u, its height along v
-/// and its looks.
+/// Merges the faces in `rows` into rectangles of faces that look the same, and
+/// clears `rows`.
+///
+/// Bit u of `rows[v]` is set for the face at u and v, and bit v of `row_mask`
+/// is set where `rows[v]` has any face. `looks` returns what decides how a face
+/// looks. Calls `merged` for each rectangle with its first face's u and v, its
+/// width along u, its height along v, and what `looks` returned for it.
 fn merge_faces<L: PartialEq>(
     rows: &mut [u64],
     row_mask: u64,

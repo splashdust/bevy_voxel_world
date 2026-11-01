@@ -17,13 +17,14 @@ use crate::{
     voxel::WorldVoxel,
 };
 
-/// What the streaming policy needs to know about one camera. View and
-/// projection are kept apart, as Bevy's camera does, so that points far from
-/// the origin keep their precision.
+/// What the streaming policy needs to know about one camera.
+///
+/// The view and projection matrices are kept apart, as in Bevy's camera, so
+/// that points far from the origin keep their precision.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CameraSnapshot {
     position: Vec3,
-    /// The level-0 chunk the camera is in, computed once since every chunk's
+    /// The level-0 chunk the camera is in. Computed once, since every chunk's
     /// distance to the camera is measured from it.
     chunk_position: IVec3,
     world_from_view: Affine3A,
@@ -52,8 +53,10 @@ impl CameraSnapshot {
         }
     }
 
-    /// The ray from the near plane through a point of the viewport, given in
-    /// physical pixels from its top left corner.
+    /// The ray from the near plane through a point of the viewport.
+    ///
+    /// `point` is in physical pixels from the viewport's top left corner.
+    /// Returns `None` while the camera has no render target.
     fn viewport_ray(&self, point: Vec2) -> Option<Ray3d> {
         if self.viewport_size.cmpeq(UVec2::ZERO).any() {
             return None;
@@ -80,7 +83,8 @@ impl CameraSnapshot {
     }
 
     /// Whether the chunk contains the camera, or its centre or one of its
-    /// corners is in view, widened by `ndc_margin`.
+    /// corners is in view. `ndc_margin` widens the view on every side, in NDC
+    /// units.
     fn sees_chunk(&self, key: ChunkKey, ndc_margin: f32) -> bool {
         let chunk_min = key.world_position();
         let chunk_max = chunk_min + Vec3::splat(key.voxel_extent() as f32);
@@ -143,9 +147,11 @@ impl Occupancy {
         matches!(self, Occupancy::Empty | Occupancy::Mixed | Occupancy::Full)
     }
 
-    /// What is at a chunk whose data is published. A ray sees nothing behind
-    /// a chunk of solid voxels, since every solid voxel is opaque; translucent
-    /// voxels would change that here and in [`Occupancy::of_uniform`] together.
+    /// The occupancy of a chunk with published `data`.
+    ///
+    /// Every solid voxel counts as opaque, so a ray sees nothing behind a full
+    /// chunk. Supporting translucent voxels means changing this and
+    /// [`Occupancy::of_uniform`] together.
     pub fn of_data<I>(data: &ChunkData<I>) -> Self {
         if data.is_full {
             Occupancy::Full
@@ -156,8 +162,8 @@ impl Occupancy {
         }
     }
 
-    /// What a chunk that is `voxel` throughout would be once published: as
-    /// [`Occupancy::of_data`] would see it.
+    /// The occupancy a chunk filled with `voxel` throughout will have once
+    /// published, matching [`Occupancy::of_data`].
     pub fn of_uniform<I: PartialEq>(voxel: WorldVoxel<I>) -> Self {
         if voxel.is_solid() {
             Occupancy::Full
@@ -170,39 +176,46 @@ impl Occupancy {
 /// What the streaming policy needs to know about the chunks that exist and the
 /// voxel edits.
 pub(crate) trait ChunkLookup {
-    /// The finest chunk covering the level-0 chunk at `chunk_position`, and
-    /// what is at it; `None` when no chunk covers it.
+    /// The finest chunk covering the level-0 chunk at `chunk_position`, and its
+    /// occupancy. Returns `None` when no chunk covers it.
     fn covering(&self, chunk_position: IVec3) -> Option<(ChunkKey, Occupancy)>;
 
-    /// What is at the chunk key.
+    /// The occupancy of the chunk at `key`.
     fn occupancy(&self, key: ChunkKey) -> Occupancy;
 
-    /// The coarsest LOD level any chunk has; 0 when none exist.
+    /// The coarsest LOD level of any chunk, or 0 when no chunks exist.
     fn coarsest_level(&self) -> LodLevel;
 
-    /// Whether a voxel edit reaches the chunk at `key`: lies in its extent or in
-    /// the level-0 chunks its padding samples.
+    /// Whether a voxel edit lies in the extent of the chunk at `key`, or in the
+    /// level-0 chunks its padding samples.
     fn edits_reach(&self, key: ChunkKey) -> bool;
 }
 
-/// How many missing chunks a spawning ray queues past the published chunks in
-/// its way, in open air: the next one, and one behind it in case that is air
-/// too. Queueing more would spawn more chunks underground wherever a ray meets
-/// the ground before the ground chunk publishes.
+/// The most chunks that have not been spawned yet that one spawning ray queues
+/// before it stops.
+///
+/// Two covers the next chunk along the ray, and one behind it in case the first
+/// turns out to be air. A larger value spawns more chunks hidden behind solid
+/// ones, wherever a ray reaches solid voxels before their chunk is published.
 const RAY_LOOKAHEAD: usize = 2;
 
-/// The most rays cast in a frame, as a multiple of `spawning_rays`, while the
-/// lifecycle has room for more chunks than the rays have found.
+/// The most rays cast in one frame, as a multiple of `spawning_rays`.
+///
+/// Rays beyond `spawning_rays` are cast only while the chunk lifecycle could
+/// start more chunks than the rays have found.
 const MAX_RAYS_PER_SPAWNING_RAY: usize = 16;
 
-/// How far from a point where a ray found chunks the rays cast near it land, as
-/// a fraction of the viewport: a few chunks either way at the far end of the
-/// view, where a chunk covers around a hundredth of the viewport.
+/// How far an extra ray may land from an earlier ray that found chunks, as a
+/// fraction of the viewport size.
+///
+/// At the far end of the view a chunk covers around a hundredth of the
+/// viewport, so this is a few chunks either way.
 const RAY_JITTER: f32 = 1.0 / 16.0;
 
-/// Chunks are retired only beyond the spawning distance plus this margin, in
-/// squared chunks, leaving a thin band where existing chunks are kept but none
-/// are spawned.
+/// The margin past the spawning distance, squared and in chunks, before a chunk
+/// is retired.
+///
+/// It leaves a thin band where existing chunks are kept but none are spawned.
 const RETIRE_MARGIN_SQUARED: i32 = 1;
 
 /// The chunks to spawn and retire this frame.
@@ -212,10 +225,11 @@ pub(crate) struct StreamingPlan {
     pub retire: Vec<ChunkKey>,
 }
 
-/// Plans this frame's spawns and retirements. `chunks` are the chunks that
-/// exist, `lookup` tells what is at a chunk key, `wanted` how many chunks the
-/// lifecycle could start right away beyond those already waiting, and `rng`
-/// picks where to cast spawning rays.
+/// Plans this frame's spawns and retirements.
+///
+/// `chunks` are the chunks that exist, and `lookup` gives the occupancy of any
+/// chunk key. `wanted` is how many chunks the chunk lifecycle could start right
+/// away beyond those already Pending. `rng` picks where to cast spawning rays.
 pub(crate) fn plan<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
@@ -232,8 +246,8 @@ pub(crate) fn plan<C: VoxelWorldConfig>(
 
     plan.spawn = planner.chunks_to_spawn(wanted, rng);
     if planner.coarsest == 0 && lookup.coarsest_level() == 0 {
-        // Every chunk is at level 0 and wanted wherever it is, so only range
-        // and view retire chunks, with nothing asked per chunk about levels.
+        // Every chunk is at level 0 and level 0 is wanted everywhere, so only
+        // range and view retire chunks, and the per-chunk LOD checks are skipped.
         for key in chunks {
             if planner.out_of_range_or_view(key) {
                 plan.retire.push(key);
@@ -258,15 +272,14 @@ struct Planner<'a, C, L> {
     lookup: &'a L,
     spawning_distance: i32,
     spawning_distance_squared: i32,
-    /// The squared radius around each camera within which chunks are spawned
-    /// and kept whatever else.
+    /// The protected radius, squared.
     protected_distance_squared: i32,
-    /// Whether, out of view, only chunks in the protected radius are spawned:
-    /// when spawning in view, and when despawning out of view, since any other
-    /// chunk would be retired as soon as it existed.
+    /// Whether chunks out of view are spawned only inside the protected radius.
+    /// True with `CloseAndInView` spawning, and also with `FarAwayOrOutOfView`
+    /// despawning, since a chunk spawned out of view would retire right away.
     in_view_only: bool,
-    /// The coarsest LOD level the policy plans: the level `chunk_lod` wants at
-    /// the spawning distance.
+    /// The coarsest LOD level the policy plans, which is the level `chunk_lod`
+    /// wants at the spawning distance.
     coarsest: LodLevel,
 }
 
@@ -308,17 +321,20 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     // --- LOD levels ---------------------------------------------------------
     //
-    // The level at a position is chosen top down: the coarsest chunk containing
-    // the position is split while `chunk_lod`, asked about the chunk's level-0
-    // chunk nearest the nearest camera, wants a finer level than the chunk's.
-    // Since `chunk_lod` never wants finer detail farther away, the chunk wanted
-    // at a position is the coarsest one, up to `coarsest`, that `chunk_lod`
-    // wants at its level or coarser, and a chunk is that one exactly when
-    // `chunk_lod` also wants a finer level than its parent's for the parent.
+    // The LOD level at a position is chosen from the top down. Starting from
+    // the coarsest chunk containing the position, a chunk is split while
+    // `chunk_lod` wants a finer level for it than it has.
+    //
+    // `chunk_lod` never wants finer detail farther away. So the chunk wanted at
+    // a position is the coarsest one, up to `coarsest`, for which `chunk_lod`
+    // wants its own level or coarser. That holds for a chunk but not for its
+    // parent exactly when the chunk is the wanted one.
 
-    /// The level `chunk_lod` wants for the chunk, asked about the chunk's
-    /// level-0 chunk nearest the nearest camera. `previous` is the level the
-    /// chunk's position has now.
+    /// The level `chunk_lod` wants for the chunk.
+    ///
+    /// `chunk_lod` is asked about the chunk's level-0 chunk nearest the nearest
+    /// camera. `previous` is the level of the chunk covering that position now,
+    /// passed on as `chunk_lod`'s `previous_lod`.
     fn asked(&self, key: ChunkKey, previous: Option<LodLevel>) -> LodLevel {
         let (camera, nearest) = self
             .cameras
@@ -345,8 +361,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         }
     }
 
-    /// The key of the chunk wanted at a level-0 chunk position, where
-    /// `previous` is the level the position has now.
+    /// The key of the chunk wanted at a level-0 chunk position. `previous` is
+    /// the level of the chunk covering the position now.
     fn wanted_key(&self, chunk_position: IVec3, previous: Option<LodLevel>) -> ChunkKey {
         let mut lod_level = 0;
         while lod_level < self.coarsest {
@@ -374,9 +390,11 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     // --- Fill hints ---------------------------------------------------------
 
-    /// What a chunk that doesn't exist would be once published, as far as its
-    /// fill hint tells: `None` when the world gives no hint, or when a voxel
-    /// edit reaches the chunk, which the hint cannot know about.
+    /// The occupancy a missing chunk will have once published, according to
+    /// its fill hint.
+    ///
+    /// Returns `None` when the world gives no hint, or when a voxel edit
+    /// reaches the chunk, since the hint doesn't know about voxel edits.
     fn hinted(&self, key: ChunkKey) -> Option<Occupancy> {
         match self.config.chunk_fill_hint(key) {
             FillHint::Unknown => None,
@@ -386,10 +404,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         }
     }
 
-    /// Whether the fill hint of a chunk that doesn't exist stands for it, so
-    /// that it isn't spawned and covers its extent as a published chunk would:
-    /// it is [`hinted`](Self::hinted) and outside every camera's protected
-    /// radius, which spawns its chunks whatever their hints.
+    /// Whether a missing chunk's fill hint is used instead of spawning it.
+    ///
+    /// Such a chunk is never spawned, and covers its extent just as a published
+    /// chunk would. This holds when the chunk is [`hinted`](Self::hinted) and
+    /// outside every camera's protected radius. Chunks inside the protected
+    /// radius spawn whatever their fill hint.
     fn hint_stands_for(&self, key: ChunkKey) -> bool {
         self.hinted(key).is_some()
             && !self.is_close_to_any_camera(key, self.protected_distance_squared)
@@ -417,8 +437,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 .any(|camera| camera.sees_chunk(key, 0.0))
     }
 
-    /// Whether the policy wants no chunk at the key: it is beyond the spawning
-    /// distance, or out of view where only chunks in view are spawned.
+    /// Whether the policy wants no chunk at the key. True when it is beyond the
+    /// spawning distance, or out of view while `in_view_only` is set.
     fn unwanted_region(&self, key: ChunkKey) -> bool {
         !self.is_close_to_any_camera(key, self.spawning_distance_squared)
             || (self.in_view_only && self.out_of_view_and_unprotected(key))
@@ -426,16 +446,19 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     // --- Retiring -----------------------------------------------------------
 
-    /// Whether an existing chunk retires this frame: when it is out of range or
-    /// view, or when another level is wanted at its position and the chunks of
-    /// that level cover it, so that no hole opens where it was.
+    /// Whether an existing chunk retires this frame.
+    ///
+    /// It retires when it is out of range or view. It also retires when a
+    /// different level is wanted at its position, but only once chunks at that
+    /// level cover its extent, so that no hole opens where it was.
     fn retires(&self, key: ChunkKey) -> bool {
         self.out_of_range_or_view(key)
             || (!self.wants(key, Some(key.lod_level)) && self.covered(key))
     }
 
-    /// Whether an existing chunk is beyond the spawning distance and its
-    /// margin, or out of view where chunks out of view are despawned.
+    /// Whether an existing chunk is beyond the spawning distance plus
+    /// `RETIRE_MARGIN_SQUARED`, or out of view and unprotected under
+    /// `FarAwayOrOutOfView` despawning.
     fn out_of_range_or_view(&self, key: ChunkKey) -> bool {
         if !self.is_close_to_any_camera(
             key,
@@ -447,10 +470,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             && self.out_of_view_and_unprotected(key)
     }
 
-    /// Whether the chunks that exist cover the chunk's extent without it: a
-    /// published chunk above it, or published chunks below it wherever the
-    /// policy wants a chunk at all. A missing chunk whose fill hint stands for
-    /// it covers its extent as a published one would.
+    /// Whether other chunks cover the chunk's extent, so it can retire.
+    ///
+    /// The extent is covered by a published chunk above it, or by published
+    /// chunks below it wherever the policy wants a chunk at all. A missing
+    /// chunk whose fill hint is used instead of spawning it counts as
+    /// published.
     fn covered(&self, key: ChunkKey) -> bool {
         for lod_level in key.lod_level + 1..=self.coarsest {
             let above = ChunkKey::containing_chunk(key.position, lod_level);
@@ -466,8 +491,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     /// Whether the region of the chunk at `key` is covered by published or
     /// hinted chunks at its level or finer, or no chunk is wanted there.
-    /// `retiring` is the level of the chunk about to retire, which the region
-    /// has for now.
+    /// `retiring` is the level of the chunk about to retire, which still covers
+    /// the region.
     fn covered_below(&self, key: ChunkKey, retiring: LodLevel) -> bool {
         if self.published_or_hinted(key) || self.unwanted_region(key) {
             return true;
@@ -479,8 +504,9 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             .all(|child| self.covered_below(child, retiring))
     }
 
-    /// Whether the chunk at `key` is published, or missing with a fill hint that
-    /// stands for it. A spawned chunk is waited for even when it is hinted.
+    /// Whether the chunk at `key` is published, or missing with a fill hint used
+    /// in its place. A chunk that is spawned but not yet published is waited
+    /// for, even when it has a fill hint.
     fn published_or_hinted(&self, key: ChunkKey) -> bool {
         match self.lookup.occupancy(key) {
             Occupancy::Missing => self.hint_stands_for(key),
@@ -499,14 +525,14 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
         let mut spawn = Vec::new();
         let mut visited = HashSet::new();
-        // Chunks queued by the protected cubes and the rays, so a ray can tell
-        // whether it found a chunk no other ray had.
+        // Every chunk queued so far, so a ray can tell whether it found a chunk
+        // that nothing else had queued.
         let mut queued = HashSet::new();
         let mut chunks_deque =
             VecDeque::with_capacity(config.spawning_rays() * RAY_LOOKAHEAD);
 
-        // Every camera's protected cube is queued first, nearest chunks first, so
-        // they spawn before any other chunk.
+        // The cube of chunks within the protected radius of each camera is
+        // queued first, nearest chunks first, so they spawn before any other.
         let protected_distance = config.min_despawn_distance() as i32;
         let mut protected_offsets = Vec::new();
         for x in -protected_distance..=protected_distance {
@@ -526,13 +552,16 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             }
         }
 
-        // Each frame some random points on the screen get a ray. While the lifecycle
-        // could start more chunks than the rays have found, more rays are cast, up to
-        // a limit, as long as they keep finding chunks: a ray that ends at a chunk
-        // that isn't published yet finds nothing, and once every ray does, the chunks
-        // found so far must publish before more can be found. The chunks to find lie
-        // in patches of the view, such as the sky above a far ridge, so every other
-        // extra ray is cast near a point where a ray found chunks this frame.
+        // Each frame, `spawning_rays` rays are cast through random points of the
+        // viewports. While the chunk lifecycle could start more chunks than the
+        // rays have found, extra rays are cast, up to `MAX_RAYS_PER_SPAWNING_RAY`
+        // times as many, until `spawning_rays` rays in a row find nothing. A ray
+        // that stops at an unpublished chunk finds nothing, so once every ray
+        // does, the chunks found so far must publish before more can be found.
+        //
+        // Missing chunks tend to lie in patches of the view, such as the sky
+        // above a distant hill, so every other extra ray is cast near a point
+        // where an earlier ray found chunks this frame.
         let base_rays = config.spawning_rays();
         let max_rays = base_rays.saturating_mul(MAX_RAYS_PER_SPAWNING_RAY);
         let m = config.spawning_ray_margin();
@@ -609,8 +638,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             }
 
             // If we get here, we queue the neighbors, at whatever level is
-            // wanted where they are. The flood continues through hinted chunks
-            // as through spawned ones.
+            // wanted where they are. The flood fill also continues past chunks
+            // whose fill hint is used instead of spawning them.
             let extent = key.extent();
             for x in -1..=1 {
                 for y in -1..=1 {
@@ -632,18 +661,27 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         spawn.into_iter().map(|(_, key)| key).collect()
     }
 
-    /// Shoots a ray from the given point, and queues the first missing chunks past
-    /// the published chunks in its way, returning how many no ray had queued. The
-    /// ray walks through chunks whose published voxels have air in them, stepping
-    /// by the extent of the chunk wanted where it is, so that it crosses far air,
-    /// where the chunks are coarse, in a few steps. It stops at a full chunk,
-    /// since nothing behind it can be seen, and at a chunk that isn't published
-    /// yet, since that chunk decides whether the ones behind it can be. So chunks
-    /// spawn from the cameras outwards as the chunks in front of them publish, and
-    /// chunks hidden underground are hardly ever spawned. A missing chunk whose
-    /// fill hint stands for it is walked through or stopped at as its hint says,
-    /// without being queued, so where the world hints its open air the ray
-    /// reaches the terrain in one go.
+    /// Shoots a ray from the given point and queues yet unpublished chunks.
+    /// Returns how many were added to the queue.
+    ///
+    /// Each step takes the ray into the next chunk along its path. Far from the
+    /// camera, where `chunk_lod` asks for large chunks, the steps are large too,
+    /// so the ray crosses open air in a few steps.
+    ///
+    /// The ray passes through chunks that contain air. It stops at a chunk that
+    /// is completely solid, because nothing behind it can be seen. It also stops
+    /// at a chunk that is spawned but not yet published, because what lies
+    /// behind it is unknown until it has generated. As a result, chunks spawn
+    /// from the camera outwards as the chunks in front of them publish, and
+    /// chunks hidden behind solid ones are rarely spawned.
+    ///
+    /// When the ray reaches a chunk that has not been spawned yet, it queues it
+    /// and continues. It queues at most `RAY_LOOKAHEAD` such chunks, then stops.
+    ///
+    /// A chunk with a fill hint is never queued. The ray passes through a chunk
+    /// hinted empty and stops at a chunk hinted solid, just as if the chunk
+    /// existed. A world that hints the air above its terrain therefore lets the
+    /// ray reach the terrain in one go.
     fn queue_chunks_intersecting_ray_from_point(
         &self,
         camera: &CameraSnapshot,
@@ -660,11 +698,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         let mut t = 0.0;
         while t < (self.spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = chunk_containing(current.floor().as_ivec3());
-            // The chunk wanted here, what is at it, and what decides whether
-            // anything behind can be seen while the wanted chunk is missing:
-            // the chunk covering the position now, if any.
+            // The chunk wanted here and its occupancy. `behind` is the
+            // occupancy of the chunk covering this position now, if any. While
+            // the wanted chunk is missing, it decides whether the ray goes on.
             let (key, mut occupancy, behind) = if self.coarsest == 0 {
-                // Only level 0 is planned, so this is the plain lookup it was.
+                // Only level 0 is planned, so the wanted chunk is the level-0
+                // chunk here.
                 let key = ChunkKey::new(chunk_pos, 0);
                 (key, self.lookup.occupancy(key), Occupancy::Empty)
             } else {
@@ -714,7 +753,7 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
 /// The level-0 chunk of the chunk at `key` nearest to `chunk_position`.
 fn nearest_chunk(key: ChunkKey, chunk_position: IVec3) -> IVec3 {
-    // A level-0 chunk is its own nearest point; this runs for every existing
+    // A level-0 chunk is its own nearest chunk. This runs for every existing
     // chunk every frame, so it skips the clamp there.
     if key.lod_level == 0 {
         return key.position;
@@ -724,7 +763,7 @@ fn nearest_chunk(key: ChunkKey, chunk_position: IVec3) -> IVec3 {
 
 // --- Start order ------------------------------------------------------------
 
-/// A camera's position, as the start order measures it.
+/// A camera's position, as [`StartOrder`] measures distances from it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CameraPosition {
     position: Vec3,
@@ -751,23 +790,25 @@ impl From<&CameraSnapshot> for CameraPosition {
     }
 }
 
-/// Where a chunk stands in the order chunks spawn and their tasks start in.
-/// Chunks within a camera's protected radius come first, nearest first; the
-/// rest follow by their size on screen, largest first. A chunk's size on screen
-/// goes as its extent over its distance, so a chunk at level `L` ranks with a
-/// chunk at level `L - 1` half as far: in a world with LOD levels the far,
-/// coarse bands fill in alongside the near ones instead of after all of them.
+/// A chunk's place in the order chunks spawn and their chunk tasks start in.
 ///
-/// One integer, since every pending chunk is ordered every frame: the squared
-/// distance from the nearest camera to the chunk's centre over the chunk's
-/// squared extent, as the bits of that non-negative `f32`, which order as the
-/// float does, with the sign bit set for chunks outside the protected radius.
+/// Chunks within a camera's protected radius come first, nearest first. The
+/// rest follow by their size on screen, largest first. Size on screen goes as
+/// extent over distance, so a chunk at level `L` ranks the same as a chunk at
+/// level `L - 1` half as far away. In a world with several LOD levels, far
+/// coarse chunks therefore fill in alongside near fine ones, not after them.
+///
+/// It is a single integer, because every Pending chunk is ordered every frame.
+/// The value is the squared distance from the nearest camera to the chunk's
+/// centre, divided by the chunk's squared extent. That non-negative `f32` is
+/// stored as its bits, which sort in the same order as the float. The sign bit
+/// is set for chunks outside the protected radius, so they sort last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StartOrder(u32);
 
 impl StartOrder {
-    /// `protected_distance` is the protected radius in chunks,
-    /// `min_despawn_distance`.
+    /// The start order of the chunk at `key`. `protected_distance` is the
+    /// protected radius in chunks, as `min_despawn_distance` gives it.
     #[inline]
     pub fn of(
         key: ChunkKey,
@@ -783,10 +824,10 @@ impl StartOrder {
         let distance_squared_in_extents = distance_squared / (extent * extent);
         debug_assert!(distance_squared_in_extents.is_sign_positive());
 
-        // A protected chunk has a level-0 chunk within the protected radius of
-        // the camera's, so its centre is within half its diagonal plus the
-        // radius of the camera. Every pending chunk is ordered every frame, so
-        // only chunks that close take the exact test.
+        // A chunk inside the protected radius has a level-0 chunk within that
+        // radius of the camera's, so its centre is at most half its diagonal
+        // plus the radius away, in extents. That cheap check runs first, and
+        // only chunks passing it take the exact test.
         let protected_distance_squared = (protected_distance as i32).pow(2);
         let near_enough = (HALF_DIAGONAL + protected_distance as f32).powi(2);
         let protected = distance_squared_in_extents <= near_enough
@@ -1114,7 +1155,7 @@ mod tests {
             "a chunk behind the camera does not spawn"
         );
 
-        // Once the chunks around the camera are published, rays walk out of them.
+        // Once the chunks around the camera are published, rays pass through them.
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &air_around(C));
 
         assert!(
@@ -1295,8 +1336,8 @@ mod tests {
         assert!(spawned(&plan).contains(&(NEGATIVE + IVec3::new(0, 0, -2))));
     }
 
-    /// The chunks around a camera's chunk, published as air, so rays walk out
-    /// of them.
+    /// The chunks around a camera's chunk, published as air, so rays pass out
+    /// through them.
     fn air_around(chunk: IVec3) -> Occupied {
         level_0(within(chunk, 1), Occupancy::Empty)
     }

@@ -27,8 +27,8 @@ impl VoxelWorldConfig for MainWorld {
 
     // The terrain lies between chunk rows 0 and 5: below the sea level at y = 1
     // everything is rock, and the highest peaks (about y = 170) end in row 5.
-    // Telling the streaming policy so lets its rays walk through the air and
-    // stop at the rock without spawning either.
+    // Giving these as fill hints lets spawning rays pass through the air and
+    // stop at the rock, without spawning chunks for either.
     fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
         if key.position.y + key.extent() <= 0 {
             FillHint::Uniform(WorldVoxel::Solid(3))

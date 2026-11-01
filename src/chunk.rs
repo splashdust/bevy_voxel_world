@@ -24,8 +24,8 @@ pub const CHUNK_SIZE_F: f32 = CHUNK_SIZE_U as f32;
 // A chunk with 1-voxel boundary padding.
 pub(crate) const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U + 2;
 
-/// `log2(CHUNK_SIZE)`: chunk and level arithmetic shifts instead of dividing,
-/// since a division by a divisor only known at run time costs tens of cycles.
+/// `log2(CHUNK_SIZE)`. Chunk and LOD level arithmetic shifts by this instead
+/// of dividing, since dividing by a value only known at run time is slow.
 const CHUNK_SIZE_SHIFT: i32 = CHUNK_SIZE_U.trailing_zeros() as i32;
 const _: () = assert!(CHUNK_SIZE_U.is_power_of_two());
 
@@ -44,8 +44,7 @@ pub(crate) fn chunk_containing(voxel_position: IVec3) -> IVec3 {
 /// A chunk at LOD level 0 spans `CHUNK_SIZE` voxels on a side. A chunk at level
 /// `L` spans `CHUNK_SIZE << L` voxels and contains the eight level `L - 1`
 /// chunks in that space. `position` is the chunk's minimum corner in level-0
-/// chunk units, so a world whose chunks are all at level 0 sees the chunk
-/// positions it always has, with a level of zero.
+/// chunk units, so for a level-0 chunk it is the plain chunk position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
     /// The chunk's minimum corner, in level-0 chunks: a multiple of
@@ -197,18 +196,22 @@ pub type PaddedChunkShape =
 
 pub type VoxelArray<I> = Arc<[WorldVoxel<I>]>;
 
-/// The voxels between a chunk's data voxels along each axis: the extent of a
-/// chunk at `lod_level` divided by the interior of its padded data `shape`.
+/// The spacing in voxels between a chunk's data voxels along each axis.
+///
+/// It is the extent of a chunk at `lod_level` divided by the interior of its
+/// padded data `shape`.
 fn sample_spacing(shape: UVec3, lod_level: LodLevel) -> Vec3 {
     let interior = shape.saturating_sub(UVec3::splat(2)).max(UVec3::ONE);
     Vec3::splat((CHUNK_SIZE_I << lod_level) as f32) / interior.as_vec3()
 }
 
-/// The data coordinate along one axis of the data voxel covering the voxel
-/// `offset` voxels from a chunk's origin, where the chunk's data voxels are
-/// `scale` voxels apart and `extent` long: the last data voxel at or before the
-/// offset, so that a coarse chunk answers for every voxel in its extent with
-/// the sample that stands for it. `None` outside the padded data.
+/// The data coordinate, along one axis, of the data voxel that covers the voxel
+/// `offset` voxels from a chunk's origin.
+///
+/// The chunk's data voxels are `scale` voxels apart, and there are `extent` of
+/// them along the axis. The covering data voxel is the last one at or before
+/// the offset, so in a chunk above level 0 every voxel maps to a data voxel.
+/// Returns `None` outside the padded data.
 fn data_coordinate(offset: i32, scale: f32, extent: u32) -> Option<u32> {
     if scale <= f32::EPSILON || extent == 0 {
         return None;
@@ -316,11 +319,13 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         }
     }
 
-    /// Returns the voxel at the given world-space position: the data voxel
-    /// covering it, if the position is within the chunk's padded data. Above
-    /// LOD level 0 a data voxel covers several voxels, `1 << L` on a side with
-    /// the default shapes, so this answers for every voxel of a coarse chunk
-    /// with the sample that stands for it, as the chunk's mesh shows it.
+    /// Returns the voxel at the given world-space position, if the position is
+    /// within the chunk's padded data.
+    ///
+    /// The answer is the data voxel covering the position. Above LOD level 0
+    /// one data voxel covers several voxels, `1 << L` on a side with the default
+    /// shapes, so every voxel it covers gets its value, as the chunk's mesh
+    /// shows it.
     pub fn get_voxel_at_world_position(
         &self,
         world_position: IVec3,
@@ -435,8 +440,8 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
         self.has_generated
     }
 
-    /// Whether every voxel of the chunk, its padding aside, is `voxel`, taking
-    /// `Air` and `Unset` as the same: nothing there.
+    /// Whether every voxel of the chunk, not counting the padding, is `voxel`.
+    /// `Air` and `Unset` count as the same.
     #[cfg(debug_assertions)]
     pub(crate) fn interior_is(&self, voxel: WorldVoxel<I>) -> bool {
         let same = |other: WorldVoxel<I>| {
@@ -573,9 +578,11 @@ impl<'a, I: Hash + Copy + PartialEq> PreviousVoxels<'a, I> {
     }
 }
 
-/// Scales a chunk mesh, built for a level-0 chunk, to the extent of a chunk at
-/// `lod_level`. A chunk mesh puts the corner of the chunk's first voxel at
-/// (1, 1, 1), one voxel in past the padding, and the scaling keeps it there.
+/// Scales a chunk mesh, built as for a level-0 chunk, to the extent of a chunk
+/// at `lod_level`.
+///
+/// A chunk mesh puts the corner of the chunk's first voxel at (1, 1, 1), just
+/// inside the padding, and the scaling keeps that corner in place.
 fn scale_mesh_to_level(mesh: &mut Mesh, lod_level: LodLevel) {
     if lod_level == 0 {
         return;
@@ -682,9 +689,11 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         }
     }
 
-    /// Checks the generated voxels against the chunk's fill hint, which a world
-    /// gives for the chunk without its edits, so a chunk with edits is not
-    /// checked. Debug builds only.
+    /// Checks the generated voxels against the chunk's fill hint. Debug builds
+    /// only.
+    ///
+    /// A fill hint doesn't account for voxel edits, so a chunk with voxel edits
+    /// is not checked.
     #[cfg(debug_assertions)]
     pub fn check_hint(&mut self) {
         if let FillHint::Uniform(voxel) = self.hint {
@@ -721,8 +730,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         self.chunk_data.has_generated = true;
 
         // The generated voxel at `block_pos`, which is at data coordinates `x`,
-        // `y` and `z`: the previous data's voxel where it has one, else the
-        // consumer's.
+        // `y` and `z`. It is the previous data's voxel where there is one, and
+        // otherwise the one `voxel_data_fn` returns.
         let mut generated = |block_pos: IVec3, x: usize, y: usize, z: usize| {
             let previous_voxel = previous_voxels
                 .as_ref()

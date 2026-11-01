@@ -32,8 +32,10 @@ use crate::{
     voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
 };
 
-/// The fewest chunk tasks kept running per task pool thread. More run once the
-/// pool finishes more than half as many in a frame.
+/// The fewest chunk tasks kept running per task pool thread.
+///
+/// More run once the pool finishes more than half that many in a frame, since
+/// the target is twice the number finished in the last frame.
 const MIN_TASKS_PER_THREAD: usize = 4;
 
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
@@ -54,19 +56,20 @@ pub enum ChunkStatus {
 /// Public only because `VoxelWorld` queries it; this module isn't exported.
 #[derive(Component)]
 pub enum ChunkState<T: Send + Sync + 'static> {
-    /// `priority` chunks get task slots before the others: follow-ups of
-    /// superseded tasks and remeshes after an edit.
+    /// `priority` chunks start their chunk task before the others. They are
+    /// the follow-ups of superseded tasks, and chunks remeshing after a voxel
+    /// edit.
     Pending {
         priority: bool,
     },
     /// `superseded` turns true when a voxel edit makes the running task's
-    /// inputs stale; a follow-up task starts once it is published.
+    /// inputs stale. A follow-up task starts once this one is published.
     Generating {
         task: T,
         superseded: bool,
     },
     Ready,
-    /// `kept` turns true once the chunk has lived through a frame while retiring.
+    /// `kept` turns true once the chunk has been Retiring for a whole frame.
     Retiring {
         kept: bool,
     },
@@ -124,7 +127,9 @@ impl<T: Send + Sync + 'static> ChunkState<T> {
 }
 
 /// The rules of the chunk lifecycle: the state a chunk moves to when `event`
-/// happens to it in `state`. Retiring is the only way a running task is dropped.
+/// happens to it in `state`.
+///
+/// Retiring is the only way a running chunk task is dropped.
 pub(crate) fn transition<T: Send + Sync + 'static>(
     state: ChunkState<T>,
     event: ChunkEvent<T>,
@@ -156,7 +161,8 @@ pub(crate) fn transition<T: Send + Sync + 'static>(
             };
             (state, Effect::Publish)
         }
-        // The chunk already had its turn, so it shouldn't wait for another.
+        // The chunk's task already started once, so it shouldn't wait behind
+        // the other Pending chunks again.
         (S::Generating { .. }, E::CachedMeshExpired) => {
             (S::Pending { priority: true }, Effect::None)
         }
@@ -266,9 +272,10 @@ impl<C> ChunkIndex<C> {
         self.retiring.remove(&entity);
     }
 
-    /// How many chunk tasks to keep running, within `cap`: enough to keep the
-    /// task pool busy until the next frame, judged by how many finished in the
-    /// last one.
+    /// How many chunk tasks to keep running, at most `cap`.
+    ///
+    /// The target is enough to keep the task pool busy until the next frame,
+    /// judged by how many tasks finished in the last one.
     fn running_tasks_target(&self, cap: usize) -> usize {
         let threads = AsyncComputeTaskPool::get().thread_num().max(1);
         (2 * self.finished_last_frame)
@@ -276,8 +283,8 @@ impl<C> ChunkIndex<C> {
             .min(cap)
     }
 
-    /// How many chunks could start a task right away, beyond those waiting for
-    /// one, with `cap` running tasks at most.
+    /// How many more chunks could start a chunk task right away, beyond those
+    /// already Pending, with at most `cap` tasks running.
     pub(crate) fn spawn_budget(&self, cap: usize) -> usize {
         self.running_tasks_target(cap).saturating_sub(
             self.generating.len() + self.pending.len() + self.priority.len(),
@@ -329,13 +336,14 @@ impl<C> ChunkIndex<C> {
     }
 }
 
-/// What the rest of the crate asks of the chunk lifecycle this frame, by chunk
-/// key. Requests for chunks that don't exist, or that are retiring, are
-/// ignored, except spawning.
+/// What the rest of the crate asks of the chunk lifecycle this frame.
+///
+/// Requests other than spawns are ignored for chunks that don't exist or are
+/// Retiring.
 #[derive(Resource)]
 pub(crate) struct ChunkRequests<C> {
-    /// Voxels whose edits changed, which make the chunks at every level whose
-    /// padded voxels include them stale.
+    /// Positions of voxels whose voxel edits changed. Every chunk, at any LOD
+    /// level, whose padded voxels include one of them is now stale.
     pub edited: Vec<IVec3>,
     /// Chunks to spawn.
     pub spawn: Vec<ChunkKey>,
@@ -432,13 +440,17 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         }
     }
 
-    /// Starts chunk tasks for Pending chunks: priority chunks first, oldest
-    /// first, then the others in their [`StartOrder`]: chunks in a camera's
-    /// protected radius, then the largest on screen. Priority chunks are few and
-    /// waited for, so they start whenever the cap allows. Of the others, only as
-    /// many run at once as keep the task pool busy until the next frame, so the
-    /// chunks still waiting can be started in whatever order the cameras are in
-    /// by then.
+    /// Starts chunk tasks for Pending chunks.
+    ///
+    /// Priority chunks start first, oldest first. The others follow in their
+    /// [`StartOrder`]: chunks in a camera's protected radius, then the largest
+    /// on screen.
+    ///
+    /// Priority chunks are few and something waits on them, so they start
+    /// whenever `max_active_chunk_threads` allows. Of the others, only as many
+    /// run at once as keep the task pool busy until the next frame. The chunks
+    /// still Pending are then ordered again next frame, from where the cameras
+    /// are by then.
     #[allow(clippy::too_many_arguments)]
     pub fn start_chunk_tasks(
         mut index: ResMut<ChunkIndex<C>>,
@@ -685,8 +697,8 @@ struct TaskStarter<'a, C: VoxelWorldConfig> {
 }
 
 impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
-    /// Starts the chunk's task, unless the chunk is no longer Pending, and says
-    /// whether it did.
+    /// Starts the chunk's task, unless the chunk is no longer Pending. Returns
+    /// whether it started.
     #[allow(clippy::type_complexity)]
     fn start(
         &self,
@@ -696,7 +708,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         ev_chunk_will_remesh: &mut MessageWriter<ChunkWillRemesh<C>>,
     ) -> bool {
         let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
-            // Despawned behind the lifecycle's back.
+            // The entity was despawned by something other than the lifecycle.
             index.pending.remove(&entity);
             return false;
         };
