@@ -10,6 +10,7 @@
 - `minimal()` worlds publish voxel data, so `get_voxel` and `ChunkWillSpawn` work without rendering.
 - Chunk data no longer waits for the voxel texture to load; only meshes do.
 - A chunk is despawned one frame after `ChunkWillDespawn`, so systems reading that message can still query it.
+- Chunk meshes merge neighbouring faces that look the same into one quad: a chunk of noise terrain has 41% fewer quads, and flat ground is one quad per chunk.
 - Performance: in the `chunk_lifecycle` benchmark, chunks stream in 2.5× faster (4.9× on flat terrain), edits are published 2.6× sooner, and frames while voxels are being edited take a quarter of the time (worst 1% from 2.06 ms to 0.49 ms). Meshing a chunk of noise terrain is 1.5× faster.
 - Fix: a chunk edited every frame now publishes. Before, each edit cancelled its running task.
 - Fix: when `set_voxel` sets a position more than once, the last voxel set wins, in `get_voxel` too. Setting an edited voxel to another voxel and back within a frame no longer remeshes its chunk.
@@ -42,6 +43,9 @@
 - `max_spawn_per_frame` caps spawns.
   - Before: it limited a queue of candidate chunks, not how many spawned.
   - Now: it is the most chunks spawned in a frame, nearest a camera first. If you set it, check the value still suits you.
+- A chunk mesh quad can cover many voxels.
+  - Before: each quad was one voxel's face, with texture coordinates from 0 to 1.
+  - Now: texture coordinates still count one per voxel, so they run from 0 to the quad's width and height. A custom material that samples a texture with them needs a repeating sampler (`ImageAddressMode::Repeat`), as the built-in material has.
 
 ## 0.18
 

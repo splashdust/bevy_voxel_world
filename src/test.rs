@@ -2,18 +2,19 @@ use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::configuration::VoxelWorldConfig;
 use crate::meshing::{
-    binary_chunk_mesh, block_mesh_chunk_mesh, generate_chunk_mesh_for_shape,
+    binary_chunk_mesh, block_mesh_chunk_mesh, generate_chunk_mesh,
+    generate_chunk_mesh_for_shape,
 };
 use crate::prelude::*;
 use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
-    chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I},
+    chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
     prelude::VoxelWorldCamera,
     voxel_world::*,
 };
@@ -939,98 +940,267 @@ fn generate_chunk_mesh_has_constant_size_for_random_shapes() {
     }
 }
 
-/// The quads of `mesh`, sorted. Each holds its indices relative to its first
-/// vertex, then its four vertices' attributes, with floats as their bits.
-fn sorted_quads(mesh: &Mesh) -> Vec<Vec<u32>> {
-    let attribute = |id| -> Vec<Vec<u32>> {
-        match mesh.attribute(id) {
-            Some(VertexAttributeValues::Float32x2(values)) => values
-                .iter()
-                .map(|value| value.map(f32::to_bits).to_vec())
-                .collect(),
-            Some(VertexAttributeValues::Float32x3(values)) => values
-                .iter()
-                .map(|value| value.map(f32::to_bits).to_vec())
-                .collect(),
-            Some(VertexAttributeValues::Float32x4(values)) => values
-                .iter()
-                .map(|value| value.map(f32::to_bits).to_vec())
-                .collect(),
-            Some(VertexAttributeValues::Uint32x3(values)) => {
-                values.iter().map(|value| value.to_vec()).collect()
-            }
-            other => panic!("unexpected attribute layout: {other:?}"),
-        }
-    };
-    let attributes = [
-        Mesh::ATTRIBUTE_POSITION,
-        Mesh::ATTRIBUTE_NORMAL,
-        Mesh::ATTRIBUTE_UV_0,
-        ATTRIBUTE_TEX_INDEX,
-        Mesh::ATTRIBUTE_COLOR,
-    ]
-    .map(attribute);
-    let Some(Indices::U32(indices)) = mesh.indices() else {
-        panic!("expected u32 indices");
-    };
-    assert_eq!(attributes[0].len() * 6, indices.len() * 4);
+/// A quad of a chunk mesh, with its corners on the voxel grid and its other
+/// floats, but for texture coordinates, as their bits.
+#[derive(Clone, Copy, Debug)]
+struct MeshQuad {
+    /// Its indices, counted from its first vertex.
+    indices: [u32; 6],
+    corners: [IVec3; 4],
+    normals: [[u32; 3]; 4],
+    tex_coords: [Vec2; 4],
+    materials: [[u32; 3]; 4],
+    colors: [[u32; 4]; 4],
+}
 
-    let mut quads: Vec<Vec<u32>> = indices
+impl MeshQuad {
+    /// A key that tells apart the faces of a chunk.
+    fn face_key(&self) -> ([u32; 3], [[i32; 3]; 4]) {
+        (
+            self.normals[0],
+            self.corners.map(|corner| corner.to_array()),
+        )
+    }
+
+    /// The faces this quad covers, one quad each, as they look in it. Its
+    /// ambient occlusion must not change along an axis it spans more than one
+    /// face of.
+    fn faces(&self) -> Vec<MeshQuad> {
+        let [c0, c1, c2, c3] = self.corners;
+        let [uv0, uv1, uv2, uv3] = self.tex_coords;
+        assert!(
+            c3 == c1 + c2 - c0 && (uv3 - (uv1 + uv2 - uv0)).abs().max_element() < 1e-3,
+            "not a rectangle: {self:?}"
+        );
+        let (width, height) =
+            ((c1 - c0).abs().element_sum(), (c2 - c0).abs().element_sum());
+        let (u, v) = ((c1 - c0) / width, (c2 - c0) / height);
+        let [ao0, ao1, ao2, ao3] = self.colors;
+        assert!(
+            width == 1 || (ao0 == ao1 && ao2 == ao3),
+            "ambient occlusion changes along a merged axis: {self:?}"
+        );
+        assert!(
+            height == 1 || (ao0 == ao2 && ao1 == ao3),
+            "ambient occlusion changes along a merged axis: {self:?}"
+        );
+        let tex_coord = |a: i32, b: i32| {
+            uv0 + (uv1 - uv0) * a as f32 / width as f32
+                + (uv2 - uv0) * b as f32 / height as f32
+        };
+        let corner_offsets = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        let mut faces = Vec::new();
+        for b in 0..height {
+            for a in 0..width {
+                faces.push(MeshQuad {
+                    corners: corner_offsets.map(|(i, j)| c0 + u * (a + i) + v * (b + j)),
+                    tex_coords: corner_offsets.map(|(i, j)| tex_coord(a + i, b + j)),
+                    ..*self
+                });
+            }
+        }
+        faces
+    }
+}
+
+/// The quads of `mesh`, a chunk mesh of the padded `shape`.
+fn mesh_quads(mesh: &Mesh, shape: UVec3) -> Vec<MeshQuad> {
+    let (
+        Some(VertexAttributeValues::Float32x3(positions)),
+        Some(VertexAttributeValues::Float32x3(normals)),
+        Some(VertexAttributeValues::Float32x2(tex_coords)),
+        Some(VertexAttributeValues::Uint32x3(materials)),
+        Some(VertexAttributeValues::Float32x4(colors)),
+        Some(Indices::U32(indices)),
+    ) = (
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+        mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+        mesh.attribute(Mesh::ATTRIBUTE_UV_0),
+        mesh.attribute(ATTRIBUTE_TEX_INDEX),
+        mesh.attribute(Mesh::ATTRIBUTE_COLOR),
+        mesh.indices(),
+    )
+    else {
+        panic!("unexpected chunk mesh layout");
+    };
+    assert_eq!(positions.len() * 6, indices.len() * 4);
+    let voxel_size = CHUNK_SIZE_F / (shape - 2).max(UVec3::ONE).as_vec3();
+
+    indices
         .as_chunks::<6>()
         .0
         .iter()
         .map(|quad_indices| {
             let first = *quad_indices.iter().min().unwrap();
-            let mut quad: Vec<u32> = quad_indices.iter().map(|i| i - first).collect();
-            for vertex in first..first + 4 {
-                for values in &attributes {
-                    quad.extend(&values[vertex as usize]);
-                }
+            let vertex = |corner: usize| first as usize + corner;
+            MeshQuad {
+                indices: quad_indices.map(|index| index - first),
+                corners: std::array::from_fn(|corner| {
+                    let position = Vec3::from(positions[vertex(corner)]);
+                    ((position - 1.0) / voxel_size + 1.0).round().as_ivec3()
+                }),
+                normals: std::array::from_fn(|corner| {
+                    normals[vertex(corner)].map(f32::to_bits)
+                }),
+                tex_coords: std::array::from_fn(|corner| {
+                    Vec2::from(tex_coords[vertex(corner)])
+                }),
+                materials: std::array::from_fn(|corner| materials[vertex(corner)]),
+                colors: std::array::from_fn(|corner| {
+                    colors[vertex(corner)].map(f32::to_bits)
+                }),
             }
-            quad
+        })
+        .collect()
+}
+
+/// Voxels of a few solid boxes of random materials on solid ground, with a
+/// sprinkling of single voxels.
+fn blocky_voxels(rng: &mut StdRng, shape: UVec3) -> Vec<WorldVoxel<u8>> {
+    let runtime_shape = RuntimeShape::<u32, 3>::new(shape.to_array());
+    let ground = rng.random_range(0..shape.y);
+    let boxes: Vec<_> = (0..rng.random_range(1..8))
+        .map(|_| {
+            let mut corner = || {
+                UVec3::new(
+                    rng.random_range(0..shape.x),
+                    rng.random_range(0..shape.y),
+                    rng.random_range(0..shape.z),
+                )
+            };
+            let (a, b) = (corner(), corner());
+            (
+                a.min(b),
+                a.max(b),
+                WorldVoxel::Solid(rng.random_range(1..4)),
+            )
         })
         .collect();
-    quads.sort();
-    quads
+
+    (0..runtime_shape.size())
+        .map(|index| {
+            let position = UVec3::from(runtime_shape.delinearize(index));
+            let in_box = boxes.iter().rev().find(|(min, max, _)| {
+                position.cmpge(*min).all() && position.cmple(*max).all()
+            });
+            if rng.random_bool(0.01) {
+                WorldVoxel::Solid(rng.random_range(1..4))
+            } else if let Some((_, _, voxel)) = in_box {
+                *voxel
+            } else if position.y < ground {
+                WorldVoxel::Solid(1)
+            } else {
+                WorldVoxel::Air
+            }
+        })
+        .collect()
+}
+
+/// Voxels each solid with the chance `solid_chance`, of a random material, and
+/// otherwise air or unset.
+fn noisy_voxels(
+    rng: &mut StdRng,
+    shape: UVec3,
+    solid_chance: f64,
+) -> Vec<WorldVoxel<u8>> {
+    (0..shape.element_product())
+        .map(|_| {
+            if rng.random_bool(solid_chance) {
+                WorldVoxel::Solid(rng.random_range(1..4))
+            } else if rng.random_bool(0.5) {
+                WorldVoxel::Air
+            } else {
+                WorldVoxel::Unset
+            }
+        })
+        .collect()
 }
 
 #[test]
-fn binary_meshing_matches_block_mesh() {
+fn binary_meshing_covers_block_mesh_faces_with_quads_that_look_the_same() {
     let mut rng = StdRng::seed_from_u64(0x5EED);
     let texture_index_mapper: TextureIndexMapperFn<u8> =
         Arc::new(|material| [material as u32, material as u32 + 4, material as u32 + 8]);
+    let (mut quad_count, mut face_count) = (0, 0);
 
-    for round in 0..40 {
-        let shape = if round == 0 {
-            UVec3::splat(34)
-        } else {
-            let dim = |rng: &mut StdRng| rng.random_range(3..=64);
-            UVec3::new(dim(&mut rng), dim(&mut rng), dim(&mut rng))
+    for round in 0..60 {
+        let shape = match round {
+            0 | 1 => UVec3::splat(34),
+            2 | 3 => UVec3::splat(18),
+            _ => {
+                let dim = |rng: &mut StdRng| rng.random_range(3..=64);
+                UVec3::new(dim(&mut rng), dim(&mut rng), dim(&mut rng))
+            }
         };
-        let solid_chance = [0.1, 0.5, 0.9][round % 3];
+        let voxels = if round % 2 == 0 {
+            blocky_voxels(&mut rng, shape)
+        } else {
+            noisy_voxels(&mut rng, shape, [0.1, 0.5, 0.9][round % 3])
+        };
         let runtime_shape = RuntimeShape::<u32, 3>::new(shape.to_array());
-        let voxels: Vec<WorldVoxel<u8>> = (0..runtime_shape.size())
-            .map(|_| {
-                if rng.random_bool(solid_chance) {
-                    WorldVoxel::Solid(rng.random_range(1..4))
-                } else if rng.random_bool(0.5) {
-                    WorldVoxel::Air
-                } else {
-                    WorldVoxel::Unset
-                }
-            })
-            .collect();
-
-        let binary =
-            binary_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone());
-        let reference =
-            block_mesh_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone());
-        assert_eq!(
-            sorted_quads(&binary),
-            sorted_quads(&reference),
-            "shape {shape}, solid chance {solid_chance}"
+        let quads = mesh_quads(
+            &binary_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone()),
+            shape,
         );
+        let faces = mesh_quads(
+            &block_mesh_chunk_mesh(&voxels, &runtime_shape, texture_index_mapper.clone()),
+            shape,
+        );
+        quad_count += quads.len();
+        face_count += faces.len();
+
+        let mut covered = BTreeMap::new();
+        for face in quads.iter().flat_map(MeshQuad::faces) {
+            assert!(
+                covered.insert(face.face_key(), face).is_none(),
+                "shape {shape}: two quads cover {face:?}"
+            );
+        }
+        assert_eq!(covered.len(), faces.len(), "shape {shape}");
+        let whole_voxels = (CHUNK_SIZE_F / (shape - 2).as_vec3()).fract() == Vec3::ZERO;
+        for face in &faces {
+            let Some(covering) = covered.get(&face.face_key()) else {
+                panic!("shape {shape}: no quad covers {face:?}");
+            };
+            assert_eq!(
+                (covering.indices, covering.normals),
+                (face.indices, face.normals),
+                "shape {shape}"
+            );
+            assert_eq!(
+                (covering.materials, covering.colors),
+                (face.materials, face.colors),
+                "shape {shape}"
+            );
+            // The texture repeats, so it looks the same moved by whole tiles.
+            let offset = covering.tex_coords[0] - face.tex_coords[0];
+            for (covering, face) in covering.tex_coords.iter().zip(face.tex_coords) {
+                assert!((covering - face - offset).abs().max_element() < 1e-3);
+            }
+            assert!(
+                !whole_voxels || (offset - offset.round()).abs().max_element() < 1e-3
+            );
+        }
     }
+    assert!(
+        quad_count < face_count,
+        "the voxels should have faces to merge"
+    );
+}
+
+#[test]
+fn flat_ground_meshes_as_one_quad() {
+    let shape = RuntimeShape::<u32, 3>::new([PADDED_CHUNK_SIZE; 3]);
+    let voxels: Vec<WorldVoxel<u8>> = (0..shape.size())
+        .map(|index| match shape.delinearize(index) {
+            [_, y, _] if y <= 4 => WorldVoxel::Solid(1),
+            _ => WorldVoxel::Air,
+        })
+        .collect();
+
+    let mesh = generate_chunk_mesh(Arc::from(voxels), IVec3::ZERO, Arc::new(|_| [0; 3]));
+
+    assert_eq!(mesh.count_vertices(), 4);
 }
 
 #[test]

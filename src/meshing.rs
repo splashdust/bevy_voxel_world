@@ -68,9 +68,21 @@ pub fn generate_chunk_mesh_for_shape<I: PartialEq + Copy>(
 /// each column of voxels as the bits of a `u64`.
 const MAX_BINARY_MESH_EXTENT: u32 = u64::BITS;
 
-/// Meshes `voxels` with one quad per visible face, finding the faces with bitwise
-/// operations on columns of voxels. Makes the same quads as
-/// [`block_mesh_chunk_mesh`]. `shape` is at most [`MAX_BINARY_MESH_EXTENT`]
+/// The axes of the normal, u and v of each of `RIGHT_HANDED_Y_UP_CONFIG.faces`.
+const FACE_AXES: [[usize; 3]; 6] = [
+    [0, 2, 1],
+    [1, 2, 0],
+    [2, 0, 1],
+    [0, 2, 1],
+    [1, 2, 0],
+    [2, 0, 1],
+];
+
+/// Meshes `voxels`, finding the visible faces with bitwise operations on columns
+/// of voxels. Neighbouring faces of one material whose eight neighbours in front
+/// are opaque alike merge into one quad, so ambient occlusion varies only across
+/// the axis a quad isn't merged along, and the mesh looks the same as
+/// [`block_mesh_chunk_mesh`]'s. `shape` is at most [`MAX_BINARY_MESH_EXTENT`]
 /// voxels along each axis.
 pub(crate) fn binary_chunk_mesh<I: PartialEq + Copy>(
     voxels: &[WorldVoxel<I>],
@@ -78,7 +90,8 @@ pub(crate) fn binary_chunk_mesh<I: PartialEq + Copy>(
     texture_index_mapper: TextureIndexMapperFn<I>,
 ) -> Mesh {
     let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
-    let [size_x, size_y, size_z] = shape.as_array().map(|extent| extent as usize);
+    let extents = shape.as_array().map(|extent| extent as usize);
+    let [size_x, size_y, size_z] = extents;
     // Faces are made only for the voxels inside the padding.
     if size_x < 3 || size_y < 3 || size_z < 3 {
         return MeshBuffers::with_capacity(0, shape).into_mesh();
@@ -92,63 +105,176 @@ pub(crate) fn binary_chunk_mesh<I: PartialEq + Copy>(
         }
     }
     let interior_z = ((1u64 << (size_z - 1)) - 1) & !1;
-    let column_index = |x: usize, y: usize| x + y * size_x;
-    // The visible faces of the voxels in the column at (x, y), as bits, in the
-    // order of `faces`.
-    let face_bits = |x: usize, y: usize| {
-        let column = columns[column_index(x, y)];
-        let opaque = column & interior_z;
-        [
-            opaque & !columns[column_index(x - 1, y)],
-            opaque & !columns[column_index(x, y - 1)],
-            opaque & !(column << 1),
-            opaque & !columns[column_index(x + 1, y)],
-            opaque & !columns[column_index(x, y + 1)],
-            opaque & !(column >> 1),
-        ]
+    let column = |x: usize, y: usize| columns[x + y * size_x];
+    // Which of the 3×3 voxels centred on the voxel at u and v of `layer` across
+    // `normal_axis` are opaque: bit 3 * (b + 1) + a + 1 for the voxel a along u
+    // and b along v from it.
+    let opaque_around = |normal_axis: usize, layer: usize, u: usize, v: usize| {
+        let three = |x, y| (column(x, y) >> (u - 1)) as u16 & 0b111;
+        let one = |x, y| (column(x, y) >> layer) as u16 & 1;
+        match normal_axis {
+            0 => three(layer, v - 1) | three(layer, v) << 3 | three(layer, v + 1) << 6,
+            1 => three(v - 1, layer) | three(v, layer) << 3 | three(v + 1, layer) << 6,
+            _ => {
+                one(u - 1, v - 1)
+                    | one(u, v - 1) << 1
+                    | one(u + 1, v - 1) << 2
+                    | one(u - 1, v) << 3
+                    | one(u + 1, v) << 5
+                    | one(u - 1, v + 1) << 6
+                    | one(u, v + 1) << 7
+                    | one(u + 1, v + 1) << 8
+            }
+        }
     };
 
-    let mut quad_count = 0;
+    // Bit u of face_rows[face][layer * row_counts[face] + v] is set where the
+    // voxel at `layer` along the normal, u and v has a visible face facing
+    // `faces[face]`, and bit v of row_masks[face][layer] where that row has any.
+    let row_counts = FACE_AXES.map(|[_, _, v_axis]| extents[v_axis]);
+    let mut face_rows: [Vec<u64>; 6] = std::array::from_fn(|face| {
+        vec![0; extents[FACE_AXES[face][0]] * row_counts[face]]
+    });
+    let mut row_masks = [[0u64; MAX_BINARY_MESH_EXTENT as usize]; 6];
     for y in 1..size_y - 1 {
         for x in 1..size_x - 1 {
-            quad_count += face_bits(x, y)
-                .iter()
-                .map(|bits| bits.count_ones() as usize)
-                .sum::<usize>();
-        }
-    }
-
-    let normals = faces.map(|face| IVec3::from(face.signed_normal().to_array()));
-    let opaque =
-        |[x, y, z]: [u32; 3]| columns[column_index(x as usize, y as usize)] >> z & 1 == 1;
-    let mut buffers = MeshBuffers::with_capacity(quad_count, shape);
-    for y in 1..size_y - 1 {
-        for x in 1..size_x - 1 {
-            for ((face, normal), mut bits) in
-                faces.iter().zip(&normals).zip(face_bits(x, y))
-            {
-                while bits != 0 {
-                    let minimum = [x as u32, y as u32, bits.trailing_zeros()];
-                    bits &= bits - 1;
-                    let material_type = match voxels[shape.linearize(minimum) as usize] {
-                        WorldVoxel::Solid(mt) => texture_index_mapper(mt),
-                        _ => [0, 0, 0],
-                    };
-                    buffers.push_quad(
-                        face,
-                        &UnorientedQuad {
-                            minimum,
-                            width: 1,
-                            height: 1,
-                        },
-                        face_aos(&minimum, normal, opaque),
-                        material_type,
-                    );
+            let opaque = column(x, y) & interior_z;
+            let [neg_x, neg_y, neg_z, pos_x, pos_y, pos_z] = [
+                opaque & !column(x - 1, y),
+                opaque & !column(x, y - 1),
+                opaque & !(column(x, y) << 1),
+                opaque & !column(x + 1, y),
+                opaque & !column(x, y + 1),
+                opaque & !(column(x, y) >> 1),
+            ];
+            for (face, bits) in [(0, neg_x), (3, pos_x)] {
+                face_rows[face][x * size_y + y] = bits;
+                row_masks[face][x] |= ((bits != 0) as u64) << y;
+            }
+            for (face, bits) in [(1, neg_y), (4, pos_y)] {
+                face_rows[face][y * size_x + x] = bits;
+                row_masks[face][y] |= ((bits != 0) as u64) << x;
+            }
+            // These faces lie across the columns.
+            for (face, bits) in [(2, neg_z), (5, pos_z)] {
+                for z in set_bits(bits) {
+                    face_rows[face][z * size_y + y] |= 1 << x;
+                    row_masks[face][z] |= 1 << y;
                 }
             }
         }
     }
+
+    let strides = [1, size_x, size_x * size_y];
+    let row_length = MAX_BINARY_MESH_EXTENT as usize;
+    // How the face at u and v of a layer looks, at u + v * row_length: which
+    // voxels around the one in front of it are opaque, and its voxel.
+    let mut looks = vec![(0, WorldVoxel::Unset); row_length * row_length];
+    let mut quads = Vec::new();
+    for (face, [normal_axis, u_axis, v_axis]) in FACE_AXES.into_iter().enumerate() {
+        let normal_sign = faces[face].signed_normal()[normal_axis] as isize;
+        let layers = face_rows[face].chunks_exact_mut(row_counts[face]);
+        for ((layer, rows), &row_mask) in layers.enumerate().zip(&row_masks[face]) {
+            let front_layer = layer.wrapping_add_signed(normal_sign);
+            for v in set_bits(row_mask) {
+                for u in set_bits(rows[v]) {
+                    let voxel_index = layer * strides[normal_axis]
+                        + u * strides[u_axis]
+                        + v * strides[v_axis];
+                    looks[u + v * row_length] = (
+                        opaque_around(normal_axis, front_layer, u, v),
+                        voxels[voxel_index],
+                    );
+                }
+            }
+            merge_faces(
+                rows,
+                row_mask,
+                |u, v| looks[u + v * row_length],
+                |u, v, width, height, looks| {
+                    let mut minimum = [0; 3];
+                    minimum[normal_axis] = layer as u32;
+                    minimum[u_axis] = u as u32;
+                    minimum[v_axis] = v as u32;
+                    let quad = UnorientedQuad {
+                        minimum,
+                        width,
+                        height,
+                    };
+                    quads.push((face, quad, looks));
+                },
+            );
+        }
+    }
+
+    let mut buffers = MeshBuffers::with_capacity(quads.len(), shape);
+    for (face, quad, (opaque_around, voxel)) in quads {
+        let material_type = match voxel {
+            WorldVoxel::Solid(mt) => texture_index_mapper(mt),
+            _ => [0, 0, 0],
+        };
+        let opaque = |bit: u16| opaque_around >> bit & 1 == 1;
+        // In the order face_aos takes the voxels around the one in front.
+        let ao = side_aos([
+            opaque(3),
+            opaque(0),
+            opaque(1),
+            opaque(2),
+            opaque(5),
+            opaque(8),
+            opaque(7),
+            opaque(6),
+        ]);
+        buffers.push_quad(&faces[face], &quad, ao, material_type);
+    }
     buffers.into_mesh()
+}
+
+/// The indices of the set bits of `bits`, lowest first.
+fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        (bits != 0).then(|| {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            bit
+        })
+    })
+}
+
+/// Merges the faces in `rows`, where bit u of `rows[v]` is set for the face at
+/// u and v, into rectangles of faces that `looks` the same, and clears `rows`.
+/// Bit v of `row_mask` is set where `rows[v]` has a face. Calls `merged` with
+/// each rectangle's first face's u and v, its width along u, its height along v
+/// and its looks.
+fn merge_faces<L: PartialEq>(
+    rows: &mut [u64],
+    row_mask: u64,
+    looks: impl Fn(usize, usize) -> L,
+    mut merged: impl FnMut(usize, usize, u32, u32, L),
+) {
+    for v in set_bits(row_mask) {
+        while rows[v] != 0 {
+            let u = rows[v].trailing_zeros() as usize;
+            let first = looks(u, v);
+            let run = (rows[v] >> u).trailing_ones() as usize;
+            let width = (1..run)
+                .find(|&offset| looks(u + offset, v) != first)
+                .unwrap_or(run);
+            let span = (u64::MAX >> (u64::BITS as usize - width)) << u;
+            let height = 1 + rows[v + 1..]
+                .iter()
+                .enumerate()
+                .take_while(|&(offset, row)| {
+                    row & span == span
+                        && (u..u + width).all(|u| looks(u, v + 1 + offset) == first)
+                })
+                .count();
+            for row in &mut rows[v..v + height] {
+                *row &= !span;
+            }
+            merged(u, v, width as u32, height as u32, first);
+        }
+    }
 }
 
 /// Meshes `voxels` with block-mesh, one quad per visible face.
