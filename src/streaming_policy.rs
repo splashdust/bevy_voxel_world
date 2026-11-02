@@ -94,28 +94,14 @@ impl CameraSnapshot {
             return true;
         }
 
-        let limit = 1.0 + ndc_margin;
-        let point_in_ndc = |point: Vec3| -> bool {
-            if let Some(ndc) = self.world_to_ndc(point) {
-                ndc.x >= -limit
-                    && ndc.x <= limit
-                    && ndc.y >= -limit
-                    && ndc.y <= limit
-                    && ndc.z >= -ndc_margin
-                    && ndc.z <= 1.0 + ndc_margin
-            } else {
-                false
-            }
-        };
-
-        if point_in_ndc((chunk_min + chunk_max) * 0.5) {
+        if self.sees_point((chunk_min + chunk_max) * 0.5, ndc_margin) {
             return true;
         }
 
         for &x in &[chunk_min.x, chunk_max.x] {
             for &y in &[chunk_min.y, chunk_max.y] {
                 for &z in &[chunk_min.z, chunk_max.z] {
-                    if point_in_ndc(Vec3::new(x, y, z)) {
+                    if self.sees_point(Vec3::new(x, y, z), ndc_margin) {
                         return true;
                     }
                 }
@@ -123,6 +109,22 @@ impl CameraSnapshot {
         }
 
         false
+    }
+
+    /// Whether the point is in view. `ndc_margin` widens the view on every side,
+    /// in NDC units.
+    fn sees_point(&self, point: Vec3, ndc_margin: f32) -> bool {
+        let limit = 1.0 + ndc_margin;
+        if let Some(ndc) = self.world_to_ndc(point) {
+            ndc.x >= -limit
+                && ndc.x <= limit
+                && ndc.y >= -limit
+                && ndc.y <= limit
+                && ndc.z >= -ndc_margin
+                && ndc.z <= 1.0 + ndc_margin
+        } else {
+            false
+        }
     }
 }
 
@@ -182,6 +184,10 @@ pub(crate) trait ChunkLookup {
 
     /// The occupancy of the chunk at `key`.
     fn occupancy(&self, key: ChunkKey) -> Occupancy;
+
+    /// Whether the chunk at `key` exists and has been chosen for despawning. It
+    /// still reports its occupancy, but it is about to stop covering its extent.
+    fn is_retiring(&self, key: ChunkKey) -> bool;
 
     /// The coarsest LOD level of any chunk, or 0 when no chunks exist.
     fn coarsest_level(&self) -> LodLevel;
@@ -472,14 +478,27 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     /// Whether other chunks cover the chunk's extent, so it can retire.
     ///
-    /// The extent is covered by a published chunk above it, or by published
-    /// chunks below it wherever the policy wants a chunk at all. A missing
-    /// chunk whose fill hint is used instead of spawning it counts as
-    /// published.
+    /// The extent is covered by a published chunk above it that the policy
+    /// wants, or by published chunks below it wherever the policy wants a chunk
+    /// at all. A missing chunk whose fill hint is used instead of spawning it
+    /// counts as published, wanted or not.
+    ///
+    /// A published chunk above that the policy doesn't want doesn't count. It
+    /// is waiting to be replaced too, and may retire in the same frame, which
+    /// would leave a hole.
+    ///
+    /// A missing chunk that [`hidden`](Self::hidden) finds no camera can see
+    /// isn't waited for, above or below, since spawning rays may never reach it.
     fn covered(&self, key: ChunkKey) -> bool {
         for lod_level in key.lod_level + 1..=self.coarsest {
             let above = ChunkKey::containing_chunk(key.position, lod_level);
-            if self.published_or_hinted(above) {
+            let wanted = || self.wants(above, Some(key.lod_level));
+            let stays = if self.lookup.occupancy(above) == Occupancy::Missing {
+                self.hint_stands_for(above) || (wanted() && self.hidden(above))
+            } else {
+                self.published_or_hinted(above) && wanted()
+            };
+            if stays {
                 return true;
             }
         }
@@ -490,11 +509,17 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     }
 
     /// Whether the region of the chunk at `key` is covered by published or
-    /// hinted chunks at its level or finer, or no chunk is wanted there.
-    /// `retiring` is the level of the chunk about to retire, which still covers
-    /// the region.
+    /// hinted chunks at its level or finer, is hidden from every camera, or no
+    /// chunk is wanted there. `retiring` is the level of the chunk about to
+    /// retire, which still covers the region.
+    ///
+    /// A hidden region is checked as a whole first, so that a large buried
+    /// region costs one check and not one per chunk in it.
     fn covered_below(&self, key: ChunkKey, retiring: LodLevel) -> bool {
         if self.published_or_hinted(key) || self.unwanted_region(key) {
+            return true;
+        }
+        if self.lookup.occupancy(key) == Occupancy::Missing && self.hidden(key) {
             return true;
         }
         if key.lod_level == 0 || self.asked(key, Some(retiring)) >= key.lod_level {
@@ -504,14 +529,84 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             .all(|child| self.covered_below(child, retiring))
     }
 
-    /// Whether the chunk at `key` is published, or missing with a fill hint used
-    /// in its place. A chunk that is spawned but not yet published is waited
-    /// for, even when it has a fill hint.
+    /// Whether the chunk at `key` is published and staying, or missing with a
+    /// fill hint used in its place. A chunk that is spawned but not yet
+    /// published is waited for, even when it has a fill hint. A Retiring chunk
+    /// doesn't count, since it is about to be despawned.
     fn published_or_hinted(&self, key: ChunkKey) -> bool {
         match self.lookup.occupancy(key) {
             Occupancy::Missing => self.hint_stands_for(key),
-            occupancy => occupancy.is_published(),
+            occupancy => occupancy.is_published() && !self.lookup.is_retiring(key),
         }
+    }
+
+    /// Whether solid chunks hide the missing chunk at `key` from every camera.
+    ///
+    /// A spawning ray stops at a solid chunk, so it may never reach a chunk
+    /// behind one. The check follows the same rule along lines from each camera
+    /// to the chunk's centre and corners, leaving out the ones out of that
+    /// camera's view when only chunks in view are spawned, since no ray goes
+    /// there.
+    ///
+    /// Any line that gets through means rays can reach the chunk, so it spawns
+    /// and is waited for. Lines between those points aren't checked, so a gap
+    /// that no line passes through can go unnoticed. The chunk then counts as
+    /// hidden until a ray through the gap finds it, which is like any other
+    /// missing chunk coming into view.
+    ///
+    /// Chunks in a camera's protected radius always spawn, so they are never
+    /// hidden.
+    fn hidden(&self, key: ChunkKey) -> bool {
+        if self.is_close_to_any_camera(key, self.protected_distance_squared) {
+            return false;
+        }
+        // The corners are moved one voxel in, so that they lie in the chunk.
+        let min = key.world_position() + Vec3::ONE;
+        let size = key.voxel_extent() as f32 - 2.0;
+        self.cameras.iter().all(|camera| {
+            std::iter::once(key.centre())
+                .chain((0..8).map(|corner| {
+                    min + Vec3::new(
+                        (corner & 1) as f32,
+                        ((corner >> 1) & 1) as f32,
+                        (corner >> 2) as f32,
+                    ) * size
+                }))
+                .all(|point| {
+                    (self.in_view_only && !camera.sees_point(point, 0.0))
+                        || self.solid_chunk_between(camera.position, point, key)
+                })
+        })
+    }
+
+    /// Whether a line from `from` to `to`, a point in the chunk at `target`,
+    /// meets a solid chunk before it enters that chunk.
+    ///
+    /// Published and hinted chunks count, as they do for a spawning ray. A chunk
+    /// not yet published doesn't, since it may turn out not to be solid.
+    fn solid_chunk_between(&self, from: Vec3, to: Vec3, target: ChunkKey) -> bool {
+        let Ok(direction) = Dir3::new(to - from) else {
+            return false;
+        };
+        let length = from.distance(to);
+        let mut t = 0.0;
+        while t < length {
+            let current = from + direction * t;
+            let chunk_pos = chunk_containing(current.floor().as_ivec3());
+            if ChunkKey::containing_chunk(chunk_pos, target.lod_level) == target {
+                return false;
+            }
+            let (key, occupancy, behind) = self.chunk_along_ray(chunk_pos);
+            let occupancy = match occupancy {
+                Occupancy::Missing => self.hinted(key).unwrap_or(behind),
+                occupancy => occupancy,
+            };
+            if occupancy == Occupancy::Full {
+                return true;
+            }
+            t += key.voxel_extent() as f32;
+        }
+        false
     }
 
     // --- Spawning -----------------------------------------------------------
@@ -698,30 +793,7 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         let mut t = 0.0;
         while t < (self.spawning_distance * CHUNK_SIZE_I) as f32 {
             let chunk_pos = chunk_containing(current.floor().as_ivec3());
-            // The chunk wanted here and its occupancy. `behind` is the
-            // occupancy of the chunk covering this position now, if any. While
-            // the wanted chunk is missing, it decides whether the ray goes on.
-            let (key, mut occupancy, behind) = if self.coarsest == 0 {
-                // Only level 0 is planned, so the wanted chunk is the level-0
-                // chunk here.
-                let key = ChunkKey::new(chunk_pos, 0);
-                (key, self.lookup.occupancy(key), Occupancy::Empty)
-            } else {
-                let covering = self.lookup.covering(chunk_pos);
-                let key =
-                    self.wanted_key(chunk_pos, covering.map(|(key, _)| key.lod_level));
-                let occupancy = match covering {
-                    Some((covering, occupancy)) if covering == key => occupancy,
-                    // Wanted coarser than the finest chunk here: it may exist.
-                    Some((covering, _)) if key.lod_level > covering.lod_level => {
-                        self.lookup.occupancy(key)
-                    }
-                    _ => Occupancy::Missing,
-                };
-                let behind =
-                    covering.map_or(Occupancy::Empty, |(_, occupancy)| occupancy);
-                (key, occupancy, behind)
-            };
+            let (key, mut occupancy, behind) = self.chunk_along_ray(chunk_pos);
             if occupancy == Occupancy::Missing {
                 match self.hinted(key) {
                     Some(hinted) => occupancy = hinted,
@@ -748,6 +820,32 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             current = ray.origin + ray.direction * t;
         }
         found
+    }
+
+    /// What a ray finds at the level-0 chunk at `chunk_pos`.
+    ///
+    /// Returns the key of the chunk wanted there, its occupancy, and the
+    /// occupancy of the chunk covering the position now, if any. While the
+    /// wanted chunk is missing, the last one decides whether the ray goes on.
+    fn chunk_along_ray(&self, chunk_pos: IVec3) -> (ChunkKey, Occupancy, Occupancy) {
+        if self.coarsest == 0 {
+            // Only level 0 is planned, so the wanted chunk is the level-0 chunk
+            // here.
+            let key = ChunkKey::new(chunk_pos, 0);
+            return (key, self.lookup.occupancy(key), Occupancy::Empty);
+        }
+        let covering = self.lookup.covering(chunk_pos);
+        let key = self.wanted_key(chunk_pos, covering.map(|(key, _)| key.lod_level));
+        let occupancy = match covering {
+            Some((covering, occupancy)) if covering == key => occupancy,
+            // Wanted coarser than the finest chunk here: it may exist.
+            Some((covering, _)) if key.lod_level > covering.lod_level => {
+                self.lookup.occupancy(key)
+            }
+            _ => Occupancy::Missing,
+        };
+        let behind = covering.map_or(Occupancy::Empty, |(_, occupancy)| occupancy);
+        (key, occupancy, behind)
     }
 }
 
@@ -993,6 +1091,10 @@ mod tests {
             self.get(&key).copied().unwrap_or(Occupancy::Missing)
         }
 
+        fn is_retiring(&self, _key: ChunkKey) -> bool {
+            false
+        }
+
         fn coarsest_level(&self) -> LodLevel {
             self.keys().map(|key| key.lod_level).max().unwrap_or(0)
         }
@@ -1015,6 +1117,10 @@ mod tests {
 
         fn occupancy(&self, key: ChunkKey) -> Occupancy {
             self.occupied.occupancy(key)
+        }
+
+        fn is_retiring(&self, key: ChunkKey) -> bool {
+            self.occupied.is_retiring(key)
         }
 
         fn coarsest_level(&self) -> LodLevel {
@@ -1809,6 +1915,359 @@ mod tests {
                 .collect();
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
         assert_eq!(plan.retire, vec![parent]);
+    }
+
+    /// Level 0 nearer than 3 chunks, level 1 nearer than 6, level 2 beyond.
+    fn three_levels() -> TestWorld {
+        TestWorld {
+            spawning_distance: 12,
+            lod_bands: vec![(3, 0), (6, 1)],
+            far_lod: 2,
+            ..default()
+        }
+    }
+
+    #[test]
+    fn a_chunk_stays_until_the_finer_chunks_it_is_waiting_for_are_published() {
+        let config = three_levels();
+        // A corner of a level-2 chunk, which is also a corner of a level-1 chunk.
+        let at_camera = IVec3::splat(20);
+        let cameras = [camera(at_camera, Vec3::NEG_Z)];
+        let parent = ChunkKey::containing_chunk(at_camera, 2);
+        let child = ChunkKey::containing_chunk(at_camera, 1);
+
+        // The camera moved while the level-1 chunks generated, so level 0 is
+        // now wanted around it. The level-1 chunks cover their parent, but the
+        // parent doesn't cover the level-1 chunk around the camera, since the
+        // policy wants neither.
+        let mut occupied: Occupied =
+            parent.children().map(|k| (k, Occupancy::Mixed)).collect();
+        occupied.insert(parent, Occupancy::Mixed);
+
+        let is_covered = |occupied: &Occupied, position: IVec3| {
+            (0..=MAX_LOD_LEVEL).any(|lod_level| {
+                occupied
+                    .get(&ChunkKey::containing_chunk(position, lod_level))
+                    .is_some_and(|occupancy| occupancy.is_published())
+            })
+        };
+
+        let mut unpublished: Vec<ChunkKey> = Vec::new();
+        let mut child_retired_at = None;
+        for frame in 0..10 {
+            let plan = plan_with(&config, &cameras, &occupied);
+            if frame == 0 {
+                assert!(plan.retire.contains(&parent), "{:?}", plan.retire);
+                assert!(!plan.retire.contains(&child), "{:?}", plan.retire);
+            }
+            if child_retired_at.is_none() && plan.retire.contains(&child) {
+                child_retired_at = Some(frame);
+            }
+            for key in plan.retire {
+                occupied.remove(&key);
+            }
+            for x in 0..parent.extent() {
+                for y in 0..parent.extent() {
+                    for z in 0..parent.extent() {
+                        let position = parent.position + IVec3::new(x, y, z);
+                        assert!(
+                            is_covered(&occupied, position),
+                            "frame {frame}: a hole opened at {position}"
+                        );
+                    }
+                }
+            }
+            for key in unpublished.drain(..) {
+                occupied.insert(key, Occupancy::Mixed);
+            }
+            for key in plan.spawn {
+                occupied.insert(key, Occupancy::Unpublished);
+                unpublished.push(key);
+            }
+        }
+        assert!(
+            child_retired_at.is_some(),
+            "the level-1 chunk retires once level 0 is published"
+        );
+
+        // With the camera still, the chunks have settled.
+        let settled = plan_with(&config, &cameras, &occupied);
+        assert!(settled.spawn.is_empty(), "spawned {:?}", settled.spawn);
+        assert!(settled.retire.is_empty(), "retired {:?}", settled.retire);
+    }
+
+    /// The chunks that exist, and the ones among them that are retiring.
+    struct WithRetiring<'a> {
+        occupied: &'a Occupied,
+        retiring: Vec<ChunkKey>,
+    }
+
+    impl ChunkLookup for WithRetiring<'_> {
+        fn covering(&self, chunk_position: IVec3) -> Option<(ChunkKey, Occupancy)> {
+            self.occupied.covering(chunk_position)
+        }
+
+        fn occupancy(&self, key: ChunkKey) -> Occupancy {
+            self.occupied.occupancy(key)
+        }
+
+        fn is_retiring(&self, key: ChunkKey) -> bool {
+            self.retiring.contains(&key)
+        }
+
+        fn coarsest_level(&self) -> LodLevel {
+            self.occupied.coarsest_level()
+        }
+
+        fn edits_reach(&self, key: ChunkKey) -> bool {
+            self.occupied.edits_reach(key)
+        }
+    }
+
+    fn plan_with_retiring(
+        config: &TestWorld,
+        occupied: &Occupied,
+        retiring: ChunkKey,
+    ) -> StreamingPlan {
+        let lookup = WithRetiring {
+            occupied,
+            retiring: vec![retiring],
+        };
+        // The retiring chunk is left out, as its fate is already decided.
+        plan(
+            config,
+            &[camera(C, Vec3::NEG_Z)],
+            occupied.keys().copied().filter(|key| *key != retiring),
+            &lookup,
+            0,
+            &mut StdRng::seed_from_u64(1),
+        )
+    }
+
+    #[test]
+    fn a_retiring_parent_does_not_cover_the_chunks_it_would_replace() {
+        let config = TestWorld {
+            far_lod: 1,
+            ..default()
+        };
+        let parent = parent_at_c();
+        let mut occupied: Occupied = parent
+            .children()
+            .map(|child| (child, Occupancy::Mixed))
+            .collect();
+        occupied.insert(parent, Occupancy::Mixed);
+
+        let plan = plan_with_retiring(&config, &occupied, parent);
+
+        assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
+    }
+
+    #[test]
+    fn a_retiring_child_does_not_cover_its_parent() {
+        let config = two_levels();
+        let parent = parent_at_c();
+        let children: Vec<_> = parent.children().collect();
+        let mut occupied: Occupied = children
+            .iter()
+            .map(|child| (*child, Occupancy::Mixed))
+            .collect();
+        occupied.insert(parent, Occupancy::Mixed);
+
+        let plan = plan_with_retiring(&config, &occupied, children[0]);
+
+        assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
+    }
+
+    // --- Chunks hidden behind solid ones ---------------------------------------
+
+    /// Level 0 nearer than 30 chunks and level 2 beyond, with spawning in view.
+    fn near_level_0_in_view() -> TestWorld {
+        TestWorld {
+            spawning_distance: 40,
+            spawn_in_view: true,
+            lod_bands: vec![(30, 0)],
+            far_lod: 2,
+            spawning_rays: 200,
+            ..default()
+        }
+    }
+
+    /// A level-2 chunk whose top row, row 11, has a surface, with solid chunks
+    /// below it, and a camera above it looking down.
+    fn chunk_below_camera() -> (ChunkKey, CameraSnapshot) {
+        (
+            ChunkKey::new(IVec3::new(8, 8, 8), 2),
+            camera(
+                IVec3::new(10, 20, 10),
+                Vec3::new(0.02, -1.0, 0.01).normalize(),
+            ),
+        )
+    }
+
+    /// Air above row 11, a surface in it, and solid below it, except for the
+    /// shaft of chunks in `opening`, which have air in them.
+    fn surface_with_opening(key: ChunkKey, opening: Option<IVec2>) -> Occupancy {
+        let in_opening = opening
+            .is_some_and(|opening| key.lod_level == 0 && key.position.xz() == opening);
+        if key.position.y >= 12 {
+            Occupancy::Empty
+        } else if key.position.y + key.extent() <= 11 && !in_opening {
+            Occupancy::Full
+        } else {
+            Occupancy::Mixed
+        }
+    }
+
+    /// Plans `frames` frames in which every spawned chunk publishes at once and
+    /// every retired chunk goes away, until `coarse` retires. Returns the frame
+    /// it retired in, if it did.
+    fn run_until_retired(
+        occupied: &mut Occupied,
+        coarse: ChunkKey,
+        cameras: &[CameraSnapshot],
+        opening: Option<IVec2>,
+        frames: usize,
+    ) -> Option<usize> {
+        let config = near_level_0_in_view();
+        let mut rng = StdRng::seed_from_u64(7);
+        for frame in 0..frames {
+            let keys: Vec<_> = occupied.keys().copied().collect();
+            let plan = plan(&config, cameras, keys, &*occupied, 1000, &mut rng);
+            for key in plan.spawn {
+                occupied.insert(key, surface_with_opening(key, opening));
+            }
+            let retired = plan.retire.contains(&coarse);
+            for key in plan.retire {
+                occupied.remove(&key);
+            }
+            if retired {
+                return Some(frame);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_coarse_chunk_retires_without_waiting_for_finer_chunks_hidden_behind_solid_ones()
+    {
+        let (coarse, camera) = chunk_below_camera();
+        let cameras = [camera];
+        let mut occupied: Occupied = [(coarse, surface_with_opening(coarse, None))]
+            .into_iter()
+            .collect();
+
+        let retired = run_until_retired(&mut occupied, coarse, &cameras, None, 400);
+
+        assert!(retired.is_some(), "the coarse chunk never retired");
+        let row = |y: i32| {
+            (8..12)
+                .flat_map(|x| (8..12).map(move |z| IVec3::new(x, y, z)))
+                .filter(|&position| occupied.contains_key(&existing(position)))
+                .count()
+        };
+        assert_eq!(row(11), 16, "the surface is published at level 0");
+        assert_eq!(row(9), 0, "no chunk is spawned behind the solid row");
+
+        // With the camera still, the chunks have settled.
+        let config = near_level_0_in_view();
+        let mut rng = StdRng::seed_from_u64(8);
+        for _ in 0..50 {
+            let keys: Vec<_> = occupied.keys().copied().collect();
+            let plan = plan(&config, &cameras, keys, &occupied, 1000, &mut rng);
+            assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
+            assert!(
+                !plan.spawn.contains(&coarse),
+                "the coarse chunk spawned again"
+            );
+            for key in plan.spawn {
+                assert!(key.position.y >= 10, "{key} spawned behind the solid row");
+                occupied.insert(key, surface_with_opening(key, None));
+            }
+        }
+    }
+
+    #[test]
+    fn a_coarse_chunk_waits_for_finer_chunks_seen_through_an_opening_in_the_solid_ones() {
+        let (coarse, camera) = chunk_below_camera();
+        let cameras = [camera];
+        let opening = IVec2::new(10, 10);
+        let below_opening = existing(IVec3::new(10, 9, 10));
+        // Rows 10 and 11 are published, with the opening in row 10.
+        let mut occupied: Occupied = [(coarse, Occupancy::Mixed)].into_iter().collect();
+        for y in 10..12 {
+            for x in 8..12 {
+                for z in 8..12 {
+                    let key = existing(IVec3::new(x, y, z));
+                    occupied.insert(key, surface_with_opening(key, Some(opening)));
+                }
+            }
+        }
+
+        let plan_now = plan_with(&near_level_0_in_view(), &cameras, &occupied);
+        assert!(
+            !plan_now.retire.contains(&coarse),
+            "retired with a chunk visible through the opening still missing"
+        );
+
+        let retired =
+            run_until_retired(&mut occupied, coarse, &cameras, Some(opening), 400);
+        assert!(retired.is_some(), "the coarse chunk never retired");
+        assert!(
+            occupied.contains_key(&below_opening),
+            "the coarse chunk retired before the chunk below the opening spawned"
+        );
+    }
+
+    #[test]
+    fn a_chunk_in_the_protected_radius_is_waited_for_even_behind_solid_ones() {
+        let config = TestWorld {
+            min_despawn_distance: 2,
+            ..two_levels()
+        };
+        let parent = parent_at_c();
+        // Every chunk but one of the children is solid, around the missing one.
+        let missing = parent.children().next().unwrap();
+        let mut occupied: Occupied = within(C, 4)
+            .into_iter()
+            .map(|position| (existing(position), Occupancy::Full))
+            .collect();
+        occupied.remove(&missing);
+        occupied.insert(parent, Occupancy::Mixed);
+
+        let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
+
+        assert!(!plan.retire.contains(&parent), "retired {:?}", plan.retire);
+    }
+
+    #[test]
+    fn a_chunk_retires_when_the_coarser_chunk_wanted_in_its_place_is_hidden() {
+        let config = TestWorld {
+            spawning_distance: 12,
+            far_lod: 1,
+            spawn_in_view: true,
+            min_despawn_distance: 0,
+            ..default()
+        };
+        let cam = IVec3::new(10, 10, 20);
+        let cameras = [camera(cam, Vec3::NEG_Z)];
+        // Level 0 chunks, with a wall of level-1 solid chunks between them and
+        // the camera, and the parent wanted in their place missing.
+        let parent = ChunkKey::new(IVec3::new(10, 10, 8), 1);
+        let child = parent.children().next().unwrap();
+        let mut occupied: Occupied = [(child, Occupancy::Mixed)].into_iter().collect();
+        for x in (0..20).step_by(2) {
+            for y in (0..20).step_by(2) {
+                occupied.insert(ChunkKey::new(IVec3::new(x, y, 14), 1), Occupancy::Full);
+            }
+        }
+
+        let plan = plan_with(&config, &cameras, &occupied);
+        assert!(plan.retire.contains(&child), "retired {:?}", plan.retire);
+
+        // With the wall gone, the camera can see the parent, so it is waited for.
+        occupied.retain(|key, _| *key == child);
+        let plan = plan_with(&config, &cameras, &occupied);
+        assert!(!plan.retire.contains(&child), "retired {:?}", plan.retire);
     }
 
     #[test]

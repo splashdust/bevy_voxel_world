@@ -205,6 +205,15 @@ fn sample_spacing(shape: UVec3, lod_level: LodLevel) -> Vec3 {
     Vec3::splat((CHUNK_SIZE_I << lod_level) as f32) / interior.as_vec3()
 }
 
+/// How many voxels deep the padding of a chunk at `lod_level` is along each axis:
+/// the spacing of its data voxels from the padded data `shape`, rounded up.
+///
+/// It is at most the chunk's voxel extent, so the padding never reaches past the
+/// chunks next to it at the same level.
+pub(crate) fn padding_depth(shape: UVec3, lod_level: LodLevel) -> IVec3 {
+    sample_spacing(shape, lod_level).ceil().as_ivec3()
+}
+
 /// The data coordinate, along one axis, of the data voxel that covers the voxel
 /// `offset` voxels from a chunk's origin.
 ///
@@ -720,7 +729,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         // The world coordinates of the data voxels along each axis.
         let world_coordinates: [Vec<i32>; 3] = std::array::from_fn(|axis| {
             (0..shape[axis])
-                .map(|c| ((c as f32 - 1.0) * scale[axis]) as i32 + origin[axis])
+                .map(|c| ((c as f32 - 1.0) * scale[axis]).floor() as i32 + origin[axis])
                 .collect()
         });
         let previous_voxels = previous_data

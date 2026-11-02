@@ -27,13 +27,19 @@ struct Chunks<'a, C: VoxelWorldConfig> {
     index: &'a ChunkIndex<C>,
     chunk_map: &'a ChunkMapData<C::MaterialIndex>,
     edits: &'a CommittedEdits<'a, C::MaterialIndex>,
+    /// How deep the padding of a chunk is at each LOD level, kept here since the
+    /// fill hint of a chunk is checked against the edits at every ray step.
+    padding: [IVec3; MAX_LOD_LEVEL as usize + 1],
 }
 
 impl<C: VoxelWorldConfig> Chunks<'_, C> {
-    /// The occupancy of a chunk that exists.
+    /// The occupancy of a chunk that exists. Data left by a despawned chunk at
+    /// the same key doesn't count as published.
     fn published(&self, key: ChunkKey) -> Occupancy {
+        let entity = self.index.get(key);
         self.chunk_map
             .get(&key)
+            .filter(|data| Some(data.entity) == entity)
             .map_or(Occupancy::Unpublished, Occupancy::of_data)
     }
 }
@@ -51,12 +57,16 @@ impl<C: VoxelWorldConfig> ChunkLookup for Chunks<'_, C> {
         self.published(key)
     }
 
+    fn is_retiring(&self, key: ChunkKey) -> bool {
+        self.index.is_retiring(key)
+    }
+
     fn coarsest_level(&self) -> LodLevel {
         self.index.levels_in_use().last().unwrap_or(0)
     }
 
     fn edits_reach(&self, key: ChunkKey) -> bool {
-        self.edits.reach(key)
+        self.edits.reach(key, self.padding[key.lod_level as usize])
     }
 }
 
@@ -147,6 +157,10 @@ where
             index: &index,
             chunk_map: &chunk_map_read_lock,
             edits: &committed_edits,
+            padding: std::array::from_fn(|lod_level| {
+                let lod_level = lod_level as LodLevel;
+                padding_depth(configuration.chunk_data_shape(lod_level), lod_level)
+            }),
         };
 
         #[cfg(feature = "trace")]

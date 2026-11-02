@@ -18,7 +18,7 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{chunk_containing, Chunk, ChunkKey, ChunkTask, LevelCounts},
+    chunk::{chunk_containing, padding_depth, Chunk, ChunkKey, ChunkTask, LevelCounts},
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::{FillHint, LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
@@ -195,6 +195,8 @@ pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 #[derive(Resource)]
 pub struct ChunkIndex<C> {
     entities: HashMap<ChunkKey, Entity>,
+    /// The chunk key of every live chunk.
+    keys: HashMap<Entity, ChunkKey>,
     /// How many chunks there are at each LOD level.
     levels: LevelCounts,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
@@ -218,6 +220,7 @@ impl<C> Default for ChunkIndex<C> {
     fn default() -> Self {
         Self {
             entities: HashMap::new(),
+            keys: HashMap::new(),
             levels: LevelCounts::new(),
             priority: VecDeque::new(),
             pending: HashMap::new(),
@@ -237,6 +240,13 @@ impl<C> ChunkIndex<C> {
 
     pub fn contains(&self, key: ChunkKey) -> bool {
         self.entities.contains_key(&key)
+    }
+
+    /// Whether the chunk at `key` exists and is Retiring.
+    pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
+        self.entities
+            .get(&key)
+            .is_some_and(|entity| self.retiring.contains(entity))
     }
 
     /// The key of the finest chunk that covers the voxel at `voxel_position`,
@@ -261,15 +271,21 @@ impl<C> ChunkIndex<C> {
 
     fn spawned(&mut self, key: ChunkKey, entity: Entity) {
         self.entities.insert(key, entity);
+        self.keys.insert(entity, key);
         self.levels.add(key.lod_level);
         self.pending.insert(entity, key);
     }
 
-    fn despawned(&mut self, key: ChunkKey, entity: Entity) {
-        if self.entities.remove(&key).is_some() {
-            self.levels.remove(key.lod_level);
-        }
+    /// Removes the chunk from the index, so its key can spawn again. Returns its
+    /// chunk key, or `None` if the index no longer holds it.
+    fn despawned(&mut self, entity: Entity) -> Option<ChunkKey> {
+        let key = self.keys.remove(&entity)?;
+        self.entities.remove(&key);
+        self.levels.remove(key.lod_level);
+        self.pending.remove(&entity);
+        self.generating.remove(&entity);
         self.retiring.remove(&entity);
+        Some(key)
     }
 
     /// How many chunk tasks to keep running, at most `cap`.
@@ -367,6 +383,23 @@ impl<C> Default for ChunkRequests<C> {
 pub(crate) struct ChunkLifecycle<C>(PhantomData<C>);
 
 impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
+    /// Forgets chunks whose entities were despawned by something other than the
+    /// lifecycle, such as a game system, and queues their data for removal.
+    ///
+    /// Chunks the lifecycle despawned itself have already left the index, so they
+    /// are skipped.
+    pub fn forget_despawned_chunks(
+        mut removed: RemovedComponents<ChunkStateOf<C>>,
+        mut index: ResMut<ChunkIndex<C>>,
+        mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
+    ) {
+        for entity in removed.read() {
+            if let Some(key) = index.despawned(entity) {
+                chunk_map_remove_buffer.push((key, entity));
+            }
+        }
+    }
+
     /// Applies this frame's requests: edits, then spawns and retirements.
     #[allow(clippy::type_complexity)]
     pub fn apply_requests(
@@ -387,9 +420,18 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let requests = &mut *requests;
 
         let mut stale: HashSet<ChunkKey> = HashSet::new();
-        for voxel in requests.edited.drain(..) {
-            for lod_level in index.levels_in_use() {
-                stale.extend(chunks_including(voxel, lod_level));
+        if !requests.edited.is_empty() {
+            let levels: Vec<_> = index
+                .levels_in_use()
+                .map(|lod_level| {
+                    let shape = configuration.chunk_data_shape(lod_level);
+                    (lod_level, padding_depth(shape, lod_level))
+                })
+                .collect();
+            for voxel in requests.edited.drain(..) {
+                for &(lod_level, padding) in &levels {
+                    stale.extend(chunks_including(voxel, lod_level, padding));
+                }
             }
         }
         for key in stale {
@@ -680,8 +722,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 == Effect::Despawn
             {
                 commands.entity(entity).despawn();
-                index.despawned(chunk.key, entity);
-                chunk_map_remove_buffer.push(chunk.key);
+                index.despawned(entity);
+                chunk_map_remove_buffer.push((chunk.key, entity));
             }
         }
     }
@@ -708,8 +750,8 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         ev_chunk_will_remesh: &mut MessageWriter<ChunkWillRemesh<C>>,
     ) -> bool {
         let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
-            // The entity was despawned by something other than the lifecycle.
-            index.pending.remove(&entity);
+            // The entity is gone. `forget_despawned_chunks` removes it from the
+            // index on the next frame at the latest.
             return false;
         };
         if state.status() != ChunkStatus::Pending {
@@ -717,8 +759,10 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         }
 
         let key = chunk.key;
+        // Data left by a despawned chunk at this key isn't this chunk's.
         let previous_chunk_data =
-            ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map);
+            ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map)
+                .filter(|data| data.entity == entity);
         let voxel_data_fn = (self.configuration.voxel_lookup_delegate())(
             key.position,
             key.lod_level,
@@ -743,7 +787,8 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             key,
             data_shape,
             mesh_shape,
-            self.voxel_edits.chunk_edits(key),
+            self.voxel_edits
+                .chunk_edits(key, padding_depth(data_shape, key.lod_level)),
             self.configuration.chunk_fill_hint(key),
         );
 

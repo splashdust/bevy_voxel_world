@@ -268,8 +268,10 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     ///
     /// When a position's level changes, the chunks at the new level spawn first,
     /// and the old ones retire once the new ones cover them. The levels overlap
-    /// briefly instead of leaving a hole. Chunks generate largest on screen
-    /// first, so far coarse chunks fill in alongside near fine ones.
+    /// briefly instead of leaving a hole. A new chunk hidden from every camera
+    /// behind solid chunks isn't waited for, since it may never spawn. Chunks
+    /// generate largest on screen first, so far coarse chunks fill in alongside
+    /// near fine ones.
     ///
     /// The level must not get finer with distance: for one camera and one
     /// `previous_lod`, a chunk farther from the camera than another must get a

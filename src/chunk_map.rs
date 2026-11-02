@@ -110,10 +110,12 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
                     write_lock.bounds.max = max.max(write_lock.bounds.max);
                 }
 
-                // Despawning a chunk removes its data, so a chunk without
-                // previous data is published for the first time.
                 if previous.is_none() {
                     write_lock.levels.add(key.lod_level);
+                }
+                // A chunk is published for the first time when the key has no
+                // data, or still holds the data of a despawned chunk.
+                if previous.map(|data| data.entity) != Some(*entity) {
                     ev_chunk_will_spawn.write(ChunkWillSpawn::new(*key, *entity));
                 }
                 ev_chunk_published.write(ChunkPublished::new(*key, *entity));
@@ -121,10 +123,14 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
             update_buffer.clear();
 
             let mut need_rebuild_aabb = false;
-            for key in remove_buffer.iter() {
-                if write_lock.data.remove(key).is_some() {
-                    write_lock.levels.remove(key.lod_level);
+            for (key, entity) in remove_buffer.iter() {
+                // The chunk may have spawned again and published while this
+                // removal waited for the lock. Its data stays.
+                if write_lock.data.get(key).map(|data| data.entity) != Some(*entity) {
+                    continue;
                 }
+                write_lock.data.remove(key);
+                write_lock.levels.remove(key.lod_level);
 
                 let (min, max) = chunk_corners(key);
                 need_rebuild_aabb |= write_lock.bounds.min.floor().cmpeq(min).any()
@@ -175,5 +181,10 @@ pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(
     PhantomData<C>,
 );
 
+/// The despawned chunks whose data is still to be removed, by chunk key and
+/// entity.
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapRemoveBuffer<C>(#[deref] Vec<ChunkKey>, PhantomData<C>);
+pub(crate) struct ChunkMapRemoveBuffer<C>(
+    #[deref] Vec<(ChunkKey, Entity)>,
+    PhantomData<C>,
+);

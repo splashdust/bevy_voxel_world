@@ -104,6 +104,7 @@ where
             .add_systems(
                 PreUpdate,
                 (
+                    ChunkLifecycle::<C>::forget_despawned_chunks,
                     Internals::<C>::commit_voxel_edits,
                     // Finished tasks are published before the chunks are streamed, so
                     // spawning rays see this frame's results, and before tasks start,

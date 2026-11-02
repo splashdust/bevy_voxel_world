@@ -15,7 +15,8 @@ use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
-    chunk_lifecycle::ChunkIndex,
+    chunk_lifecycle::{ChunkIndex, ChunkStateOf},
+    chunk_map::ChunkMap,
     prelude::VoxelWorldCamera,
     voxel_world::*,
 };
@@ -1824,6 +1825,96 @@ fn raycast_finds_voxel() {
     );
 }
 
+/// A flat floor that keeps its chunks around two far apart cameras.
+#[derive(Resource, Clone, Default)]
+struct WideFloorWorld;
+
+impl VoxelWorldConfig for WideFloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2000
+    }
+
+    fn min_despawn_distance(&self) -> u32 {
+        3
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|pos, _| floor_voxel(pos)))
+    }
+}
+
+#[test]
+fn raycast_stays_on_its_ray_when_published_chunks_span_a_wide_area() {
+    const FAR_X: f32 = 60_000.0;
+
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<WideFloorWorld>::minimal(),
+    ))
+    .add_systems(Startup, |mut commands: Commands| {
+        for x in [10.0, FAR_X] {
+            let transform = Transform::from_xyz(x, 10.0, 10.0);
+            commands.spawn((
+                Camera3d::default(),
+                transform,
+                GlobalTransform::from(transform),
+                VoxelWorldCamera::<WideFloorWorld>::default(),
+            ));
+        }
+    });
+    let far_chunk = IVec3::new((FAR_X / CHUNK_SIZE_F).floor() as i32, -1, 0);
+    update_until(
+        &mut app,
+        "the chunks the rays reach and the chunk below the far camera to be ready",
+        |app| {
+            [
+                IVec3::new(0, -1, 0),
+                IVec3::new(-1, -1, 0),
+                IVec3::new(0, -1, -1),
+                IVec3::new(-1, -1, -1),
+                far_chunk,
+            ]
+            .into_iter()
+            .all(|chunk_pos| {
+                chunk_status::<WideFloorWorld>(app, chunk_pos) == Some(ChunkStatus::Ready)
+            })
+        },
+    );
+
+    let errors = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<WideFloorWorld>| {
+            (0..200)
+                .map(|i| {
+                    let angle = i as f32 * 0.0314;
+                    let direction =
+                        Vec3::new(angle.cos() * 0.5, -1.0, angle.sin() * 0.5).normalize();
+                    let origin = Vec3::new(0.5, 40.5, 0.5);
+                    // Where the ray meets the top of the floor.
+                    let expected = origin + direction * (origin.y / -direction.y);
+                    let ray = Ray3d {
+                        origin,
+                        direction: Dir3::new(direction).unwrap(),
+                    };
+                    let hit = voxel_world
+                        .raycast(ray, &|_| true)
+                        .expect("the ray points at the floor");
+                    (hit.position.xz() + Vec2::splat(0.5)).distance(expected.xz())
+                })
+                .collect::<Vec<f32>>()
+        })
+        .unwrap();
+
+    // The hit voxel's centre is at most half a voxel's diagonal from the ray.
+    for error in errors {
+        assert!(error < 1.0, "the hit is {error} voxels off the ray");
+    }
+}
+
 struct VisitVoxelTestState<'a> {
     test_name: &'a str,
     expected_path: &'a [IVec3],
@@ -2530,6 +2621,143 @@ fn record_announcements<C: VoxelWorldConfig>(
         .extend(published.read().map(|msg| msg.chunk_key.position));
 }
 
+/// A world with room for one chunk task at a time, whose chunk tasks each take
+/// at least 100 ms.
+#[derive(Resource, Clone, Default)]
+struct OneSlowTaskWorld;
+
+impl VoxelWorldConfig for OneSlowTaskWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn max_active_chunk_threads(&self) -> usize {
+        1
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            let mut slept = false;
+            Box::new(move |_, _| {
+                if !slept {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    slept = true;
+                }
+                WorldVoxel::Air
+            })
+        })
+    }
+}
+
+#[test]
+fn despawning_a_generating_chunk_frees_its_task_slot_and_lets_it_respawn() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<OneSlowTaskWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<OneSlowTaskWorld>);
+
+    let mut running = None;
+    update_until(&mut app, "a chunk task to start", |app| {
+        let world = app.world_mut();
+        running = world
+            .query::<(
+                Entity,
+                &Chunk<OneSlowTaskWorld>,
+                &ChunkStateOf<OneSlowTaskWorld>,
+            )>()
+            .iter(world)
+            .find(|(_, _, state)| state.status() == ChunkStatus::Generating)
+            .map(|(entity, chunk, _)| (entity, chunk.key()));
+        running.is_some()
+    });
+    let (entity, key) = running.unwrap();
+
+    app.world_mut().despawn(entity);
+
+    update_until(&mut app, "the despawned chunk to publish again", |app| {
+        chunk_status::<OneSlowTaskWorld>(app, key.position) == Some(ChunkStatus::Ready)
+    });
+    let data = chunk_data::<OneSlowTaskWorld>(&mut app, key.position)
+        .expect("the respawned chunk is published");
+    assert_ne!(data.get_entity(), entity);
+}
+
+#[test]
+fn despawning_a_ready_chunk_removes_its_data_and_lets_it_respawn() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(Update, record_announcements::<FloorWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    let first_entity = chunk_data::<FloorWorld>(&mut app, IVec3::ZERO)
+        .expect("the chunk is published")
+        .get_entity();
+
+    app.world_mut().despawn(first_entity);
+
+    update_until(&mut app, "the chunk to publish again", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+            && chunk_data::<FloorWorld>(app, IVec3::ZERO)
+                .is_some_and(|data| data.get_entity() != first_entity)
+    });
+    assert_eq!(
+        Announced::count(&app.world().resource::<Announced>().will_spawn, IVec3::ZERO),
+        2,
+        "each of the two chunks announces its first publish"
+    );
+}
+
+#[test]
+fn a_respawned_chunk_keeps_its_data_when_the_old_chunk_is_removed_late() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .init_resource::<Announced>()
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(Update, record_announcements::<FloorWorld>);
+
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    let first_entity = chunk_data::<FloorWorld>(&mut app, IVec3::ZERO)
+        .expect("the chunk is published")
+        .get_entity();
+
+    // A reader on another thread would hold this lock the same way. While it is
+    // held the chunk map can't be written, so its buffers wait.
+    let chunk_map = app.world().resource::<ChunkMap<FloorWorld, u8>>().get_map();
+    let read_guard = chunk_map.read().unwrap();
+
+    move_cameras::<FloorWorld>(&mut app, Transform::from_xyz(90_000.0, 10.0, 10.0));
+    update_until(&mut app, "the chunk at the origin to despawn", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO).is_none()
+    });
+    move_cameras::<FloorWorld>(&mut app, Transform::from_xyz(10.0, 10.0, 10.0));
+    update_until(
+        &mut app,
+        "the chunk at the origin to be ready again",
+        |app| chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready),
+    );
+
+    drop(read_guard);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let data = chunk_data::<FloorWorld>(&mut app, IVec3::ZERO)
+        .expect("the new chunk's data outlasts the old chunk's removal");
+    assert_ne!(data.get_entity(), first_entity);
+    assert_eq!(
+        Announced::count(&app.world().resource::<Announced>().will_spawn, IVec3::ZERO),
+        2,
+        "each of the two chunks announces its first publish"
+    );
+}
+
 #[test]
 fn a_remeshed_chunk_is_published_again_but_spawns_once() {
     let mut app = App::new();
@@ -2579,4 +2807,184 @@ fn a_chunk_spawned_again_after_despawning_announces_its_spawn_again() {
 
     let announced = app.world().resource::<Announced>();
     assert_eq!(Announced::count(&announced.will_spawn, IVec3::ZERO), 2);
+}
+
+/// A world whose chunks sample every other voxel at level 0, so their padding
+/// is two voxels deep, on a floor below y = 0.
+#[derive(Resource, Clone, Default)]
+struct SparseDataWorld;
+
+impl VoxelWorldConfig for SparseDataWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| Box::new(|pos, _| floor_voxel(pos)))
+    }
+
+    fn chunk_data_shape(&self, _lod_level: LodLevel) -> UVec3 {
+        padded_chunk_shape_uniform(CHUNK_SIZE_I as u32 / 2)
+    }
+}
+
+#[test]
+fn an_edit_in_a_neighbours_padding_two_voxels_deep_regenerates_the_chunk() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        VoxelWorldPlugin::<SparseDataWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<SparseDataWorld>);
+    update_until(&mut app, "the chunks on either side to be ready", |app| {
+        [IVec3::ZERO, IVec3::new(-1, 0, 0)]
+            .into_iter()
+            .all(|chunk_pos| {
+                chunk_status::<SparseDataWorld>(app, chunk_pos)
+                    == Some(ChunkStatus::Ready)
+            })
+    });
+
+    // Chunk 0's first data voxel along x sits two voxels into chunk -1.
+    let edited = IVec3::new(-2, 8, 8);
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<SparseDataWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(7));
+        })
+        .unwrap();
+
+    let padding_voxel = UVec3::new(0, 5, 5);
+    update_until(&mut app, "chunk 0's padding to show the edit", |app| {
+        app.world_mut()
+            .run_system_once(move |voxel_world: VoxelWorld<SparseDataWorld>| {
+                voxel_world
+                    .get_chunk_data(ChunkKey::new(IVec3::ZERO, 0))
+                    .is_some_and(|data| {
+                        data.get_voxel(padding_voxel) == WorldVoxel::Solid(7)
+                    })
+            })
+            .unwrap()
+    });
+}
+
+#[test]
+fn a_coarse_chunk_with_sparse_data_shows_an_edit_past_the_next_level_0_chunk() {
+    let key = ChunkKey::new(IVec3::ZERO, 2);
+    let shape = UVec3::splat(4);
+    let edits = crate::voxel_edits::VoxelEdits::<DefaultWorld, u8>::default();
+    edits.set(IVec3::new(-64, 0, 0), WorldVoxel::Solid(1));
+    edits.commit();
+
+    let mut task = crate::chunk::ChunkTask::<DefaultWorld, u8>::new(
+        Entity::PLACEHOLDER,
+        key,
+        shape,
+        shape,
+        edits.chunk_edits(key, crate::chunk::padding_depth(shape, key.lod_level)),
+        FillHint::Unknown,
+    );
+    task.generate(|_, _| WorldVoxel::Air, None);
+
+    assert_eq!(
+        task.chunk_data.get_voxel(UVec3::new(0, 1, 1)),
+        WorldVoxel::Solid(1)
+    );
+}
+
+/// A chunk task for the level-0 chunk at the origin with the data `shape`.
+fn task_with_shape(shape: UVec3) -> crate::chunk::ChunkTask<DefaultWorld, u8> {
+    let key = ChunkKey::new(IVec3::ZERO, 0);
+    let edits = crate::voxel_edits::VoxelEdits::<DefaultWorld, u8>::default();
+    crate::chunk::ChunkTask::new(
+        Entity::PLACEHOLDER,
+        key,
+        shape,
+        shape,
+        edits.chunk_edits(key, crate::chunk::padding_depth(shape, key.lod_level)),
+        FillHint::Unknown,
+    )
+}
+
+#[test]
+fn a_densely_sampled_chunk_reads_its_low_padding_from_the_neighbouring_chunk() {
+    let shape = UVec3::splat(66);
+    let mut task = task_with_shape(shape);
+    task.generate(
+        |pos, _| {
+            if pos.x >= 0 {
+                WorldVoxel::Solid(1)
+            } else {
+                WorldVoxel::Air
+            }
+        },
+        None,
+    );
+
+    assert_eq!(
+        task.chunk_data.get_voxel(UVec3::new(0, 30, 30)),
+        WorldVoxel::Air
+    );
+    assert!(!task.chunk_data.is_full());
+
+    let mesh = generate_chunk_mesh_for_shape(
+        task.chunk_data.voxels_arc().unwrap(),
+        IVec3::ZERO,
+        shape,
+        shape,
+        Arc::new(|_| [0, 0, 0]),
+    );
+    let Some(VertexAttributeValues::Float32x3(normals)) =
+        mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+    else {
+        panic!("normals missing");
+    };
+    assert!(
+        normals.iter().any(|normal| normal[0] < -0.5),
+        "the solid voxels at x = 0 have a face towards the air at x < 0"
+    );
+}
+
+#[test]
+fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
+    // 32 voxels over 10 data voxels is 3.2 voxels apart.
+    let mut task = task_with_shape(UVec3::splat(12));
+    let sampled = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+    let sampled_in_task = sampled.clone();
+    task.generate(
+        move |pos, _| {
+            sampled_in_task.lock().unwrap().insert(pos.x);
+            WorldVoxel::Solid((pos.x + 10) as u8)
+        },
+        None,
+    );
+
+    let sampled = sampled.lock().unwrap();
+    assert_eq!(
+        sampled.iter().copied().collect::<Vec<_>>(),
+        vec![-4, 0, 3, 6, 9, 12, 16, 19, 22, 25, 28, 32]
+    );
+
+    // Every voxel in the padded data is answered by the last data voxel at or
+    // before it.
+    for x in -4..=32 {
+        let covering = *sampled.range(..=x).next_back().unwrap();
+        assert_eq!(
+            task.chunk_data
+                .get_voxel_at_world_position(IVec3::new(x, 0, 0)),
+            Some(WorldVoxel::Solid((covering + 10) as u8)),
+            "voxel {x}"
+        );
+    }
+    assert_eq!(
+        task.chunk_data
+            .get_voxel_at_world_position(IVec3::new(-5, 0, 0)),
+        None
+    );
+    assert!(
+        -sampled.first().unwrap() <= crate::chunk::padding_depth(UVec3::splat(12), 0).x,
+        "the padding depth covers the deepest sample"
+    );
 }
