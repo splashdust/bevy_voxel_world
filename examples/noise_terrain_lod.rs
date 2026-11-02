@@ -153,11 +153,11 @@ impl VoxelWorldConfig for MainWorld {
             0
         } else if distance < 70.0 {
             1
-        } else if distance < 100.0 {
-            2
         } else if distance < 150.0 {
+            2
+        } else if distance < 200.0 {
             3
-        } else if distance < 250.0 {
+        } else if distance < 300.0 {
             4
         } else {
             5
@@ -202,7 +202,7 @@ fn setup(mut commands: Commands) {
             color: *ClearColor::default(),
             falloff: FogFalloff::Linear {
                 start: 125.0 * CHUNK_SIZE_F,
-                end: 200.0 * CHUNK_SIZE_F,
+                end: 500.0 * CHUNK_SIZE_F,
             },
             ..default()
         },
@@ -312,9 +312,9 @@ fn move_camera(
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
     if let Ok(mut transform) = cam_transform.single_mut() {
-        transform.translation.x += time.delta_secs() * 12.0;
-        transform.translation.z += time.delta_secs() * 24.0;
-        transform.rotate_y(time.delta_secs() * 0.1);
+        transform.translation.x += time.delta_secs() * 120.0;
+        transform.translation.z += time.delta_secs() * 240.0;
+        transform.rotate_y(time.delta_secs() * 0.01);
     }
 }
 

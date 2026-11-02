@@ -153,7 +153,7 @@ The delegate doesn't have to produce cubical voxels. The [marching cubes example
 
 ## Level of Detail
 
-<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/6427fc19-6ad6-4275-bd71-45187147d299" />
+<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/a93bd929-36b1-44d5-bcdb-41d608d33399" />
 
 Every chunk has a LOD level. A level-0 chunk is 32 voxels on a side and samples every voxel. A chunk at level `L` is `32 << L` voxels on a side and, by default, samples every `1 << L` voxels, so it holds as many samples as a level-0 chunk. Far regions therefore cost about as much as near ones, which lets a world stream out to a distant horizon.
 
@@ -170,7 +170,7 @@ Other `VoxelWorldConfig` methods that matter with LOD levels:
 - `chunk_meshing_delegate` builds its mesh as for a level-0 chunk, and the crate scales it to the chunk's size. A custom mesher should scale its own texture coordinates with `scale_texture_coordinates`.
 - `chunk_fill_hint` is an opt-in optimization that lets a world hint at the contents of a chunk. By hinting that a chunk is either 100% air or 100% solid material, the chunk streaming policy can decide to skip over it or stop at it, thereby avoiding unnecessary work.
 
-The consuming code is responsible for hiding seams between levels. `examples/noise_terrain_lod.rs` streams terrain 800 chunks out in six levels, uses fill hints, and hides cracks with skirts by returning `WorldVoxel::Unset` in the padding of its level-1 chunks.
+The consuming code is responsible for hiding seams between levels. `examples/noise_terrain_lod.rs` streams terrain 500 chunks out in six levels, uses fill hints, and hides cracks with skirts by returning `WorldVoxel::Unset` in the padding of its level-1 chunks.
 
 ## AI Disclosure
 
