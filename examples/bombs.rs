@@ -13,7 +13,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        15
+        40
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
@@ -58,7 +58,8 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-120.0, 150.0, -120.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-120.0, 250.0, -120.0)
+            .looking_at(Vec3::ZERO + Vec3::Y * 70.0, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
@@ -206,12 +207,12 @@ fn explosion(
         camera_transform.translation + (direction * 300.0) - Vec3::Y * 10.0;
 
     if let Some((impact_point, _)) =
-        random_surface_voxel(&voxel_world, impact_point.as_ivec3(), 70)
+        random_surface_voxel(&voxel_world, impact_point.as_ivec3(), 130)
     {
         let vox = voxel_world.get_voxel(impact_point - IVec3::Y);
 
         // Dig out a spherical volume centered around the impact point
-        let radius = 10;
+        let radius = 20;
         for x in -radius..=radius {
             for y in -radius..=radius {
                 for z in -radius..=radius {
