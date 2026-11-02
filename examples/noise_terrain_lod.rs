@@ -8,12 +8,31 @@ use bevy::{
     prelude::*,
     ui::{PositionType, Val},
 };
-use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
+use bevy_voxel_world::custom_meshing::{CHUNK_SIZE_F, CHUNK_SIZE_I};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 
 #[derive(Component)]
 struct FpsText;
+
+/// The terrain lies between these level-0 chunk rows: below the sea level at
+/// y = 0 everything is rock, and the highest peaks (about y = 170) end in row
+/// 5, so every chunk above that row is air.
+const LOWEST_TERRAIN_CHUNK: i32 = -1;
+const HIGHEST_TERRAIN_CHUNK: i32 = 5;
+
+/// What fills the chunk at `key` when no terrain crosses it: rock below the
+/// terrain, air above it. Used as the chunk's fill hint, so that the streaming
+/// policy spawns neither, and by the voxel lookup to skip the noise there.
+fn terrain_fill(key: ChunkKey) -> FillHint {
+    if key.position.y + key.extent() <= LOWEST_TERRAIN_CHUNK {
+        FillHint::Uniform(WorldVoxel::Solid(3))
+    } else if key.position.y > HIGHEST_TERRAIN_CHUNK {
+        FillHint::Uniform(WorldVoxel::Air)
+    } else {
+        FillHint::Unknown
+    }
+}
 
 #[derive(Resource, Clone)]
 struct MainWorld {
@@ -39,7 +58,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        200
+        500
     }
 
     fn min_despawn_distance(&self) -> u32 {
@@ -49,16 +68,16 @@ impl VoxelWorldConfig for MainWorld {
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let chunk_noise = Arc::clone(&self.noise);
         Box::new(move |chunk_pos, lod_level, _previous| {
-            if chunk_pos.y < -1 {
-                return Box::new(|_, _| WorldVoxel::Solid(3));
-            }
-            if chunk_pos.y > 4 {
-                return Box::new(|_, _| WorldVoxel::Air);
+            if let FillHint::Uniform(voxel) =
+                terrain_fill(ChunkKey::new(chunk_pos, lod_level))
+            {
+                return Box::new(move |_, _| voxel);
             }
 
+            // A chunk at level L spans CHUNK_SIZE << L voxels.
             let chunk_min = chunk_pos * CHUNK_SIZE_I;
-            let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I);
-            let skirt_enabled = lod_level == 2;
+            let chunk_max = chunk_min + IVec3::splat(CHUNK_SIZE_I << lod_level);
+            let skirt_enabled = lod_level == 1;
             let noise = Arc::clone(&chunk_noise);
 
             // We use this to cache the noise value for each y column so we only need
@@ -118,14 +137,6 @@ impl VoxelWorldConfig for MainWorld {
         })
     }
 
-    fn chunk_data_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
-    fn chunk_meshing_shape(&self, lod_level: LodLevel) -> UVec3 {
-        padded_chunk_shape_uniform(CHUNK_SIZE_U / lod_level.max(1) as u32)
-    }
-
     fn chunk_lod(
         &self,
         chunk_position: IVec3,
@@ -135,20 +146,30 @@ impl VoxelWorldConfig for MainWorld {
         let camera_chunk = (camera_position / CHUNK_SIZE_F).floor();
         let distance = chunk_position.as_vec3().distance(camera_chunk);
 
-        // directly set lod values to our stride lengths
-        if distance < 10.0 {
+        // The LOD level by distance in chunks. A chunk at level L spans
+        // 32 << L voxels and samples the terrain every 1 << L voxels, so the
+        // far bands hold few, large chunks.
+        if distance < 30.0 {
+            0
+        } else if distance < 70.0 {
             1
-        } else if distance < 25.0 {
+        } else if distance < 150.0 {
             2
-        } else if distance < 50.0 {
+        } else if distance < 200.0 {
+            3
+        } else if distance < 300.0 {
             4
-        } else if distance < 85.0 {
-            8
-        } else if distance < 125.0 {
-            16
         } else {
-            32
+            5
         }
+    }
+
+    // With these fill hints, spawning rays pass through the air above the
+    // terrain and stop at the rock below it, without spawning chunks for
+    // either. Only the chunks the terrain crosses are generated, and the rays
+    // reach the terrain at the horizon right away.
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
+        terrain_fill(key)
     }
 
     fn attach_chunks_to_root(&self) -> bool {
@@ -161,7 +182,7 @@ fn main() {
         .add_plugins((DefaultPlugins, FrameTimeDiagnosticsPlugin::default()))
         .add_plugins(VoxelWorldPlugin::with_config(MainWorld::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_camera, update_fps_text))
+        .add_systems(Update, (move_camera, update_fps_text, edit_terrain))
         .run();
 }
 
@@ -173,15 +194,15 @@ fn setup(mut commands: Commands) {
             order: 0,
             ..default()
         },
-        Transform::from_xyz(-200.0, 180.0, -200.0)
-            .looking_at(Vec3::new(0.0, 60.0, 0.0), Vec3::Y),
+        Transform::from_xyz(-200.0, 260.0, -200.0)
+            .looking_at(Vec3::new(0.0, 170.0, 0.0), Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
         DistanceFog {
             color: *ClearColor::default(),
             falloff: FogFalloff::Linear {
                 start: 125.0 * CHUNK_SIZE_F,
-                end: 200.0 * CHUNK_SIZE_F,
+                end: 500.0 * CHUNK_SIZE_F,
             },
             ..default()
         },
@@ -238,14 +259,62 @@ fn setup(mut commands: Commands) {
     ));
 }
 
+/// Left click digs a hole and shift + left click adds a mound where the
+/// cursor points. Edits go through the usual voxel API and the terrain keeps
+/// updating like any other voxel change.
+fn edit_terrain(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    window: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<VoxelWorldCamera<MainWorld>>>,
+    mut voxel_world: VoxelWorld<MainWorld>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let (Ok(window), Ok((camera, camera_transform))) = (window.single(), camera.single())
+    else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor) else {
+        return;
+    };
+    let Some(hit) = voxel_world.raycast(ray, &|_| true) else {
+        return;
+    };
+
+    let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let center = hit.voxel_pos();
+    let radius = 32;
+    for x in -radius..=radius {
+        for y in -radius..=radius {
+            for z in -radius..=radius {
+                let offset = IVec3::new(x, y, z);
+                if offset.length_squared() <= radius * radius {
+                    let voxel = if add {
+                        WorldVoxel::Solid(0)
+                    } else {
+                        WorldVoxel::Air
+                    };
+                    voxel_world.set_voxel(center + offset, voxel);
+                }
+            }
+        }
+    }
+}
+
 fn move_camera(
     time: Res<Time>,
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
     if let Ok(mut transform) = cam_transform.single_mut() {
-        transform.translation.x += time.delta_secs() * 12.0;
-        transform.translation.z += time.delta_secs() * 24.0;
-        transform.rotate_y(time.delta_secs() * 0.1);
+        transform.translation.x += time.delta_secs() * 120.0;
+        transform.translation.z += time.delta_secs() * 240.0;
+        transform.rotate_y(time.delta_secs() * 0.01);
     }
 }
 

@@ -6,13 +6,14 @@ use bevy::{
 };
 
 use crate::{
+    chunk_lifecycle::ChunkLifecycle,
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
         prepare_texture, prepare_voxel_texture, LoadingTexture, StandardVoxelMaterial,
         TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
-    voxel_world_internal::Internals,
+    voxel_world_internal::{Internals, SpawnMeshes},
 };
 
 #[derive(Resource)]
@@ -99,34 +100,43 @@ where
     fn build(&self, app: &mut App) {
         app.init_resource::<C>()
             .add_systems(PreStartup, Internals::<C>::setup)
+            .insert_resource(SpawnMeshes::<C>::new(self.spawn_meshes))
             .add_systems(
                 PreUpdate,
                 (
+                    ChunkLifecycle::<C>::forget_despawned_chunks,
+                    Internals::<C>::commit_voxel_edits,
+                    // Finished tasks are published before the chunks are streamed, so
+                    // spawning rays see this frame's results, and before tasks start,
+                    // so a chunk whose task finished gets its follow-up task, and the
+                    // task pool its next tasks, without waiting for the next frame.
+                    ChunkLifecycle::<C>::collect_chunk_tasks,
                     (
-                        (
-                            Internals::<C>::spawn_chunks,
-                            Internals::<C>::update_chunk_lods,
-                            Internals::<C>::retire_chunks,
-                        )
-                            .chain(),
-                        Internals::<C>::remesh_dirty_chunks,
+                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
+                        ChunkLifecycle::<C>::flush_mesh_cache_buffers,
+                    ),
+                    Internals::<C>::stream_chunks,
+                    ChunkLifecycle::<C>::apply_requests,
+                    // Starting tasks needs the chunks spawned above. No other step
+                    // depends on an earlier step's commands, so this is the only sync
+                    // point the set needs.
+                    ApplyDeferred,
+                    ChunkLifecycle::<C>::start_chunk_tasks,
+                    // Flushing again removes the despawned chunks from the chunk map
+                    // this frame.
+                    (
+                        ChunkLifecycle::<C>::despawn_retired_chunks,
+                        ChunkLifecycle::<C>::flush_chunk_map_buffers,
                     )
                         .chain(),
-                    (
-                        Internals::<C>::flush_voxel_write_buffer,
-                        Internals::<C>::despawn_retired_chunks,
-                        (
-                            Internals::<C>::flush_chunk_map_buffers,
-                            Internals::<C>::flush_mesh_cache_buffers,
-                        ),
-                    )
-                        .chain(),
-                ),
+                )
+                    .chain_ignore_deferred()
+                    .in_set(VoxelWorldSet::<C>::default()),
             )
             .add_message::<ChunkWillSpawn<C>>()
+            .add_message::<ChunkPublished<C>>()
             .add_message::<ChunkWillDespawn<C>>()
             .add_message::<ChunkWillRemesh<C>>()
-            .add_message::<ChunkWillChangeLod<C>>()
             .add_message::<ChunkWillUpdate<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
@@ -138,8 +148,6 @@ where
                 "shaders/voxel_texture.wesl",
                 Shader::from_wesl
             );
-
-            app.add_systems(Update, Internals::<C>::spawn_meshes);
         }
 
         if !self.use_custom_material && self.spawn_meshes {

@@ -127,7 +127,7 @@ fn main() {
                 player_input_3d,
                 animate_move,
                 pathfind_error,
-                apply_chunk_nav_on_spawn,
+                apply_chunk_nav_on_publish,
             ),
         )
         .add_plugins(NorthstarPlugin::<OrdinalNeighborhood3d>::default())
@@ -423,14 +423,14 @@ fn pathfind_error(query: Query<Entity, With<PathfindingFailed>>, mut commands: C
     }
 }
 
-// Apply newly generated per-chunk navigation data to the grid when chunks are spawned/remeshed
-fn apply_chunk_nav_on_spawn(
+// Apply newly generated per-chunk navigation data to the grid each time a chunk is published
+fn apply_chunk_nav_on_publish(
     mut grid: Single<&mut OrdinalGrid3d>,
     nav_q: Query<&ChunkNav>,
-    mut ev_spawn: MessageReader<ChunkWillSpawn<MyMainWorld>>,
+    mut ev_published: MessageReader<ChunkPublished<MyMainWorld>>,
 ) {
     let mut changed = false;
-    for evt in ev_spawn.read() {
+    for evt in ev_published.read() {
         if let Ok(nav) = nav_q.get(evt.entity) {
             for &pos in &nav.passable {
                 if grid.in_bounds(pos) {

@@ -10,10 +10,10 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-![bvw_480](https://github.com/splashdust/bevy_voxel_world/assets/428824/98d25cd1-0a6c-4618-b0de-0e16ca5af636)
+<img width="700" height="389" alt="bombs" src="https://github.com/user-attachments/assets/6c768a17-c370-4480-98fc-6bf4b4fae22c" />
 
 ```bash
-$ cargo run -r --example noise_terrain
+$ cargo run -r --example bombs
 ```
 
 The world can be controlled in two main ways: through a terrain lookup function, and directly by `set_voxel` and `get_voxel` functions. The world has two "layers" of voxel information, one that is procedural and determined by the terrain lookup function, and one that is controlled by `set_voxel` and persisted in a `HashMap`. The persistent layer always overrides the procedural layer. This way, the world can be infinitely large, but we only need to store information about voxels that are deliberately changed. In the current implementation, the proceduaral layer is cached for spawned chunks, so it may still use a lot of memory if the spawning distance is large.
@@ -66,6 +66,8 @@ fn my_system(mut voxel_world: VoxelWorld<MyWorld>) {
 This will update the voxel value at the given location in the persisting `HashMap`, and cause `bevy_voxel_world` to queue the affected chunk for re-meshing.
 
 Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Solid`.
+
+<img width="800" height="445" alt="voxel_animation" src="https://github.com/user-attachments/assets/7dafe892-4035-4cc5-92b3-51c73dd3071c" />
 
 ## Voxel materials
 
@@ -143,28 +145,48 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 <img width="558" src="https://github.com/user-attachments/assets/13f46fd6-81a8-4c93-943c-9c5fc7b9b38e"/>
 
+### Other shapes
+
+<img width="800" height="445" alt="marching_cubes" src="https://github.com/user-attachments/assets/b83b9861-206c-4bf8-9cfb-582e0ccbb500" />
+
+The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
+
 ## Level of Detail
 
-Worlds can compute a per-chunk level-of-detail (LOD) value by overriding `VoxelWorldConfig::chunk_lod`. The callback receives both the chunk position and the previously assigned LOD (if any). The default implementation always returns `0`, so nothing changes unless you opt in. When a chunk's LOD changes it is automatically marked for regeneration and remeshing to apply the new data, and a `ChunkWillChangeLod` event is fired so gameplay/UI systems can react even if no remesh is needed.
+<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/a93bd929-36b1-44d5-bcdb-41d608d33399" />
 
-Once you provide your own LOD value, the following hooks become available:
+Every chunk has a LOD level. A level-0 chunk is 32 voxels on a side and samples every voxel. A chunk at level `L` is `32 << L` voxels on a side and, by default, samples every `1 << L` voxels, so it holds as many samples as a level-0 chunk. Far regions therefore cost about as much as near ones, which lets a world stream out to a distant horizon.
 
-- `chunk_data_shape(lod)`: define the padded voxel dimensions used while generating data per unique LOD. Returning a smaller shape reduces the number of samples you pull from the `voxel_lookup_delegate`.
-- `chunk_meshing_shape(lod)`: define the padded voxel dimensions per unique LOD used purely for meshing. If this differs from the data shape, the default mesher downsamples using nearest-neighbour sampling before handing the voxels to block-mesh. You can keep the meshing shape fixed (for example `PADDED_CHUNK_SIZE`) to guarantee identical tessellation across LODs, or shrink it to reduce triangle counts and fill seams with your own skirts/transition geometry. `chunk_meshing_delegate` receives the `data_shape` and `mesh_shape` which can be used in custom meshers.
-- `chunk_regenerate_strategy()`: choose whether previously generated voxel buffers should be reused (`Reuse`, the new default) or recalculated (`Repopulate`, pre 0.13.1 behavior) when the chunk changes LOD. Reuse avoids re-running expensive generators at the cost of storing the higher-resolution payload while the chunk is coarse.
-- `voxel_lookup_delegate` and `chunk_meshing_delegate`: both delegates receive the current LOD together with the previously generated `ChunkData` (if any). This lets you pull information forward when LODs change instead of starting from scratch. The voxel lookup closure also receives an `Option<WorldVoxel>` describing any previous value for each sample so you can cheaply decide whether a position needs new work.
+To use LOD levels, override `VoxelWorldConfig::chunk_lod` and return the level wanted at a chunk position. The default returns `0` everywhere. The level must not get finer with distance. Check out the `noise_terrain_lod` example to see this in action.
 
-See `examples/noise_terrain_lod.rs` for a reference implementation that varies both data and mesh shapes, and uses coarse-chunk skirts (implemented by returning `WorldVoxel::Unset` for voxels in the padded border) to hide cracks at LOD boundaries.
+When the level at a position changes, chunks at the new level spawn first, and the old ones are despawned once the new ones cover them, so no hole opens.
 
-## Gotchas
+A chunk is addressed by a `ChunkKey`, which holds its position and its level. Chunk messages carry one, and `VoxelWorld::chunk_at` returns the key of the finest chunk covering a voxel.
 
-`bevy_voxel_world` began as an internal part of a game that I'm working on, but I figured that it could be useful as a standalone plugin, for myself and perhaps for others, so I decided to break it out and make it public as a crate.
+Other `VoxelWorldConfig` methods that matter with LOD levels:
 
-In its current state, there are still various hard-coded assumptions that works well enough for my usecase, but may not suit everyone. Over time, the aim is to generalize and make `bevy_voxel_world` more configurable. There are also many potential performance optimizations that I have not prioritized yet at this point.
+- `chunk_data_shape` and `chunk_meshing_shape` can be used for sampling a level more or less densely than the default.
+- `voxel_lookup_delegate` is called with world positions, so it works unchanged at every level.
+- `chunk_meshing_delegate` builds its mesh as for a level-0 chunk, and the crate scales it to the chunk's size. A custom mesher should scale its own texture coordinates with `scale_texture_coordinates`.
+- `chunk_fill_hint` is an opt-in optimization that lets a world hint at the contents of a chunk. By hinting that a chunk is either 100% air or 100% solid material, the chunk streaming policy can decide to skip over it or stop at it, thereby avoiding unnecessary work.
 
-Default meshing is handled by [block-mesh-rs](https://github.com/bonsairobo/block-mesh-rs), using the "simple" algorithm.
+The consuming code is responsible for hiding seams between levels. `examples/noise_terrain_lod.rs` streams terrain 500 chunks out in six levels, uses fill hints, and hides cracks with skirts by returning `WorldVoxel::Unset` in the padding of its level-1 chunks.
 
-Feedback, issues and pull requests are welcomed!
+## AI Disclosure
+
+From version 0.19.0 of `bevy_voxel_world`, AI has been used to implement new features, optimize existing ones and write some documentation (such as release notes). On prior versions, AI was used only sparingly for some of the upgrade work to keep up with Bevy versions.
+
+Increased use of AI makes it possible for me to keep working on this crate, despite having very limited time to do so.
+
+This note is here so that those who wish can steer clear of AI. Use versions prior to the one mentioned above, and feel free to fork or copy an earlier version if you wish to have a version of this crate untouched by AI.
+
+## Contribution policy
+
+AI written contributions are accepted. Code quality, such as maintainability, clarity, performance, and so on, still matter as much as they always have. It remains important to maintain sane abstractions and to understand how the code works. I may reject PRs that are hard to understand, are messy, or lack clear goal or architecture.
+
+Please do disclose in the PR description where and how AI was used. It's also fine to let agents co-author commits. Doing so makes it clear which commits were written by AI.
+
+It may sometimes take up to a month or so before I have a chance to process new PRs, especially during summer.
 
 ---
 

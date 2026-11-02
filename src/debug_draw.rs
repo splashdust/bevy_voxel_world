@@ -1,11 +1,7 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use std::sync::{Arc, RwLock};
 
-use crate::{
-    chunk::{Chunk, CHUNK_SIZE_F},
-    configuration::VoxelWorldConfig,
-    prelude::VoxelWorld,
-};
+use crate::{chunk::Chunk, configuration::VoxelWorldConfig, prelude::VoxelWorld};
 
 #[derive(Default)]
 pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
@@ -176,10 +172,11 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
     voxel_world: VoxelWorld<C>,
 ) {
     for (chunk, transform) in chunks.iter() {
-        let size = Vec3::ONE * CHUNK_SIZE_F;
+        let extent = chunk.key().voxel_extent() as f32;
+        let size = Vec3::ONE * extent;
         let color = Srgba::new(0.0, 1.0, 0.0, 1.0);
 
-        let Some(chunk_data) = voxel_world.get_chunk_data(chunk.position) else {
+        let Some(chunk_data) = voxel_world.get_chunk_data(chunk.key()) else {
             continue;
         };
 
@@ -190,7 +187,7 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
         gizmos.cube(
             Transform::from(*transform)
                 .with_scale(size)
-                .with_translation(transform.translation() + (CHUNK_SIZE_F / 2.0) + 1.0),
+                .with_translation(transform.translation() + (extent / 2.0) + 1.0),
             color,
         );
     }

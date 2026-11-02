@@ -25,7 +25,7 @@ impl VoxelWorldConfig for MainWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        25
+        40
     }
 
     fn min_despawn_distance(&self) -> u32 {

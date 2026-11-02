@@ -4,10 +4,10 @@ use std::{
 };
 
 use crate::{
-    chunk::{self, ChunkData, CHUNK_SIZE_F},
+    chunk::{self, ChunkData, ChunkKey, LevelCounts, CHUNK_SIZE_F},
     configuration::VoxelWorldConfig,
     voxel::VOXEL_SIZE,
-    voxel_world::ChunkWillSpawn,
+    voxel_world::{ChunkPublished, ChunkWillSpawn},
 };
 use bevy::{math::Vec3A, prelude::*};
 use hashbrown::HashMap;
@@ -15,13 +15,24 @@ use hashbrown::HashMap;
 #[derive(Deref, DerefMut)]
 pub struct ChunkMapData<I> {
     #[deref]
-    data: HashMap<IVec3, chunk::ChunkData<I>>,
+    data: HashMap<ChunkKey, chunk::ChunkData<I>>,
+    levels: LevelCounts,
     bounds: Aabb3d,
 }
 
-/// Holds a map of all chunks that are currently spawned spawned
-/// The chunks also exist as entities that can be queried in the ECS,
-/// but having this map in addition allows for faster spatial lookups
+impl<I> ChunkMapData<I> {
+    /// The published data of the finest chunk that covers the voxel at
+    /// `voxel_position`, if any chunk does.
+    pub fn finest_covering(&self, voxel_position: IVec3) -> Option<&chunk::ChunkData<I>> {
+        self.levels.in_use().find_map(|lod_level| {
+            self.data
+                .get(&ChunkKey::containing(voxel_position, lod_level))
+        })
+    }
+}
+
+/// Holds the published data of chunks, by chunk key. A chunk has no entry here
+/// until its first chunk task is published.
 #[derive(Resource)]
 pub struct ChunkMap<C, I> {
     map: Arc<RwLock<ChunkMapData<I>>>,
@@ -30,17 +41,17 @@ pub struct ChunkMap<C, I> {
 
 impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
     pub fn get(
-        position: &IVec3,
+        key: &ChunkKey,
         read_lock: &RwLockReadGuard<ChunkMapData<I>>,
     ) -> Option<chunk::ChunkData<I>> {
-        read_lock.data.get(position).cloned()
+        read_lock.data.get(key).cloned()
     }
 
     pub fn contains_chunk(
-        position: &IVec3,
+        key: &ChunkKey,
         read_lock: &RwLockReadGuard<ChunkMapData<I>>,
     ) -> bool {
-        read_lock.data.contains_key(position)
+        read_lock.data.contains_key(key)
     }
 
     /// Get the current bounding box of loaded chunks in this map.
@@ -61,6 +72,8 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
     }
 
     pub fn get_read_lock(&self) -> RwLockReadGuard<'_, ChunkMapData<I>> {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("wait_chunk_map_read").entered();
         self.map.read().unwrap()
     }
 
@@ -70,76 +83,83 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
 
     pub(crate) fn apply_buffers(
         &self,
-        insert_buffer: &mut ChunkMapInsertBuffer<C, I>,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
+        ev_chunk_published: &mut MessageWriter<ChunkPublished<C>>,
         ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
     ) {
-        if insert_buffer.is_empty()
-            && update_buffer.is_empty()
-            && remove_buffer.is_empty()
-        {
+        if update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
         }
 
         if let Ok(mut write_lock) = self.map.try_write() {
-            for (position, chunk_data) in insert_buffer.iter() {
-                write_lock.data.insert(
-                    *position,
+            for (key, chunk_data, entity) in update_buffer.iter() {
+                let previous = write_lock.data.insert(
+                    *key,
                     ChunkData {
-                        position: *position,
+                        key: *key,
                         ..chunk_data.clone()
                     },
                 );
 
-                let position_f = Vec3A::from(position.as_vec3());
-                if position_f.cmplt(write_lock.bounds.min).any() {
-                    write_lock.bounds.min = position_f.min(write_lock.bounds.min);
-                } else if position_f.cmpgt(write_lock.bounds.max).any() {
-                    write_lock.bounds.max = position_f.max(write_lock.bounds.max);
+                let (min, max) = chunk_corners(key);
+                if min.cmplt(write_lock.bounds.min).any() {
+                    write_lock.bounds.min = min.min(write_lock.bounds.min);
                 }
-            }
-            insert_buffer.clear();
-
-            for (position, chunk_data, evt) in update_buffer.iter() {
-                write_lock.data.insert(
-                    *position,
-                    ChunkData {
-                        position: *position,
-                        ..chunk_data.clone()
-                    },
-                );
-
-                let position_f = Vec3A::from(position.as_vec3());
-                if position_f.cmplt(write_lock.bounds.min).any() {
-                    write_lock.bounds.min = position_f.min(write_lock.bounds.min);
-                } else if position_f.cmpgt(write_lock.bounds.max).any() {
-                    write_lock.bounds.max = position_f.max(write_lock.bounds.max);
+                if max.cmpgt(write_lock.bounds.max).any() {
+                    write_lock.bounds.max = max.max(write_lock.bounds.max);
                 }
 
-                ev_chunk_will_spawn.write((*evt).clone());
+                if previous.is_none() {
+                    write_lock.levels.add(key.lod_level);
+                }
+                // A chunk is published for the first time when the key has no
+                // data, or still holds the data of a despawned chunk.
+                if previous.map(|data| data.entity) != Some(*entity) {
+                    ev_chunk_will_spawn.write(ChunkWillSpawn::new(*key, *entity));
+                }
+                ev_chunk_published.write(ChunkPublished::new(*key, *entity));
             }
             update_buffer.clear();
 
             let mut need_rebuild_aabb = false;
-            for position in remove_buffer.iter() {
-                write_lock.data.remove(position);
+            for (key, entity) in remove_buffer.iter() {
+                // The chunk may have spawned again and published while this
+                // removal waited for the lock. Its data stays.
+                if write_lock.data.get(key).map(|data| data.entity) != Some(*entity) {
+                    continue;
+                }
+                write_lock.data.remove(key);
+                write_lock.levels.remove(key.lod_level);
 
-                need_rebuild_aabb = write_lock.bounds.min.floor().as_ivec3() == *position
-                    || write_lock.bounds.max.floor().as_ivec3() == *position;
+                let (min, max) = chunk_corners(key);
+                need_rebuild_aabb |= write_lock.bounds.min.floor().cmpeq(min).any()
+                    || write_lock.bounds.max.floor().cmpeq(max).any();
             }
             remove_buffer.clear();
 
-            if need_rebuild_aabb {
-                let mut tmp_vec = Vec::with_capacity(write_lock.data.len());
-                for v in write_lock.data.keys() {
-                    tmp_vec.push(Vec3A::from(v.as_vec3()));
+            if write_lock.data.is_empty() {
+                write_lock.bounds = Aabb3d::new(Vec3::ZERO, Vec3::ZERO);
+            } else if need_rebuild_aabb {
+                let mut corners = Vec::with_capacity(2 * write_lock.data.len());
+                for key in write_lock.data.keys() {
+                    let (min, max) = chunk_corners(key);
+                    corners.push(min);
+                    corners.push(max);
                 }
                 write_lock.bounds =
-                    Aabb3d::from_point_cloud(Isometry3d::IDENTITY, tmp_vec.drain(0..));
+                    Aabb3d::from_point_cloud(Isometry3d::IDENTITY, corners.drain(0..));
             }
         }
     }
+}
+
+/// The chunk's minimum and maximum corners in chunk coordinates, inclusive.
+fn chunk_corners(key: &ChunkKey) -> (Vec3A, Vec3A) {
+    (
+        Vec3A::from(key.position.as_vec3()),
+        Vec3A::from((key.position + key.extent() - 1).as_vec3()),
+    )
 }
 
 impl<C, I> Default for ChunkMap<C, I> {
@@ -147,6 +167,7 @@ impl<C, I> Default for ChunkMap<C, I> {
         Self {
             map: Arc::new(RwLock::new(ChunkMapData {
                 data: HashMap::with_capacity(1000),
+                levels: LevelCounts::new(),
                 bounds: Aabb3d::new(Vec3::ZERO, Vec3::ZERO),
             })),
             _marker: PhantomData,
@@ -154,17 +175,16 @@ impl<C, I> Default for ChunkMap<C, I> {
     }
 }
 
-#[derive(Resource, Deref, DerefMut, Default, Debug)]
-pub(crate) struct ChunkMapInsertBuffer<C, I>(
-    #[deref] Vec<(IVec3, chunk::ChunkData<I>)>,
-    PhantomData<C>,
-);
-
 #[derive(Resource, Deref, DerefMut, Default)]
 pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(
-    #[deref] Vec<(IVec3, chunk::ChunkData<I>, ChunkWillSpawn<C>)>,
+    #[deref] Vec<(ChunkKey, chunk::ChunkData<I>, Entity)>,
     PhantomData<C>,
 );
 
+/// The despawned chunks whose data is still to be removed, by chunk key and
+/// entity.
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapRemoveBuffer<C>(#[deref] Vec<IVec3>, PhantomData<C>);
+pub(crate) struct ChunkMapRemoveBuffer<C>(
+    #[deref] Vec<(ChunkKey, Entity)>,
+    PhantomData<C>,
+);

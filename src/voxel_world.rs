@@ -3,17 +3,18 @@
 /// This module implements most of the public API for bevy_voxel_world.
 ///
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    chunk::{ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U},
-    chunk_map::ChunkMap,
-    configuration::VoxelWorldConfig,
+    chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
+    chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
+    chunk_map::{ChunkMap, ChunkMapData},
+    configuration::{FillHint, VoxelWorldConfig},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
-    voxel_world_internal::{ModifiedVoxels, VoxelWriteBuffer},
+    voxel_edits::{VoxelEditReader, VoxelEdits},
 };
 
 /// This component is used to mark Cameras that bevy_voxel_world should use to determine
@@ -31,15 +32,57 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
+/// The systems that run the chunk lifecycle of the voxel world `C`, in `PreUpdate`.
+///
+/// Within a frame, they apply voxel edits, spawn and retire chunks, start chunk
+/// tasks, collect finished ones, publish their data and despawn retired chunks.
+/// A system ordered after this set sees every chunk published so far, and the
+/// `ChunkPublished` and `ChunkWillSpawn` messages of this frame.
+#[derive(SystemSet)]
+pub struct VoxelWorldSet<C>(PhantomData<fn() -> C>);
+
+impl<C> Default for VoxelWorldSet<C> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<C> Clone for VoxelWorldSet<C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for VoxelWorldSet<C> {}
+
+impl<C> PartialEq for VoxelWorldSet<C> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<C> Eq for VoxelWorldSet<C> {}
+
+impl<C> std::hash::Hash for VoxelWorldSet<C> {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl<C> std::fmt::Debug for VoxelWorldSet<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VoxelWorldSet<{}>", std::any::type_name::<C>())
+    }
+}
+
 pub trait ChunkEventType: Send + Sync + 'static {}
 
+/// A message about a chunk, which it names by its chunk key and its entity.
 #[derive(Event)]
 pub struct ChunkEvent<C, E>
 where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
-    pub chunk_key: IVec3,
+    pub chunk_key: ChunkKey,
     pub entity: Entity,
     _marker: (PhantomData<C>, PhantomData<E>),
 }
@@ -49,7 +92,7 @@ where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
-    pub fn new(chunk_key: IVec3, entity: Entity) -> Self {
+    pub fn new(chunk_key: ChunkKey, entity: Entity) -> Self {
         Self {
             chunk_key,
             entity,
@@ -78,20 +121,22 @@ pub type ChunkWillDespawn<C> = ChunkEvent<C, WillDespawn>;
 pub struct WillDespawn;
 impl ChunkEventType for WillDespawn {}
 
-/// Fired when a chunk is about to be spawned.
+/// Fired once per chunk, when its voxel data is first published and readable
+/// through `VoxelWorld`. A chunk spawned again after despawning fires it again.
 pub type ChunkWillSpawn<C> = ChunkEvent<C, WillSpawn>;
 pub struct WillSpawn;
 impl ChunkEventType for WillSpawn {}
+
+/// Fired every time a chunk's voxel data is published, after which it is
+/// readable through `VoxelWorld`: on its first publish and after every remesh.
+pub type ChunkPublished<C> = ChunkEvent<C, Published>;
+pub struct Published;
+impl ChunkEventType for Published {}
 
 /// Fired when a chunk is about to be remeshed.
 pub type ChunkWillRemesh<C> = ChunkEvent<C, WillRemesh>;
 pub struct WillRemesh;
 impl ChunkEventType for WillRemesh {}
-
-/// Fired when a chunk's LOD value changes.
-pub type ChunkWillChangeLod<C> = ChunkEvent<C, WillChangeLod>;
-pub struct WillChangeLod;
-impl ChunkEventType for WillChangeLod {}
 
 /// Fired when a chunk is about to be updated, typically when `set_voxel` was called on a voxel
 /// within the chunk.
@@ -133,25 +178,54 @@ impl<I> VoxelRaycastResult<I> {
 
 /// Grants access to the VoxelWorld in systems
 #[derive(SystemParam)]
-pub struct VoxelWorld<'w, C: VoxelWorldConfig> {
+pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
+    chunk_index: Res<'w, ChunkIndex<C>>,
+    chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    modified_voxels: Res<'w, ModifiedVoxels<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    voxel_write_buffer:
-        ResMut<'w, VoxelWriteBuffer<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    #[allow(unused)]
+    voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     configuration: Res<'w, C>,
 }
 
-impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
-    /// Get the voxel at the given position. The voxel will be WorldVoxel::Unset if there is no voxel at that position
-    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
-        self.get_voxel_fn()(position)
+impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
+    /// Where the chunk with the given key is in the chunk lifecycle, or `None`
+    /// if no chunk with that key is spawned. [`VoxelWorld::chunk_at`] finds the
+    /// key of the chunk covering a voxel.
+    pub fn chunk_state(&self, key: ChunkKey) -> Option<ChunkStatus> {
+        let entity = self.chunk_index.get(key)?;
+        // A chunk spawned this frame has no state component until commands apply.
+        Some(
+            self.chunk_states
+                .get(entity)
+                .map_or(ChunkStatus::Pending, |state| state.status()),
+        )
     }
 
-    /// Set the voxel at the given position. This will create a new chunk if one does not exist at
-    /// the given position.
+    /// The key of the finest spawned chunk that covers the voxel at
+    /// `voxel_position`, or `None` if no chunk does.
+    pub fn chunk_at(&self, voxel_position: IVec3) -> Option<ChunkKey> {
+        self.chunk_index.chunk_at(voxel_position)
+    }
+
+    /// Get the voxel at the given position: its voxel edit if it has one, else
+    /// its voxel in the finest published chunk covering it, else what the
+    /// [fill hint](VoxelWorldConfig::chunk_fill_hint) of its level-0 chunk says.
+    /// The voxel will be `WorldVoxel::Unset` if none of these has a voxel there.
+    pub fn get_voxel(&self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
+        voxel_at(
+            &self.voxel_edits.reader(),
+            &self.chunk_map.get_map(),
+            self.configuration.as_ref(),
+            position,
+        )
+    }
+
+    /// Set the voxel at the given position. It replaces the generated voxel there for
+    /// as long as the world exists, and `get_voxel` returns it right away. Setting a
+    /// voxel doesn't spawn a chunk: a spawned chunk that contains it remeshes to show
+    /// it, and a chunk spawned later shows it from the start. When the same position
+    /// is set more than once, the last voxel set wins.
     pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::MaterialIndex>) {
-        self.voxel_write_buffer.push((position, voxel));
+        self.voxel_edits.set(position, voxel);
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
@@ -159,60 +233,31 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     pub fn get_voxel_fn(
         &self,
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
+        let voxel_edits = self.voxel_edits.reader();
         let chunk_map = self.chunk_map.get_map();
-        let write_buffer = self.voxel_write_buffer.clone();
-        let modified_voxels = self.modified_voxels.clone();
+        let configuration = self.configuration.as_ref().clone();
 
         Arc::new(move |position| {
-            let (chunk_pos, _) = get_chunk_voxel_position(position);
-
-            if let Some(voxel) = write_buffer
-                .iter()
-                .find(|(pos, _)| *pos == position)
-                .map(|(_, voxel)| *voxel)
-            {
-                return voxel;
-            }
-
-            {
-                if let Some(voxel) = modified_voxels.get_voxel(&position) {
-                    return voxel;
-                }
-            }
-
-            let chunk_opt = {
-                let chun_map_read = chunk_map.read().unwrap();
-                chun_map_read.get(&chunk_pos).cloned()
-            };
-
-            chunk_opt
-                .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position))
-                .unwrap_or(WorldVoxel::Unset)
+            voxel_at(&voxel_edits, &chunk_map, &configuration, position)
         })
     }
 
-    /// Get the ChunkData for the given chunk position
+    /// The published data of the chunk with the given key, or `None` if no chunk
+    /// with that key is spawned or published.
     ///
-    /// The position should be the chunk position, measured in CHUNK_SIZE units (32 by default)
-    ///
-    /// You can `floor(voxel_position / CHUNK_SIZE)` to get the chunk position from a voxel position
-    pub fn get_chunk_data(
-        &self,
-        chunk_pos: IVec3,
-    ) -> Option<ChunkData<C::MaterialIndex>> {
-        self.chunk_map
-            .get_map()
-            .read()
-            .unwrap()
-            .get(&chunk_pos)
-            .cloned()
+    /// The level-0 chunk at a chunk position has the key
+    /// `ChunkKey::new(chunk_pos, 0)`, where `chunk_pos` is
+    /// `floor(voxel_position / CHUNK_SIZE)`; [`VoxelWorld::chunk_at`] finds the
+    /// key of the chunk covering a voxel at any level.
+    pub fn get_chunk_data(&self, key: ChunkKey) -> Option<ChunkData<C::MaterialIndex>> {
+        self.chunk_map.get_map().read().unwrap().get(&key).cloned()
     }
 
     pub fn get_chunk_data_fn(
         &self,
-    ) -> Arc<dyn Fn(IVec3) -> Option<ChunkData<C::MaterialIndex>> + Send + Sync> {
+    ) -> Arc<dyn Fn(ChunkKey) -> Option<ChunkData<C::MaterialIndex>> + Send + Sync> {
         let chunk_map = self.chunk_map.get_map();
-        Arc::new(move |chunk_pos| chunk_map.read().unwrap().get(&chunk_pos).cloned())
+        Arc::new(move |key| chunk_map.read().unwrap().get(&key).cloned())
     }
 
     /// Get the closes surface voxel to the given position
@@ -291,6 +336,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
+    /// The ray is traced through the bounds of the published chunks, reading
+    /// voxels as [`get_voxel`](Self::get_voxel) does, so within those bounds a
+    /// voxel no chunk covers is what its chunk's fill hint says.
+    ///
     /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
     /// Returns `None` if no voxel was intersected
     ///
@@ -350,15 +399,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
                 p
             };
 
-            // To find where we get out of the loaded cuboid, we can intersect from a point
-            // guaranteed to be on the other side of the cube and in the opposite direction
-            // of the ray.
-            let trace_end_orig =
-                trace_start + d * loaded_aabb.min.distance_squared(loaded_aabb.max);
-            let trace_end_t = RayCast3d::new(trace_end_orig, -ray.direction, f32::MAX)
-                .aabb_intersection_at(&loaded_aabb)
-                .unwrap();
-            let trace_end = Ray3d::new(trace_end_orig, -d).get_point(trace_end_t);
+            let trace_end = bounds_exit(trace_start, *d, &loaded_aabb);
 
             let mut raycast_result = None;
             voxel_line_traversal(trace_start, trace_end, |voxel_coords, _time, face| {
@@ -392,48 +433,56 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, C> {
 /// Returns a tuple of the chunk position and the voxel position within the chunk.
 #[inline]
 pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
-    let chunk_position = IVec3 {
-        x: (position.x as f32 / CHUNK_SIZE_F).floor() as i32,
-        y: (position.y as f32 / CHUNK_SIZE_F).floor() as i32,
-        z: (position.z as f32 / CHUNK_SIZE_F).floor() as i32,
-    };
-
+    let chunk_position = chunk_containing(position);
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)
 }
 
-/// Returns every chunk whose padded voxel data includes the given world-space voxel.
-pub(crate) fn get_affected_chunk_positions(position: IVec3) -> Vec<IVec3> {
-    let (chunk_position, voxel_position) = get_chunk_voxel_position(position);
-
-    let axis_offsets = |component| {
-        let mut offsets = [0, 0, 0];
-        let mut len = 1;
-
-        if component == 1 {
-            offsets[len] = -1;
-            len += 1;
-        }
-        if component == CHUNK_SIZE_U {
-            offsets[len] = 1;
-            len += 1;
-        }
-
-        (offsets, len)
-    };
-
-    let (x_offsets, x_len) = axis_offsets(voxel_position.x);
-    let (y_offsets, y_len) = axis_offsets(voxel_position.y);
-    let (z_offsets, z_len) = axis_offsets(voxel_position.z);
-    let mut affected_chunks = Vec::with_capacity(8);
-    for x in x_offsets.iter().take(x_len).copied() {
-        for y in y_offsets.iter().take(y_len).copied() {
-            for z in z_offsets.iter().take(z_len).copied() {
-                affected_chunks.push(chunk_position + IVec3::new(x, y, z));
-            }
-        }
+/// Where a ray from `start`, a point within `bounds`, leaves them. `direction`
+/// must not be zero.
+///
+/// The ray stops at the nearest of the faces it heads towards. Measuring from
+/// `start` keeps the result precise however large the bounds are.
+fn bounds_exit(start: Vec3, direction: Vec3, bounds: &Aabb3d) -> Vec3 {
+    let (min, max) = (Vec3::from(bounds.min), Vec3::from(bounds.max));
+    let mut distance = f32::INFINITY;
+    for axis in 0..3 {
+        let face = if direction[axis] > 0.0 {
+            max[axis]
+        } else if direction[axis] < 0.0 {
+            min[axis]
+        } else {
+            continue;
+        };
+        distance = distance.min((face - start[axis]) / direction[axis]);
     }
+    // Rounding can leave `start` just outside the bounds.
+    start + direction * distance.max(0.0)
+}
 
-    affected_chunks
+/// The voxel at `position`: its voxel edit if it has one, else its voxel in the
+/// published data of the finest chunk covering it, else the voxel the fill hint
+/// of its level-0 chunk says is everywhere in it.
+fn voxel_at<C: VoxelWorldConfig>(
+    voxel_edits: &VoxelEditReader<C::MaterialIndex>,
+    chunk_map: &RwLock<ChunkMapData<C::MaterialIndex>>,
+    configuration: &C,
+    position: IVec3,
+) -> WorldVoxel<C::MaterialIndex> {
+    if let Some(voxel) = voxel_edits.get(position) {
+        return voxel;
+    }
+    let published = chunk_map
+        .read()
+        .unwrap()
+        .finest_covering(position)
+        .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position));
+    match published {
+        Some(voxel) => voxel,
+        None => match configuration.chunk_fill_hint(ChunkKey::containing(position, 0)) {
+            FillHint::Uniform(voxel) => voxel,
+            FillHint::Unknown => WorldVoxel::Unset,
+        },
+    }
 }

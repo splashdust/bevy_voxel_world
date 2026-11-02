@@ -2,66 +2,97 @@
 /// Voxel World internals
 /// This module contains the internal systems and resources used to implement bevy_voxel_world.
 ///
-use bevy::{
-    ecs::system::SystemParam,
-    platform::collections::{HashMap, HashSet},
-    prelude::*,
-    tasks::AsyncComputeTaskPool,
-};
-use futures_lite::future;
-use std::{
-    collections::VecDeque,
-    marker::PhantomData,
-    sync::{Arc, RwLock},
-};
+use bevy::{ecs::system::SystemParam, prelude::*};
+use std::marker::PhantomData;
 
 use crate::{
     chunk::*,
+    chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
-    configuration::{ChunkDespawnStrategy, ChunkSpawnStrategy, VoxelWorldConfig},
+    configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::*,
     plugin::VoxelWorldMaterialHandle,
-    prelude::default_chunk_meshing_delegate,
-    voxel::WorldVoxel,
+    streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
+    voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
-    voxel_world::{
-        get_affected_chunk_positions, ChunkWillChangeLod, ChunkWillDespawn,
-        ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
-    },
+    voxel_world::VoxelWorldCamera,
 };
+
+/// What the streaming policy sees of the chunks.
+///
+/// The chunk index tells which chunks exist, and the chunk map which are
+/// published. The committed voxel edits tell which chunks' fill hints can't be
+/// trusted.
+struct Chunks<'a, C: VoxelWorldConfig> {
+    index: &'a ChunkIndex<C>,
+    chunk_map: &'a ChunkMapData<C::MaterialIndex>,
+    edits: &'a CommittedEdits<'a, C::MaterialIndex>,
+    /// How deep the padding of a chunk is at each LOD level, kept here since the
+    /// fill hint of a chunk is checked against the edits at every ray step.
+    padding: [IVec3; MAX_LOD_LEVEL as usize + 1],
+}
+
+impl<C: VoxelWorldConfig> Chunks<'_, C> {
+    /// The occupancy of a chunk that exists. Data left by a despawned chunk at
+    /// the same key doesn't count as published.
+    fn published(&self, key: ChunkKey) -> Occupancy {
+        let entity = self.index.get(key);
+        self.chunk_map
+            .get(&key)
+            .filter(|data| Some(data.entity) == entity)
+            .map_or(Occupancy::Unpublished, Occupancy::of_data)
+    }
+}
+
+impl<C: VoxelWorldConfig> ChunkLookup for Chunks<'_, C> {
+    fn covering(&self, chunk_position: IVec3) -> Option<(ChunkKey, Occupancy)> {
+        let key = self.index.covering_chunk(chunk_position)?;
+        Some((key, self.published(key)))
+    }
+
+    fn occupancy(&self, key: ChunkKey) -> Occupancy {
+        if !self.index.contains(key) {
+            return Occupancy::Missing;
+        }
+        self.published(key)
+    }
+
+    fn is_retiring(&self, key: ChunkKey) -> bool {
+        self.index.is_retiring(key)
+    }
+
+    fn coarsest_level(&self) -> LodLevel {
+        self.index.levels_in_use().last().unwrap_or(0)
+    }
+
+    fn edits_reach(&self, key: ChunkKey) -> bool {
+        self.edits.reach(key, self.padding[key.lod_level as usize])
+    }
+}
 
 #[derive(SystemParam, Deref)]
 pub struct CameraInfo<'w, 's, C: VoxelWorldConfig>(
     Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<VoxelWorldCamera<C>>>,
 );
 
-/// Holds a map of modified voxels that will persist between chunk spawn/despawn
-#[derive(Resource, Deref, DerefMut, Clone)]
-pub struct ModifiedVoxels<C, I>(
-    #[deref] Arc<RwLock<HashMap<IVec3, WorldVoxel<I>>>>,
-    PhantomData<C>,
-);
-
-impl<C: VoxelWorldConfig> Default for ModifiedVoxels<C, C::MaterialIndex> {
-    fn default() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())), PhantomData)
-    }
-}
-
-impl<C: VoxelWorldConfig> ModifiedVoxels<C, C::MaterialIndex> {
-    pub fn get_voxel(&self, position: &IVec3) -> Option<WorldVoxel<C::MaterialIndex>> {
-        let modified_voxels = self.0.read().unwrap();
-        modified_voxels.get(position).cloned()
-    }
-}
-
-/// A temporary buffer for voxel modifications that will get flushed to the `ModifiedVoxels` resource
-/// at the end of the frame.
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct VoxelWriteBuffer<C, I>(#[deref] Vec<(IVec3, WorldVoxel<I>)>, PhantomData<C>);
-
 #[derive(Component)]
 pub(crate) struct NeedsMaterial<C>(PhantomData<C>);
+
+impl<C> NeedsMaterial<C> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+/// Whether chunks get meshes. Off in `minimal()` worlds, which only keep voxel data.
+#[derive(Resource)]
+pub(crate) struct SpawnMeshes<C>(pub bool, PhantomData<C>);
+
+impl<C> SpawnMeshes<C> {
+    pub fn new(spawn_meshes: bool) -> Self {
+        Self(spawn_meshes, PhantomData)
+    }
+}
 
 pub(crate) struct Internals<C>(PhantomData<C>);
 
@@ -75,13 +106,13 @@ where
     /// Init the resources used internally by bevy_voxel_world
     pub fn setup(mut commands: Commands, configuration: Res<C>) {
         commands.init_resource::<ChunkMap<C, C::MaterialIndex>>();
-        commands.init_resource::<ChunkMapInsertBuffer<C, C::MaterialIndex>>();
         commands.init_resource::<ChunkMapUpdateBuffer<C, C::MaterialIndex>>();
         commands.init_resource::<ChunkMapRemoveBuffer<C>>();
         commands.init_resource::<MeshCache<C>>();
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
-        commands.init_resource::<ModifiedVoxels<C, C::MaterialIndex>>();
-        commands.init_resource::<VoxelWriteBuffer<C, C::MaterialIndex>>();
+        commands.init_resource::<VoxelEdits<C, C::MaterialIndex>>();
+        commands.init_resource::<ChunkIndex<C>>();
+        commands.init_resource::<ChunkRequests<C>>();
 
         // Create the root node and allow to modify it by the configuration.
         let world_root = commands
@@ -94,624 +125,82 @@ where
         configuration.init_root(commands, world_root)
     }
 
-    /// Find and spawn chunks in need of spawning
-    pub fn spawn_chunks(
-        mut commands: Commands,
-        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C, C::MaterialIndex>>,
-        world_root: Query<Entity, With<WorldRoot<C>>>,
+    /// Plans this frame's spawns and retirements, and requests them.
+    pub fn stream_chunks(
+        mut requests: ResMut<ChunkRequests<C>>,
+        index: Res<ChunkIndex<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        chunks: Query<&Chunk<C>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
-        // Panic if no root exists as it is already inserted in the setup.
-        let world_root = world_root.single().unwrap();
-        let attach_to_root = configuration.attach_chunks_to_root();
-
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("stream_chunks").entered();
         let cameras: Vec<_> = camera_info
             .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
+            .map(|(camera, transform)| {
+                CameraSnapshot::new(
+                    transform.affine(),
+                    camera.clip_from_view(),
+                    camera.physical_viewport_size().unwrap_or_default(),
+                )
+            })
             .collect();
         if cameras.is_empty() {
             return;
         }
-
-        let spawning_distance = configuration.spawning_distance() as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-        let spawn_strategy = configuration.chunk_spawn_strategy();
-
-        let visibility_margin = 0.0f32;
-        let protected_chunk_radius_sq =
-            (configuration.min_despawn_distance() as i32).pow(2);
-
-        let mut visited = HashSet::new();
-        let mut chunks_deque = VecDeque::with_capacity(
-            configuration.spawning_rays() * spawning_distance as usize,
-        );
 
         let chunk_map_read_lock = chunk_map.get_read_lock();
-
-        // Shoots a ray from the given point, and queue all (non-spawned) chunks intersecting the ray
-        let queue_chunks_intersecting_ray_from_point =
-            |camera: &TrackedCamera, point: Vec2, queue: &mut VecDeque<IVec3>| {
-                let Ok(ray) = camera.camera.viewport_to_world(camera.transform, point)
-                else {
-                    return;
-                };
-                let mut current = ray.origin;
-                let mut t = 0.0;
-                while t < (spawning_distance * CHUNK_SIZE_I) as f32 {
-                    let chunk_pos = current.as_ivec3() / CHUNK_SIZE_I;
-                    if let Some(chunk) = ChunkMap::<C, C::MaterialIndex>::get(
-                        &chunk_pos,
-                        &chunk_map_read_lock,
-                    ) {
-                        if chunk.is_full {
-                            // If we hit a full chunk, we can stop the ray early
-                            break;
-                        }
-                    } else {
-                        queue.push_back(chunk_pos);
-                    }
-                    t += CHUNK_SIZE_F;
-                    current = ray.origin + ray.direction * t;
-                }
-            };
-
-        // Each frame we pick some random points on the screen
-        let m = configuration.spawning_ray_margin();
-        for _ in 0..configuration.spawning_rays() {
-            let camera = &cameras[rand::random_range(0..cameras.len())];
-            let viewport_size =
-                camera.camera.physical_viewport_size().unwrap_or_default();
-            let random_point_in_viewport = {
-                let x =
-                    rand::random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
-                let y =
-                    rand::random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
-                Vec2::new(x, y)
-            };
-
-            // Then, for each point, we cast a ray, picking up any unspawned chunks along the ray
-            queue_chunks_intersecting_ray_from_point(
-                camera,
-                random_point_in_viewport,
-                &mut chunks_deque,
-            );
-        }
-
-        // We also queue the chunks closest to every camera to make sure they will always spawn early.
-        let protected_distance = configuration.min_despawn_distance() as i32;
-        for camera in &cameras {
-            for x in -protected_distance..=protected_distance {
-                for y in -protected_distance..=protected_distance {
-                    for z in -protected_distance..=protected_distance {
-                        let queue_pos = camera.chunk_position + IVec3::new(x, y, z);
-                        chunks_deque.push_back(queue_pos);
-                    }
-                }
-            }
-        }
-
-        // Then, when we have a queue of chunks, we can set them up for spawning
-        while let Some(chunk_position) = chunks_deque.pop_front() {
-            if visited.contains(&chunk_position)
-                || chunks_deque.len() > configuration.max_spawn_per_frame()
-            {
-                continue;
-            }
-            visited.insert(chunk_position);
-
-            if !chunk_is_close_to_any_camera(
-                &cameras,
-                chunk_position,
-                spawning_distance_squared,
-            ) {
-                continue;
-            }
-
-            if spawn_strategy == ChunkSpawnStrategy::CloseAndInView
-                && !chunk_visible_to_any_camera(
-                    &cameras,
-                    chunk_position,
-                    visibility_margin,
-                )
-                && !chunk_is_close_to_any_camera(
-                    &cameras,
-                    chunk_position,
-                    protected_chunk_radius_sq,
-                )
-            {
-                continue;
-            }
-
-            let has_chunk = ChunkMap::<C, C::MaterialIndex>::contains_chunk(
-                &chunk_position,
-                &chunk_map_read_lock,
-            );
-
-            if !has_chunk {
-                let chunk_entity = commands.spawn(NeedsRemesh).id();
-                if attach_to_root {
-                    commands.entity(world_root).add_child(chunk_entity);
-                }
-                let camera_position =
-                    closest_camera_position_to_chunk(&cameras, chunk_position);
-                let lod_level =
-                    configuration.chunk_lod(chunk_position, None, camera_position);
-                let data_shape = configuration.chunk_data_shape(lod_level);
-                let mesh_shape = configuration.chunk_meshing_shape(lod_level);
-                let chunk = Chunk::<C>::new(
-                    chunk_position,
-                    lod_level,
-                    chunk_entity,
-                    data_shape,
-                    mesh_shape,
-                );
-
-                let mut chunk_data = ChunkData::with_entity(chunk.entity);
-                chunk_data.lod_level = lod_level;
-                chunk_data.data_shape = data_shape;
-                chunk_data.mesh_shape = mesh_shape;
-                chunk_map_insert_buffer.push((chunk_position, chunk_data));
-
-                commands.entity(chunk.entity).try_insert((
-                    chunk,
-                    Transform::from_translation(
-                        chunk_position.as_vec3() * CHUNK_SIZE_F - 1.0,
-                    ),
-                ));
-            } else {
-                continue;
-            }
-
-            if spawn_strategy != ChunkSpawnStrategy::Close {
-                continue;
-            }
-
-            // If we get here, we queue the neighbors
-            for x in -1..=1 {
-                for y in -1..=1 {
-                    for z in -1..=1 {
-                        let queue_pos = chunk_position + IVec3::new(x, y, z);
-                        if queue_pos == chunk_position {
-                            continue;
-                        }
-                        chunks_deque.push_back(queue_pos);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Update chunk LOD assignments and schedule remeshing when a change occurs.
-    pub fn update_chunk_lods(
-        mut commands: Commands,
-        mut chunks: Query<(Entity, &mut Chunk<C>), Without<NeedsDespawn>>,
-        configuration: Res<C>,
-        camera_info: CameraInfo<C>,
-        mut ev_chunk_will_change_lod: MessageWriter<ChunkWillChangeLod<C>>,
-    ) {
-        let cameras: Vec<_> = camera_info
-            .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
-            .collect();
-        if cameras.is_empty() {
-            return;
-        }
-
-        for (entity, mut chunk) in chunks.iter_mut() {
-            let camera_position =
-                closest_camera_position_to_chunk(&cameras, chunk.position);
-            let target_lod = configuration.chunk_lod(
-                chunk.position,
-                Some(chunk.lod_level),
-                camera_position,
-            );
-            if target_lod == chunk.lod_level {
-                continue;
-            }
-
-            ev_chunk_will_change_lod
-                .write(ChunkWillChangeLod::<C>::new(chunk.position, entity));
-
-            let data_shape = configuration.chunk_data_shape(target_lod);
-            let mesh_shape = configuration.chunk_meshing_shape(target_lod);
-
-            if chunk.data_shape == data_shape && chunk.mesh_shape == mesh_shape {
-                chunk.lod_level = target_lod;
-                // Shape did not change, so nothing to regenerate/remesh.
-                continue;
-            }
-
-            chunk.data_shape = data_shape;
-            chunk.mesh_shape = mesh_shape;
-            chunk.lod_level = target_lod;
-
-            // Ensure a remesh occurs to refresh data at the new LOD.
-            let mut entity_commands = commands.entity(entity);
-            entity_commands.try_insert(NeedsRemesh);
-            entity_commands.remove::<ChunkThread<C, C::MaterialIndex>>();
-        }
-    }
-
-    /// Tags chunks that are eligible for despawning
-    pub fn retire_chunks(
-        mut commands: Commands,
-        all_chunks: Query<(&Chunk<C>, Option<&ViewVisibility>)>,
-        configuration: Res<C>,
-        camera_info: CameraInfo<C>,
-        mut ev_chunk_will_despawn: MessageWriter<ChunkWillDespawn<C>>,
-    ) {
-        let spawning_distance = configuration.spawning_distance() as i32;
-        let spawning_distance_squared = spawning_distance.pow(2);
-
-        let cameras: Vec<_> = camera_info
-            .iter()
-            .map(|(camera, transform)| TrackedCamera::new(camera, transform))
-            .collect();
-        if cameras.is_empty() {
-            return;
-        }
-
-        let chunks_to_remove = {
-            let mut remove = Vec::with_capacity(1000);
-            for (chunk, view_visibility) in all_chunks.iter() {
-                let should_be_culled = {
-                    match configuration.chunk_despawn_strategy() {
-                        ChunkDespawnStrategy::FarAway => false,
-                        ChunkDespawnStrategy::FarAwayOrOutOfView => {
-                            let frustum_culled = !chunk_visible_to_any_camera(
-                                &cameras,
-                                chunk.position,
-                                0.0,
-                            );
-                            if let Some(visibility) = view_visibility {
-                                !visibility.get() || frustum_culled
-                            } else {
-                                frustum_culled
-                            }
-                        }
-                    }
-                };
-                let near_camera = chunk_is_close_to_any_camera(
-                    &cameras,
-                    chunk.position,
-                    (CHUNK_SIZE_I * configuration.min_despawn_distance() as i32).pow(2),
-                );
-                if (should_be_culled && !near_camera)
-                    || !chunk_is_close_to_any_camera(
-                        &cameras,
-                        chunk.position,
-                        spawning_distance_squared + 1,
-                    )
-                {
-                    remove.push(chunk);
-                }
-            }
-            remove
+        let committed_edits = voxel_edits.committed();
+        let lookup = Chunks::<C> {
+            index: &index,
+            chunk_map: &chunk_map_read_lock,
+            edits: &committed_edits,
+            padding: std::array::from_fn(|lod_level| {
+                let lod_level = lod_level as LodLevel;
+                padding_depth(configuration.chunk_data_shape(lod_level), lod_level)
+            }),
         };
 
-        for chunk in chunks_to_remove {
-            commands.entity(chunk.entity).try_insert(NeedsDespawn);
-            ev_chunk_will_despawn
-                .write(ChunkWillDespawn::<C>::new(chunk.position, chunk.entity));
-        }
-    }
-
-    /// Despawns chunks that have been tagged for despawning
-    pub fn despawn_retired_chunks(
-        mut commands: Commands,
-        mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
-        retired_chunks: Query<(Entity, &Chunk<C>), With<NeedsDespawn>>,
-    ) {
-        let read_lock = chunk_map.get_read_lock();
-        for (entity, chunk) in retired_chunks.iter() {
-            if ChunkMap::<C, C::MaterialIndex>::contains_chunk(
-                &chunk.position,
-                &read_lock,
-            ) {
-                commands.entity(entity).despawn();
-                chunk_map_remove_buffer.push(chunk.position);
-            }
-        }
-    }
-
-    /// Spawn a thread for each chunk that has been marked by NeedsRemesh
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::type_complexity)]
-    pub fn remesh_dirty_chunks(
-        mut commands: Commands,
-        mut ev_chunk_will_remesh: MessageWriter<ChunkWillRemesh<C>>,
-        dirty_chunks: Query<
-            &Chunk<C>,
-            (With<NeedsRemesh>, Without<ChunkThread<C, C::MaterialIndex>>),
-        >,
-        chunk_threads: Query<(), With<ChunkThread<C, C::MaterialIndex>>>,
-        mesh_cache: Res<MeshCache<C>>,
-        modified_voxels: Res<ModifiedVoxels<C, C::MaterialIndex>>,
-        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
-        configuration: Res<C>,
-    ) {
-        let thread_pool = AsyncComputeTaskPool::get();
-        let max_threads = configuration.max_active_chunk_threads();
-        let remaining_threads = max_threads.saturating_sub(chunk_threads.iter().count());
-
-        if remaining_threads == 0 {
-            return;
-        }
-
-        for chunk in dirty_chunks.iter().take(remaining_threads) {
-            let previous_chunk_data = {
-                let read_lock = chunk_map.get_read_lock();
-                ChunkMap::<C, C::MaterialIndex>::get(&chunk.position, &read_lock)
-            };
-
-            let lod_level = chunk.lod_level;
-
-            let regenerate_strategy = configuration.chunk_regenerate_strategy();
-
-            let voxel_data_fn = (configuration.voxel_lookup_delegate())(
-                chunk.position,
-                lod_level,
-                previous_chunk_data.clone(),
-            );
-            let data_shape = chunk.data_shape;
-            let mesh_shape = chunk.mesh_shape;
-            let chunk_meshing_fn = (configuration
-                .chunk_meshing_delegate()
-                .unwrap_or(Box::new(default_chunk_meshing_delegate)))(
-                chunk.position,
-                lod_level,
-                data_shape,
-                mesh_shape,
-                previous_chunk_data.clone(),
-            );
-            let texture_index_mapper = configuration.texture_index_mapper().clone();
-
-            let mut chunk_task = ChunkTask::<C, C::MaterialIndex>::new(
-                chunk.entity,
-                chunk.position,
-                lod_level,
-                data_shape,
-                mesh_shape,
-                modified_voxels.clone(),
-            );
-
-            let mesh_map = mesh_cache.get_mesh_map();
-
-            let thread = thread_pool.spawn(async move {
-                chunk_task.generate(
-                    voxel_data_fn,
-                    previous_chunk_data.clone(),
-                    regenerate_strategy,
-                );
-
-                // No need to mesh if the chunk is empty or full
-                if chunk_task.is_empty() || chunk_task.is_full() {
-                    return chunk_task;
-                }
-
-                // Also no need to mesh if a matching mesh is already cached
-                let mesh_cache_hit = mesh_map
-                    .read()
-                    .unwrap()
-                    .contains_key(&chunk_task.voxels_hash());
-                if !mesh_cache_hit {
-                    chunk_task.mesh(chunk_meshing_fn, texture_index_mapper);
-                }
-
-                chunk_task
-            });
-
-            commands
-                .entity(chunk.entity)
-                .try_insert(ChunkThread::<C, C::MaterialIndex>::new(
-                    thread,
-                    chunk.position,
-                ))
-                .remove::<NeedsRemesh>();
-
-            ev_chunk_will_remesh
-                .write(ChunkWillRemesh::<C>::new(chunk.position, chunk.entity));
-        }
-    }
-
-    /// Inserts new meshes for chunks that have just finished remeshing
-    #[allow(clippy::type_complexity)]
-    pub fn spawn_meshes(
-        mut commands: Commands,
-        mut chunking_threads: Query<
-            (
-                Entity,
-                &mut ChunkThread<C, C::MaterialIndex>,
-                &mut Chunk<C>,
-                &Transform,
-            ),
-            Without<NeedsRemesh>,
-        >,
-        mut mesh_assets: ResMut<Assets<Mesh>>,
-        buffers: (
-            ResMut<ChunkMapUpdateBuffer<C, C::MaterialIndex>>,
-            ResMut<MeshCacheInsertBuffer<C>>,
-        ),
-        res: (Res<MeshCache<C>>, Res<LoadingTexture>),
-    ) {
-        let (mesh_cache, loading_texture) = res;
-
-        if !loading_texture.is_loaded {
-            return;
-        }
-
-        let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
-
-        for (entity, mut thread, chunk, transform) in &mut chunking_threads {
-            let thread_result = future::block_on(future::poll_once(&mut thread.0));
-
-            if thread_result.is_none() {
-                continue;
-            }
-
-            let chunk_task = thread_result.unwrap();
-
-            if chunk_task.is_empty() || chunk_task.is_full() {
-                commands
-                    .entity(entity)
-                    .remove::<Mesh3d>()
-                    .remove::<MeshRef>()
-                    .remove::<NeedsMaterial<C>>()
-                    .remove::<C::ChunkUserBundle>();
-            } else {
-                let mesh_handle = {
-                    if let Some(mesh_handle) =
-                        mesh_cache.get_mesh_handle(&chunk_task.voxels_hash())
-                    {
-                        if let Some(user_bundle) =
-                            mesh_cache.get_user_bundle(&chunk_task.voxels_hash())
-                        {
-                            commands.entity(entity).insert(user_bundle);
-                        }
-
-                        mesh_handle
-                    } else {
-                        let hash = chunk_task.voxels_hash();
-                        let Some(mesh) = chunk_task.mesh else {
-                            commands
-                                .entity(chunk.entity)
-                                .try_insert(NeedsRemesh)
-                                .remove::<ChunkThread<C, C::MaterialIndex>>();
-                            continue;
-                        };
-
-                        // Bevy 0.19 mesh slab allocator can emit use-after-free
-                        // errors if zero-vertex meshes are uploaded.
-                        if mesh.count_vertices() == 0 {
-                            commands
-                                .entity(entity)
-                                .remove::<Mesh3d>()
-                                .remove::<MeshRef>()
-                                .remove::<NeedsMaterial<C>>()
-                                .remove::<C::ChunkUserBundle>();
-                            chunk_map_update_buffer.push((
-                                chunk.position,
-                                chunk_task.chunk_data,
-                                ChunkWillSpawn::<C>::new(chunk_task.position, entity),
-                            ));
-                            commands
-                                .entity(chunk.entity)
-                                .remove::<ChunkThread<C, C::MaterialIndex>>();
-                            continue;
-                        }
-
-                        let mesh_ref = Arc::new(mesh_assets.add(mesh));
-                        let user_bundle = chunk_task.user_bundle;
-
-                        mesh_cache_insert_buffer.push((
-                            hash,
-                            mesh_ref.clone(),
-                            user_bundle.clone(),
-                        ));
-                        if let Some(bundle) = user_bundle {
-                            commands.entity(entity).insert(bundle);
-                        }
-                        mesh_ref
-                    }
-                };
-
-                commands.entity(entity).try_insert((
-                    *transform,
-                    MeshRef(mesh_handle),
-                    NeedsMaterial::<C>(PhantomData),
-                ));
-            }
-
-            chunk_map_update_buffer.push((
-                chunk.position,
-                chunk_task.chunk_data,
-                ChunkWillSpawn::<C>::new(chunk_task.position, entity),
-            ));
-
-            commands
-                .entity(chunk.entity)
-                .remove::<ChunkThread<C, C::MaterialIndex>>();
-        }
-    }
-
-    pub fn flush_voxel_write_buffer(
-        mut commands: Commands,
-        mut buffer: ResMut<VoxelWriteBuffer<C, C::MaterialIndex>>,
-        mut ev_chunk_will_update: MessageWriter<ChunkWillUpdate<C>>,
-        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
-        modified_voxels: ResMut<ModifiedVoxels<C, C::MaterialIndex>>,
-    ) {
-        let chunk_map_read_lock = chunk_map.get_read_lock();
-        let mut modified_voxels = modified_voxels.write().unwrap();
-
-        let mut updated_chunks = HashSet::<(Entity, IVec3)>::new();
-
-        for (position, voxel) in buffer.iter() {
-            // Skip writes that don't actually change the voxel value.
-            // Without this guard, repeatedly setting a voxel to the same value
-            // every frame causes perpetual chunk remesh cancellation — the
-            // in-progress async meshing task gets dropped before it can finish,
-            // so the chunk never renders.
-            if modified_voxels.get(position) == Some(voxel) {
-                continue;
-            }
-
-            modified_voxels.insert(*position, *voxel);
-
-            for affected_chunk_pos in get_affected_chunk_positions(*position) {
-                if let Some(chunk_data) = ChunkMap::<C, C::MaterialIndex>::get(
-                    &affected_chunk_pos,
-                    &chunk_map_read_lock,
-                ) {
-                    if let Ok(mut ent) = commands.get_entity(chunk_data.entity) {
-                        ent.try_insert(NeedsRemesh);
-                        ent.remove::<ChunkThread<C, C::MaterialIndex>>();
-                        updated_chunks.insert((chunk_data.entity, affected_chunk_pos));
-                    }
-                }
-            }
-        }
-
-        for (entity, chunk_pos) in updated_chunks {
-            ev_chunk_will_update.write(ChunkWillUpdate::<C>::new(chunk_pos, entity));
-        }
-
-        buffer.clear();
-    }
-
-    pub fn flush_mesh_cache_buffers(
-        mut mesh_cache_insert_buffer: ResMut<MeshCacheInsertBuffer<C>>,
-        mesh_cache: Res<MeshCache<C>>,
-    ) {
-        mesh_cache.apply_buffers(&mut mesh_cache_insert_buffer);
-    }
-
-    pub fn flush_chunk_map_buffers(
-        mut chunk_map_insert_buffer: ResMut<ChunkMapInsertBuffer<C, C::MaterialIndex>>,
-        mut chunk_map_update_buffer: ResMut<ChunkMapUpdateBuffer<C, C::MaterialIndex>>,
-        mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
-        mut ev_chunk_will_spawn: MessageWriter<ChunkWillSpawn<C>>,
-        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
-    ) {
-        chunk_map.apply_buffers(
-            &mut chunk_map_insert_buffer,
-            &mut chunk_map_update_buffer,
-            &mut chunk_map_remove_buffer,
-            &mut ev_chunk_will_spawn,
+        #[cfg(feature = "trace")]
+        let _plan_span = bevy::log::info_span!("streaming_policy_plan").entered();
+        let plan = streaming_policy::plan(
+            configuration.as_ref(),
+            &cameras,
+            chunks.iter().map(|chunk| chunk.key),
+            &lookup,
+            index.spawn_budget(configuration.max_active_chunk_threads()),
+            &mut rand::rng(),
         );
+        requests.spawn.extend(plan.spawn);
+        requests.retire.extend(plan.retire);
     }
 
+    /// Commits the voxel edits set since the last frame, and requests that the
+    /// chunks they make stale be updated.
+    pub fn commit_voxel_edits(
+        mut requests: ResMut<ChunkRequests<C>>,
+        voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+    ) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("commit_voxel_edits").entered();
+        requests.edited.extend(voxel_edits.commit());
+    }
+
+    /// Shows the meshes of chunks once the voxel texture has loaded.
     pub(crate) fn assign_material<M: Material>(
         mut commands: Commands,
         mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial<C>>>,
         material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
+        loading_texture: Res<LoadingTexture>,
     ) {
         let Some(material_handle) = material_handle else {
             return;
         };
+        if !loading_texture.is_loaded {
+            return;
+        }
 
         for (entity, mesh_ref, transform) in needs_material.iter_mut() {
             commands
@@ -721,138 +210,5 @@ where
                 .insert(*transform)
                 .remove::<NeedsMaterial<C>>();
         }
-    }
-}
-
-struct TrackedCamera<'a> {
-    camera: &'a Camera,
-    transform: &'a GlobalTransform,
-    position: Vec3,
-    chunk_position: IVec3,
-}
-
-impl<'a> TrackedCamera<'a> {
-    fn new(camera: &'a Camera, transform: &'a GlobalTransform) -> Self {
-        let position = transform.translation();
-        Self {
-            camera,
-            transform,
-            position,
-            chunk_position: position.as_ivec3() / CHUNK_SIZE_I,
-        }
-    }
-}
-
-fn chunk_is_close_to_any_camera(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-    distance_squared: i32,
-) -> bool {
-    cameras.iter().any(|camera| {
-        chunk_position.distance_squared(camera.chunk_position) <= distance_squared
-    })
-}
-
-fn closest_camera_position_to_chunk(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-) -> Vec3 {
-    let chunk_world_position = chunk_position.as_vec3() * CHUNK_SIZE_F;
-    cameras
-        .iter()
-        .min_by(|a, b| {
-            a.position
-                .distance_squared(chunk_world_position)
-                .total_cmp(&b.position.distance_squared(chunk_world_position))
-        })
-        .map(|camera| camera.position)
-        .unwrap_or(Vec3::ZERO)
-}
-
-fn chunk_visible_to_any_camera(
-    cameras: &[TrackedCamera],
-    chunk_position: IVec3,
-    ndc_margin: f32,
-) -> bool {
-    cameras.iter().any(|camera| {
-        chunk_visible_to_camera(
-            camera.camera,
-            camera.transform,
-            chunk_position,
-            ndc_margin,
-        )
-    })
-}
-
-fn chunk_visible_to_camera(
-    camera: &Camera,
-    cam_gtf: &GlobalTransform,
-    chunk_position: IVec3,
-    ndc_margin: f32,
-) -> bool {
-    let chunk_min = chunk_position.as_vec3() * CHUNK_SIZE_F;
-    let chunk_max = chunk_min + Vec3::splat(CHUNK_SIZE_F);
-
-    let cam_pos = cam_gtf.translation();
-    if cam_pos.x >= chunk_min.x
-        && cam_pos.x <= chunk_max.x
-        && cam_pos.y >= chunk_min.y
-        && cam_pos.y <= chunk_max.y
-        && cam_pos.z >= chunk_min.z
-        && cam_pos.z <= chunk_max.z
-    {
-        return true;
-    }
-
-    let limit = 1.0 + ndc_margin;
-    let point_in_ndc = |point: Vec3| -> bool {
-        if let Some(ndc) = camera.world_to_ndc(cam_gtf, point) {
-            ndc.x >= -limit
-                && ndc.x <= limit
-                && ndc.y >= -limit
-                && ndc.y <= limit
-                && ndc.z >= -ndc_margin
-                && ndc.z <= 1.0 + ndc_margin
-        } else {
-            false
-        }
-    };
-
-    if point_in_ndc((chunk_min + chunk_max) * 0.5) {
-        return true;
-    }
-
-    for &x in &[chunk_min.x, chunk_max.x] {
-        for &y in &[chunk_min.y, chunk_max.y] {
-            for &z in &[chunk_min.z, chunk_max.z] {
-                if point_in_ndc(Vec3::new(x, y, z)) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if the given world point is within the camera's view
-#[inline]
-#[allow(dead_code)]
-fn is_in_view(
-    world_point: Vec3,
-    camera: &Camera,
-    cam_global_transform: &GlobalTransform,
-) -> bool {
-    if let Some(chunk_vp) = camera.world_to_ndc(cam_global_transform, world_point) {
-        // When the position is within the viewport the values returned will be between
-        // -1.0 and 1.0 on the X and Y axes, and between 0.0 and 1.0 on the Z axis.
-        chunk_vp.x >= -1.0
-            && chunk_vp.x <= 1.0
-            && chunk_vp.y >= -1.0
-            && chunk_vp.y <= 1.0
-            && chunk_vp.z >= 0.0
-            && chunk_vp.z <= 1.0
-    } else {
-        false
     }
 }

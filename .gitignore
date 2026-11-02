@@ -3,3 +3,5 @@
 assets/.DS_Store
 .VSCodeCounter
 .idea
+# Local design notes and probes, never committed
+.scratch/

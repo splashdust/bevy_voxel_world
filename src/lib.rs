@@ -1,26 +1,31 @@
 mod chunk;
+mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
 mod mesh_cache;
 mod meshing;
 mod plugin;
+mod streaming_policy;
 mod voxel;
+mod voxel_edits;
 mod voxel_material;
 mod voxel_traversal;
 mod voxel_world;
 mod voxel_world_internal;
 
 pub mod prelude {
-    pub use crate::chunk::{Chunk, NeedsDespawn};
+    pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
+    pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
+        VoxelWorldSet,
     };
     pub use crate::voxel_world::{
-        ChunkWillChangeLod, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
+        ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate,
     };
 }
@@ -34,6 +39,7 @@ pub mod custom_meshing {
     pub use crate::meshing::generate_chunk_mesh;
     pub use crate::meshing::generate_chunk_mesh_for_shape;
     pub use crate::meshing::mesh_from_quads;
+    pub use crate::meshing::scale_texture_coordinates;
 }
 
 pub mod debug {
