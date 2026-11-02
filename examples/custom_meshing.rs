@@ -1,3 +1,11 @@
+//! Meshes chunks with the greedy algorithm from the `block_mesh` crate, drawn as a
+//! wireframe to show the quads.
+//!
+//! Shows how to replace the default mesher with a `chunk_meshing_delegate`. The
+//! delegate runs on a thread in the task pool. It receives a chunk's voxels and the
+//! `texture_index_mapper`, and returns a Bevy mesh and an optional bundle to add to
+//! the chunk's entity.
+
 use std::sync::Arc;
 
 use bevy::{

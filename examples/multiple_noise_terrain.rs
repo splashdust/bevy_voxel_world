@@ -1,3 +1,9 @@
+//! Generates a terrain from two layers of noise, with materials named by an enum.
+//!
+//! Shows a `voxel_lookup_delegate` that combines noise. One layer sets the height of
+//! the terrain and the other paints patches of stone on it, with snow on everything
+//! high up. Using an enum as `MaterialIndex` also shrinks `WorldVoxel` to one byte.
+
 use std::sync::Arc;
 
 use bevy::{

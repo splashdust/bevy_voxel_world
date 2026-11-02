@@ -9,7 +9,7 @@ homepage = "https://github.com/splashdust/bevy_voxel_world"
 repository = "https://github.com/splashdust/bevy_voxel_world"
 documentation = "https://github.com/splashdust/bevy_voxel_world"
 readme = "README.md"
-exclude = ["/.github/", "/assets/", "/examples/"]
+exclude = ["/.github/", "/assets/", "/examples/", "/website/"]
 keywords = ["bevy", "gamedev", "voxelengine", "voxels"]
 categories = ["game-development", "graphics"]
 
@@ -83,8 +83,11 @@ ndshape = "0.3.0"
 rand = "0.10.1"
 weak-table = { version = "0.4.0", features = ["ahash"] }
 
+# The browser needs a getrandom backend enabled for each version in use: rand
+# depends on 0.4, and ahash on 0.3.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 bevy_northstar = { version = "0.8.0" }

@@ -1,3 +1,16 @@
+//! Traces a line through the voxel grid, and draws or erases the voxels it crosses.
+//!
+//! Shows `voxel_line_traversal`, which calls a closure for each voxel along a line,
+//! with how far along the line it is and the face the line entered through.
+//!
+//! Controls:
+//!   - Left click to place a voxel
+//!   - Ctrl + left click to start a trace, whose end follows the cursor while Ctrl
+//!     is held
+//!   - Ctrl + E to erase the voxels along the trace
+//!   - Release Ctrl to stop tracing
+//!   - Drag with the left mouse button to orbit, the right to pan, scroll to zoom
+
 use bevy::color::palettes::css;
 use bevy::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
@@ -36,13 +49,6 @@ impl VoxelWorldConfig for MyMainWorld {
     }
 }
 
-/// Controls:
-/// - Left-click to place a voxel somewhere
-/// - Ctrl + Left click to place the source of a voxel line trace
-///     - Hold Ctrl to see the trace end follow the cursor
-///     - Hold Ctrl and hit E to erase all solid voxels intersecting the trace
-///     - Release Ctrl to stop tracing
-/// - Unreal controls to move the camera around
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)

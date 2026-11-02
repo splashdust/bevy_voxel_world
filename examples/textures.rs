@@ -1,3 +1,9 @@
+//! Textures voxels from an array texture, with different textures on the top, sides
+//! and bottom of a voxel.
+//!
+//! Shows `voxel_texture`, which loads the array texture, and `texture_index_mapper`,
+//! which maps each material to the indexes of its `[top, sides, bottom]` textures.
+
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;

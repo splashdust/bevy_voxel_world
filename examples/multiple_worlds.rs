@@ -1,3 +1,11 @@
+//! Runs two voxel worlds in one scene, each with its own configuration.
+//!
+//! Shows that each `VoxelWorldPlugin` with its own config type is a separate world,
+//! and that `VoxelWorld<C>` picks which one a system uses. One world is a noise
+//! terrain with the default material. The other holds a few voxels placed with
+//! `set_voxel`, drawn with a custom material. The camera has a `VoxelWorldCamera` for
+//! each world.
+
 use std::sync::Arc;
 
 use bevy::{

@@ -1,3 +1,9 @@
+//! Digs craters in a noise terrain as the camera flies over it.
+//!
+//! Shows how to edit a generated world. Ten times a second, `raycast` finds a
+//! random spot on the surface ahead of the camera. `set_voxel` then digs a sphere
+//! of air there and scatters voxels around it.
+
 use bevy::{
     light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
 };

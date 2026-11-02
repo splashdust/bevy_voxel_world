@@ -1,3 +1,14 @@
+//! Streams chunks around several moving cameras at once, seen from above.
+//!
+//! Shows that a world spawns chunks around every camera with a `VoxelWorldCamera`.
+//! Colored spheres mark the patrolling cameras, which render nothing themselves. The
+//! camera you look through has no `VoxelWorldCamera`, so it has no effect on which
+//! chunks exist.
+//!
+//! Controls:
+//!   - Space or + to add a patrolling camera
+//!   - Backspace or - to remove one
+
 use std::sync::Arc;
 
 use bevy::{

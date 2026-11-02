@@ -1,3 +1,12 @@
+//! Adds voxels where the cursor points.
+//!
+//! Shows `raycast`, which follows a ray from the cursor and returns the first voxel
+//! it hits and the face it hit. A translucent cube marks the empty voxel next to that
+//! face.
+//!
+//! Controls:
+//!   - Left click to place a voxel at the cube
+
 use std::sync::Arc;
 
 use bevy::prelude::*;

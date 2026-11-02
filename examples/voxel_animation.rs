@@ -1,3 +1,9 @@
+//! Animates ripples in a pool of water by setting its voxels every frame.
+//!
+//! Shows how to animate voxels with `set_voxel`. Every voxel in the pool is set each
+//! frame, across four chunks, and the chunks where something changed remesh to show
+//! it.
+
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_voxel_world::prelude::*;
 

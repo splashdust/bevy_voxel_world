@@ -1,3 +1,8 @@
+//! The `textures` example, with materials named by an enum instead of `u8` constants.
+//!
+//! Shows that `MaterialIndex` can be your own type. Using an enum also shrinks
+//! `WorldVoxel` to one byte.
+
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use std::sync::Arc;

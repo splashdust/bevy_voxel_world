@@ -1,3 +1,8 @@
+//! Fills a ball with random voxels, at most one per frame.
+//!
+//! The smallest use of the crate: `VoxelWorldPlugin::default()` with no config, a
+//! camera with a `VoxelWorldCamera`, and `set_voxel` called from a system.
+
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 use rand::RngExt;

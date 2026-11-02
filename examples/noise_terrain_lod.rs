@@ -1,3 +1,14 @@
+//! Streams a terrain out to a distant horizon with levels of detail.
+//!
+//! Shows how `chunk_lod` makes far chunks larger and coarser, which lets the world
+//! reach 500 chunks from the camera in six levels. Fill hints keep chunks of air and
+//! rock from spawning, and level-1 chunks return `WorldVoxel::Unset` in their padding
+//! to hide cracks between levels. The frame rate shows in the corner.
+//!
+//! Controls:
+//!   - Left click to dig a hole where the cursor points
+//!   - Shift + left click to add a mound
+
 use std::sync::Arc;
 
 use bevy::{

@@ -1,3 +1,9 @@
+//! Renders voxels with your own Bevy material and fragment shader.
+//!
+//! Shows how to add a material with `MaterialPlugin` and pass it to the world with
+//! `with_material`. The material keeps the crate's vertex shader and vertex layout,
+//! and takes its fragment shader from `assets/custom_material.wesl`.
+
 use bevy::{
     mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},

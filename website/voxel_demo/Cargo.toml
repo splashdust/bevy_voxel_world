@@ -1,0 +1,33 @@
+[package]
+name = "voxel_demo"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Stands alone so that its features, profile and lockfile stay out of the crate's.
+[workspace]
+
+[dependencies]
+bevy = { version = "0.20", default-features = false, features = [
+  "bevy_core_pipeline",
+  "bevy_pbr",
+  "bevy_render",
+  "bevy_winit",
+  "std",
+  "web",
+  "webgl2",
+] }
+bevy_voxel_world = { path = "../.." }
+noise = "0.9.0"
+rand = "0.10.1"
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

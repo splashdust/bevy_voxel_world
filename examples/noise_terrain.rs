@@ -1,3 +1,9 @@
+//! Generates an endless noise terrain as the camera flies over it.
+//!
+//! Shows how a `voxel_lookup_delegate` decides each voxel from its position, using
+//! one height per column. `chunk_fill_hint` declares which chunks are all air or all
+//! rock, so that spawning rays need not spawn them.
+
 use std::sync::Arc;
 
 use bevy::{

@@ -1,8 +1,15 @@
-// Example of a 3D voxel world using Bevy Northstar
-// left click to move player
-// g to rebuild the navigation grid
-// orbit camera via middle mouse
-// scroll wheel to zoom
+//! Moves a player through a voxel world with pathfinding from the `bevy_northstar`
+//! crate.
+//!
+//! Shows how to build other data alongside a chunk's mesh. A
+//! `chunk_meshing_delegate` calls the default mesher, `generate_chunk_mesh`, and
+//! also finds the chunk's passable voxels: air above a solid voxel. They travel in
+//! a `ChunkUserBundle`, and reach the navigation grid when `ChunkPublished` fires.
+//!
+//! Controls:
+//!   - Left click to move the player
+//!   - Right click to place a voxel
+//!   - Drag with the middle mouse button to orbit, scroll to zoom
 
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_northstar::prelude::*;
