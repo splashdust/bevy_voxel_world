@@ -10,10 +10,10 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/6427fc19-6ad6-4275-bd71-45187147d299" />
+<img width="700" height="389" alt="bombs" src="https://github.com/user-attachments/assets/6c768a17-c370-4480-98fc-6bf4b4fae22c" />
 
 ```bash
-$ cargo run -r --example noise_terrain
+$ cargo run -r --example bombs
 ```
 
 The world can be controlled in two main ways: through a terrain lookup function, and directly by `set_voxel` and `get_voxel` functions. The world has two "layers" of voxel information, one that is procedural and determined by the terrain lookup function, and one that is controlled by `set_voxel` and persisted in a `HashMap`. The persistent layer always overrides the procedural layer. This way, the world can be infinitely large, but we only need to store information about voxels that are deliberately changed. In the current implementation, the proceduaral layer is cached for spawned chunks, so it may still use a lot of memory if the spawning distance is large.
@@ -147,11 +147,13 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 ### Other shapes
 
-The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
-
 <img width="800" height="445" alt="marching_cubes" src="https://github.com/user-attachments/assets/b83b9861-206c-4bf8-9cfb-582e0ccbb500" />
 
+The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
+
 ## Level of Detail
+
+<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/6427fc19-6ad6-4275-bd71-45187147d299" />
 
 Every chunk has a LOD level. A level-0 chunk is 32 voxels on a side and samples every voxel. A chunk at level `L` is `32 << L` voxels on a side and, by default, samples every `1 << L` voxels, so it holds as many samples as a level-0 chunk. Far regions therefore cost about as much as near ones, which lets a world stream out to a distant horizon.
 
