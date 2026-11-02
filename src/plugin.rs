@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::{
     asset::{load_internal_asset, RenderAssetUsages},
     image::{CompressedImageFormats, ImageSampler, ImageType},
@@ -10,15 +12,41 @@ use crate::{
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
         prepare_texture, prepare_voxel_texture, LoadingTexture, StandardVoxelMaterial,
-        TextureLayers, VOXEL_TEXTURE_SHADER_HANDLE,
+        VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
     voxel_world_internal::{Internals, SpawnMeshes},
 };
 
+/// The handle of a custom material of type `M`.
+///
+/// A world whose `VoxelWorldConfig::init_custom_materials` returns false gives
+/// its chunks this handle, which you add yourself. All such worlds with material
+/// type `M` share it.
+///
+/// For any other world with a custom material, `VoxelWorldPlugin` creates the
+/// material and adds this handle for you to read. The chunks of that world keep
+/// the material created for them, and if several such worlds have material type
+/// `M`, this is the handle of the last plugin built.
 #[derive(Resource)]
 pub struct VoxelWorldMaterialHandle<M: Material> {
     pub handle: Handle<M>,
+}
+
+/// The material `VoxelWorldPlugin` created for the chunks of world `C`.
+#[derive(Resource)]
+pub(crate) struct WorldMaterial<C, M: Material> {
+    pub handle: Handle<M>,
+    _world: PhantomData<C>,
+}
+
+impl<C, M: Material> WorldMaterial<C, M> {
+    fn new(handle: Handle<M>) -> Self {
+        Self {
+            handle,
+            _world: PhantomData,
+        }
+    }
 }
 
 /// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
@@ -212,14 +240,14 @@ where
                 },
             });
 
-            app.insert_resource(LoadingTexture {
-                is_loaded: preloaded_texture,
-                handle: image_handle,
-            });
-            app.insert_resource(VoxelWorldMaterialHandle { handle: mat_handle });
-            app.insert_resource(TextureLayers(texture_layers));
+            app.insert_resource(LoadingTexture::<C>::new(
+                preloaded_texture,
+                image_handle,
+                texture_layers,
+            ));
+            app.insert_resource(WorldMaterial::<C, _>::new(mat_handle));
 
-            app.add_systems(Update, prepare_texture);
+            app.add_systems(Update, prepare_texture::<C>);
 
             app.add_systems(
                 Update,
@@ -234,13 +262,11 @@ where
                 let mut custom_material_assets =
                     app.world_mut().resource_mut::<Assets<M>>();
                 let handle = custom_material_assets.add(self.material.clone());
+                app.insert_resource(WorldMaterial::<C, M>::new(handle.clone()));
                 app.insert_resource(VoxelWorldMaterialHandle { handle });
             }
 
-            app.insert_resource(LoadingTexture {
-                is_loaded: true,
-                handle: Handle::default(),
-            });
+            app.insert_resource(LoadingTexture::<C>::new(true, Handle::default(), 0));
 
             app.add_systems(Update, Internals::<C>::assign_material::<M>);
         }

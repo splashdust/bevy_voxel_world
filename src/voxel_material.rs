@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use bevy::image::{ImageAddressMode, TextureReinterpretationError};
 use bevy::{
     asset::uuid_handle,
@@ -12,15 +14,28 @@ use bevy::{
     shader::{Shader, ShaderDefVal, ShaderRef},
 };
 
-/// Keeps track of the loading status of the image used for the voxel texture
+use crate::configuration::VoxelWorldConfig;
+
+/// Keeps track of the loading status of the image used for the voxel texture of
+/// world `C`.
 #[derive(Resource)]
-pub(crate) struct LoadingTexture {
+pub(crate) struct LoadingTexture<C> {
     pub is_loaded: bool,
     pub handle: Handle<Image>,
+    pub layers: u32,
+    _world: PhantomData<C>,
 }
 
-#[derive(Resource)]
-pub(crate) struct TextureLayers(pub u32);
+impl<C> LoadingTexture<C> {
+    pub fn new(is_loaded: bool, handle: Handle<Image>, layers: u32) -> Self {
+        Self {
+            is_loaded,
+            handle,
+            layers,
+            _world: PhantomData,
+        }
+    }
+}
 
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
@@ -83,10 +98,9 @@ impl MaterialExtension for StandardVoxelMaterial {
     }
 }
 
-pub(crate) fn prepare_texture(
+pub(crate) fn prepare_texture<C: VoxelWorldConfig>(
     asset_server: Res<AssetServer>,
-    texture_layers: Res<TextureLayers>,
-    mut loading_texture: ResMut<LoadingTexture>,
+    mut loading_texture: ResMut<LoadingTexture<C>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if loading_texture.is_loaded
@@ -99,7 +113,7 @@ pub(crate) fn prepare_texture(
     }
 
     let mut image = images.get_mut(&loading_texture.handle).unwrap();
-    if let Err(err) = prepare_voxel_texture(&mut image, texture_layers.0) {
+    if let Err(err) = prepare_voxel_texture(&mut image, loading_texture.layers) {
         warn_once!("Failed to prepare voxel texture as a texture array: {err}");
     }
 
@@ -111,7 +125,13 @@ pub(crate) fn prepare_voxel_texture(
     texture_layers: u32,
 ) -> Result<(), TextureReinterpretationError> {
     set_repeat_sampler(image);
-    image.reinterpret_stacked_2d_as_array(texture_layers)?;
+    // Worlds with the same texture path share one image, so another world may
+    // already have made it an array texture.
+    let is_array = texture_layers > 1
+        && image.texture_descriptor.size.depth_or_array_layers == texture_layers;
+    if !is_array {
+        image.reinterpret_stacked_2d_as_array(texture_layers)?;
+    }
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),
         ..default()
