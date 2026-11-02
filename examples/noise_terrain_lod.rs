@@ -149,15 +149,15 @@ impl VoxelWorldConfig for MainWorld {
         // The LOD level by distance in chunks. A chunk at level L spans
         // 32 << L voxels and samples the terrain every 1 << L voxels, so the
         // far bands hold few, large chunks.
-        if distance < 60.0 {
+        if distance < 30.0 {
             0
-        } else if distance < 120.0 {
+        } else if distance < 70.0 {
             1
-        } else if distance < 180.0 {
+        } else if distance < 100.0 {
             2
-        } else if distance < 250.0 {
+        } else if distance < 150.0 {
             3
-        } else if distance < 300.0 {
+        } else if distance < 250.0 {
             4
         } else {
             5
