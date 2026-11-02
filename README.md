@@ -10,7 +10,7 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-![bvw_480](https://github.com/splashdust/bevy_voxel_world/assets/428824/98d25cd1-0a6c-4618-b0de-0e16ca5af636)
+<img width="800" height="445" alt="noise_terrain_lod" src="https://github.com/user-attachments/assets/6427fc19-6ad6-4275-bd71-45187147d299" />
 
 ```bash
 $ cargo run -r --example noise_terrain
@@ -66,6 +66,8 @@ fn my_system(mut voxel_world: VoxelWorld<MyWorld>) {
 This will update the voxel value at the given location in the persisting `HashMap`, and cause `bevy_voxel_world` to queue the affected chunk for re-meshing.
 
 Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Solid`.
+
+<img width="800" height="445" alt="voxel_animation" src="https://github.com/user-attachments/assets/7dafe892-4035-4cc5-92b3-51c73dd3071c" />
 
 ## Voxel materials
 
@@ -146,6 +148,8 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 ### Other shapes
 
 The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
+
+<img width="800" height="445" alt="marching_cubes" src="https://github.com/user-attachments/assets/b83b9861-206c-4bf8-9cfb-582e0ccbb500" />
 
 ## Level of Detail
 
