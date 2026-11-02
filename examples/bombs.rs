@@ -50,7 +50,7 @@ struct ExplosionTimeout {
 
 fn setup(mut commands: Commands) {
     commands.spawn(ExplosionTimeout {
-        timer: Timer::from_seconds(0.25, TimerMode::Repeating),
+        timer: Timer::from_seconds(0.1, TimerMode::Repeating),
     });
 
     // --- Just scene setup below ---
@@ -58,8 +58,8 @@ fn setup(mut commands: Commands) {
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-120.0, 250.0, -120.0)
-            .looking_at(Vec3::ZERO + Vec3::Y * 70.0, Vec3::Y),
+        Transform::from_xyz(-120.0, 150.0, -120.0)
+            .looking_at(Vec3::ZERO + Vec3::Y * 100.0, Vec3::Y),
         // This tells bevy_voxel_world to use this cameras transform to calculate spawning area
         VoxelWorldCamera::<MainWorld>::default(),
     ));
@@ -143,8 +143,8 @@ fn move_camera(
     mut cam_transform: Query<&mut Transform, With<VoxelWorldCamera<MainWorld>>>,
 ) {
     if let Ok(mut transform) = cam_transform.single_mut() {
-        transform.translation.x += time.delta_secs() * 7.0;
-        transform.translation.z += time.delta_secs() * 12.0;
+        transform.translation.x += time.delta_secs() * 14.0;
+        transform.translation.z += time.delta_secs() * 24.0;
     }
 }
 
@@ -204,7 +204,7 @@ fn explosion(
     )
     .normalize();
     let impact_point =
-        camera_transform.translation + (direction * 300.0) - Vec3::Y * 10.0;
+        camera_transform.translation + (direction * 600.0) - Vec3::Y * 10.0;
 
     if let Some((impact_point, _)) =
         random_surface_voxel(&voxel_world, impact_point.as_ivec3(), 130)
@@ -231,10 +231,10 @@ fn explosion(
 
         // Spread some voxels out around the impact zone
         if let WorldVoxel::Solid(mat) = vox {
-            let num_voxels = 50;
+            let num_voxels = 40;
             for _ in 0..num_voxels {
                 if let Some(rand_vox) =
-                    random_surface_voxel(&voxel_world, impact_point, 25)
+                    random_surface_voxel(&voxel_world, impact_point, 30)
                 {
                     voxel_world.set_voxel(rand_vox.0 + IVec3::Y, WorldVoxel::Solid(mat));
                 }
