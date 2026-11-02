@@ -249,6 +249,7 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
 
     /// Custom material will not get initialized if this returns false. When this is false,
     /// `VoxelWorldMaterialHandle` needs to be manually added with a reference to the material handle.
+    /// All worlds with the same material type that return false share that handle.
     ///
     /// This can be used for example if you need to wait for a texture image to load before
     /// the material can be used.

@@ -11,7 +11,7 @@ use crate::{
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::*,
-    plugin::VoxelWorldMaterialHandle,
+    plugin::{VoxelWorldMaterialHandle, WorldMaterial},
     streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
     voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
@@ -188,13 +188,21 @@ where
         requests.edited.extend(voxel_edits.commit());
     }
 
-    /// Shows the meshes of chunks once the voxel texture has loaded.
+    /// Shows the meshes of chunks once the voxel texture of this world has loaded.
+    ///
+    /// Chunks get the material the plugin created for this world. A world without
+    /// one waits for `VoxelWorldMaterialHandle` to be added.
     pub(crate) fn assign_material<M: Material>(
         mut commands: Commands,
         mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial<C>>>,
-        material_handle: Option<Res<VoxelWorldMaterialHandle<M>>>,
-        loading_texture: Res<LoadingTexture>,
+        world_material: Option<Res<WorldMaterial<C, M>>>,
+        shared_material: Option<Res<VoxelWorldMaterialHandle<M>>>,
+        loading_texture: Res<LoadingTexture<C>>,
     ) {
+        let material_handle = world_material
+            .as_deref()
+            .map(|material| &material.handle)
+            .or(shared_material.as_deref().map(|material| &material.handle));
         let Some(material_handle) = material_handle else {
             return;
         };
@@ -206,7 +214,7 @@ where
             commands
                 .entity(entity)
                 .insert(Mesh3d((*mesh_ref.0).clone()))
-                .insert(MeshMaterial3d(material_handle.handle.clone()))
+                .insert(MeshMaterial3d(material_handle.clone()))
                 .insert(*transform)
                 .remove::<NeedsMaterial<C>>();
         }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.1 (unreleased)
+
+### Bug Fixes
+
+- Each world's chunks now get that world's material and wait only for that world's voxel texture. Before, all worlds using the built-in voxel material, or the same custom material type, rendered with the material of the last `VoxelWorldPlugin` built, and shared its texture loading state.
+
+- A world that lets the plugin create its custom material now always uses that material, so adding a `VoxelWorldMaterialHandle<M>` over the plugin's one no longer changes its chunks. To supply a handle yourself, return false from `VoxelWorldConfig::init_custom_materials`.
+
 ## 0.19
 
 ### Architecture

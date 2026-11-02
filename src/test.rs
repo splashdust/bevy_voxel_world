@@ -10,8 +10,9 @@ use crate::meshing::{
     binary_chunk_mesh, block_mesh_chunk_mesh, generate_chunk_mesh,
     generate_chunk_mesh_for_shape,
 };
+use crate::plugin::VoxelWorldMaterialHandle;
 use crate::prelude::*;
-use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
+use crate::voxel_material::{prepare_voxel_texture, ATTRIBUTE_TEX_INDEX};
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
@@ -687,19 +688,9 @@ impl VoxelWorldConfig for MissingTextureWorld {
 
 #[test]
 fn chunks_publish_while_the_voxel_texture_is_loading() {
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        bevy::asset::AssetPlugin::default(),
-        bevy::image::ImagePlugin::default(),
-        bevy::mesh::MeshPlugin,
-        TransformPlugin,
-        bevy::camera::CameraPlugin,
-    ))
-    // Normally registered by RenderPlugin; the voxel material loads a shader.
-    .init_asset::<bevy::shader::Shader>()
-    .add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
-    .add_systems(Startup, spawn_camera::<MissingTextureWorld>);
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
+        .add_systems(Startup, spawn_camera::<MissingTextureWorld>);
 
     update_until(&mut app, "a chunk mesh to be published", |app| {
         app.world_mut()
@@ -715,6 +706,331 @@ fn chunks_publish_while_the_voxel_texture_is_loading() {
         .iter(app.world())
         .count();
     assert_eq!(shown, 0, "meshes were shown before the texture loaded");
+}
+
+/// The material of worlds that use the built-in voxel material.
+type DefaultVoxelMaterial = bevy::pbr::ExtendedMaterial<
+    StandardMaterial,
+    crate::voxel_material::StandardVoxelMaterial,
+>;
+
+/// A world with the example voxel texture.
+#[derive(Resource, Clone, Default)]
+struct TexturedWorld;
+
+impl VoxelWorldConfig for TexturedWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn voxel_texture(&self) -> Option<(String, u32)> {
+        Some(("example_voxel_texture.png".into(), 4))
+    }
+}
+
+/// A second world like `FloorWorld`, for tests that need two.
+#[derive(Resource, Clone, Default)]
+struct SecondFloorWorld;
+
+impl VoxelWorldConfig for SecondFloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+}
+
+/// A world whose custom material is created and added by the test.
+#[derive(Resource, Clone, Default)]
+struct HandAddedMaterialWorld;
+
+impl VoxelWorldConfig for HandAddedMaterialWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn init_custom_materials(&self) -> bool {
+        false
+    }
+}
+
+/// An app with what chunk meshes and voxel materials need, but no renderer.
+fn meshing_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        bevy::asset::AssetPlugin::default(),
+        bevy::image::ImagePlugin::default(),
+        bevy::mesh::MeshPlugin,
+        TransformPlugin,
+        bevy::camera::CameraPlugin,
+    ))
+    // Normally registered by RenderPlugin; the voxel material loads a shader.
+    .init_asset::<bevy::shader::Shader>();
+    app
+}
+
+/// The material handles on the chunks of world `C`.
+fn chunk_materials<C: VoxelWorldConfig, M: Material>(app: &mut App) -> Vec<Handle<M>> {
+    app.world_mut()
+        .query_filtered::<&MeshMaterial3d<M>, With<Chunk<C>>>()
+        .iter(app.world())
+        .map(|material| material.0.clone())
+        .collect()
+}
+
+fn has_chunk_mesh<C: VoxelWorldConfig>(app: &mut App) -> bool {
+    app.world_mut()
+        .query_filtered::<(), (With<crate::mesh_cache::MeshRef>, With<Chunk<C>>)>()
+        .iter(app.world())
+        .next()
+        .is_some()
+}
+
+/// Runs `app` until the chunks of world `Other` have material `M`, and checks
+/// that the chunk meshes of `MissingTextureWorld` have not been shown.
+fn assert_only_missing_texture_world_waits<Other: VoxelWorldConfig, M: Material>(
+    app: &mut App,
+) {
+    update_until(app, "the other world's chunks to get materials", |app| {
+        !chunk_materials::<Other, M>(app).is_empty()
+            && has_chunk_mesh::<MissingTextureWorld>(app)
+    });
+
+    let shown = app
+        .world_mut()
+        .query_filtered::<(), (With<Mesh3d>, With<Chunk<MissingTextureWorld>>)>()
+        .iter(app.world())
+        .count();
+    assert_eq!(shown, 0, "meshes were shown before the texture loaded");
+}
+
+#[test]
+fn worlds_with_different_voxel_textures_get_different_materials() {
+    let mut app = meshing_app();
+    // Normally registered by RenderPlugin.
+    app.register_asset_loader(bevy::image::ImageLoader::new(
+        bevy::image::CompressedImageFormats::empty(),
+    ))
+    .add_plugins(VoxelWorldPlugin::with_config(TexturedWorld))
+    .add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+    .add_systems(
+        Startup,
+        (spawn_camera::<TexturedWorld>, spawn_camera::<FloorWorld>),
+    );
+
+    update_until(&mut app, "both worlds' chunks to get materials", |app| {
+        !chunk_materials::<TexturedWorld, DefaultVoxelMaterial>(app).is_empty()
+            && !chunk_materials::<FloorWorld, DefaultVoxelMaterial>(app).is_empty()
+    });
+
+    let textured = chunk_materials::<TexturedWorld, DefaultVoxelMaterial>(&mut app);
+    let built_in = chunk_materials::<FloorWorld, DefaultVoxelMaterial>(&mut app);
+    assert!(
+        textured.iter().all(|material| !built_in.contains(material)),
+        "the two worlds' chunks share a material"
+    );
+
+    let example_texture = app
+        .world()
+        .resource::<AssetServer>()
+        .get_handle::<Image>("example_voxel_texture.png")
+        .expect("the example texture should have been requested");
+    let materials = app.world().resource::<Assets<DefaultVoxelMaterial>>();
+    for material in &textured {
+        assert_eq!(
+            materials.get(material).unwrap().extension.voxels_texture,
+            example_texture,
+            "a chunk of the textured world has another world's texture"
+        );
+    }
+}
+
+#[test]
+fn a_world_does_not_wait_for_the_voxel_texture_of_a_world_built_after_it() {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+        .add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
+        .add_systems(
+            Startup,
+            (
+                spawn_camera::<FloorWorld>,
+                spawn_camera::<MissingTextureWorld>,
+            ),
+        );
+
+    assert_only_missing_texture_world_waits::<FloorWorld, DefaultVoxelMaterial>(&mut app);
+}
+
+#[test]
+fn a_world_waits_for_its_voxel_texture_when_a_world_built_after_it_is_ready() {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
+        .add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+        .add_systems(
+            Startup,
+            (
+                spawn_camera::<MissingTextureWorld>,
+                spawn_camera::<FloorWorld>,
+            ),
+        );
+
+    assert_only_missing_texture_world_waits::<FloorWorld, DefaultVoxelMaterial>(&mut app);
+}
+
+#[test]
+fn a_world_waits_for_its_voxel_texture_when_a_world_built_after_it_has_a_custom_material()
+{
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(VoxelWorldPlugin::with_config(MissingTextureWorld))
+        .add_plugins(
+            VoxelWorldPlugin::with_config(FloorWorld)
+                .with_material(StandardMaterial::default()),
+        )
+        .add_systems(
+            Startup,
+            (
+                spawn_camera::<MissingTextureWorld>,
+                spawn_camera::<FloorWorld>,
+            ),
+        );
+
+    assert_only_missing_texture_world_waits::<FloorWorld, StandardMaterial>(&mut app);
+}
+
+#[test]
+fn worlds_sharing_a_custom_material_type_keep_their_own_materials() {
+    let red = Color::srgb(1.0, 0.0, 0.0);
+    let blue = Color::srgb(0.0, 0.0, 1.0);
+
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(VoxelWorldPlugin::with_config(FloorWorld).with_material(
+            StandardMaterial {
+                base_color: red,
+                ..default()
+            },
+        ))
+        .add_plugins(
+            VoxelWorldPlugin::with_config(SecondFloorWorld).with_material(
+                StandardMaterial {
+                    base_color: blue,
+                    ..default()
+                },
+            ),
+        )
+        .add_systems(
+            Startup,
+            (spawn_camera::<FloorWorld>, spawn_camera::<SecondFloorWorld>),
+        );
+
+    update_until(&mut app, "both worlds' chunks to get materials", |app| {
+        !chunk_materials::<FloorWorld, StandardMaterial>(app).is_empty()
+            && !chunk_materials::<SecondFloorWorld, StandardMaterial>(app).is_empty()
+    });
+
+    let first = chunk_materials::<FloorWorld, StandardMaterial>(&mut app);
+    let second = chunk_materials::<SecondFloorWorld, StandardMaterial>(&mut app);
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    assert!(first
+        .iter()
+        .all(|material| materials.get(material).unwrap().base_color == red));
+    assert!(second
+        .iter()
+        .all(|material| materials.get(material).unwrap().base_color == blue));
+}
+
+#[test]
+fn the_plugin_adds_the_material_handle_of_a_custom_material() {
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>().add_plugins(
+        VoxelWorldPlugin::with_config(FloorWorld)
+            .with_material(StandardMaterial::default()),
+    );
+
+    let handle = &app
+        .world()
+        .resource::<VoxelWorldMaterialHandle<StandardMaterial>>()
+        .handle;
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    assert!(materials.get(handle).is_some());
+}
+
+#[test]
+fn a_hand_added_material_handle_reaches_worlds_that_do_not_init_custom_materials() {
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(
+            VoxelWorldPlugin::with_config(HandAddedMaterialWorld)
+                .with_material(StandardMaterial::default()),
+        )
+        .add_systems(Startup, spawn_camera::<HandAddedMaterialWorld>);
+
+    update_until(&mut app, "a chunk mesh to be published", |app| {
+        has_chunk_mesh::<HandAddedMaterialWorld>(app)
+    });
+    assert!(
+        chunk_materials::<HandAddedMaterialWorld, StandardMaterial>(&mut app).is_empty(),
+        "a chunk got a material before one was added"
+    );
+
+    let handle = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    app.insert_resource(VoxelWorldMaterialHandle {
+        handle: handle.clone(),
+    });
+
+    update_until(&mut app, "the chunks to get the added material", |app| {
+        !chunk_materials::<HandAddedMaterialWorld, StandardMaterial>(app).is_empty()
+    });
+    assert!(
+        chunk_materials::<HandAddedMaterialWorld, StandardMaterial>(&mut app)
+            .iter()
+            .all(|material| *material == handle)
+    );
+}
+
+#[test]
+fn a_voxel_texture_shared_by_two_worlds_can_be_prepared_twice() {
+    let mut image = Image::new_fill(
+        bevy::render::render_resource::Extent3d {
+            width: 2,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[0, 0, 0, 255],
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+
+    prepare_voxel_texture(&mut image, 4).unwrap();
+    prepare_voxel_texture(&mut image, 4).unwrap();
+
+    assert_eq!(image.texture_descriptor.size.depth_or_array_layers, 4);
+    assert_eq!(image.height(), 2);
 }
 
 #[test]
