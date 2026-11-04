@@ -342,8 +342,7 @@ fn update_fps_text(
     let fps_avg = fps_diag.and_then(|d| d.average());
     let frame_ms = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
-        .and_then(|d| d.average())
-        .map(|seconds| seconds * 1000.0);
+        .and_then(|d| d.average());
 
     let line_one = match (fps_current, fps_avg) {
         (Some(current), Some(avg)) => {
