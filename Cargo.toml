@@ -94,6 +94,7 @@ bevy_northstar = { version = "0.8.0" }
 bevy = { version = "0.20", default-features = false, features = [
   "3d",
   "bevy_ui",
+  "bevy_ui_render",
   "png",
 ] }
 bevy_panorbit_camera = { version = "0.36.0" }
