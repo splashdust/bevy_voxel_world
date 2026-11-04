@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.19.1 (unreleased)
+## 0.19.1
 
 ### Bug Fixes
 
