@@ -4,10 +4,11 @@ use std::{
     fmt,
     hash::{BuildHasher, Hash, Hasher},
     marker::PhantomData,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use crate::{
+    mesh_cache::WeakMeshMap,
     prelude::{
         ChunkMeshingFn, FillHint, LodLevel, TextureIndexMapperFn, VoxelWorldConfig,
     },
@@ -788,6 +789,31 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         }
 
         self.chunk_data.generate_hash();
+    }
+
+    /// Works out what the chunk needs from its finished voxels. Runs for every
+    /// chunk task, after generating and before the mesh cache check, including
+    /// for chunks that generated empty or full.
+    ///
+    /// Does nothing yet. It is the place for work that depends on the voxels
+    /// and must be done before the chunk is published, whether or not it gets a
+    /// mesh.
+    pub fn post_voxel(&mut self) {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("post_voxel").entered();
+    }
+
+    /// Whether the mesh cache already holds a mesh for the chunk's voxels, so
+    /// the chunk needn't be meshed.
+    pub fn is_mesh_cached(&self, mesh_map: &RwLock<WeakMeshMap>) -> bool {
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("check_mesh_cache").entered();
+        {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("wait_mesh_cache_read").entered();
+            mesh_map.read().unwrap()
+        }
+        .contains_key(&self.voxels_hash())
     }
 
     /// Generate a mesh for the chunk based on the currect voxel data

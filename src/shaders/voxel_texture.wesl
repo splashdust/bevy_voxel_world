@@ -1,3 +1,4 @@
+import bevy_voxel_world::voxel_io::{VoxelVertex, VoxelVertexOutput};
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
@@ -22,51 +23,9 @@ var mat_array_texture: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(101)
 var mat_array_texture_sampler: sampler;
 
-struct Vertex {
-    @builtin(instance_index) instance_index: u32,
-    @if(VERTEX_POSITIONS)
-    @location(0) position: vec3<f32>,
-    @if(VERTEX_NORMALS)
-    @location(1) normal: vec3<f32>,
-    @if(VERTEX_UVS)
-    @location(2) uv: vec2<f32>,
-    @if(VERTEX_UVS_B)
-    @location(3) uv_b: vec2<f32>,
-    @if(VERTEX_TANGENTS)
-    @location(4) tangent: vec4<f32>,
-    @if(VERTEX_COLORS)
-    @location(5) color: vec4<f32>,
-    // @if(SKINNED)
-    // @location(6) joint_indices: vec4<u32>,
-    // @if(SKINNED)
-    // @location(7) joint_weights: vec4<f32>,
-    @if(MORPH_TARGETS)
-    @builtin(vertex_index) index: u32,
-
-    @location(8) tex_idx: vec3<u32>
-};
-
-struct CustomVertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) world_position: vec4<f32>,
-    @location(1) world_normal: vec3<f32>,
-    @if(VERTEX_UVS)
-    @location(2) uv: vec2<f32>,
-    @if(VERTEX_UVS_B)
-    @location(3) uv_b: vec2<f32>,
-    @if(VERTEX_TANGENTS)
-    @location(4) world_tangent: vec4<f32>,
-    @if(VERTEX_COLORS)
-    @location(5) color: vec4<f32>,
-    @if(VERTEX_OUTPUT_INSTANCE_INDEX)
-    @location(6) @interpolate(flat) instance_index: u32,
-
-    @location(8) @interpolate(flat) tex_idx: vec3<u32>,
-}
-
 @vertex
-fn vertex(vertex: Vertex) -> CustomVertexOutput {
-    var out: CustomVertexOutput;
+fn vertex(vertex: VoxelVertex) -> VoxelVertexOutput {
+    var out: VoxelVertexOutput;
     var model =  mesh_functions::get_world_from_local(vertex.instance_index);
 
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
@@ -99,7 +58,7 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
 
 @fragment
 fn fragment(
-    in: CustomVertexOutput,
+    in: VoxelVertexOutput,
     @builtin(front_facing) is_front: bool,
 )  -> FragmentOutput {
     var standard_in: VertexOutput;

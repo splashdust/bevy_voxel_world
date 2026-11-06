@@ -11,7 +11,8 @@ use crate::{
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::*,
-    plugin::{VoxelWorldMaterialHandle, WorldMaterial},
+    plugin::WorldMaterial,
+    pool_budget::PoolBudget,
     streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
     voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
@@ -112,6 +113,7 @@ where
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
         commands.init_resource::<VoxelEdits<C, C::MaterialIndex>>();
         commands.init_resource::<ChunkIndex<C>>();
+        commands.init_resource::<PoolBudget<C>>();
         commands.init_resource::<ChunkRequests<C>>();
 
         // Create the root node and allow to modify it by the configuration.
@@ -126,9 +128,11 @@ where
     }
 
     /// Plans this frame's spawns and retirements, and requests them.
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
+        budget: Res<PoolBudget<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunks: Query<&Chunk<C>>,
@@ -170,7 +174,8 @@ where
             &cameras,
             chunks.iter().map(|chunk| chunk.key),
             &lookup,
-            index.spawn_budget(configuration.max_active_chunk_threads()),
+            budget
+                .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),
             &mut rand::rng(),
         );
         requests.spawn.extend(plan.spawn);
@@ -188,35 +193,32 @@ where
         requests.edited.extend(voxel_edits.commit());
     }
 
-    /// Shows the meshes of chunks once the voxel texture of this world has loaded.
+    /// Shows the meshes of chunks once this world's material is ready.
     ///
-    /// Chunks get the material the plugin created for this world. A world without
-    /// one waits for `VoxelWorldMaterialHandle` to be added.
+    /// Chunks get the handle in `WorldMaterial<C, M>`, and the components its
+    /// `insert_chunk_components` inserts. A world with the default material
+    /// waits for its voxel texture to load.
     pub(crate) fn assign_material<M: Material>(
         mut commands: Commands,
         mut needs_material: Query<(Entity, &MeshRef, &Transform), With<NeedsMaterial<C>>>,
-        world_material: Option<Res<WorldMaterial<C, M>>>,
-        shared_material: Option<Res<VoxelWorldMaterialHandle<M>>>,
-        loading_texture: Res<LoadingTexture<C>>,
+        world_material: Res<WorldMaterial<C, M>>,
+        loading_texture: Option<Res<LoadingTexture<C>>>,
     ) {
-        let material_handle = world_material
-            .as_deref()
-            .map(|material| &material.handle)
-            .or(shared_material.as_deref().map(|material| &material.handle));
-        let Some(material_handle) = material_handle else {
+        let Some(material_handle) = &world_material.handle else {
             return;
         };
-        if !loading_texture.is_loaded {
+        if loading_texture.is_some_and(|texture| !texture.is_loaded) {
             return;
         }
 
         for (entity, mesh_ref, transform) in needs_material.iter_mut() {
-            commands
-                .entity(entity)
+            let mut chunk = commands.entity(entity);
+            chunk
                 .insert(Mesh3d((*mesh_ref.0).clone()))
                 .insert(MeshMaterial3d(material_handle.clone()))
                 .insert(*transform)
                 .remove::<NeedsMaterial<C>>();
+            (world_material.insert_chunk_components)(&mut chunk);
         }
     }
 }

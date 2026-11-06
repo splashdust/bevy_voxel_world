@@ -10,6 +10,7 @@ mod light_off;
 mod mesh_cache;
 mod meshing;
 mod plugin;
+mod pool_budget;
 mod streaming_policy;
 mod voxel;
 mod voxel_edits;

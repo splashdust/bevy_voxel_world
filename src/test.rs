@@ -1012,6 +1012,168 @@ fn a_hand_added_material_handle_reaches_worlds_that_do_not_init_custom_materials
     );
 }
 
+/// A second world whose custom material is created and added by the test.
+#[derive(Resource, Clone, Default)]
+struct SecondHandAddedMaterialWorld;
+
+impl VoxelWorldConfig for SecondHandAddedMaterialWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        2
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        FloorWorld.voxel_lookup_delegate()
+    }
+
+    fn init_custom_materials(&self) -> bool {
+        false
+    }
+}
+
+/// The one material handle on the chunks of world `C`, once they all have it.
+fn the_chunk_material<C: VoxelWorldConfig, M: Material>(app: &mut App) -> Handle<M> {
+    update_until(app, "the chunks to get a material", |app| {
+        !chunk_materials::<C, M>(app).is_empty()
+    });
+    let materials = chunk_materials::<C, M>(app);
+    assert!(
+        materials.iter().all(|material| *material == materials[0]),
+        "the chunks of one world have different materials"
+    );
+    materials[0].clone()
+}
+
+#[test]
+fn a_default_worlds_chunks_get_the_default_material() {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+
+    let material = the_chunk_material::<FloorWorld, DefaultVoxelMaterial>(&mut app);
+
+    let materials = app.world().resource::<Assets<DefaultVoxelMaterial>>();
+    assert_eq!(materials.len(), 1);
+    assert_eq!(
+        materials.get(&material).unwrap().base.perceptual_roughness,
+        0.95
+    );
+}
+
+#[test]
+fn a_custom_material_worlds_chunks_get_its_material() {
+    let red = Color::srgb(1.0, 0.0, 0.0);
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(VoxelWorldPlugin::with_config(FloorWorld).with_material(
+            StandardMaterial {
+                base_color: red,
+                ..default()
+            },
+        ))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+
+    let material = the_chunk_material::<FloorWorld, StandardMaterial>(&mut app);
+
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    assert_eq!(materials.get(&material).unwrap().base_color, red);
+    assert!(
+        app.world()
+            .get_resource::<Assets<DefaultVoxelMaterial>>()
+            .is_none_or(|materials| materials.is_empty()),
+        "a custom material world made a default material"
+    );
+}
+
+#[test]
+fn a_hand_added_material_is_shared_by_worlds_that_name_it() {
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(
+            VoxelWorldPlugin::with_config(HandAddedMaterialWorld)
+                .with_material(StandardMaterial::default()),
+        )
+        .add_plugins(
+            VoxelWorldPlugin::with_config(SecondHandAddedMaterialWorld)
+                .with_material(StandardMaterial::default()),
+        )
+        .add_systems(
+            Startup,
+            (
+                spawn_camera::<HandAddedMaterialWorld>,
+                spawn_camera::<SecondHandAddedMaterialWorld>,
+            ),
+        );
+    assert!(
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .is_empty(),
+        "the plugin made a material for a world that doesn't init one"
+    );
+
+    let handle = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    app.insert_resource(VoxelWorldMaterialHandle {
+        handle: handle.clone(),
+    });
+
+    assert_eq!(
+        the_chunk_material::<HandAddedMaterialWorld, StandardMaterial>(&mut app),
+        handle
+    );
+    assert_eq!(
+        the_chunk_material::<SecondHandAddedMaterialWorld, StandardMaterial>(&mut app),
+        handle
+    );
+}
+
+#[test]
+fn two_worlds_each_get_their_own_material() {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+        .add_plugins(VoxelWorldPlugin::with_config(SecondFloorWorld))
+        .add_systems(
+            Startup,
+            (spawn_camera::<FloorWorld>, spawn_camera::<SecondFloorWorld>),
+        );
+
+    let first = the_chunk_material::<FloorWorld, DefaultVoxelMaterial>(&mut app);
+    let second = the_chunk_material::<SecondFloorWorld, DefaultVoxelMaterial>(&mut app);
+    assert_ne!(first, second);
+}
+
+#[test]
+fn a_minimal_world_with_a_custom_material_assigns_no_material() {
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(
+            VoxelWorldPlugin::<FloorWorld>::minimal()
+                .with_material(StandardMaterial::default()),
+        )
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+
+    update_until(&mut app, "a chunk to be published", |app| {
+        !app.world()
+            .resource::<ChunkMap<FloorWorld, u8>>()
+            .get_read_lock()
+            .is_empty()
+    });
+
+    assert!(app
+        .world()
+        .resource::<Assets<StandardMaterial>>()
+        .is_empty());
+    assert!(app
+        .world()
+        .get_resource::<VoxelWorldMaterialHandle<StandardMaterial>>()
+        .is_none());
+    assert!(chunk_materials::<FloorWorld, StandardMaterial>(&mut app).is_empty());
+}
+
 #[test]
 fn a_voxel_texture_shared_by_two_worlds_can_be_prepared_twice() {
     let mut image = Image::new_fill(
