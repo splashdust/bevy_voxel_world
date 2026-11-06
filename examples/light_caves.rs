@@ -9,10 +9,17 @@
 //! With the argument `check`, it renders fixed cameras offscreen instead and
 //! checks pixels, for a maintainer to run by hand on a machine with a GPU:
 //!
-//! - In a sealed pocket with no sky light and no lamp in reach, every pixel is
-//!   exactly black, with no tonemapping.
-//! - A lamp declared below the top level still glows, less than one at the top
-//!   level.
+//! - With sky light off, a lamp declared below the top level still glows, less
+//!   than one at the top level.
+//! - With sky light off, a sun with no shadow map leaves the lamp room as it
+//!   was with the shadow map.
+//! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
+//!   off, every pixel is exactly black, with no tonemapping, with and without
+//!   the sun's shadow map.
+//!
+//! The lamp room's checks run with sky light off because the room spans a
+//! chunk boundary with more open columns than a chunk's walk can settle, so
+//! its lower chunk shows direct sky until a sky probe disproves it.
 //!
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there.
@@ -247,8 +254,9 @@ impl Scene {
 
 #[derive(Resource, Clone, Default)]
 struct CaveWorld {
-    /// No sky light, for the pixel checks.
-    no_sky: bool,
+    /// For the pixel checks: with sky light, but no sky fill, or with no sky
+    /// light.
+    check_sky: Option<bool>,
 }
 
 impl VoxelWorldConfig for CaveWorld {
@@ -278,13 +286,17 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
-        Some(LightPropagation {
-            sky: if self.no_sky {
-                Sky::Off
-            } else {
-                Sky::default()
+        Some(match self.check_sky {
+            None => LightPropagation::default(),
+            Some(true) => LightPropagation {
+                sky_fill: None,
+                ..default()
             },
-            ..default()
+            Some(false) => LightPropagation {
+                sky: Sky::Off,
+                sky_fill: None,
+                ..default()
+            },
         })
     }
 
@@ -346,9 +358,11 @@ fn add_lights(commands: &mut Commands) {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("check") {
-        check();
-        return;
+    match std::env::args().nth(1).as_deref() {
+        Some("check") => return check(),
+        Some("check-sky-off") => return check_part(false),
+        Some("check-sky-on") => return check_part(true),
+        _ => {}
     }
     App::new()
         .add_plugins(DefaultPlugins)
@@ -393,32 +407,69 @@ fn switch_camera(
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 
-/// One check: where the camera stands, and what it asserts of the picture.
+/// One check: whether sky light is on, where the camera stands, whether the
+/// sun has a shadow map, and what it asserts of the picture, given the
+/// picture of an earlier check.
 struct Check {
     name: &'static str,
     file: &'static str,
+    sky: bool,
     camera: &'static FixedCamera,
-    judge: fn(&Image, &Camera, &GlobalTransform) -> Result<String, String>,
+    shadow_maps: bool,
+    /// The file of the earlier check whose picture the judge gets.
+    earlier: Option<&'static str>,
+    judge:
+        fn(&Image, &Camera, &GlobalTransform, Option<&Image>) -> Result<String, String>,
 }
 
-const CHECKS: [Check; 2] = [
+const CHECKS: [Check; 4] = [
     Check {
         name: "a lamp declared below the top level still glows, scaled by its level",
         file: "lamp_room.png",
+        sky: false,
         camera: &LAMP_ROOM_CAMERA,
+        shadow_maps: true,
+        earlier: None,
         judge: dim_lamp_glows,
     },
     Check {
         name: "a sealed pocket with no light in reach is exactly black",
         file: "sealed_pocket.png",
+        sky: true,
         camera: &POCKET_CAMERA,
+        shadow_maps: true,
+        earlier: None,
         judge: pocket_is_black,
     },
+    Check {
+        name: "a sun with no shadow map leaves a sealed pocket exactly black",
+        file: "sealed_pocket_no_shadow_map.png",
+        sky: true,
+        camera: &POCKET_CAMERA,
+        shadow_maps: false,
+        earlier: None,
+        judge: pocket_is_black,
+    },
+    Check {
+        name: "a sun with no shadow map leaves propagated shade as it was",
+        file: "lamp_room_no_shadow_map.png",
+        sky: false,
+        camera: &LAMP_ROOM_CAMERA,
+        shadow_maps: false,
+        earlier: Some("lamp_room.png"),
+        judge: matches_earlier,
+    },
 ];
+
+/// The pictures of the checks so far, by file.
+#[derive(Resource, Default)]
+struct Pictures(std::collections::HashMap<&'static str, Image>);
 
 #[derive(Resource)]
 struct CheckPlan {
     target: Handle<Image>,
+    /// The checks this run makes, in order.
+    checks: Vec<&'static Check>,
     next: usize,
     moved_at_frame: u32,
     /// The last frame on which a chunk wasn't Ready.
@@ -430,7 +481,25 @@ struct CheckPlan {
     directory: Option<std::path::PathBuf>,
 }
 
+/// Runs the checks with sky light off, then with it on, each in a process of
+/// its own, since a world's sky rule is read once.
 fn check() {
+    let mut failed = false;
+    for sky in ["sky-off", "sky-on"] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(format!("check-{sky}"))
+            .args(std::env::args().skip(2))
+            .status()
+            .unwrap();
+        failed |= !status.success();
+    }
+    if failed {
+        std::process::exit(1);
+    }
+}
+
+/// Runs the checks with sky light on or off.
+fn check_part(sky: bool) {
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -444,13 +513,23 @@ fn check() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
-        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld { no_sky: true }))
-        .add_systems(Startup, setup_check)
+        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld {
+            check_sky: Some(sky),
+        }))
+        .init_resource::<Pictures>()
+        .add_systems(
+            Startup,
+            move |commands: Commands, images: ResMut<Assets<Image>>| {
+                setup_check(commands, images, sky)
+            },
+        )
         .add_systems(Update, run_checks)
         .run();
 }
 
-fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: bool) {
+    let checks: Vec<&'static Check> =
+        CHECKS.iter().filter(|check| check.sky == sky).collect();
     let mut image =
         Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
@@ -460,12 +539,13 @@ fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderTarget::Image(target.clone().into()),
         Tonemapping::None,
         DebandDither::Disabled,
-        transform_of(CHECKS[0].camera),
+        transform_of(checks[0].camera),
         VoxelWorldCamera::<CaveWorld>::default(),
     ));
     add_lights(&mut commands);
     commands.insert_resource(CheckPlan {
         target,
+        checks,
         next: 0,
         moved_at_frame: 0,
         last_busy_frame: 0,
@@ -485,6 +565,7 @@ fn run_checks(
         (&mut Transform, &Camera, &GlobalTransform),
         With<VoxelWorldCamera<CaveWorld>>,
     >,
+    mut suns: Query<&mut DirectionalLight>,
     chunks: Query<&Chunk<CaveWorld>>,
     voxel_world: VoxelWorld<CaveWorld>,
     mut exit: MessageWriter<AppExit>,
@@ -500,7 +581,7 @@ fn run_checks(
     if plan.waiting {
         return;
     }
-    let Some(check) = CHECKS.get(plan.next) else {
+    let Some(check) = plan.checks.get(plan.next).copied() else {
         exit.write(if plan.failed {
             AppExit::error()
         } else {
@@ -510,8 +591,14 @@ fn run_checks(
     };
     let (mut transform, camera, global) = cameras.single_mut().unwrap();
     let wanted = transform_of(check.camera);
-    if *transform != wanted {
+    let shadow_maps_wrong = suns
+        .iter()
+        .any(|sun| sun.shadow_maps_enabled != check.shadow_maps);
+    if *transform != wanted || shadow_maps_wrong {
         *transform = wanted;
+        for mut sun in &mut suns {
+            sun.shadow_maps_enabled = check.shadow_maps;
+        }
         plan.moved_at_frame = frame;
         return;
     }
@@ -528,31 +615,61 @@ fn run_checks(
 
     plan.waiting = true;
     let (camera, global) = (camera.clone(), *global);
-    let (name, judge) = (check.name, check.judge);
+    let (name, file, earlier, judge) =
+        (check.name, check.file, check.earlier, check.judge);
     let mut screenshot = commands.spawn(Screenshot::image(plan.target.clone()));
     if let Some(directory) = &plan.directory {
         std::fs::create_dir_all(directory).unwrap();
         screenshot.observe(save_to_disk(directory.join(check.file)));
     }
     screenshot.observe(
-        move |captured: On<ScreenshotCaptured>, mut plan: ResMut<CheckPlan>| {
-            match judge(&captured.image, &camera, &global) {
+        move |captured: On<ScreenshotCaptured>,
+              mut plan: ResMut<CheckPlan>,
+              mut pictures: ResMut<Pictures>| {
+            let earlier = earlier.and_then(|file| pictures.0.get(file));
+            match judge(&captured.image, &camera, &global, earlier) {
                 Ok(note) => println!("PASS {name}: {note}"),
                 Err(note) => {
                     println!("FAIL {name}: {note}");
                     plan.failed = true;
                 }
             }
+            pictures.0.insert(file, captured.image.clone());
             plan.waiting = false;
             plan.next += 1;
         },
     );
 }
 
+/// Whether `image` matches the earlier check's picture, within one step of
+/// rounding in each channel.
+fn matches_earlier(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let earlier = earlier
+        .and_then(|earlier| earlier.data.as_ref())
+        .ok_or("no earlier picture")?;
+    let differing = data
+        .iter()
+        .zip(earlier)
+        .filter(|(now, before)| now.abs_diff(**before) > 1)
+        .count();
+    if differing == 0 {
+        Ok(format!("{} pixels as before", data.len() / 4))
+    } else {
+        Err(format!("{differing} channels differ by more than 1"))
+    }
+}
+
 fn pocket_is_black(
     image: &Image,
     _: &Camera,
     _: &GlobalTransform,
+    _: Option<&Image>,
 ) -> Result<String, String> {
     let data = image.data.as_ref().ok_or("no pixels")?;
     let lit = data
@@ -601,6 +718,7 @@ fn dim_lamp_glows(
     image: &Image,
     camera: &Camera,
     global: &GlobalTransform,
+    _: Option<&Image>,
 ) -> Result<String, String> {
     // The middle of each lamp's top face.
     let top = Vec3::new(0.5, 1.0, 0.5);

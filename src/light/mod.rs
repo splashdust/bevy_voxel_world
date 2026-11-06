@@ -18,6 +18,7 @@ mod levels;
 pub(crate) mod material;
 pub(crate) mod relight;
 pub(crate) mod route;
+pub(crate) mod sky;
 pub(crate) mod solver;
 pub(crate) mod view;
 
@@ -27,19 +28,19 @@ pub mod bench;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use bevy::log::warn_once;
 use bevy::prelude::*;
 
 use crate::chunk::{ChunkKey, PADDED_CHUNK_SIZE};
 use crate::chunk_lifecycle::ChunkLifecycle;
 use crate::chunk_map::ChunkMapData;
-use crate::configuration::VoxelWorldConfig;
+use crate::configuration::{VoxelLookupDelegate, VoxelWorldConfig};
+use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::VoxelWorldSet;
 use config::{Emission, LightPropagation, Sky};
-use kernel::MAX_ONE_WORD_REACH;
 use levels::LevelScale;
 pub use levels::LightLevels;
 use relight::{LightWork, Relights};
+use sky::{Above, SkyRule, SkyWalk};
 use solver::{LightCounters, LightTask, LightTaskSettings};
 use view::LightView;
 
@@ -53,6 +54,8 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     pub emissive_materials: Vec<(C::MaterialIndex, Emission)>,
     /// What chunk tasks and relight tasks read to solve light.
     pub task: Arc<LightTaskSettings<C::MaterialIndex>>,
+    /// Where sky light enters, or `None` with sky light off.
+    pub sky_rule: Option<SkyRule>,
     pub view: LightView,
     _world: PhantomData<C>,
 }
@@ -65,17 +68,43 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// What the task of the chunk with `key` needs to solve its light. `None`
     /// for a chunk that doesn't get light: one above level 0, or with another
     /// data shape.
+    ///
+    /// With sky light on, the task gets the world's lookup `delegate` to walk
+    /// the chunk positions above the chunk, and the fill hints and voxel edits
+    /// of those positions, read now.
     pub fn task_for(
         &self,
         key: ChunkKey,
         data_shape: UVec3,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+        delegate: VoxelLookupDelegate<C::MaterialIndex>,
     ) -> Option<LightTask<C::MaterialIndex>> {
         if key.lod_level != 0 || data_shape != UVec3::splat(PADDED_CHUNK_SIZE) {
             return None;
         }
+        let walk = self.sky_rule.map(|rule| {
+            let window = rule.window(key.position.y);
+            let positions =
+                (1..=sky::walkable(window) as i32).map(|y| key.position + IVec3::Y * y);
+            let above = positions
+                .clone()
+                .zip(edits.buckets(positions))
+                .map(|(position, edits)| {
+                    Above::new(world.chunk_fill_hint(ChunkKey::new(position, 0)), edits)
+                })
+                .collect();
+            SkyWalk {
+                position: key.position,
+                window,
+                above,
+                delegate,
+            }
+        });
         Some(LightTask {
             settings: self.task.clone(),
             view: self.view.clone(),
+            walk,
         })
     }
 
@@ -111,6 +140,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     let routed = app.world().contains_resource::<route::LightRoute<C>>();
     let task = Arc::new(task_settings::<C>(&config, &emissive_materials, routed));
     app.insert_resource(LightSettings::<C> {
+        sky_rule: SkyRule::of(&config.sky),
         config,
         emissive_materials,
         task,
@@ -139,7 +169,8 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     );
 }
 
-/// The level of sky light in every open voxel, until sky light is solved.
+/// The level of sky light a chunk shows before its light lands: direct sky,
+/// as a column nothing has settled shows, or 0 with sky light off.
 pub(crate) fn placeholder_sky(config: &LightPropagation) -> u8 {
     if config.sky == Sky::Off {
         0
@@ -148,23 +179,17 @@ pub(crate) fn placeholder_sky(config: &LightPropagation) -> u8 {
     }
 }
 
+/// What chunk tasks read of `config`, which must be clamped.
 fn task_settings<C: VoxelWorldConfig>(
     config: &LightPropagation,
     emissive_materials: &[(C::MaterialIndex, Emission)],
     routed: bool,
 ) -> LightTaskSettings<C::MaterialIndex> {
-    let mut voxel_reach = config.voxel_reach as u32;
-    if voxel_reach > MAX_ONE_WORD_REACH {
-        warn_once!(
-            "light propagation: voxel_reach {voxel_reach} isn't supported yet, using \
-             {MAX_ONE_WORD_REACH}"
-        );
-        voxel_reach = MAX_ONE_WORD_REACH;
-    }
     LightTaskSettings {
-        voxel_scale: LevelScale::new(voxel_reach),
+        voxel_scale: LevelScale::new(config.voxel_reach as u32),
+        sky_scale: (config.sky != Sky::Off)
+            .then(|| LevelScale::new(config.sky_reach as u32)),
         shape: config.shape,
-        sky: placeholder_sky(config),
         routed,
         emission: emissive_materials
             .iter()

@@ -1,10 +1,11 @@
-//! What a chunk keeps for the solves of the chunks around it: its occupancy
-//! and its emissive voxels.
+//! What a chunk keeps for the solves of the chunks around it: its occupancy,
+//! its emissive voxels and its column answer.
 
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::voxel::WorldVoxel;
 
 use super::kernel::Plane;
+use super::sky::ColumnAnswer;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 const PADDED: usize = PADDED_CHUNK_SIZE as usize;
@@ -53,16 +54,20 @@ pub(crate) struct EmissiveVoxel {
 pub(crate) struct LightInputs {
     pub occupancy: Occupancy,
     pub emissive: Vec<EmissiveVoxel>,
+    /// Which columns sky light enters at the chunk's top.
+    pub columns: ColumnAnswer,
 }
 
 impl LightInputs {
-    /// What a chunk's voxels hold for light. With an empty `emission` list
-    /// nothing looks for emissive voxels. Returns whether it looked.
+    /// What a chunk's voxels hold for light, with its column answer
+    /// `columns`. With an empty `emission` list nothing looks for emissive
+    /// voxels. Returns whether it looked.
     ///
     /// `chunk` must be a level-0 chunk with the default data shape.
     pub fn of<I: Copy + PartialEq>(
         chunk: &ChunkData<I>,
         emission: &[(I, u8)],
+        columns: ColumnAnswer,
     ) -> (Self, bool) {
         let scanned = !emission.is_empty();
         let voxels = match (&chunk.fill_type, &chunk.voxels) {
@@ -71,6 +76,7 @@ impl LightInputs {
                     Self {
                         occupancy: Occupancy::Open,
                         emissive: Vec::new(),
+                        columns,
                     },
                     false,
                 )
@@ -89,6 +95,7 @@ impl LightInputs {
                     Self {
                         occupancy,
                         emissive,
+                        columns,
                     },
                     scanned,
                 );
@@ -97,15 +104,15 @@ impl LightInputs {
             (FillType::Mixed, None) => unreachable!("a mixed chunk stores its voxels"),
         };
 
-        let mut columns: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+        let mut solid: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
         let mut emissive = Vec::new();
         let mut solids = 0;
         for z in 0..CHUNK {
             for y in 0..CHUNK {
                 let start = 1 + (y + 1) * PADDED + (z + 1) * PADDED * PADDED;
                 let row = &voxels[start..start + CHUNK];
-                let columns = &mut columns[y * CHUNK..(y + 1) * CHUNK];
-                for (column, voxel) in columns.iter_mut().zip(row) {
+                let solid = &mut solid[y * CHUNK..(y + 1) * CHUNK];
+                for (column, voxel) in solid.iter_mut().zip(row) {
                     let solid = voxel.is_solid() as u32;
                     *column |= solid << z;
                     solids += solid;
@@ -118,15 +125,39 @@ impl LightInputs {
         let occupancy = match solids as usize {
             0 => Occupancy::Open,
             n if n == CHUNK * CHUNK * CHUNK => Occupancy::Solid,
-            _ => Occupancy::Mixed(columns),
+            _ => Occupancy::Mixed(solid),
         };
         (
             Self {
                 occupancy,
                 emissive,
+                columns,
             },
             scanned,
         )
+    }
+}
+
+impl LightInputs {
+    /// The chunk's voxels with direct sky, as a [`Plane`]: in each column its
+    /// answer lets sky light into, the open voxels from the chunk's top down
+    /// to the first solid voxel. `None` if no voxel has direct sky.
+    pub fn direct_sky(&self) -> Option<Box<Plane>> {
+        if !self.columns.has_sky() || !self.occupancy.has_open_voxel() {
+            return None;
+        }
+        let mut plane: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+        for x in 0..CHUNK {
+            let mut falling = self.columns.sky[x];
+            for y in (0..CHUNK).rev() {
+                if falling == 0 {
+                    break;
+                }
+                falling &= !self.occupancy.solid_column(x, y);
+                plane[x + y * CHUNK] = falling;
+            }
+        }
+        Some(plane)
     }
 }
 

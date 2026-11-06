@@ -11,7 +11,7 @@
 
 use bevy::prelude::*;
 
-use crate::prelude::{LightShape, WorldVoxel};
+use crate::prelude::{LightShape, Sky, WorldVoxel};
 
 /// Not reached by any source.
 const UNREACHED: u32 = u32::MAX;
@@ -27,6 +27,8 @@ pub(super) struct Reference {
     shape: LightShape,
     /// The voxel light level of every voxel.
     voxel: Vec<u8>,
+    /// The sky light level of every voxel.
+    sky: Vec<u8>,
 }
 
 impl Reference {
@@ -70,6 +72,7 @@ impl Reference {
             reach,
             shape,
             voxel: vec![0; count],
+            sky: vec![0; count],
         };
 
         let sources: Vec<(usize, u32)> = (0..count)
@@ -91,9 +94,93 @@ impl Reference {
         reference
     }
 
+    /// Works out sky light in the box from `min` to `max`, exclusive, of the
+    /// world whose voxels `voxel_at` returns, entering under the sky rule
+    /// `sky`.
+    ///
+    /// An open voxel has direct sky, at level 15, when its column holds no
+    /// solid from it up to the top of the chunk positions the rule says must
+    /// be clear: with a sky clearance of N chunks, up to the top of the Nth
+    /// chunk above the voxel's chunk; with a sky ceiling, up to the top of the
+    /// chunk holding the ceiling, or of the voxel's own chunk if that is
+    /// higher. Light from direct sky then spreads like any other, and voxel
+    /// light is 0 everywhere. `voxel_at` is asked about voxels above the box
+    /// too.
+    ///
+    /// Light from outside the box doesn't enter it, so only voxels at least
+    /// `reach` inside its faces are sure to be right.
+    pub fn sky_light<I: Copy + PartialEq>(
+        min: IVec3,
+        max: IVec3,
+        reach: u32,
+        shape: LightShape,
+        sky: &Sky,
+        voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+    ) -> Self {
+        let mut reference =
+            Self::voxel_light(min, max, reach, shape, &voxel_at, |_| None);
+        let size = reference.size;
+        // The highest voxel each chunk's column must be clear up to.
+        let top = |y: i32| -> Option<i32> {
+            let chunk = y.div_euclid(32);
+            match sky {
+                Sky::Clearance { chunks } => Some((chunk + 1 + *chunks as i32) * 32 - 1),
+                Sky::Ceiling { y } => Some((chunk.max(y.div_euclid(32)) + 1) * 32 - 1),
+                Sky::Off => None,
+            }
+        };
+        let mut direct = vec![false; reference.open.len()];
+        if let Some(highest) = top(max.y - 1) {
+            for z in 0..size.z {
+                for x in 0..size.x {
+                    // The lowest solid at or above the voxel, walking down.
+                    let mut solid_from = i32::MAX;
+                    for y in (min.y..=highest).rev() {
+                        let p = IVec3::new(min.x + x, y, min.z + z);
+                        let open = match reference.index(p) {
+                            Some(i) => reference.open[i],
+                            None => !voxel_at(p).is_solid(),
+                        };
+                        if !open {
+                            solid_from = y;
+                            continue;
+                        }
+                        if let Some(i) = reference.index(p) {
+                            direct[i] = solid_from > top(y).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        let sources: Vec<(usize, u32)> = (0..direct.len())
+            .filter(|&i| direct[i])
+            .map(|i| (i, 0))
+            .collect();
+        let distances = reference.flood(&sources);
+        reference.sky = distances
+            .iter()
+            .enumerate()
+            .map(|(i, distance)| {
+                if direct[i] {
+                    15
+                } else if !reference.open[i] {
+                    0
+                } else {
+                    reference.level(*distance)
+                }
+            })
+            .collect();
+        reference
+    }
+
     /// The voxel light level at `position`.
     pub fn voxel_at(&self, position: IVec3) -> u8 {
         self.voxel[self.index(position).expect("a position in the box")]
+    }
+
+    /// The sky light level at `position`.
+    pub fn sky_at(&self, position: IVec3) -> u8 {
+        self.sky[self.index(position).expect("a position in the box")]
     }
 
     fn index(&self, position: IVec3) -> Option<usize> {
@@ -134,10 +221,13 @@ impl Reference {
     /// then z, each spreading one step from everything reached so far.
     fn flood(&self, sources: &[(usize, u32)]) -> Vec<u32> {
         let count = self.open.len();
+        let mut distance = vec![UNREACHED; count];
+        if sources.is_empty() {
+            return distance;
+        }
         // When each voxel was reached, as a count of passes, so a pass spreads
         // only from voxels reached before it began.
         let mut reached_at = vec![UNREACHED; count];
-        let mut distance = vec![UNREACHED; count];
         let mut pass = 0;
         for round in 1..=self.reach {
             for &(i, start) in sources {

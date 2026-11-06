@@ -15,6 +15,15 @@
 //! the forward pass, so a lit chunk material must render forward.
 //!
 //! An unlit world, or one with `shown: false`, keeps its material unwrapped.
+//!
+//! The sun gate: by default Bevy's directional lights shine only on faces
+//! with direct sky. Bevy's shadow map can't be trusted for this, because it
+//! holds only spawned chunks, and under the default streaming rock out of
+//! view isn't spawned, so the sun would shine into caves through it. Direct
+//! sky falls straight down, so the sun stops at an overhang's drip line.
+//! A face reads light blended between voxels, so the gate is a step between
+//! direct sky and the level beside it, worked out from sky reach and
+//! precision.
 
 use std::marker::PhantomData;
 
@@ -34,7 +43,7 @@ use bevy::{
 };
 
 use super::config::{
-    LevelCurve, LightAo, LightLook, LightPropagation, LightSmoothing, SunGate,
+    LevelCurve, LightAo, LightPrecision, LightPropagation, LightSmoothing, SunGate,
 };
 use super::route::{self, LightRoute};
 use crate::configuration::VoxelWorldConfig;
@@ -82,7 +91,7 @@ impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
     }
 }
 
-/// A world's [`LightLook`] as the shader reads it, the `LightLook` struct of
+/// A world's [`LightLook`](super::config::LightLook) as the shader reads it, the `LightLook` struct of
 /// the `bevy_voxel_world::light` module.
 ///
 /// Each curve is 16 levels as 4 `vec4`s, with level 0 forced to 0, so a
@@ -91,8 +100,12 @@ impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
 pub(crate) struct LookUniform {
     pub sky_falloff: [Vec4; 4],
     pub voxel_falloff: [Vec4; 4],
-    /// How much of Bevy's directional lights reaches each sky light level.
+    /// How much of Bevy's directional lights reaches each sky light level,
+    /// when `sun_step` is 0.
     pub sun_falloff: [Vec4; 4],
+    /// With [`SunGate::DirectSkyOnly`], the sky light level from which the sun
+    /// shines fully, and below which it doesn't shine. 0 otherwise.
+    pub sun_step: f32,
     pub voxel_brightness: f32,
     pub emissive_glow: f32,
     pub minimum_brightness: f32,
@@ -103,19 +116,22 @@ pub(crate) struct LookUniform {
 }
 
 impl LookUniform {
-    pub fn new(look: &LightLook) -> Self {
-        let sun = match &look.sun {
+    /// The uniform for `config`'s look, which must be clamped.
+    pub fn new(config: &LightPropagation) -> Self {
+        let look = &config.look;
+        let (sun, sun_step) = match &look.sun {
             SunGate::DirectSkyOnly => {
                 let mut brightness = [0.0; 16];
                 brightness[15] = 1.0;
-                LevelCurve { brightness }
+                (LevelCurve { brightness }, direct_sky_step(config))
             }
-            SunGate::ByLevel(curve) => curve.clone(),
+            SunGate::ByLevel(curve) => (curve.clone(), 0.0),
         };
         Self {
             sky_falloff: table(&look.sky_falloff),
             voxel_falloff: table(&look.voxel_falloff),
             sun_falloff: table(&sun),
+            sun_step,
             voxel_brightness: look.voxel_brightness,
             emissive_glow: look.emissive_glow,
             minimum_brightness: look.minimum_brightness,
@@ -127,6 +143,24 @@ impl LookUniform {
             },
         }
     }
+}
+
+/// The sky light level halfway between direct sky, at 15, and the brightest
+/// level an open voxel without direct sky holds, one step from it.
+///
+/// A face reads light blended between the voxels in front of it, so at the edge
+/// of direct sky it reads levels between the two. The sun shines from this
+/// level up, so it stops halfway across the edge. At 16 levels the voxel beside
+/// direct sky holds at most 14. At 256 levels it holds `255 × reach / (reach +
+/// 1)` in 255ths, which comes closer to 15 the longer the reach, so the step
+/// follows the reach.
+fn direct_sky_step(config: &LightPropagation) -> f32 {
+    let t = 1.0 - 1.0 / (config.sky_reach as f32 + 1.0);
+    let beside = match config.precision {
+        LightPrecision::Steps16 => (15.0 * t).round().clamp(1.0, 14.0),
+        LightPrecision::Steps256 => (255.0 * t).round().clamp(1.0, 254.0) / 17.0,
+    };
+    (beside + 15.0) / 2.0
 }
 
 /// A curve as the shader's table, with level 0 at 0.
@@ -177,7 +211,7 @@ pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
         base,
         extension: VoxelWorldBindings {
             light_texture: route.texture.clone(),
-            look: LookUniform::new(&config.look),
+            look: LookUniform::new(&config),
             _material: PhantomData,
         },
     };
@@ -196,20 +230,55 @@ pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::LightLook;
     use super::*;
 
     #[test]
     fn the_looks_uniform_fits_webgl2s_uniform_block_and_level_0_is_black() {
         assert!(LookUniform::min_size().get() <= 16 * 1024);
 
-        let mut look = LightLook::default();
-        look.sky_falloff.brightness[0] = 0.5;
-        look.voxel_falloff.brightness[0] = 0.5;
-        let uniform = LookUniform::new(&look);
+        let mut config = LightPropagation::default();
+        config.look.sky_falloff.brightness[0] = 0.5;
+        config.look.voxel_falloff.brightness[0] = 0.5;
+        let uniform = LookUniform::new(&config);
         assert_eq!(uniform.sky_falloff[0].x, 0.0);
         assert_eq!(uniform.voxel_falloff[0].x, 0.0);
         assert_eq!(uniform.sun_falloff[0].x, 0.0);
         assert_eq!(uniform.voxel_falloff[3].w, 1.0);
         assert!((uniform.voxel_falloff[3].z - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_sun_steps_between_direct_sky_and_the_brightest_level_beside_it() {
+        let step = |sky_reach, precision| {
+            LookUniform::new(&LightPropagation {
+                sky_reach,
+                precision,
+                ..default()
+            })
+            .sun_step
+        };
+        // At 16 levels the voxel beside direct sky holds 14 at any reach above
+        // a few voxels, and level 15 is direct sky.
+        assert_eq!(step(30, LightPrecision::Steps16), 14.5);
+        assert_eq!(step(14, LightPrecision::Steps16), 14.5);
+        // At 256 levels it holds 247/255 at reach 30, and 238/255 at reach 14.
+        let beside_30 = 247.0 / 17.0;
+        assert!(
+            (step(30, LightPrecision::Steps256) - (beside_30 + 15.0) / 2.0).abs() < 1e-5
+        );
+        let beside_14 = 238.0 / 17.0;
+        assert!(
+            (step(14, LightPrecision::Steps256) - (beside_14 + 15.0) / 2.0).abs() < 1e-5
+        );
+
+        let by_level = LookUniform::new(&LightPropagation {
+            look: LightLook {
+                sun: SunGate::ByLevel(LevelCurve::default()),
+                ..default()
+            },
+            ..default()
+        });
+        assert_eq!(by_level.sun_step, 0.0);
     }
 }

@@ -189,6 +189,39 @@ impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
     }
 }
 
+/// The world of `stream_in`, or of `stream_in_flat` with `FLAT`, lit with the
+/// default light settings. Its scenarios report what light costs on the gated
+/// worlds, against `light-baseline`'s runs of them, and gate nothing yet.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct LitBenchWorld<const TERRAIN: u8>;
+
+#[cfg(feature = "light_propagation")]
+impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        BenchWorld::<TERRAIN, false>.voxel_lookup_delegate()
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+}
+
 // --- Lifecycle observation -------------------------------------------------
 
 /// The message that marks a chunk's voxel data as published.
@@ -557,6 +590,41 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 /// cost: in chunk tasks and relight tasks on the pool, against the same chunks
 /// solved one after another on one thread, and on the main thread landing
 /// light and starting relights.
+/// `stream_in` on a lit world, with what working out its direct sky and
+/// solving its light cost in chunk tasks.
+#[cfg(feature = "light_propagation")]
+fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
+    prefix: &str,
+) -> Metrics {
+    use bevy_voxel_world::light_bench::light_stats;
+
+    let mut app = build_app(C::default());
+    let result = stream_in::<C>(&mut app);
+    let stats = light_stats::<C>(app.world()).expect("a lit world");
+    let mut metrics = Metrics::new();
+    metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
+    metrics.insert(format!("{prefix}.near_time_ms"), result.near_time_ms);
+    metrics.insert(format!("{prefix}.frames"), result.frames as f64);
+    let solves = stats.solves.max(1) as f64;
+    metrics.insert(format!("{prefix}.solves"), stats.solves as f64);
+    metrics.insert(
+        format!("{prefix}.pool_solve_us_per_chunk"),
+        stats.solve_ms * 1000.0 / solves,
+    );
+    metrics.insert(
+        format!("{prefix}.column_us_per_chunk"),
+        stats.column_ms * 1000.0 / solves,
+    );
+    metrics.insert(format!("{prefix}.walks"), stats.walks as f64);
+    metrics.insert(format!("{prefix}.walk_lookups"), stats.walk_lookups as f64);
+    metrics.insert(format!("{prefix}.relights"), stats.relights as f64);
+    metrics.insert(
+        format!("{prefix}.main_thread_total_ms"),
+        stats.main_thread_ms,
+    );
+    metrics
+}
+
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lamps() -> Metrics {
     use bevy_voxel_world::light_bench::{light_stats, solve_published_serially};
@@ -777,6 +845,14 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("stream_in_lamps_unlit", RUNS, &|| {
         scenario_stream_in::<LampWorld<false>>("stream_in_lamps_unlit")
     });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lit", RUNS, &|| {
+        scenario_stream_in_lit::<LitBenchWorld<SINE>>("stream_in_lit")
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_flat_lit", RUNS, &|| {
+        scenario_stream_in_lit::<LitBenchWorld<FLAT>>("stream_in_flat_lit")
+    });
     metrics
 }
 
@@ -797,7 +873,11 @@ enum Gate {
 }
 
 fn gate(key: &str) -> Gate {
-    if key.starts_with("in_view_fly_through.") || key.starts_with("stream_in_lamps") {
+    if key.starts_with("in_view_fly_through.")
+        || key.starts_with("stream_in_lamps")
+        || key.starts_with("stream_in_lit")
+        || key.starts_with("stream_in_flat_lit")
+    {
         return Gate::ReportOnly;
     }
     match key.rsplit('.').next().unwrap() {

@@ -23,7 +23,7 @@ use crate::{
 type Voxels<I> = HashMap<IVec3, WorldVoxel<I>>;
 
 /// The edited voxels of one chunk, shared with the chunk tasks that read them.
-type EditBucket<I> = Arc<Voxels<I>>;
+pub(crate) type EditBucket<I> = Arc<Voxels<I>>;
 
 /// Committed edits, by chunk.
 type Committed<I> = Arc<RwLock<HashMap<IVec3, EditBucket<I>>>>;
@@ -145,6 +145,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             chunk_pos,
             buckets: Buckets::Within(within),
         }
+    }
+
+    /// The committed edits in each level-0 chunk at `positions`, in order, or
+    /// `None` for a chunk with none.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn buckets(
+        &self,
+        positions: impl Iterator<Item = IVec3>,
+    ) -> Vec<Option<EditBucket<I>>> {
+        let buckets = self.committed.read().unwrap();
+        positions
+            .map(|position| buckets.get(&position).cloned())
+            .collect()
     }
 
     /// The committed edits, read once for a frame.

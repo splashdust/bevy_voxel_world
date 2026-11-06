@@ -98,11 +98,12 @@ const SPREAD: [u64; 256] = {
 /// Solid voxels hold 0, apart from each emissive voxel, which holds the lamp
 /// marker. The shell is left at 0.
 pub(crate) fn slot_bytes(light: &ChunkLight) -> Option<Box<[u8]>> {
-    let ChannelLight::Planes(planes) = &light.voxel else {
+    if let (ChannelLight::Uniform(_), ChannelLight::Uniform(_)) =
+        (&light.sky, &light.voxel)
+    {
         return None;
-    };
+    }
     let mut bytes = vec![0u8; SLOT_BYTES].into_boxed_slice();
-    let sky = light.sky as u64;
     for y in 0..CHUNK {
         for x in 0..CHUNK {
             let column = x + y * CHUNK;
@@ -110,11 +111,8 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Option<Box<[u8]>> {
             let row = 1 + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
             for shift in (0..CHUNK).step_by(8) {
                 let open_byte = (open >> shift) as usize & 0xFF;
-                let mut texels = SPREAD[open_byte] * sky;
-                for (bit, plane) in planes.iter().enumerate() {
-                    let levels = (plane[column] >> shift) as usize & open_byte;
-                    texels |= SPREAD[levels] << (4 + bit);
-                }
+                let texels = nibbles(&light.sky, column, shift, open_byte)
+                    | nibbles(&light.voxel, column, shift, open_byte) << 4;
                 bytes[row + shift..row + shift + 8]
                     .copy_from_slice(&texels.to_le_bytes());
             }
@@ -126,6 +124,31 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Option<Box<[u8]>> {
             LAMP_MARKER | lamp.level;
     }
     Some(bytes)
+}
+
+/// The levels of one channel at 8 voxels of a column from `shift` up, one in
+/// the low nibble of each byte. Only the voxels set in `open` get a level.
+#[inline]
+fn nibbles(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
+    match channel {
+        ChannelLight::Uniform(level) => SPREAD[open] * *level as u64,
+        ChannelLight::Planes(planes) => {
+            let mut texels = 0;
+            for (bit, plane) in planes.iter().enumerate() {
+                let levels = (plane[column] >> shift) as usize & open;
+                texels |= SPREAD[levels] << bit;
+            }
+            texels
+        }
+    }
+}
+
+/// The level a channel shows on a chunk's tag when the chunk has no slot.
+fn tag_level(channel: &ChannelLight) -> u8 {
+    match channel {
+        ChannelLight::Uniform(level) => *level,
+        ChannelLight::Planes(_) => 0,
+    }
 }
 
 /// The levels of a chunk with no slot, as the low byte of its tag.
@@ -214,10 +237,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         light: &ChunkLight,
         bytes: Option<Box<[u8]>>,
     ) -> Option<u32> {
-        let levels = match light.voxel {
-            ChannelLight::Uniform(voxel) => tag_levels(light.sky, voxel),
-            ChannelLight::Planes(_) => tag_levels(light.sky, 0),
-        };
+        let levels = tag_levels(tag_level(&light.sky), tag_level(&light.voxel));
         let landing = Landing { bytes, levels };
         if !self.tags.contains_key(&entity) {
             self.landing.insert(entity, landing);
