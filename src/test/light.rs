@@ -9,6 +9,11 @@ use bevy::prelude::*;
 use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, FloorWorld};
 use crate::prelude::*;
 
+#[cfg(feature = "light_propagation")]
+mod reference;
+#[cfg(feature = "light_propagation")]
+mod voxel_light;
+
 /// The types of the components on each chunk of world `C` that has a mesh
 /// shown.
 fn shown_chunk_components<C: VoxelWorldConfig>(app: &mut App) -> Vec<HashSet<TypeId>> {

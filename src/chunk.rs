@@ -258,6 +258,10 @@ pub struct ChunkData<I> {
     pub(crate) has_generated: bool,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
+    /// The chunk's light, in a world with light propagation. Only level-0
+    /// chunks with the default data shape have it.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) light: Option<Arc<crate::light::solver::ChunkLight>>,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -273,6 +277,8 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             has_generated: false,
             data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
             mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
+            #[cfg(feature = "light_propagation")]
+            light: None,
         }
     }
 
@@ -670,6 +676,10 @@ where
     pub disagrees_with_hint: bool,
     pub mesh: Option<Mesh>,
     pub user_bundle: Option<C::ChunkUserBundle>,
+    /// What the task needs to solve the chunk's light, in a world with light
+    /// propagation.
+    #[cfg(feature = "light_propagation")]
+    pub light: Option<crate::light::solver::LightTask<I>>,
     _marker: PhantomData<C>,
 }
 
@@ -695,6 +705,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             disagrees_with_hint: false,
             mesh: None,
             user_bundle: None,
+            #[cfg(feature = "light_propagation")]
+            light: None,
             _marker: PhantomData,
         }
     }
@@ -795,12 +807,16 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     /// chunk task, after generating and before the mesh cache check, including
     /// for chunks that generated empty or full.
     ///
-    /// Does nothing yet. It is the place for work that depends on the voxels
-    /// and must be done before the chunk is published, whether or not it gets a
-    /// mesh.
+    /// It is the place for work that depends on the voxels and must be done
+    /// before the chunk is published, whether or not it gets a mesh: in a world
+    /// with light propagation, solving the chunk's light.
     pub fn post_voxel(&mut self) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("post_voxel").entered();
+        #[cfg(feature = "light_propagation")]
+        if let Some(light) = self.light.take() {
+            self.chunk_data.light = Some(Arc::new(light.solve(&self.chunk_data)));
+        }
     }
 
     /// Whether the mesh cache already holds a mesh for the chunk's voxels, so

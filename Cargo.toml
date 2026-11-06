@@ -71,6 +71,11 @@ required-features = ["navigation"]
 name = "chunk_lifecycle"
 harness = false
 
+[[bench]]
+name = "light_kernels"
+harness = false
+required-features = ["light_propagation"]
+
 [dependencies]
 ahash = "0.8.11"
 bevy = { version = "0.20", default-features = false, features = [

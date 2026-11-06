@@ -483,6 +483,11 @@ impl Emission {
         Self { level }
     }
 
+    /// The level as a whole level from 0 to 15.
+    pub(crate) fn whole_level(&self) -> u8 {
+        self.level.round().clamp(0.0, 15.0) as u8
+    }
+
     /// This emission with its level clamped to 0 to 15, logging a warning once
     /// if it wasn't.
     pub(crate) fn clamped(self) -> Self {

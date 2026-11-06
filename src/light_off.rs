@@ -65,5 +65,6 @@ needs_feature!(
     LevelCurve,
     SunGate,
     LightAo,
-    Emission
+    Emission,
+    LightLevels
 );

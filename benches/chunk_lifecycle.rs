@@ -134,6 +134,61 @@ impl<const TERRAIN: u8, const IN_VIEW: bool> VoxelWorldConfig
     }
 }
 
+/// The sine terrain with a lamp on one in 64 surface voxels, lit with the
+/// default light settings when `LIT`. Its scenarios report what solving light
+/// in chunk tasks costs, against the same world unlit, and gate nothing.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct LampWorld<const LIT: bool>;
+
+#[cfg(feature = "light_propagation")]
+const LAMP: u8 = 2;
+
+#[cfg(feature = "light_propagation")]
+impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            Box::new(|pos: IVec3, _| {
+                let height = (8.0 * (pos.x as f32 / 23.0).sin()
+                    + 8.0 * (pos.z as f32 / 17.0).cos())
+                    as i32;
+                let hash = (pos.x.wrapping_mul(73_856_093)
+                    ^ pos.z.wrapping_mul(19_349_663)) as u32;
+                if pos.y == height - 1 && hash.is_multiple_of(64) {
+                    WorldVoxel::Solid(LAMP)
+                } else if pos.y < height {
+                    WorldVoxel::Solid(if pos.y < height - 3 { 1 } else { 0 })
+                } else {
+                    WorldVoxel::Air
+                }
+            })
+        })
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        LIT.then(LightPropagation::default)
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        vec![(LAMP, Emission::level(15.0))]
+    }
+}
+
 // --- Lifecycle observation -------------------------------------------------
 
 /// The message that marks a chunk's voxel data as published.
@@ -498,6 +553,37 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics
 }
 
+/// `stream_in` on the world with lamps, lit, with what solving its light
+/// cost: in chunk tasks on the pool, against the same chunks solved one after
+/// another on one thread, and on the main thread reading neighbours for tasks.
+#[cfg(feature = "light_propagation")]
+fn scenario_stream_in_lamps() -> Metrics {
+    use bevy_voxel_world::light_bench::{light_stats, solve_published_serially};
+
+    type Lit = LampWorld<true>;
+    let prefix = "stream_in_lamps";
+    let mut metrics = scenario_stream_in::<Lit>(prefix);
+    let mut app = build_app(Lit::default());
+    stream_in::<Lit>(&mut app);
+    let stats = light_stats::<Lit>(app.world()).expect("a lit world");
+    let (serial_solves, serial_ms) = solve_published_serially::<Lit>(app.world());
+    metrics.insert(format!("{prefix}.solves"), stats.solves as f64);
+    metrics.insert(
+        format!("{prefix}.emissive_scans"),
+        stats.emissive_scans as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.pool_solve_us_per_chunk"),
+        stats.solve_ms * 1000.0 / stats.solves.max(1) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.serial_solve_us_per_chunk"),
+        serial_ms * 1000.0 / serial_solves.max(1) as f64,
+    );
+    metrics.insert(format!("{prefix}.snapshot_total_ms"), stats.snapshot_ms);
+    metrics
+}
+
 /// Every chunk around the camera becomes unwanted, and a whole new area wanted, on
 /// the same frame.
 fn scenario_teleport() -> Metrics {
@@ -671,6 +757,12 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("in_view_fly_through", RUNS, &|| {
         scenario_fly_through::<InViewWorld>("in_view_fly_through")
     });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lamps", RUNS, &scenario_stream_in_lamps);
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lamps_unlit", RUNS, &|| {
+        scenario_stream_in::<LampWorld<false>>("stream_in_lamps_unlit")
+    });
     metrics
 }
 
@@ -691,7 +783,7 @@ enum Gate {
 }
 
 fn gate(key: &str) -> Gate {
-    if key.starts_with("in_view_fly_through.") {
+    if key.starts_with("in_view_fly_through.") || key.starts_with("stream_in_lamps") {
         return Gate::ReportOnly;
     }
     match key.rsplit('.').next().unwrap() {

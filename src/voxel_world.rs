@@ -184,6 +184,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     configuration: Res<'w, C>,
+    #[cfg(feature = "light_propagation")]
+    light: Option<Res<'w, crate::light::LightSettings<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -217,6 +219,22 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             self.configuration.as_ref(),
             position,
         )
+    }
+
+    /// The light at the voxel at `position`, as levels from 0 to 15.
+    ///
+    /// It reads the light published with the level-0 chunk holding the voxel:
+    /// a solid voxel reads 0, an emissive voxel its own level, and an open
+    /// voxel the light that reached it. Light beside a chunk that isn't loaded,
+    /// or that was published after the chunk holding the voxel started its
+    /// task, can read darker than the truth, never brighter.
+    ///
+    /// Returns `None` when the world has no light propagation, or no published
+    /// level-0 chunk holds the voxel.
+    #[cfg(feature = "light_propagation")]
+    pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
+        let light = self.light.as_ref()?;
+        light.light_at(&self.chunk_map.get_read_lock(), position)
     }
 
     /// Set the voxel at the given position. It replaces the generated voxel there for

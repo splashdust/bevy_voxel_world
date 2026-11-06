@@ -28,6 +28,8 @@ pub mod prelude {
         Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,
         LightShape, LightSmoothing, OpenFill, PathFill, Sky, SkyFill, SunGate,
     };
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::LightLevels;
     #[cfg(not(feature = "light_propagation"))]
     pub use crate::light_off::*;
     pub use crate::plugin::VoxelWorldPlugin;
@@ -68,6 +70,12 @@ pub mod rendering {
 pub mod traversal_alg {
     pub use crate::voxel_traversal::*;
 }
+
+/// Hooks for the crate's own light benchmarks. Not public API: it can change
+/// in any release.
+#[cfg(feature = "light_propagation")]
+#[doc(hidden)]
+pub use crate::light::bench as light_bench;
 
 #[cfg(test)]
 mod test;

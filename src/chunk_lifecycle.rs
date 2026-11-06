@@ -486,6 +486,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         configuration: Res<C>,
+        #[cfg(feature = "light_propagation")] light: Option<
+            Res<crate::light::LightSettings<C>>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("start_chunk_tasks").entered();
@@ -502,6 +505,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 mesh_cache: mesh_cache.as_ref(),
                 voxel_edits: voxel_edits.as_ref(),
                 chunk_map: &chunk_map_read_lock,
+                #[cfg(feature = "light_propagation")]
+                light: light.as_deref(),
             },
             index: &mut index,
             chunks: &mut chunks,
@@ -732,6 +737,8 @@ struct TaskStarter<'a, C: VoxelWorldConfig> {
     mesh_cache: &'a MeshCache<C>,
     voxel_edits: &'a VoxelEdits<C, C::MaterialIndex>,
     chunk_map: &'a RwLockReadGuard<'a, ChunkMapData<C::MaterialIndex>>,
+    #[cfg(feature = "light_propagation")]
+    light: Option<&'a crate::light::LightSettings<C>>,
 }
 
 impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
@@ -787,6 +794,11 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
                 .chunk_edits(key, padding_depth(data_shape, key.lod_level)),
             self.configuration.chunk_fill_hint(key),
         );
+
+        #[cfg(feature = "light_propagation")]
+        if let Some(light) = self.light {
+            chunk_task.light = light.task_for(key, data_shape, self.chunk_map);
+        }
 
         let mesh_map = self.mesh_cache.get_mesh_map();
 
