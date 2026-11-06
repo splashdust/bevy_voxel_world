@@ -3,6 +3,10 @@ mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
+#[cfg(feature = "light_propagation")]
+mod light;
+#[cfg(not(feature = "light_propagation"))]
+mod light_off;
 mod mesh_cache;
 mod meshing;
 mod plugin;
@@ -18,6 +22,13 @@ pub mod prelude {
     pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::config::{
+        Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,
+        LightShape, LightSmoothing, OpenFill, PathFill, Sky, SkyFill, SunGate,
+    };
+    #[cfg(not(feature = "light_propagation"))]
+    pub use crate::light_off::*;
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{

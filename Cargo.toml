@@ -13,9 +13,14 @@ exclude = ["/.github/", "/assets/", "/examples/", "/website/"]
 keywords = ["bevy", "gamedev", "voxelengine", "voxels"]
 categories = ["game-development", "graphics"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 navigation = []
+# Light from the sky and from emissive voxels, spreading through open voxels.
+light_propagation = []
 # Profiling spans for the crate's own work, alongside Bevy's.
 trace = ["bevy/trace"]
 # `trace`, sent to the Tracy profiler.

@@ -2,6 +2,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkData, ChunkKey, VoxelArray, PADDED_CHUNK_SIZE};
+#[cfg(feature = "light_propagation")]
+use crate::light::config::{Emission, LightPropagation};
 use crate::meshing::{generate_chunk_mesh_for_shape, scale_texture_coordinates};
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
@@ -329,6 +331,26 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
+
+    /// The world's light propagation settings, or `None` for no light, the
+    /// default.
+    ///
+    /// Whether this returns `None` is read once at plugin build. See
+    /// [`LightPropagation`] for what light does and when each setting applies.
+    #[cfg(feature = "light_propagation")]
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        None
+    }
+
+    /// The materials whose voxels give off light, and how much. Empty by
+    /// default, and then no chunk looks for light sources among its voxels.
+    ///
+    /// Used only by a world whose
+    /// [`light_propagation`](Self::light_propagation) returns a config.
+    #[cfg(feature = "light_propagation")]
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        Vec::new()
+    }
 }
 
 pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(

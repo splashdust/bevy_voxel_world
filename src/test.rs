@@ -3304,3 +3304,5 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
         "the padding depth covers the deepest sample"
     );
 }
+
+mod light;

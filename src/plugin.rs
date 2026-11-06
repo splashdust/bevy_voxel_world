@@ -271,6 +271,9 @@ where
             app.add_systems(Update, Internals::<C>::assign_material::<M>);
         }
 
+        #[cfg(feature = "light_propagation")]
+        crate::light::build(app, &self.config);
+
         app.insert_resource(self.config.clone());
     }
 }
