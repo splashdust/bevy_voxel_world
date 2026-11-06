@@ -47,6 +47,20 @@ use bevy::reflect::Reflect;
 ///
 /// Light needs the crate's `light_propagation` cargo feature.
 ///
+/// # Showing light
+///
+/// With [`shown`](Self::shown) on, the crate draws the world's chunks with its
+/// material wrapped in
+/// [`VoxelWorldBindings`](crate::rendering::VoxelWorldBindings), and:
+///
+/// - The crate owns the `MeshTag` of every chunk in the world, and overwrites
+///   any tag the world's own systems set.
+/// - Lit chunk materials are forward only: voxel light is added in the forward
+///   pass, so a chunk drawn in a deferred pass shows none.
+/// - Exact black is zero light before tonemapping. Where neither kind of light
+///   reaches, a face is exactly black, which Bevy's default tonemapper maps to
+///   1/255, with dither noise of up to 1/255.
+///
 /// ```
 /// use bevy::prelude::*;
 /// use bevy_voxel_world::prelude::*;

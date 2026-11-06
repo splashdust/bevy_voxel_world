@@ -6,8 +6,7 @@ use crate::{
     chunk_lifecycle::ChunkLifecycle,
     configuration::{DefaultWorld, VoxelWorldConfig},
     voxel_material::{
-        add_default_material, add_shaders, DefaultVoxelMaterial,
-        VOXEL_TEXTURE_SHADER_HANDLE,
+        add_shaders, default_material, DefaultVoxelMaterial, VOXEL_TEXTURE_SHADER_HANDLE,
     },
     voxel_world::*,
     voxel_world_internal::{Internals, SpawnMeshes},
@@ -71,7 +70,7 @@ impl<C, M: Material> WorldMaterial<C, M> {
 ///
 /// With no `handle`, the chunks wait for `VoxelWorldMaterialHandle<M>` to be
 /// added, and the worlds that name the same handle share it.
-fn add_material_path<C: VoxelWorldConfig, M: Material>(
+pub(crate) fn add_material_path<C: VoxelWorldConfig, M: Material>(
     app: &mut App,
     handle: Option<Handle<M>>,
 ) {
@@ -89,6 +88,28 @@ fn add_material_path<C: VoxelWorldConfig, M: Material>(
         );
     }
     app.insert_resource(WorldMaterial::<C, M>::new(handle));
+}
+
+/// Sets up giving the chunks of world `C` the default material, wrapped in
+/// the crate's light bindings if the world shows its light.
+fn add_default_material_path<C: VoxelWorldConfig>(app: &mut App, config: &C) {
+    let material = default_material::<C>(app, config);
+    #[cfg(feature = "light_propagation")]
+    if let Some(light) = config.light_propagation().filter(|light| light.shown) {
+        crate::light::material::add_lit_material_path::<C, _>(app, material, &light);
+        return;
+    }
+    if app
+        .get_added_plugins::<MaterialPlugin<DefaultVoxelMaterial>>()
+        .is_empty()
+    {
+        app.add_plugins(MaterialPlugin::<DefaultVoxelMaterial>::default());
+    }
+    let handle = app
+        .world_mut()
+        .resource_mut::<Assets<DefaultVoxelMaterial>>()
+        .add(material);
+    add_material_path::<C, DefaultVoxelMaterial>(app, Some(handle));
 }
 
 /// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
@@ -233,8 +254,7 @@ where
                 });
                 add_material_path::<C, M>(app, handle);
             } else {
-                let handle = add_default_material::<C>(app, &self.config);
-                add_material_path::<C, DefaultVoxelMaterial>(app, Some(handle));
+                add_default_material_path(app, &self.config);
             }
         }
 

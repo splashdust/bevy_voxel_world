@@ -94,6 +94,9 @@ pub(crate) struct LightTaskSettings<I> {
     pub shape: LightShape,
     /// The level of sky light in every open voxel, until sky light is solved.
     pub sky: u8,
+    /// Whether the world's chunks show their light, so a chunk task turns a
+    /// chunk's light into the bytes of its slot.
+    pub routed: bool,
     /// Each emissive material and its level.
     pub emission: Vec<(I, u8)>,
     pub counters: Arc<LightCounters>,

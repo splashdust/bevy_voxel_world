@@ -39,4 +39,16 @@ struct VoxelVertexOutput {
     @location(6) @interpolate(flat) instance_index: u32,
 
     @location(8) @interpolate(flat) tex_idx: vec3<u32>,
+
+    // What the `bevy_voxel_world::light` module reads, in a lit world: the
+    // face's position and normal in the chunk's padded local coordinates, and
+    // the chunk's tag. The position is centroid-sampled because with MSAA a
+    // pixel centre can lie outside its triangle, and the position there would
+    // read the light of a voxel beyond the face.
+    @if(VOXEL_LIGHT)
+    @location(9) @interpolate(perspective, centroid) local_position: vec3<f32>,
+    @if(VOXEL_LIGHT)
+    @location(10) local_normal: vec3<f32>,
+    @if(VOXEL_LIGHT)
+    @location(11) @interpolate(flat) light_tag: u32,
 }

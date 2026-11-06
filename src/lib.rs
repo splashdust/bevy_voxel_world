@@ -61,6 +61,8 @@ pub mod debug {
 }
 
 pub mod rendering {
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::material::{VoxelWorldBindings, VoxelWorldMaterial};
     pub use crate::plugin::VoxelWorldMaterialHandle;
     pub use crate::voxel_material::vertex_layout;
     pub use crate::voxel_material::ATTRIBUTE_TEX_INDEX;

@@ -66,6 +66,8 @@ pub(crate) fn add_shaders(shaders: &mut Assets<Shader>) {
     shaders
         .insert(VOXEL_IO_SHADER_HANDLE.id(), voxel_io)
         .unwrap();
+    #[cfg(feature = "light_propagation")]
+    crate::light::material::add_light_shader(shaders);
 }
 
 pub const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
@@ -129,22 +131,15 @@ impl MaterialExtension for StandardVoxelMaterial {
 pub(crate) type DefaultVoxelMaterial =
     ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
 
-/// Adds the default material of world `C` and returns its handle.
+/// Makes the default material of world `C`, ready to be added as an asset.
 ///
 /// The material samples the world's voxel texture, or the built-in texture if
 /// the world has none. Chunks wait for a voxel texture loaded from a file until
 /// `prepare_texture` has made it an array texture.
-pub(crate) fn add_default_material<C: VoxelWorldConfig>(
+pub(crate) fn default_material<C: VoxelWorldConfig>(
     app: &mut App,
     config: &C,
-) -> Handle<DefaultVoxelMaterial> {
-    if app
-        .get_added_plugins::<MaterialPlugin<DefaultVoxelMaterial>>()
-        .is_empty()
-    {
-        app.add_plugins(MaterialPlugin::<DefaultVoxelMaterial>::default());
-    }
-
+) -> DefaultVoxelMaterial {
     let loading_texture: LoadingTexture<C> = match config.voxel_texture() {
         Some((img_path, layers)) => {
             let asset_server = app.world().resource::<AssetServer>();
@@ -167,24 +162,21 @@ pub(crate) fn add_default_material<C: VoxelWorldConfig>(
         }
     };
 
-    let handle = app
-        .world_mut()
-        .resource_mut::<Assets<DefaultVoxelMaterial>>()
-        .add(ExtendedMaterial {
-            base: StandardMaterial {
-                reflectance: 0.05,
-                metallic: 0.05,
-                perceptual_roughness: 0.95,
-                ..default()
-            },
-            extension: StandardVoxelMaterial {
-                voxels_texture: loading_texture.handle.clone(),
-            },
-        });
+    let material = ExtendedMaterial {
+        base: StandardMaterial {
+            reflectance: 0.05,
+            metallic: 0.05,
+            perceptual_roughness: 0.95,
+            ..default()
+        },
+        extension: StandardVoxelMaterial {
+            voxels_texture: loading_texture.handle.clone(),
+        },
+    };
 
     app.insert_resource(loading_texture);
     app.add_systems(Update, prepare_texture::<C>);
-    handle
+    material
 }
 
 pub(crate) fn prepare_texture<C: VoxelWorldConfig>(

@@ -1,0 +1,615 @@
+//! A lit world of hills, caves and sealed rooms, with lamps underground.
+//!
+//! Shows light propagation with the default material: lamps light the rock
+//! around them, and their own faces glow. Press 1 to 6 to move between fixed
+//! cameras.
+//!
+//! Run with `cargo run --example light_caves --features light_propagation`.
+//!
+//! With the argument `check`, it renders fixed cameras offscreen instead and
+//! checks pixels, for a maintainer to run by hand on a machine with a GPU:
+//!
+//! - In a sealed pocket with no sky light and no lamp in reach, every pixel is
+//!   exactly black, with no tonemapping.
+//! - A lamp declared below the top level still glows, less than one at the top
+//!   level.
+//!
+//! It exits with a failure if a check fails. With a directory after `check`,
+//! it also saves each picture there.
+
+use std::time::Duration;
+
+use bevy::{
+    app::ScheduleRunnerPlugin,
+    camera::RenderTarget,
+    core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    light::CascadeShadowConfigBuilder,
+    prelude::*,
+    render::{
+        render_resource::{TextureFormat, TextureUsages},
+        view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
+    },
+    window::ExitCondition,
+    winit::WinitPlugin,
+};
+use bevy_voxel_world::prelude::*;
+use noise::{NoiseFn, Perlin};
+
+const GRASS: u8 = 0;
+const DIRT: u8 = 1;
+const STONE: u8 = 2;
+const LAMP: u8 = 3;
+const DIM_LAMP: u8 = 4;
+
+/// The level the dim lamp is declared at.
+const DIM_LEVEL: f32 = 8.0;
+
+// --- The scene ---------------------------------------------------------------
+
+/// Noise caves stop here, and everything below is rock.
+const CAVE_FLOOR: i32 = -480;
+
+/// A box, minimum inclusive and maximum exclusive.
+#[derive(Clone, Copy)]
+struct Bounds {
+    min: [i32; 3],
+    max: [i32; 3],
+}
+
+impl Bounds {
+    const fn new(min: [i32; 3], max: [i32; 3]) -> Self {
+        Self { min, max }
+    }
+
+    fn contains(&self, x: i32, y: i32, z: i32) -> bool {
+        (0..3).all(|axis| {
+            let value = [x, y, z][axis];
+            value >= self.min[axis] && value < self.max[axis]
+        })
+    }
+}
+
+struct Ellipsoid {
+    centre: [f64; 3],
+    radii: [f64; 3],
+}
+
+impl Ellipsoid {
+    fn contains(&self, x: i32, y: i32, z: i32) -> bool {
+        let d = |value: i32, axis: usize| {
+            (value as f64 + 0.5 - self.centre[axis]) / self.radii[axis]
+        };
+        let (dx, dy, dz) = (d(x, 0), d(y, 1), d(z, 2));
+        dx * dx + dy * dy + dz * dz < 1.0
+    }
+}
+
+/// A disc of ground at one height, blended into the rolling hills.
+struct Plateau {
+    x: f64,
+    z: f64,
+    flat: f64,
+    blend: f64,
+    height: f64,
+}
+
+/// A cavern under a hill, lit from above through a shaft one voxel wide.
+const SHAFT: (i32, i32) = (-320, 0);
+const SHAFT_TOP: i32 = 120;
+const CAVERN_ROOF: i32 = SHAFT_TOP - 100;
+const CAVERN: Ellipsoid = Ellipsoid {
+    centre: [-319.5, -10.0, 0.5],
+    radii: [70.0, 30.0, 70.0],
+};
+
+/// A sealed pocket two voxels below the grass.
+const POCKET_TOP: i32 = 48;
+const POCKET: Bounds =
+    Bounds::new([-326, POCKET_TOP - 8, 122], [-314, POCKET_TOP - 2, 134]);
+
+/// A sealed room lit only by its lamps.
+const LAMP_ROOM: Bounds = Bounds::new([300, -40, -340], [340, -20, -300]);
+/// The lamps on its floor.
+const BRIGHT_LAMP_AT: IVec3 = IVec3::new(320, -41, -320);
+const DIM_LAMP_AT: IVec3 = IVec3::new(332, -41, -310);
+
+/// An overhang: a slab sticking out of a mesa.
+const MESA: Bounds = Bounds::new([-48, 32, 290], [48, 84, 340]);
+const SLAB: Bounds = Bounds::new([-48, 72, 340], [48, 84, 404]);
+
+const PLATEAUS: [Plateau; 4] = [
+    Plateau {
+        x: -319.5,
+        z: 0.5,
+        flat: 20.0,
+        blend: 120.0,
+        height: SHAFT_TOP as f64,
+    },
+    Plateau {
+        x: 320.5,
+        z: -320.5,
+        flat: 64.0,
+        blend: 150.0,
+        height: 40.0,
+    },
+    Plateau {
+        x: 0.0,
+        z: 360.0,
+        flat: 90.0,
+        blend: 170.0,
+        height: 32.0,
+    },
+    // Last, so that it wins inside the cavern hill's blend.
+    Plateau {
+        x: -320.0,
+        z: 128.0,
+        flat: 16.0,
+        blend: 56.0,
+        height: POCKET_TOP as f64,
+    },
+];
+
+/// No noise caves here, so that the placed spaces stay as sealed as placed.
+const QUIET: [Bounds; 4] = [
+    Bounds::new([-406, -56, -86], [-234, 36, 86]),
+    Bounds::new([-336, CAVERN_ROOF, -16], [-304, SHAFT_TOP + 8, 16]),
+    Bounds::new([-342, 24, 112], [-298, 60, 144]),
+    Bounds::new([284, -56, -356], [356, -4, -284]),
+];
+
+/// What voxel is where: a pure function of position.
+struct Scene {
+    hills: Perlin,
+    region: Perlin,
+    big: Perlin,
+    worm_a: Perlin,
+    worm_b: Perlin,
+}
+
+impl Scene {
+    fn new() -> Self {
+        Self {
+            hills: Perlin::new(11),
+            region: Perlin::new(19),
+            big: Perlin::new(23),
+            worm_a: Perlin::new(37),
+            worm_b: Perlin::new(41),
+        }
+    }
+
+    /// The height of the ground: voxels below it are underground.
+    fn surface(&self, x: i32, z: i32) -> i32 {
+        let (fx, fz) = (x as f64, z as f64);
+        let mut height = 32.0
+            + self.hills.get([fx / 160.0, fz / 160.0]) * 18.0
+            + self.hills.get([fx / 47.0, fz / 47.0]) * 4.0;
+        for plateau in &PLATEAUS {
+            let distance = (fx - plateau.x).hypot(fz - plateau.z);
+            let t = ((distance - plateau.flat) / (plateau.blend - plateau.flat))
+                .clamp(0.0, 1.0);
+            let t = t * t * (3.0 - 2.0 * t);
+            height = plateau.height + (height - plateau.height) * t;
+        }
+        height.floor() as i32
+    }
+
+    fn noise_cave(&self, x: i32, y: i32, z: i32) -> bool {
+        let (fx, fy, fz) = (x as f64, y as f64, z as f64);
+        if self.region.get([fx / 220.0, fy / 160.0, fz / 220.0]) < -0.05 {
+            return false;
+        }
+        if self.big.get([fx / 72.0, fy / 48.0, fz / 72.0]) > 0.42 {
+            return true;
+        }
+        let at = [fx / 36.0, fy / 28.0, fz / 36.0];
+        self.worm_a.get(at).abs() < 0.04 && self.worm_b.get(at).abs() < 0.04
+    }
+
+    fn open(&self, x: i32, y: i32, z: i32, surface: i32) -> bool {
+        if y >= surface {
+            return !(MESA.contains(x, y, z) || SLAB.contains(x, y, z));
+        }
+        if (x == SHAFT.0 && z == SHAFT.1 && y >= CAVERN_ROOF - 1)
+            || CAVERN.contains(x, y, z)
+            || POCKET.contains(x, y, z)
+            || LAMP_ROOM.contains(x, y, z)
+        {
+            return true;
+        }
+        y >= CAVE_FLOOR
+            && !QUIET.iter().any(|quiet| quiet.contains(x, y, z))
+            && self.noise_cave(x, y, z)
+    }
+
+    fn voxel(&self, position: IVec3) -> WorldVoxel {
+        let IVec3 { x, y, z } = position;
+        let surface = self.surface(x, z);
+        if self.open(x, y, z, surface) {
+            return WorldVoxel::Air;
+        }
+        WorldVoxel::Solid(if position == BRIGHT_LAMP_AT {
+            LAMP
+        } else if position == DIM_LAMP_AT {
+            DIM_LAMP
+        } else if y >= surface {
+            STONE
+        } else if y + 1 >= surface {
+            GRASS
+        } else if y + 4 >= surface {
+            DIRT
+        } else {
+            STONE
+        })
+    }
+}
+
+// --- The world ---------------------------------------------------------------
+
+#[derive(Resource, Clone, Default)]
+struct CaveWorld {
+    /// No sky light, for the pixel checks.
+    no_sky: bool,
+}
+
+impl VoxelWorldConfig for CaveWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        8
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            let scene = Scene::new();
+            Box::new(move |position, _| scene.voxel(position))
+        })
+    }
+
+    fn texture_index_mapper(
+        &self,
+    ) -> std::sync::Arc<dyn Fn(Self::MaterialIndex) -> [u32; 3] + Send + Sync> {
+        std::sync::Arc::new(|material| match material {
+            GRASS => [0, 1, 1],
+            DIRT => [1, 1, 1],
+            STONE => [2, 2, 2],
+            _ => [3, 3, 3],
+        })
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation {
+            sky: if self.no_sky {
+                Sky::Off
+            } else {
+                Sky::default()
+            },
+            ..default()
+        })
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        vec![
+            (LAMP, Emission::level(15.0)),
+            (DIM_LAMP, Emission::level(DIM_LEVEL)),
+        ]
+    }
+}
+
+// --- The cameras -------------------------------------------------------------
+
+struct FixedCamera {
+    position: Vec3,
+    look_at: Vec3,
+}
+
+const fn camera(position: [f32; 3], look_at: [f32; 3]) -> FixedCamera {
+    FixedCamera {
+        position: Vec3::from_array(position),
+        look_at: Vec3::from_array(look_at),
+    }
+}
+
+const LAMP_ROOM_CAMERA: FixedCamera =
+    camera([306.0, -30.0, -332.0], [320.5, -40.0, -319.5]);
+const POCKET_CAMERA: FixedCamera = camera([-324.5, 43.0, 124.0], [-316.0, 42.0, 132.0]);
+
+const CAMERAS: [FixedCamera; 6] = [
+    camera([-260.0, 240.0, -300.0], [-40.0, 90.0, 40.0]),
+    LAMP_ROOM_CAMERA,
+    camera([-296.0, -24.0, 26.0], [-319.5, -38.0, 0.5]),
+    POCKET_CAMERA,
+    camera([0.0, 44.0, 396.0], [0.0, 42.0, 340.0]),
+    camera([-540.0, 120.0, 300.0], [-340.0, 130.0, 360.0]),
+];
+
+fn transform_of(camera: &FixedCamera) -> Transform {
+    Transform::from_translation(camera.position).looking_at(camera.look_at, Vec3::Y)
+}
+
+fn add_lights(commands: &mut Commands) {
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(0.98, 0.95, 0.82),
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 0.0)
+            .looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
+        CascadeShadowConfigBuilder::default().build(),
+    ));
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.98, 0.95, 0.82),
+        brightness: 600.0,
+        affects_lightmapped_meshes: true,
+    });
+}
+
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("check") {
+        check();
+        return;
+    }
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld::default()))
+        .add_systems(Startup, setup)
+        .add_systems(Update, switch_camera)
+        .run();
+}
+
+fn setup(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        transform_of(&CAMERAS[1]),
+        VoxelWorldCamera::<CaveWorld>::default(),
+    ));
+    add_lights(&mut commands);
+}
+
+fn switch_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cameras: Query<&mut Transform, With<VoxelWorldCamera<CaveWorld>>>,
+) {
+    let digits = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+    ];
+    for (key, camera) in digits.iter().zip(&CAMERAS) {
+        if keys.just_pressed(*key) {
+            for mut transform in &mut cameras {
+                *transform = transform_of(camera);
+            }
+        }
+    }
+}
+
+// --- The pixel checks --------------------------------------------------------
+
+const WIDTH: u32 = 1280;
+const HEIGHT: u32 = 720;
+
+/// One check: where the camera stands, and what it asserts of the picture.
+struct Check {
+    name: &'static str,
+    file: &'static str,
+    camera: &'static FixedCamera,
+    judge: fn(&Image, &Camera, &GlobalTransform) -> Result<String, String>,
+}
+
+const CHECKS: [Check; 2] = [
+    Check {
+        name: "a lamp declared below the top level still glows, scaled by its level",
+        file: "lamp_room.png",
+        camera: &LAMP_ROOM_CAMERA,
+        judge: dim_lamp_glows,
+    },
+    Check {
+        name: "a sealed pocket with no light in reach is exactly black",
+        file: "sealed_pocket.png",
+        camera: &POCKET_CAMERA,
+        judge: pocket_is_black,
+    },
+];
+
+#[derive(Resource)]
+struct CheckPlan {
+    target: Handle<Image>,
+    next: usize,
+    moved_at_frame: u32,
+    /// The last frame on which a chunk wasn't Ready.
+    last_busy_frame: u32,
+    frame: u32,
+    waiting: bool,
+    failed: bool,
+    /// Where to save the pictures, if anywhere.
+    directory: Option<std::path::PathBuf>,
+}
+
+fn check() {
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+        )
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld { no_sky: true }))
+        .add_systems(Startup, setup_check)
+        .add_systems(Update, run_checks)
+        .run();
+}
+
+fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let mut image =
+        Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = images.add(image);
+    commands.spawn((
+        Camera3d::default(),
+        RenderTarget::Image(target.clone().into()),
+        Tonemapping::None,
+        DebandDither::Disabled,
+        transform_of(CHECKS[0].camera),
+        VoxelWorldCamera::<CaveWorld>::default(),
+    ));
+    add_lights(&mut commands);
+    commands.insert_resource(CheckPlan {
+        target,
+        next: 0,
+        moved_at_frame: 0,
+        last_busy_frame: 0,
+        frame: 0,
+        waiting: false,
+        failed: false,
+        directory: std::env::args().nth(2).map(Into::into),
+    });
+}
+
+/// Moves to each check's camera, waits for the world to settle there, and
+/// judges a screenshot.
+fn run_checks(
+    mut commands: Commands,
+    mut plan: ResMut<CheckPlan>,
+    mut cameras: Query<
+        (&mut Transform, &Camera, &GlobalTransform),
+        With<VoxelWorldCamera<CaveWorld>>,
+    >,
+    chunks: Query<&Chunk<CaveWorld>>,
+    voxel_world: VoxelWorld<CaveWorld>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    plan.frame += 1;
+    let frame = plan.frame;
+    if chunks
+        .iter()
+        .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready))
+    {
+        plan.last_busy_frame = frame;
+    }
+    if plan.waiting {
+        return;
+    }
+    let Some(check) = CHECKS.get(plan.next) else {
+        exit.write(if plan.failed {
+            AppExit::error()
+        } else {
+            AppExit::Success
+        });
+        return;
+    };
+    let (mut transform, camera, global) = cameras.single_mut().unwrap();
+    let wanted = transform_of(check.camera);
+    if *transform != wanted {
+        *transform = wanted;
+        plan.moved_at_frame = frame;
+        return;
+    }
+    let waited = frame - plan.moved_at_frame;
+    let quiet = frame - plan.last_busy_frame.max(plan.moved_at_frame);
+    if !(quiet >= 60 && waited >= 120) {
+        if waited >= 3600 {
+            println!("FAIL {}: the world never settled", check.name);
+            plan.failed = true;
+            plan.next += 1;
+        }
+        return;
+    }
+
+    plan.waiting = true;
+    let (camera, global) = (camera.clone(), *global);
+    let (name, judge) = (check.name, check.judge);
+    let mut screenshot = commands.spawn(Screenshot::image(plan.target.clone()));
+    if let Some(directory) = &plan.directory {
+        std::fs::create_dir_all(directory).unwrap();
+        screenshot.observe(save_to_disk(directory.join(check.file)));
+    }
+    screenshot.observe(
+        move |captured: On<ScreenshotCaptured>, mut plan: ResMut<CheckPlan>| {
+            match judge(&captured.image, &camera, &global) {
+                Ok(note) => println!("PASS {name}: {note}"),
+                Err(note) => {
+                    println!("FAIL {name}: {note}");
+                    plan.failed = true;
+                }
+            }
+            plan.waiting = false;
+            plan.next += 1;
+        },
+    );
+}
+
+fn pocket_is_black(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let lit = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    if lit == 0 {
+        Ok(format!("{} pixels at 0", data.len() / 4))
+    } else {
+        Err(format!("{lit} pixels aren't black"))
+    }
+}
+
+/// The brightest channel of the pixels around where `point` shows.
+fn brightness_at(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    point: Vec3,
+) -> Result<u8, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let at = camera
+        .world_to_viewport(global, point)
+        .map_err(|error| format!("{point} isn't in view: {error:?}"))?;
+    let (x, y) = (at.x as i32, at.y as i32);
+    let mut brightest = 0;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (px, py) = (
+                (x + dx).clamp(0, WIDTH as i32 - 1),
+                (y + dy).clamp(0, HEIGHT as i32 - 1),
+            );
+            let index = (py as usize * WIDTH as usize + px as usize) * 4;
+            brightest = brightest
+                .max(data[index])
+                .max(data[index + 1])
+                .max(data[index + 2]);
+        }
+    }
+    Ok(brightest)
+}
+
+fn dim_lamp_glows(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<String, String> {
+    // The middle of each lamp's top face.
+    let top = Vec3::new(0.5, 1.0, 0.5);
+    let bright = brightness_at(image, camera, global, BRIGHT_LAMP_AT.as_vec3() + top)?;
+    let dim = brightness_at(image, camera, global, DIM_LAMP_AT.as_vec3() + top)?;
+    let note = format!("bright lamp {bright}, dim lamp at level {DIM_LEVEL} {dim}");
+    if dim > 16 && dim < bright {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}

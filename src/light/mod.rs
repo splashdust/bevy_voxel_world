@@ -3,11 +3,17 @@
 //!
 //! Each level-0 chunk's light is worked out by the [`solver`] in the chunk's
 //! own task, after its voxels are generated, and published with its voxels.
+//!
+//! A world that shows its light draws its chunks with its material wrapped in
+//! the crate's own extension ([`material`]), and gets its light to the shader
+//! through a texture of slots and a tag on each chunk ([`route`]).
 
 pub(crate) mod config;
 mod inputs;
 mod kernel;
 mod levels;
+pub(crate) mod material;
+pub(crate) mod route;
 pub(crate) mod solver;
 
 #[doc(hidden)]
@@ -106,7 +112,8 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         .into_iter()
         .map(|(material, emission)| (material, emission.clamped()))
         .collect();
-    let task = Arc::new(task_settings::<C>(&config, &emissive_materials));
+    let routed = app.world().contains_resource::<route::LightRoute<C>>();
+    let task = Arc::new(task_settings::<C>(&config, &emissive_materials, routed));
     app.insert_resource(LightSettings::<C> {
         config,
         emissive_materials,
@@ -115,9 +122,19 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     });
 }
 
+/// The level of sky light in every open voxel, until sky light is solved.
+pub(crate) fn placeholder_sky(config: &LightPropagation) -> u8 {
+    if config.sky == Sky::Off {
+        0
+    } else {
+        15
+    }
+}
+
 fn task_settings<C: VoxelWorldConfig>(
     config: &LightPropagation,
     emissive_materials: &[(C::MaterialIndex, Emission)],
+    routed: bool,
 ) -> LightTaskSettings<C::MaterialIndex> {
     let mut voxel_reach = config.voxel_reach as u32;
     if voxel_reach > MAX_ONE_WORD_REACH {
@@ -130,7 +147,8 @@ fn task_settings<C: VoxelWorldConfig>(
     LightTaskSettings {
         voxel_scale: LevelScale::new(voxel_reach),
         shape: config.shape,
-        sky: if config.sky == Sky::Off { 0 } else { 15 },
+        sky: placeholder_sky(config),
+        routed,
         emission: emissive_materials
             .iter()
             .map(|(material, emission)| (*material, emission.whole_level()))

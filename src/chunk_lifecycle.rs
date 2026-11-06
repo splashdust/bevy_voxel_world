@@ -535,6 +535,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         ),
         mesh_cache: Res<MeshCache<C>>,
         mut budget: ResMut<PoolBudget<C>>,
+        #[cfg(feature = "light_propagation")] mut light_route: Option<
+            ResMut<crate::light::route::LightRoute<C>>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
@@ -620,6 +623,14 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                         MeshRef(mesh_handle),
                         NeedsMaterial::<C>::new(),
                     ));
+                    #[cfg(feature = "light_propagation")]
+                    if let Some(route) = light_route.as_mut() {
+                        route.landed(
+                            entity,
+                            chunk_task.chunk_data.light.as_deref(),
+                            chunk_task.light_bytes.take(),
+                        );
+                    }
                 } else {
                     commands
                         .entity(entity)

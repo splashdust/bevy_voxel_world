@@ -6,6 +6,9 @@ import bevy_pbr::render::{
     view_transformations::position_world_to_clip,
 };
 
+@if(VOXEL_LIGHT)
+import bevy_voxel_world::light::{sample_light, apply_voxel_light};
+
 @if(PREPASS_PIPELINE)
 import bevy_pbr::{
     prepass::io::{VertexOutput, FragmentOutput},
@@ -53,6 +56,12 @@ fn vertex(vertex: VoxelVertex) -> VoxelVertexOutput {
 
     out.tex_idx = vertex.tex_idx;
 
+    @if(VOXEL_LIGHT) {
+        out.local_position = vertex.position;
+        out.local_normal = vertex.normal;
+        out.light_tag = mesh_functions::get_tag(vertex.instance_index);
+    }
+
     return out;
 }
 
@@ -80,6 +89,9 @@ fn fragment(
     }
 
     pbr_input.material.base_color = textureSample(mat_array_texture, mat_array_texture_sampler, in.uv, in.tex_idx[tex_face]);
+    // The vertex colour holds the mesher's ambient occlusion. With light, it
+    // darkens ambient and voxel light instead of the base colour.
+    @if(!VOXEL_LIGHT)
     pbr_input.material.base_color = pbr_input.material.base_color * in.color;
 
     pbr_input.material.base_color = alpha_discard(
@@ -90,6 +102,13 @@ fn fragment(
 
 @if(PREPASS_PIPELINE)
     let out = deferred_output(in, pbr_input);
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+    apply_voxel_light(
+        &pbr_input,
+        sample_light(in.light_tag, in.local_position, in.local_normal),
+        in.color.r,
+    );
+
 @if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
 @if(!PREPASS_PIPELINE)

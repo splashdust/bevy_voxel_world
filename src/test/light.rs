@@ -12,6 +12,8 @@ use crate::prelude::*;
 #[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
+mod route;
+#[cfg(feature = "light_propagation")]
 mod voxel_light;
 
 /// The types of the components on each chunk of world `C` that has a mesh
@@ -106,6 +108,24 @@ fn a_world_returning_no_light_config_spawns_the_same_chunks_with_the_same_compon
             .contains_resource::<crate::light::LightSettings<FloorWorld>>(),
         "a world returning no light config keeps light settings"
     );
+}
+
+#[cfg(not(feature = "light_propagation"))]
+#[test]
+fn a_worlds_chunks_carry_todays_material_and_no_tag() {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(FloorWorld))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    update_until(&mut app, "the ground chunk to be shown", |app| {
+        !super::chunk_materials::<FloorWorld, DefaultVoxelMaterial>(app).is_empty()
+    });
+
+    let tagged = app
+        .world_mut()
+        .query_filtered::<(), (With<Chunk<FloorWorld>>, With<bevy::mesh::MeshTag>)>()
+        .iter(app.world())
+        .count();
+    assert_eq!(tagged, 0);
 }
 
 #[cfg(feature = "light_propagation")]

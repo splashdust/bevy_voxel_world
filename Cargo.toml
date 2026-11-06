@@ -67,6 +67,11 @@ name = "navigation"
 path = "examples/navigation.rs"
 required-features = ["navigation"]
 
+[[example]]
+name = "light_caves"
+path = "examples/light_caves.rs"
+required-features = ["light_propagation"]
+
 [[bench]]
 name = "chunk_lifecycle"
 harness = false
