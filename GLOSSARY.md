@@ -138,6 +138,10 @@ _Avoid_: ghost chunk, hidden chunk
 What a world remembers about which columns hold a solid at the chunk positions it has seen. Forgetting any of it costs only time, never different light.
 _Avoid_: heightmap, top map
 
+**Light entry**:
+Light a world keeps for a chunk position that a fill hint keeps from spawning as air, where a loaded chunk's solid touches it, so the faces beside it read the right light. It has no voxels, entity or mesh, and goes once no solid touches it.
+_Avoid_: ghost chunk, phantom chunk
+
 **Relight**:
 Working out a chunk's light again after something it depends on changed, without regenerating its voxels. The chunk stays visible throughout.
 _Avoid_: light update, re-solve
