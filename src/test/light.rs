@@ -12,6 +12,8 @@ use crate::prelude::*;
 #[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
+mod relights;
+#[cfg(feature = "light_propagation")]
 mod voxel_light;
 
 /// The types of the components on each chunk of world `C` that has a mesh

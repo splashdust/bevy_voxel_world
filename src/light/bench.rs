@@ -14,9 +14,9 @@ use super::inputs::LightInputs;
 use super::kernel::{LightBox, Plane, Seed, LEVEL_BITS};
 use super::levels::LevelScale;
 use super::solver::{neighbour_index, solve_channel};
+use super::view::Snapshot;
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
-use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
 use crate::prelude::{LightShape, WorldVoxel};
 
@@ -28,6 +28,7 @@ pub struct KernelBox {
     seeds: Vec<Seed>,
     scale: LevelScale,
     planes: Box<[Plane; LEVEL_BITS]>,
+    faces: [u64; 6],
 }
 
 impl KernelBox {
@@ -71,13 +72,25 @@ impl KernelBox {
             seeds,
             scale,
             planes: Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]),
+            faces: [0; 6],
         }
     }
 
-    /// Spreads light through the box in `shape`.
+    /// Spreads light through the box in `shape`, hashing the chunk's faces
+    /// as every solve does.
     pub fn spread(&mut self, shape: LightShape) {
-        self.light_box
-            .spread(&self.seeds, shape, &self.scale, &mut self.planes);
+        self.light_box.spread(
+            &self.seeds,
+            shape,
+            &self.scale,
+            &mut self.planes,
+            &mut self.faces,
+        );
+    }
+
+    /// The face hashes the last spread left, one per face of the chunk.
+    pub fn face_hashes(&self) -> [u64; 6] {
+        self.faces
     }
 
     /// The level the last spread left at the chunk's voxel `local`.
@@ -111,9 +124,17 @@ pub struct LightStats {
     pub solves: u64,
     /// Time spent solving in chunk tasks, summed over them, in milliseconds.
     pub solve_ms: f64,
-    /// Main-thread time spent reading the inputs of chunk tasks' neighbours,
-    /// in milliseconds.
+    /// Time spent reading the world view before solving, summed over chunk
+    /// tasks and relight tasks, in milliseconds.
     pub snapshot_ms: f64,
+    /// Relight tasks started.
+    pub relights: u64,
+    /// Main-thread time spent landing light and starting relights, in
+    /// milliseconds.
+    pub main_thread_ms: f64,
+    /// The most main-thread time spent landing light and starting relights
+    /// in one frame, in milliseconds.
+    pub max_frame_ms: f64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -125,36 +146,31 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         solves: counters.solves.load(Ordering::Relaxed),
         solve_ms: ms(&counters.solve_nanos),
         snapshot_ms: ms(&counters.snapshot_nanos),
+        relights: counters.relights.load(Ordering::Relaxed),
+        main_thread_ms: ms(&counters.main_thread_nanos),
+        max_frame_ms: ms(&counters.max_frame_nanos),
     })
 }
 
-/// Solves voxel light again for every published level-0 chunk of world `C`,
-/// one after another on this thread, from the inputs published now. Returns
-/// how many it solved and the time it took in milliseconds.
+/// Solves voxel light again for every level-0 chunk of world `C` with light,
+/// one after another on this thread, from the world view as it is now.
+/// Returns how many it solved and the time it took in milliseconds.
 pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f64) {
     let Some(settings) = world.get_resource::<LightSettings<C>>() else {
         return (0, 0.0);
     };
-    let chunk_map = world.resource::<ChunkMap<C, C::MaterialIndex>>();
-    let map = chunk_map.get_read_lock();
-    let mut tasks = Vec::new();
-    for (key, chunk) in map.iter() {
-        let Some(light) = &chunk.light else {
-            continue;
-        };
-        let Some(mut task) = settings.task_for(*key, chunk.data_shape, &map) else {
-            continue;
-        };
-        task.neighbours[neighbour_index(IVec3::ZERO)] = Some(light.inputs.clone());
-        tasks.push(task);
+    let view = settings.view.read();
+    let mut boxes = Vec::new();
+    for (position, chunk) in view.iter() {
+        let mut snapshot = Snapshot::read(&view, *position);
+        snapshot.neighbours[neighbour_index(IVec3::ZERO)] =
+            Some(chunk.light.inputs.clone());
+        boxes.push(snapshot.neighbours);
     }
+    let task = &settings.task;
     let start = Instant::now();
-    for task in &tasks {
-        black_box(solve_channel(
-            &task.neighbours,
-            &task.settings.voxel_scale,
-            task.settings.shape,
-        ));
+    for neighbours in &boxes {
+        black_box(solve_channel(neighbours, &task.voxel_scale, task.shape));
     }
-    (tasks.len(), start.elapsed().as_secs_f64() * 1000.0)
+    (boxes.len(), start.elapsed().as_secs_f64() * 1000.0)
 }

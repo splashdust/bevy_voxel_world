@@ -2,32 +2,40 @@
 //! world's open voxels. Compiled only with the `light_propagation` feature.
 //!
 //! Each level-0 chunk's light is worked out by the [`solver`] in the chunk's
-//! own task, after its voxels are generated, and published with its voxels.
+//! own task, after its voxels are generated, and lands in the world's
+//! [world view](view) on the main thread. Chunks arriving later around it
+//! [relight](relight) it.
 
 pub(crate) mod config;
+mod faces;
 mod inputs;
 mod kernel;
 mod levels;
+pub(crate) mod relight;
 pub(crate) mod solver;
+pub(crate) mod view;
 
 #[doc(hidden)]
 pub mod bench;
 
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
 
 use bevy::log::warn_once;
 use bevy::prelude::*;
 
 use crate::chunk::{ChunkKey, PADDED_CHUNK_SIZE};
+use crate::chunk_lifecycle::ChunkLifecycle;
 use crate::chunk_map::ChunkMapData;
 use crate::configuration::VoxelWorldConfig;
+use crate::voxel_world::VoxelWorldSet;
 use config::{Emission, LightPropagation, Sky};
 use kernel::MAX_ONE_WORD_REACH;
 use levels::LevelScale;
 pub use levels::LightLevels;
+use relight::{LightWork, Relights};
 use solver::{LightCounters, LightTask, LightTaskSettings};
+use view::LightView;
 
 /// The light settings world `C` returned at plugin build, with out-of-range
 /// values clamped. Only a world that returned a light config has one.
@@ -37,8 +45,9 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     pub config: LightPropagation,
     #[cfg_attr(not(test), expect(dead_code, reason = "nothing compares settings yet"))]
     pub emissive_materials: Vec<(C::MaterialIndex, Emission)>,
-    /// What chunk tasks read to solve light.
+    /// What chunk tasks and relight tasks read to solve light.
     pub task: Arc<LightTaskSettings<C::MaterialIndex>>,
+    pub view: LightView,
     _world: PhantomData<C>,
 }
 
@@ -47,47 +56,34 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         &self.task.counters
     }
 
-    /// What the task of the chunk with `key` needs to solve its light, read
-    /// from the chunks published around it now. `None` for a chunk that
-    /// doesn't get light: one above level 0, or with another data shape.
+    /// What the task of the chunk with `key` needs to solve its light. `None`
+    /// for a chunk that doesn't get light: one above level 0, or with another
+    /// data shape.
     pub fn task_for(
         &self,
         key: ChunkKey,
         data_shape: UVec3,
-        chunk_map: &ChunkMapData<C::MaterialIndex>,
     ) -> Option<LightTask<C::MaterialIndex>> {
         if key.lod_level != 0 || data_shape != UVec3::splat(PADDED_CHUNK_SIZE) {
             return None;
         }
-        let started = Instant::now();
-        let neighbours = std::array::from_fn(|index| {
-            let index = index as i32;
-            let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
-            if offset == IVec3::ZERO {
-                return None;
-            }
-            let neighbour = chunk_map.get(&ChunkKey::new(key.position + offset, 0))?;
-            Some(neighbour.light.as_ref()?.inputs.clone())
-        });
-        self.counters().snapshot_nanos.fetch_add(
-            started.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         Some(LightTask {
             settings: self.task.clone(),
-            neighbours,
+            view: self.view.clone(),
         })
     }
 
-    /// The light at the voxel at `position`, from the published data of the
-    /// level-0 chunk holding it, or `None` if it has no light.
+    /// The light at the voxel at `position`, from the light landed for the
+    /// level-0 chunk holding it and that chunk's published voxels, or `None`
+    /// if it has no light.
     pub fn light_at(
         &self,
         chunk_map: &ChunkMapData<C::MaterialIndex>,
         position: IVec3,
     ) -> Option<LightLevels> {
-        let chunk = chunk_map.get(&ChunkKey::containing(position, 0))?;
-        let light = chunk.light.as_ref()?;
+        let key = ChunkKey::containing(position, 0);
+        let chunk = chunk_map.get(&key)?;
+        let light = self.view.read().get(&key.position)?.light.clone();
         let voxel = chunk.get_voxel_at_world_position(position)?;
         let local = (position - chunk.key.min_voxel()).as_uvec3();
         Some(light.levels_at(local, voxel, &self.task.emission))
@@ -111,8 +107,29 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         config,
         emissive_materials,
         task,
+        view: LightView::default(),
         _world: PhantomData,
-    });
+    })
+    .init_resource::<LightWork<C>>()
+    .add_systems(
+        PreUpdate,
+        (
+            (
+                Relights::<C>::forget_despawned,
+                Relights::<C>::collect,
+                Relights::<C>::land,
+            )
+                .chain()
+                .after(ChunkLifecycle::<C>::collect_chunk_tasks)
+                .before(crate::voxel_world_internal::Internals::<C>::stream_chunks),
+            // Relights start before chunk tasks, which get the room left in
+            // the pool budget.
+            Relights::<C>::start
+                .after(ChunkLifecycle::<C>::apply_requests)
+                .before(ChunkLifecycle::<C>::start_chunk_tasks),
+        )
+            .in_set(VoxelWorldSet::<C>::default()),
+    );
 }
 
 fn task_settings<C: VoxelWorldConfig>(

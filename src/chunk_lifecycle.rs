@@ -535,6 +535,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         ),
         mesh_cache: Res<MeshCache<C>>,
         mut budget: ResMut<PoolBudget<C>>,
+        #[cfg(feature = "light_propagation")] mut light_work: Option<
+            ResMut<crate::light::relight::LightWork<C>>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
@@ -633,6 +636,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             if index.apply(entity, chunk.key, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
+                #[cfg(feature = "light_propagation")]
+                if let (Some(work), Some(solved)) =
+                    (light_work.as_mut(), chunk_task.solved_light.take())
+                {
+                    work.arrive(chunk.key.position, entity, solved);
+                }
                 chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
             }
         }
@@ -797,7 +806,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
 
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light {
-            chunk_task.light = light.task_for(key, data_shape, self.chunk_map);
+            chunk_task.light = light.task_for(key, data_shape);
         }
 
         let mesh_map = self.mesh_cache.get_mesh_map();

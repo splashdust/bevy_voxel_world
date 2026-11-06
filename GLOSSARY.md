@@ -150,6 +150,10 @@ _Avoid_: light update, re-solve
 A relight that starts at the chunks whose own voxels or direct sky changed, and goes on to a neighbour only where light reached their shared face differently.
 _Avoid_: wave, cascade, flood
 
+**World view**:
+What a lit world shares with the tasks that solve light: each loaded level-0 chunk's light and what its neighbours' solves read of it, its occupancy and emissive voxels. Tasks read it off the main thread, the way chunk tasks read published chunks.
+_Avoid_: light map, snapshot
+
 **Occupancy**:
 Which voxels of a chunk are solid, and so block light, and nothing else about them.
 _Avoid_: solid mask, opacity

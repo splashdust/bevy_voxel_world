@@ -29,6 +29,11 @@ impl Occupancy {
         }
     }
 
+    #[inline]
+    pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
+        self.solid_column(x, y) >> z & 1 == 1
+    }
+
     pub fn has_open_voxel(&self) -> bool {
         !matches!(self, Occupancy::Solid)
     }

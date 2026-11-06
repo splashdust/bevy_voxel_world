@@ -21,6 +21,9 @@ const MIN_TASKS_PER_THREAD: usize = 4;
 /// A kind of job a voxel world runs on the task pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JobKind {
+    /// A relight of a chunk's light, in a world with light propagation.
+    #[cfg(feature = "light_propagation")]
+    Relight,
     Chunk,
     /// A stand-in for a second kind of job, in tests.
     #[cfg(test)]
@@ -28,7 +31,8 @@ pub(crate) enum JobKind {
 }
 
 impl JobKind {
-    const COUNT: usize = if cfg!(test) { 2 } else { 1 };
+    const COUNT: usize =
+        1 + cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
 
     fn index(self) -> usize {
         self as usize

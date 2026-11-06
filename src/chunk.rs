@@ -258,10 +258,6 @@ pub struct ChunkData<I> {
     pub(crate) has_generated: bool,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
-    /// The chunk's light, in a world with light propagation. Only level-0
-    /// chunks with the default data shape have it.
-    #[cfg(feature = "light_propagation")]
-    pub(crate) light: Option<Arc<crate::light::solver::ChunkLight>>,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -277,8 +273,6 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             has_generated: false,
             data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
             mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
-            #[cfg(feature = "light_propagation")]
-            light: None,
         }
     }
 
@@ -680,6 +674,9 @@ where
     /// propagation.
     #[cfg(feature = "light_propagation")]
     pub light: Option<crate::light::solver::LightTask<I>>,
+    /// The chunk's solved light, once `post_voxel` has run.
+    #[cfg(feature = "light_propagation")]
+    pub solved_light: Option<crate::light::solver::Solved>,
     _marker: PhantomData<C>,
 }
 
@@ -707,6 +704,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             user_bundle: None,
             #[cfg(feature = "light_propagation")]
             light: None,
+            #[cfg(feature = "light_propagation")]
+            solved_light: None,
             _marker: PhantomData,
         }
     }
@@ -815,7 +814,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         let _span = bevy::log::info_span!("post_voxel").entered();
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light.take() {
-            self.chunk_data.light = Some(Arc::new(light.solve(&self.chunk_data)));
+            self.solved_light = Some(light.solve(&self.chunk_data));
         }
     }
 
