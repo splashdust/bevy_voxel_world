@@ -127,6 +127,22 @@ pub struct LightPropagation {
 
     /// How many chunks the world's light texture holds at once, at least 1.
     ///
+    /// A chunk takes a slot in the texture when its faces see more than one
+    /// level of light. Each slot costs 39,304 bytes of GPU memory at 16
+    /// levels, so the default of 1,024 is about 38 MiB. The texture is made
+    /// when the first chunk needs a slot, so a world where every chunk's
+    /// faces see one level costs nothing.
+    ///
+    /// The count is clamped to what the device's largest 3D texture holds,
+    /// with a warning: WebGL2 guarantees 256 texels a side, which is 343
+    /// slots.
+    ///
+    /// When every slot is taken, the chunks farthest from the camera give
+    /// theirs to nearer ones, and the world logs a warning once. A chunk
+    /// with no slot shows one level of each kind of light on all its faces:
+    /// it looks flat, losing its shadows, and its lamps' faces lose their
+    /// glow. Raise the count if that warning appears.
+    ///
     /// Replaces the texture on change. Defaults to 1,024.
     pub slot_capacity: u32,
 

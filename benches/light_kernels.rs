@@ -1,4 +1,5 @@
-//! Light propagation's micro-benchmarks: the kernel and the emissive scan.
+//! Light propagation's micro-benchmarks: the kernel, filling a slot and the
+//! emissive scan.
 //!
 //! These guard hot paths against innocent changes that make them much slower;
 //! the kernel once went from 27 to 49 µs on one. They time the crate's code
@@ -14,7 +15,8 @@
 //!
 //! The kernel runs on boxes cut from the light reference scene: caves, shafts,
 //! a sealed room and a floating island, with emissive voxels scattered on
-//! exposed floors. The emissive scan runs on a chunk of layered terrain and on
+//! exposed floors. Filling a slot turns the kernel's result on those boxes
+//! into bytes and copies six neighbours' border planes. The emissive scan runs on a chunk of layered terrain and on
 //! chunks of random materials, with emissive lists of several lengths.
 
 use std::collections::{BTreeMap, HashMap};
@@ -25,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bevy::prelude::*;
-use bevy_voxel_world::light_bench::{emissive_scan, KernelBox};
+use bevy_voxel_world::light_bench::{emissive_scan, KernelBox, SlotBox};
 use bevy_voxel_world::prelude::{LightShape, WorldVoxel};
 use noise::{NoiseFn, Perlin};
 
@@ -236,12 +238,19 @@ impl Dump {
             .collect();
         KernelBox::new(
             reach,
-            |p| {
-                let p = p + offset;
-                self.open[(p.x + p.y * DUMP_SIDE + p.z * DUMP_SIDE * DUMP_SIDE) as usize]
-            },
+            |p| self.open_at(p - IVec3::splat(reach as i32)),
             &lamps,
         )
+    }
+
+    /// Whether the voxel at `p`, relative to the chunk, is open. Voxels past
+    /// the dump are open.
+    fn open_at(&self, p: IVec3) -> bool {
+        let p = p + IVec3::splat(DUMP_REACH);
+        if p.cmplt(IVec3::ZERO).any() || p.cmpge(IVec3::splat(DUMP_SIDE)).any() {
+            return true;
+        }
+        self.open[(p.x + p.y * DUMP_SIDE + p.z * DUMP_SIDE * DUMP_SIDE) as usize]
     }
 }
 
@@ -373,6 +382,39 @@ fn scan_metrics(metrics: &mut Metrics) {
     }
 }
 
+/// Filling a slot at landing: the solver's bit planes to bytes with the
+/// table, and the six shell planes from the neighbours' light.
+fn slot_metrics(dumps: &[Dump], metrics: &mut Metrics) {
+    let slots: Vec<SlotBox> = dumps
+        .iter()
+        .map(|dump| {
+            let mut kernel_box = dump.kernel_box(14);
+            kernel_box.spread(LightShape::Round);
+            SlotBox::new(&kernel_box, |p| dump.open_at(p))
+        })
+        .collect();
+    let mut times: Vec<f64> = slots
+        .iter()
+        .map(|slot| {
+            best_us(|| {
+                black_box(slot.slot_bytes());
+            })
+        })
+        .collect();
+    metrics.insert("slot.bytes.p50_us".into(), median(&mut times));
+    let mut times: Vec<f64> = slots
+        .iter()
+        .map(|slot| {
+            let mut bytes = slot.slot_bytes();
+            best_us(|| {
+                slot.shell_planes(&mut bytes);
+                black_box(&bytes);
+            })
+        })
+        .collect();
+    metrics.insert("slot.shell_planes.p50_us".into(), median(&mut times));
+}
+
 fn run_all() -> Metrics {
     let mut metrics = Metrics::new();
     eprintln!("cutting boxes from the reference scene...");
@@ -380,6 +422,8 @@ fn run_all() -> Metrics {
     metrics.insert("kernel.boxes".into(), dumps.len() as f64);
     eprintln!("kernel on {} boxes...", dumps.len());
     kernel_metrics(&dumps, &mut metrics);
+    eprintln!("slots...");
+    slot_metrics(&dumps, &mut metrics);
     eprintln!("emissive scan...");
     scan_metrics(&mut metrics);
     metrics

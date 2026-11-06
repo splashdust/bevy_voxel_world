@@ -16,6 +16,8 @@ mod relights;
 #[cfg(feature = "light_propagation")]
 mod route;
 #[cfg(feature = "light_propagation")]
+mod slots;
+#[cfg(feature = "light_propagation")]
 mod voxel_light;
 
 /// The types of the components on each chunk of world `C` that has a mesh
