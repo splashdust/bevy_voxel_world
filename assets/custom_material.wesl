@@ -1,15 +1,16 @@
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
+import bevy_pbr::render::forward_io::FragmentOutput;
+import bevy_voxel_world::voxel_io::VoxelVertexOutput;
 
 @fragment
 fn fragment(
-    in: VertexOutput,
-    @location(8) @interpolate(flat) tex_idx: vec3<u32>,
+    in: VoxelVertexOutput,
 ) -> FragmentOutput {
     var out: FragmentOutput;
 
     // tex_idx will be the array produced by the texture_index_mapper
     // You can use it to send three unsigned integers to the shader
     // based on the voxel type.
+    let tex_idx = in.tex_idx;
     if (tex_idx[0] == 1u) {
         out.color = vec4<f32>(1.0, 0.1, 0.1, 1.0);
     }

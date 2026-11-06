@@ -1,10 +1,16 @@
 use std::marker::PhantomData;
 
-use bevy::image::{ImageAddressMode, TextureReinterpretationError};
+use bevy::image::{
+    CompressedImageFormats, ImageAddressMode, ImageSampler, ImageType,
+    TextureReinterpretationError,
+};
 use bevy::{
-    asset::uuid_handle,
+    asset::{uuid_handle, RenderAssetUsages},
     mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeDescriptor},
-    pbr::{MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
+    pbr::{
+        ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
+        MaterialExtensionPipeline,
+    },
     prelude::*,
     reflect::TypePath,
     render::render_resource::{
@@ -17,7 +23,7 @@ use bevy::{
 use crate::configuration::VoxelWorldConfig;
 
 /// Keeps track of the loading status of the image used for the voxel texture of
-/// world `C`.
+/// world `C`. Only worlds with the default material have one.
 #[derive(Resource)]
 pub(crate) struct LoadingTexture<C> {
     pub is_loaded: bool,
@@ -40,6 +46,28 @@ impl<C> LoadingTexture<C> {
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
 
+/// The shader module with the vertex input and output of chunk meshes, imported
+/// as `bevy_voxel_world::voxel_io`.
+///
+/// Its `VoxelVertex` reads the attributes at the locations `vertex_layout`
+/// gives them, and its `VoxelVertexOutput` is what the crate's vertex shader
+/// returns. A custom material that keeps the crate's vertex shader can take a
+/// `VoxelVertexOutput` in its fragment shader.
+pub(crate) const VOXEL_IO_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("6f0e7d43-1b8a-4c52-9d3e-a2b4c6d8e0f1");
+
+/// Adds the crate's shaders to `shaders`.
+pub(crate) fn add_shaders(shaders: &mut Assets<Shader>) {
+    // An embedded path gives the module its import path.
+    let voxel_io = Shader::from_wesl(
+        include_str!("shaders/voxel_io.wesl"),
+        "embedded://bevy_voxel_world/voxel_io.wesl",
+    );
+    shaders
+        .insert(VOXEL_IO_SHADER_HANDLE.id(), voxel_io)
+        .unwrap();
+}
+
 pub const ATTRIBUTE_TEX_INDEX: MeshVertexAttribute =
     MeshVertexAttribute::new("TextureIndex", 989640910, VertexFormat::Uint32x3);
 
@@ -50,7 +78,6 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
         Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
         //Mesh::ATTRIBUTE_TANGENT.at_shader_location(4),
         Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
-        Mesh::ATTRIBUTE_COLOR.at_shader_location(7),
         //Mesh::ATTRIBUTE_JOINT_INDEX.at_shader_location(6),
         //Mesh::ATTRIBUTE_JOINT_WEIGHT.at_shader_location(7),
         ATTRIBUTE_TEX_INDEX.at_shader_location(8),
@@ -96,6 +123,68 @@ impl MaterialExtension for StandardVoxelMaterial {
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())
     }
+}
+
+/// The material of worlds that don't call `with_material`.
+pub(crate) type DefaultVoxelMaterial =
+    ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>;
+
+/// Adds the default material of world `C` and returns its handle.
+///
+/// The material samples the world's voxel texture, or the built-in texture if
+/// the world has none. Chunks wait for a voxel texture loaded from a file until
+/// `prepare_texture` has made it an array texture.
+pub(crate) fn add_default_material<C: VoxelWorldConfig>(
+    app: &mut App,
+    config: &C,
+) -> Handle<DefaultVoxelMaterial> {
+    if app
+        .get_added_plugins::<MaterialPlugin<DefaultVoxelMaterial>>()
+        .is_empty()
+    {
+        app.add_plugins(MaterialPlugin::<DefaultVoxelMaterial>::default());
+    }
+
+    let loading_texture: LoadingTexture<C> = match config.voxel_texture() {
+        Some((img_path, layers)) => {
+            let asset_server = app.world().resource::<AssetServer>();
+            LoadingTexture::new(false, asset_server.load(img_path), layers)
+        }
+        None => {
+            let mut image = Image::from_buffer(
+                include_bytes!("shaders/default_texture.png"),
+                ImageType::MimeType("image/png"),
+                CompressedImageFormats::default(),
+                false,
+                ImageSampler::Default,
+                RenderAssetUsages::default(),
+            )
+            .unwrap();
+            prepare_voxel_texture(&mut image, 4)
+                .expect("default voxel texture should be a valid 4-layer array texture");
+            let handle = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+            LoadingTexture::new(true, handle, 0)
+        }
+    };
+
+    let handle = app
+        .world_mut()
+        .resource_mut::<Assets<DefaultVoxelMaterial>>()
+        .add(ExtendedMaterial {
+            base: StandardMaterial {
+                reflectance: 0.05,
+                metallic: 0.05,
+                perceptual_roughness: 0.95,
+                ..default()
+            },
+            extension: StandardVoxelMaterial {
+                voxels_texture: loading_texture.handle.clone(),
+            },
+        });
+
+    app.insert_resource(loading_texture);
+    app.add_systems(Update, prepare_texture::<C>);
+    handle
 }
 
 pub(crate) fn prepare_texture<C: VoxelWorldConfig>(
