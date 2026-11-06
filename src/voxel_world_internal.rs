@@ -12,6 +12,7 @@ use crate::{
     configuration::{LodLevel, VoxelWorldConfig},
     mesh_cache::*,
     plugin::{VoxelWorldMaterialHandle, WorldMaterial},
+    pool_budget::PoolBudget,
     streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
     voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
@@ -112,6 +113,7 @@ where
         commands.init_resource::<MeshCacheInsertBuffer<C>>();
         commands.init_resource::<VoxelEdits<C, C::MaterialIndex>>();
         commands.init_resource::<ChunkIndex<C>>();
+        commands.init_resource::<PoolBudget<C>>();
         commands.init_resource::<ChunkRequests<C>>();
 
         // Create the root node and allow to modify it by the configuration.
@@ -126,9 +128,11 @@ where
     }
 
     /// Plans this frame's spawns and retirements, and requests them.
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
         index: Res<ChunkIndex<C>>,
+        budget: Res<PoolBudget<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunks: Query<&Chunk<C>>,
@@ -170,7 +174,8 @@ where
             &cameras,
             chunks.iter().map(|chunk| chunk.key),
             &lookup,
-            index.spawn_budget(configuration.max_active_chunk_threads()),
+            budget
+                .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),
             &mut rand::rng(),
         );
         requests.spawn.extend(plan.spawn);
