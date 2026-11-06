@@ -12,6 +12,8 @@ use crate::prelude::*;
 #[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
+mod relights;
+#[cfg(feature = "light_propagation")]
 mod route;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;

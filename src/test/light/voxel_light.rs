@@ -2,7 +2,7 @@
 //! `light_at`. Sky light is off in all of them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::RunSystemOnce;
@@ -14,20 +14,45 @@ use crate::chunk_map::ChunkMap;
 use crate::light::LightSettings;
 use crate::prelude::*;
 
-const STONE: u8 = 1;
-const LAMP: u8 = 2;
-const DIM_LAMP: u8 = 3;
+pub(super) const STONE: u8 = 1;
+pub(super) const LAMP: u8 = 2;
+pub(super) const DIM_LAMP: u8 = 3;
 
-type Scene = Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync>;
+pub(super) type Scene = Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync>;
 
 /// Holds back the chunk task of one chunk position: its voxel lookups wait
 /// until the hold is released.
-struct Hold {
-    chunk: IVec3,
-    released: AtomicBool,
+///
+/// A held task blocks a thread of the async compute pool, which every test in
+/// the process shares and which may have only two threads, so tests take
+/// [`Hold::exclusive`] to hold one chunk at a time between them.
+pub(super) struct Hold {
+    pub chunk: IVec3,
+    pub released: AtomicBool,
 }
 
+static HOLDING: Mutex<()> = Mutex::new(());
+
 impl Hold {
+    pub fn new(chunk: IVec3) -> Arc<Self> {
+        Arc::new(Self {
+            chunk,
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Waits until no other test holds a chunk, and keeps them from holding
+    /// one until the guard drops.
+    pub fn exclusive() -> MutexGuard<'static, ()> {
+        HOLDING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+    }
+
     fn wait(&self) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !self.released.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -39,11 +64,12 @@ impl Hold {
 /// A lit world whose voxels come from a scene, with lamps at level 15 and dim
 /// lamps at level 8.
 #[derive(Resource, Clone)]
-struct LampWorld {
-    scene: Scene,
-    light: Option<LightPropagation>,
-    emissive: Vec<(u8, Emission)>,
-    hold: Option<Arc<Hold>>,
+pub(super) struct LampWorld {
+    pub scene: Scene,
+    pub light: Option<LightPropagation>,
+    pub emissive: Vec<(u8, Emission)>,
+    pub hold: Option<Arc<Hold>>,
+    pub spawning_distance: u32,
 }
 
 impl Default for LampWorld {
@@ -56,6 +82,7 @@ impl Default for LampWorld {
                 (DIM_LAMP, Emission::level(8.0)),
             ],
             hold: None,
+            spawning_distance: 2,
         }
     }
 }
@@ -65,7 +92,7 @@ impl VoxelWorldConfig for LampWorld {
     type ChunkUserBundle = ();
 
     fn spawning_distance(&self) -> u32 {
-        2
+        self.spawning_distance
     }
 
     fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
@@ -101,7 +128,7 @@ impl VoxelWorldConfig for LampWorld {
 }
 
 /// Voxel light only, at the default voxel reach of 14.
-fn lit(shape: LightShape) -> LightPropagation {
+pub(super) fn lit(shape: LightShape) -> LightPropagation {
     LightPropagation {
         sky: Sky::Off,
         sky_fill: None,
@@ -113,7 +140,7 @@ fn lit(shape: LightShape) -> LightPropagation {
 /// The middle voxel of the chunk at the origin, where the camera is.
 const MIDDLE: IVec3 = IVec3::splat(16);
 
-fn app(world: LampWorld) -> App {
+pub(super) fn app(world: LampWorld) -> App {
     let mut app = meshing_app();
     app.add_plugins(VoxelWorldPlugin::with_config(world))
         .add_systems(Startup, spawn_camera::<LampWorld>);
@@ -143,7 +170,7 @@ fn origin_ready(world: LampWorld) -> App {
     app
 }
 
-fn light_at(app: &mut App, position: IVec3) -> Option<LightLevels> {
+pub(super) fn light_at(app: &mut App, position: IVec3) -> Option<LightLevels> {
     app.world_mut()
         .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
             voxel_world.light_at(position)
@@ -165,7 +192,7 @@ fn reach_along(app: &mut App, from: IVec3, step: IVec3) -> i32 {
 }
 
 /// Every voxel of the chunk at the origin.
-fn origin_voxels() -> impl Iterator<Item = IVec3> {
+pub(super) fn origin_voxels() -> impl Iterator<Item = IVec3> {
     (0..32).flat_map(|z| {
         (0..32).flat_map(move |y| (0..32).map(move |x| IVec3::new(x, y, z)))
     })
@@ -359,7 +386,7 @@ fn light_at_reads_0_in_a_solid_and_none_with_light_off() {
     assert_eq!(light_at(&mut unlit, stone), None);
 }
 
-fn emissive_scans(app: &App) -> u64 {
+pub(super) fn emissive_scans(app: &App) -> u64 {
     app.world()
         .resource::<LightSettings<LampWorld>>()
         .counters()
@@ -392,7 +419,7 @@ fn hash3(p: IVec3) -> u32 {
 
 /// Blocks of stone 4 voxels wide among open space, with a few lamps and dim
 /// lamps in the stone.
-fn caves(p: IVec3) -> WorldVoxel {
+pub(super) fn caves(p: IVec3) -> WorldVoxel {
     if !hash3(p.div_euclid(IVec3::splat(4))).is_multiple_of(3) {
         return WorldVoxel::Air;
     }
@@ -404,8 +431,14 @@ fn caves(p: IVec3) -> WorldVoxel {
 }
 
 fn reference(min: IVec3, max: IVec3) -> Reference {
+    caves_reference(min, max, 14)
+}
+
+/// Voxel light in the box from `min` to `max` of the world of [`caves`] at
+/// `reach`, with round spread.
+pub(super) fn caves_reference(min: IVec3, max: IVec3, reach: u32) -> Reference {
     let emission = LampWorld::default().emissive;
-    Reference::voxel_light(min, max, 14, LightShape::Round, caves, |material| {
+    Reference::voxel_light(min, max, reach, LightShape::Round, caves, |material| {
         emission
             .iter()
             .find(|(emissive, _)| *emissive == material)
@@ -415,16 +448,28 @@ fn reference(min: IVec3, max: IVec3) -> Reference {
 
 /// The voxel light of every voxel of the level-0 chunk at `chunk`, or `None`
 /// if it has none published.
-fn chunk_voxel_light(app: &mut App, chunk: IVec3) -> Option<Vec<(IVec3, f32)>> {
+pub(super) fn chunk_voxel_light(
+    app: &mut App,
+    chunk: IVec3,
+) -> Option<Vec<(IVec3, f32)>> {
     app.world_mut()
         .run_system_once(
             move |settings: Res<LightSettings<LampWorld>>,
                   chunk_map: Res<ChunkMap<LampWorld, u8>>| {
                 let map = chunk_map.get_read_lock();
+                // What `light_at` reads, looked up once for the whole chunk.
+                let data = map.get(&ChunkKey::new(chunk, 0))?;
+                let light = settings.view.read().get(&chunk)?.light.clone();
                 origin_voxels()
                     .map(|local| {
                         let p = chunk * 32 + local;
-                        Some((p, settings.light_at(&map, p)?.voxel))
+                        let voxel = data.get_voxel_at_world_position(p)?;
+                        let levels = light.levels_at(
+                            local.as_uvec3(),
+                            voxel,
+                            &settings.task.emission,
+                        );
+                        Some((p, levels.voxel))
                     })
                     .collect::<Option<Vec<_>>>()
             },
@@ -447,10 +492,8 @@ fn count_origin_publishes(
 
 #[test]
 fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_reference() {
-    let hold = Arc::new(Hold {
-        chunk: IVec3::ZERO,
-        released: AtomicBool::new(false),
-    });
+    let _holding = Hold::exclusive();
+    let hold = Hold::new(IVec3::ZERO);
     let mut app = app(LampWorld {
         scene: Arc::new(caves),
         hold: Some(hold.clone()),
@@ -479,7 +522,7 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         })
         .unwrap();
     app.update();
-    hold.released.store(true, Ordering::Release);
+    hold.release();
     update_until(&mut app, "the follow-up task to publish", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
     });

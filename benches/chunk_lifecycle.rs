@@ -554,8 +554,9 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 }
 
 /// `stream_in` on the world with lamps, lit, with what solving its light
-/// cost: in chunk tasks on the pool, against the same chunks solved one after
-/// another on one thread, and on the main thread reading neighbours for tasks.
+/// cost: in chunk tasks and relight tasks on the pool, against the same chunks
+/// solved one after another on one thread, and on the main thread landing
+/// light and starting relights.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lamps() -> Metrics {
     use bevy_voxel_world::light_bench::{light_stats, solve_published_serially};
@@ -581,6 +582,19 @@ fn scenario_stream_in_lamps() -> Metrics {
         serial_ms * 1000.0 / serial_solves.max(1) as f64,
     );
     metrics.insert(format!("{prefix}.snapshot_total_ms"), stats.snapshot_ms);
+    metrics.insert(format!("{prefix}.relights"), stats.relights as f64);
+    metrics.insert(
+        format!("{prefix}.relights_per_solve"),
+        stats.relights as f64 / stats.solves.max(1) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.main_thread_total_ms"),
+        stats.main_thread_ms,
+    );
+    metrics.insert(
+        format!("{prefix}.main_thread_max_frame_ms"),
+        stats.max_frame_ms,
+    );
     metrics
 }
 

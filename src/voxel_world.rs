@@ -186,6 +186,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     configuration: Res<'w, C>,
     #[cfg(feature = "light_propagation")]
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
+    #[cfg(feature = "light_propagation")]
+    light_work: Option<Res<'w, crate::light::relight::LightWork<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -223,11 +225,12 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
 
     /// The light at the voxel at `position`, as levels from 0 to 15.
     ///
-    /// It reads the light published with the level-0 chunk holding the voxel:
-    /// a solid voxel reads 0, an emissive voxel its own level, and an open
-    /// voxel the light that reached it. Light beside a chunk that isn't loaded,
-    /// or that was published after the chunk holding the voxel started its
-    /// task, can read darker than the truth, never brighter.
+    /// It reads the light landed for the level-0 chunk holding the voxel: a
+    /// solid voxel reads 0, an emissive voxel its own level, and an open voxel
+    /// the light that reached it. Light beside a chunk that isn't loaded can
+    /// read darker than the truth, never brighter. A chunk's light can change
+    /// after it appears, as chunks arriving around it relight it;
+    /// [`VoxelWorld::light_is_settled`] says when that has finished.
     ///
     /// Returns `None` when the world has no light propagation, or no published
     /// level-0 chunk holds the voxel.
@@ -235,6 +238,20 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
         let light = self.light.as_ref()?;
         light.light_at(&self.chunk_map.get_read_lock(), position)
+    }
+
+    /// Whether the world's light has caught up with its chunks: no relight is
+    /// waiting to start or running, and no solved light is waiting to land.
+    /// A loading screen can wait on it.
+    ///
+    /// Chunk tasks still running aren't counted, though their light may start
+    /// relights once it lands. Chunks above LOD level 0 have no relights to
+    /// wait for. A world without light propagation is always settled.
+    #[cfg(feature = "light_propagation")]
+    pub fn light_is_settled(&self) -> bool {
+        self.light_work
+            .as_ref()
+            .is_none_or(|work| work.is_settled())
     }
 
     /// Set the voxel at the given position. It replaces the generated voxel there for

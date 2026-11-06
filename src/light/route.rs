@@ -24,13 +24,14 @@
 //! shader reads such a cell as sky light 0 and voxel light at the lamp's level,
 //! and makes a face glow when the cell behind it holds one.
 //!
-//! The chunk task turns the solver's bit planes into a slot's bytes, only for
-//! a chunk whose light varies. When the chunk's mesh is shown, on the main
-//! thread, the chunk gets its slot and its tag, and the bytes are queued. The
-//! render world writes them into the slot's part of the texture during the
-//! frame they were extracted with, so the mesh, the tag and the light show in
-//! the same frame. The texture's `Image` asset is never changed, so nothing is
-//! written at rest.
+//! A solve, in a chunk task or a relight task, turns the solver's bit planes
+//! into a slot's bytes, only for a chunk with faces whose light varies. When
+//! the light lands on the main thread, a chunk showing its mesh gets its slot
+//! and its tag, and the bytes are queued. A chunk whose mesh isn't shown yet
+//! keeps them until it is. The render world writes them into the slot's part
+//! of the texture during the frame they were extracted with, so the mesh, the
+//! tag and the light show in the same frame. The texture's `Image` asset is
+//! never changed, so nothing is written at rest.
 //!
 //! Shell cells stay 0, so faces on a chunk's border read their neighbours'
 //! voxels as dark. Slots are given out until the texture is full, and a chunk
@@ -143,7 +144,7 @@ fn slots_per_axis(capacity: u32) -> UVec3 {
     axes
 }
 
-/// What a chunk brings for the shader when its task finishes with a mesh.
+/// A chunk's landed light, as the shader will read it.
 struct Landing {
     /// Its slot's bytes, if its light varies.
     bytes: Option<Box<[u8]>>,
@@ -160,12 +161,14 @@ pub(crate) struct LightRoute<C> {
     capacity: u32,
     next_slot: u32,
     slots: EntityHashMap<u32>,
-    /// Chunks whose mesh is waiting to be shown.
+    /// Light that landed for chunks not showing their mesh yet.
     landing: EntityHashMap<Landing>,
+    /// The tag of each chunk showing its mesh.
+    tags: EntityHashMap<u32>,
     /// The bytes to write into each slot, taken by the render world each frame.
     uploads: HashMap<u32, Box<[u8]>>,
     /// The tag's levels for a chunk with no light of its own, such as a chunk
-    /// above LOD level 0.
+    /// above LOD level 0, or one whose light hasn't landed yet.
     unlit_levels: u8,
     _world: PhantomData<C>,
 }
@@ -195,50 +198,69 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             next_slot: 0,
             slots: EntityHashMap::default(),
             landing: EntityHashMap::default(),
+            tags: EntityHashMap::default(),
             uploads: HashMap::default(),
             unlit_levels: tag_levels(sky, 0),
             _world: PhantomData,
         }
     }
 
-    /// Keeps what the chunk `entity` needs when its mesh is shown: the light
-    /// its task worked out, and the bytes its task made of it.
-    pub fn landed(
+    /// Takes the light that landed for the chunk `entity`, with the bytes its
+    /// solve made of it. Returns the chunk's new tag if it shows its mesh, and
+    /// otherwise keeps the light until it does.
+    pub fn light_landed(
         &mut self,
         entity: Entity,
-        light: Option<&ChunkLight>,
+        light: &ChunkLight,
         bytes: Option<Box<[u8]>>,
-    ) {
-        let levels = match light {
-            Some(light) => match light.voxel {
-                ChannelLight::Uniform(voxel) => tag_levels(light.sky, voxel),
-                ChannelLight::Planes(_) => tag_levels(light.sky, 0),
-            },
-            None => self.unlit_levels,
+    ) -> Option<u32> {
+        let levels = match light.voxel {
+            ChannelLight::Uniform(voxel) => tag_levels(light.sky, voxel),
+            ChannelLight::Planes(_) => tag_levels(light.sky, 0),
         };
-        self.landing.insert(entity, Landing { bytes, levels });
+        let landing = Landing { bytes, levels };
+        if !self.tags.contains_key(&entity) {
+            self.landing.insert(entity, landing);
+            return None;
+        }
+        Some(self.place(entity, landing))
     }
 
-    /// The tag of the chunk `entity` as its mesh is shown. A chunk with bytes
-    /// gets a slot, keeping the one it had, and its bytes are queued for it.
+    /// The tag of the chunk `entity` as its mesh is shown, placing light that
+    /// landed for it meanwhile. A chunk whose light hasn't landed gets the
+    /// levels of a chunk with no light.
     fn show(&mut self, entity: Entity) -> u32 {
-        let Some(landing) = self.landing.remove(&entity) else {
-            return self.unlit_levels as u32;
-        };
-        let Some(bytes) = landing.bytes else {
-            return landing.levels as u32;
-        };
-        let slot = match self.slots.get(&entity) {
-            Some(slot) => *slot,
-            None if self.next_slot < self.capacity => {
-                self.next_slot += 1;
-                self.slots.insert(entity, self.next_slot - 1);
-                self.next_slot - 1
-            }
-            None => return landing.levels as u32,
-        };
-        self.uploads.insert(slot, bytes);
-        HAS_SLOT | slot
+        match self.landing.remove(&entity) {
+            Some(landing) => self.place(entity, landing),
+            None => *self.tags.entry(entity).or_insert(self.unlit_levels as u32),
+        }
+    }
+
+    /// Gives the chunk `entity` the tag for `landing`, and a slot with its
+    /// bytes queued if its light varies. A chunk keeps the slot it had.
+    fn place(&mut self, entity: Entity, landing: Landing) -> u32 {
+        let slot = landing.bytes.and_then(|bytes| {
+            let slot = match self.slots.get(&entity) {
+                Some(slot) => *slot,
+                None if self.next_slot < self.capacity => {
+                    self.next_slot += 1;
+                    self.slots.insert(entity, self.next_slot - 1);
+                    self.next_slot - 1
+                }
+                None => return None,
+            };
+            self.uploads.insert(slot, bytes);
+            Some(slot)
+        });
+        let tag = slot.map_or(landing.levels as u32, |slot| HAS_SLOT | slot);
+        self.tags.insert(entity, tag);
+        tag
+    }
+
+    /// Forgets the despawned chunk `entity`, apart from its slot.
+    pub fn forget(&mut self, entity: Entity) {
+        self.landing.remove(&entity);
+        self.tags.remove(&entity);
     }
 
     /// The bytes queued for `slot` and not yet taken by the render world.

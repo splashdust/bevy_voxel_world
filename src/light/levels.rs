@@ -41,6 +41,10 @@ pub(crate) struct LevelScale {
     reach: u32,
     /// The level at each distance, up to `reach + 1`.
     levels: Vec<u8>,
+    /// By level, what [`LevelScale::first_distance`] returns.
+    first: [u32; 16],
+    /// By level, what [`LevelScale::last_distance`] returns.
+    last: [u32; 16],
 }
 
 impl LevelScale {
@@ -57,7 +61,17 @@ impl LevelScale {
                 }
             })
             .collect();
-        Self { reach, levels }
+        let mut scale = Self {
+            reach,
+            levels,
+            first: [0; 16],
+            last: [0; 16],
+        };
+        for level in 0..16u8 {
+            scale.first[level as usize] = scale.find_first_distance(level);
+            scale.last[level as usize] = scale.find_last_distance(level);
+        }
+        scale
     }
 
     pub fn reach(&self) -> u32 {
@@ -70,6 +84,38 @@ impl LevelScale {
             .get(distance as usize)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// The first distance from a level-15 source at which an open voxel holds
+    /// `level`, or `reach + 1` for level 0. A level no distance holds counts
+    /// as the first distance holding a dimmer one.
+    #[inline]
+    pub fn first_distance(&self, level: u8) -> u32 {
+        self.first[level as usize & 15]
+    }
+
+    /// The last distance from a level-15 source at which an open voxel holds
+    /// `level`, or `reach + 1` for level 0. A level no distance holds counts
+    /// as the last distance holding a brighter one.
+    #[inline]
+    pub fn last_distance(&self, level: u8) -> u32 {
+        self.last[level as usize & 15]
+    }
+
+    fn find_first_distance(&self, level: u8) -> u32 {
+        (1..=self.reach)
+            .find(|&distance| self.level(distance) <= level)
+            .unwrap_or(self.reach + 1)
+    }
+
+    fn find_last_distance(&self, level: u8) -> u32 {
+        if level == 0 {
+            return self.reach + 1;
+        }
+        (1..=self.reach)
+            .rev()
+            .find(|&distance| self.level(distance) >= level)
+            .unwrap_or(0)
     }
 
     /// The distance at which light from a source at `level` starts: the first

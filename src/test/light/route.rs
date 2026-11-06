@@ -12,6 +12,7 @@ use bevy::prelude::*;
 use super::super::{
     chunk_status, meshing_app, spawn_camera, update_until, DefaultVoxelMaterial,
 };
+use super::voxel_light::Hold;
 use crate::light::route::LightRoute;
 use crate::prelude::*;
 use crate::rendering::VoxelWorldMaterial;
@@ -32,7 +33,12 @@ struct FloorLampWorld {
     light: Option<LightPropagation>,
     /// Holds back the voxel lookups of the chunk at `HELD` until set.
     release: Option<Arc<AtomicBool>>,
+    /// Puts a lamp in the held chunk, beside the chunk at the origin.
+    edge_lamp: bool,
 }
+
+/// The lamp `FloorLampWorld::edge_lamp` puts in the held chunk.
+const EDGE_LAMP_AT: IVec3 = IVec3::new(-2, 1, 16);
 
 /// The chunk whose task waits for `FloorLampWorld::release`.
 const HELD: IVec3 = IVec3::NEG_X;
@@ -45,6 +51,7 @@ impl Default for FloorLampWorld {
                 ..default()
             }),
             release: None,
+            edge_lamp: false,
         }
     }
 }
@@ -63,6 +70,7 @@ impl VoxelWorldConfig for FloorLampWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let release = self.release.clone();
+        let edge_lamp = self.edge_lamp;
         Box::new(move |chunk, _, _| {
             let release = release.clone().filter(|_| chunk == HELD);
             Box::new(move |position, _| {
@@ -72,7 +80,7 @@ impl VoxelWorldConfig for FloorLampWorld {
                         std::thread::sleep(Duration::from_millis(1));
                     }
                 }
-                if position == LAMP_AT {
+                if position == LAMP_AT || (edge_lamp && position == EDGE_LAMP_AT) {
                     WorldVoxel::Solid(LAMP)
                 } else if position == DIM_LAMP_AT {
                     WorldVoxel::Solid(DIM_LAMP)
@@ -308,6 +316,7 @@ fn a_chunks_tag_names_its_slot_or_its_levels_when_it_has_none() {
 
 #[test]
 fn a_lit_worlds_chunks_still_share_cached_meshes() {
+    let _holding = Hold::exclusive();
     // The held chunk's task finds the mesh of the same floor in the cache.
     let release = Arc::new(AtomicBool::new(false));
     let mut app = meshing_app();
@@ -320,16 +329,60 @@ fn a_lit_worlds_chunks_still_share_cached_meshes() {
     release.store(true, Ordering::Release);
     run_until_shown(&mut app, [HELD].into_iter());
 
-    let mut mesh_of = |position: IVec3| {
-        let entity = chunk_entity(&mut app, position).unwrap();
-        app.world().get::<Mesh3d>(entity).unwrap().0.id()
-    };
-    assert_eq!(
-        mesh_of(IVec3::X),
-        mesh_of(HELD),
-        "the floor chunks have different meshes"
+    // Floor chunks meshed at the same time can each make a mesh, but the held
+    // chunk takes one of theirs.
+    let held = chunk_entity(&mut app, HELD).unwrap();
+    let held_mesh = app.world().get::<Mesh3d>(held).unwrap().0.id();
+    let others: Vec<AssetId<Mesh>> = shown_chunks(&mut app)
+        .into_iter()
+        .filter(|entity| *entity != held)
+        .map(|entity| app.world().get::<Mesh3d>(entity).unwrap().0.id())
+        .collect();
+    assert!(
+        others.contains(&held_mesh),
+        "the held floor chunk has a mesh of its own"
     );
     for position in [IVec3::X, HELD] {
         tag_of(&mut app, position);
     }
+}
+
+#[test]
+fn a_relight_updates_a_shown_chunks_slot() {
+    let _holding = Hold::exclusive();
+    // The chunk at the origin shows before the lamp beside it arrives, and
+    // relights when it does.
+    let release = Arc::new(AtomicBool::new(false));
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(FloorLampWorld {
+        release: Some(release.clone()),
+        edge_lamp: true,
+        ..default()
+    }))
+    .add_systems(Startup, spawn_camera::<FloorLampWorld>);
+    run_until_shown(&mut app, [IVec3::ZERO].into_iter());
+    let beside_edge_lamp = IVec3::new(0, 1, 16);
+    assert_eq!(light_at(&mut app, beside_edge_lamp).voxel, 0.0);
+
+    release.store(true, Ordering::Release);
+    run_until_shown(&mut app, [HELD].into_iter());
+    update_until(&mut app, "the edge lamp's light to land", |app| {
+        light_at(app, beside_edge_lamp).voxel > 0.0
+    });
+    app.update();
+
+    let tag = tag_of(&mut app, IVec3::ZERO);
+    assert_ne!(tag & HAS_SLOT, 0, "tag {tag:#x}");
+    let levels = light_at(&mut app, beside_edge_lamp);
+    let bytes = app
+        .world()
+        .resource::<LightRoute<FloorLampWorld>>()
+        .queued_upload(tag & 0xFF_FFFF)
+        .expect("the slot's bytes are queued")
+        .to_vec();
+    let cell = beside_edge_lamp + IVec3::ONE;
+    assert_eq!(
+        bytes[(cell.z + cell.x * 34 + cell.y * 34 * 34) as usize],
+        levels.sky as u8 | (levels.voxel as u8) << 4
+    );
 }

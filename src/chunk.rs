@@ -258,10 +258,6 @@ pub struct ChunkData<I> {
     pub(crate) has_generated: bool,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
-    /// The chunk's light, in a world with light propagation. Only level-0
-    /// chunks with the default data shape have it.
-    #[cfg(feature = "light_propagation")]
-    pub(crate) light: Option<Arc<crate::light::solver::ChunkLight>>,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -277,8 +273,6 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             has_generated: false,
             data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
             mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
-            #[cfg(feature = "light_propagation")]
-            light: None,
         }
     }
 
@@ -680,10 +674,9 @@ where
     /// propagation.
     #[cfg(feature = "light_propagation")]
     pub light: Option<crate::light::solver::LightTask<I>>,
-    /// The bytes of the chunk's light slot, in a world showing its light, for
-    /// a chunk with faces whose light varies.
+    /// The chunk's solved light, once `post_voxel` has run.
     #[cfg(feature = "light_propagation")]
-    pub light_bytes: Option<Box<[u8]>>,
+    pub solved_light: Option<crate::light::solver::Solved>,
     _marker: PhantomData<C>,
 }
 
@@ -712,7 +705,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             #[cfg(feature = "light_propagation")]
             light: None,
             #[cfg(feature = "light_propagation")]
-            light_bytes: None,
+            solved_light: None,
             _marker: PhantomData,
         }
     }
@@ -815,20 +808,13 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     ///
     /// It is the place for work that depends on the voxels and must be done
     /// before the chunk is published, whether or not it gets a mesh: in a world
-    /// with light propagation, solving the chunk's light, and in one showing
-    /// its light, turning it into the bytes of the chunk's slot.
+    /// with light propagation, solving the chunk's light.
     pub fn post_voxel(&mut self) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("post_voxel").entered();
         #[cfg(feature = "light_propagation")]
-        if let Some(task) = self.light.take() {
-            let routed = task.settings.routed;
-            let light = task.solve(&self.chunk_data);
-            // An empty or full chunk has no faces to show light on.
-            if routed && !self.chunk_data.is_empty && !self.chunk_data.is_full {
-                self.light_bytes = crate::light::route::slot_bytes(&light);
-            }
-            self.chunk_data.light = Some(Arc::new(light));
+        if let Some(light) = self.light.take() {
+            self.solved_light = Some(light.solve(&self.chunk_data));
         }
     }
 

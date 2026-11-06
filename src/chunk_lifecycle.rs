@@ -535,8 +535,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         ),
         mesh_cache: Res<MeshCache<C>>,
         mut budget: ResMut<PoolBudget<C>>,
-        #[cfg(feature = "light_propagation")] mut light_route: Option<
-            ResMut<crate::light::route::LightRoute<C>>,
+        #[cfg(feature = "light_propagation")] mut light_work: Option<
+            ResMut<crate::light::relight::LightWork<C>>,
         >,
     ) {
         #[cfg(feature = "trace")]
@@ -623,14 +623,6 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                         MeshRef(mesh_handle),
                         NeedsMaterial::<C>::new(),
                     ));
-                    #[cfg(feature = "light_propagation")]
-                    if let Some(route) = light_route.as_mut() {
-                        route.landed(
-                            entity,
-                            chunk_task.chunk_data.light.as_deref(),
-                            chunk_task.light_bytes.take(),
-                        );
-                    }
                 } else {
                     commands
                         .entity(entity)
@@ -644,6 +636,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             if index.apply(entity, chunk.key, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
+                #[cfg(feature = "light_propagation")]
+                if let (Some(work), Some(solved)) =
+                    (light_work.as_mut(), chunk_task.solved_light.take())
+                {
+                    work.arrive(chunk.key.position, entity, solved);
+                }
                 chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
             }
         }
@@ -808,7 +806,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
 
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light {
-            chunk_task.light = light.task_for(key, data_shape, self.chunk_map);
+            chunk_task.light = light.task_for(key, data_shape);
         }
 
         let mesh_map = self.mesh_cache.get_mesh_map();
