@@ -13,7 +13,7 @@ use crate::prelude::VoxelWorldConfig;
 #[derive(Component)]
 pub(crate) struct MeshRef(pub Arc<Handle<Mesh>>);
 
-type WeakMeshMap = WeakValueHashMap<u64, Weak<Handle<Mesh>>>;
+pub(crate) type WeakMeshMap = WeakValueHashMap<u64, Weak<Handle<Mesh>>>;
 
 // TODO: Refactor this out of MeshCache. This is a bit of an afterthough, since user bundles are added via
 // the meshing delegate function, which only runs if there's no chached mesh for the chunk. Hence the need
