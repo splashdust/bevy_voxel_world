@@ -8,6 +8,12 @@
 // calculation. A shader without PBR can use `sky_brightness` and
 // `voxel_brightness` instead.
 //
+// Light is read from a face's position and normal alone, so it reaches any
+// mesh: a cube face reads the voxel in front of it, and a face off the voxel
+// grid the 8 voxels around the point in front of it (see `sample_light`).
+// A custom vertex shader outputs what the crate's do: the centroid-sampled
+// local position at location 9, the local normal at 10 and the flat tag at 11.
+//
 // The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
 // chunk's slot in the texture: 34 texels a side, the chunk's voxels in its
 // padded local coordinates, with texel rows along z. Without it, bits 0-7 hold
@@ -142,12 +148,110 @@ fn smoothed_read(origin: vec3<i32>, front: vec3<f32>, axis: vec3<f32>) -> vec2<f
     );
 }
 
+// Which of the 8 voxels of a 2x2x2 block in `mask` are joined to those in
+// `start` through voxels in `mask`, by faces. Bit i is the voxel at
+// (i & 1, (i >> 1) & 1, (i >> 2) & 1) of the block.
+fn joined_to(mask: u32, start: u32) -> u32 {
+    var reached = start;
+    // No voxel of the block is more than 3 steps from another.
+    for (var i = 0; i < 3; i++) {
+        let next = ((reached & 0x55u) << 1u) | ((reached & 0xAAu) >> 1u)
+            | ((reached & 0x33u) << 2u) | ((reached & 0xCCu) >> 2u)
+            | ((reached & 0x0Fu) << 4u) | ((reached & 0xF0u) >> 4u);
+        reached |= next & mask;
+    }
+    return reached;
+}
+
+// One channel of a 2x2x2 block of voxels, from each voxel's level and weight.
+// A zero reads as a wall and is left out, and a voxel counts only if it's
+// joined through counted voxels to `nearest`, the voxel of the most weight,
+// which joins its neighbours even when it reads zero. Smoothed light takes the
+// weighted mean of the counted voxels, and stepped light the nearest of them.
+fn blend_eight(levels: array<f32, 8>, weights: array<f32, 8>, nearest: u32) -> f32 {
+    // Copies, since a function's arguments can't be indexed by a variable.
+    var l = levels;
+    var w = weights;
+    var lit = 0u;
+    for (var i = 0u; i < 8u; i++) {
+        if l[i] > 0.01 && w[i] > 0.0 {
+            lit |= 1u << i;
+        }
+    }
+    let counted = joined_to(lit | nearest, nearest) & lit;
+    if counted == 0u {
+        return 0.0;
+    }
+    var total = 0.0;
+    var weight = 0.0;
+    var best = 0.0;
+    var best_level = 0.0;
+    for (var i = 0u; i < 8u; i++) {
+        if (counted & (1u << i)) != 0u {
+            total += l[i] * w[i];
+            weight += w[i];
+            if w[i] > best {
+                best = w[i];
+                best_level = l[i];
+            }
+        }
+    }
+    if light_look.smoothed == 0u {
+        return best_level;
+    }
+    return total / weight;
+}
+
+// The sky and voxel light at `front`, read from the 8 voxels around it,
+// weighted by their distance from it, for a face off the grid.
+fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
+    let q = front - vec3<f32>(0.5);
+    let base = floor(q);
+    var t = q - base;
+    // A point within rounding of a voxel's centre plane reads only the voxels
+    // on that plane.
+    let near = round(t);
+    t = select(t, near, abs(t - near) < vec3<f32>(0.001));
+    var weights: array<f32, 8>;
+    var sky: array<f32, 8>;
+    var voxel: array<f32, 8>;
+    var nearest = 0u;
+    var most = -1.0;
+    for (var i = 0u; i < 8u; i++) {
+        let o = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
+        let along = mix(vec3<f32>(1.0) - t, t, vec3<f32>(o));
+        let w = along.x * along.y * along.z;
+        weights[i] = w;
+        if w > most {
+            most = w;
+            nearest = 1u << i;
+        }
+        if w > 0.0 {
+            let cell = load_cell(origin, vec3<i32>(base) + vec3<i32>(o));
+            sky[i] = cell.x;
+            voxel[i] = cell.y;
+        }
+    }
+    return vec2<f32>(
+        blend_eight(sky, weights, nearest),
+        blend_eight(voxel, weights, nearest),
+    );
+}
+
 // The light a chunk face sees, from the chunk's tag and the face's position
 // and normal in the chunk's padded local coordinates.
 //
 // A face on the grid, with its normal on an axis and its position on a plane
-// between voxels, reads the voxel in front of it, at `local + normal / 2`.
-// Any other face reads the voxel there alone.
+// between voxels, reads the voxel in front of it, at `local + normal / 2`,
+// and with smoothed light its three nearest neighbours in the face's plane.
+// Any other face, such as a slope, may cut into a solid voxel, so the voxel
+// at `local + normal / 2` may be solid. It reads the 8 voxels around that
+// point instead, leaving out those with no light and those not joined to the
+// nearest of the 8. On a cube face that would read the same as the read on
+// the grid, which costs less.
+//
+// The normal is divided by its length, with a floor, since a mesher's normals
+// can interpolate through zero, as across the top of a wall one voxel thick.
 fn sample_light(tag: u32, local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
     if (tag & HAS_SLOT) == 0u {
         let voxel = f32((tag >> 4u) & 15u);
@@ -163,7 +267,9 @@ fn sample_light(tag: u32, local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
     let on_grid = max(axis.x, max(axis.y, axis.z)) >= 0.999
         && abs(along - round(along)) <= 0.01;
     var levels: vec2<f32>;
-    if on_grid && light_look.smoothed == 1u {
+    if !on_grid {
+        levels = eight_read(origin, front);
+    } else if light_look.smoothed == 1u {
         levels = smoothed_read(origin, front, axis);
     } else {
         levels = load_cell(origin, vec3<i32>(floor(front))).xy;

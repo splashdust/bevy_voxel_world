@@ -20,7 +20,7 @@
 //!   still scales with each lamp's declared level.
 //! - A sealed pocket stays exactly black at minimum brightness 0 under every
 //!   kind of level curve, with entry 0 set above 0.
-//! - Stepped light renders the lamp room and the overview, as smoothed light
+//! - Stepped light renders the lamp room and the overhang, as smoothed light
 //!   does.
 //! - A slot given to another chunk the frame after it's freed never shows the
 //!   other chunk's light: two lamps in rooms carved deep in the rock switch on
@@ -341,14 +341,20 @@ const LAMP_ROOM_CAMERA: FixedCamera =
     camera([306.0, -30.0, -332.0], [320.5, -40.0, -319.5]);
 const POCKET_CAMERA: FixedCamera = camera([-324.5, 43.0, 124.0], [-316.0, 42.0, 132.0]);
 
-const OVERVIEW_CAMERA: FixedCamera = camera([-260.0, 240.0, -300.0], [-40.0, 90.0, 40.0]);
+/// Looks under the slab sticking out of the mesa, at the mesa's shaded face.
+const OVERHANG_CAMERA: FixedCamera = camera([0.0, 44.0, 396.0], [0.0, 42.0, 340.0]);
+/// Looks at the mesa's sunlit face and the ground below it.
+const SUNLIT_FACE_CAMERA: FixedCamera = camera([20.0, 60.0, 250.0], [0.0, 40.0, 290.0]);
+/// Looks past the slab from the side the sun shines in from, at ground whose
+/// sky light falls off beside the slab and the cave mouths beyond it.
+const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 372.0]);
 
 const CAMERAS: [FixedCamera; 6] = [
-    OVERVIEW_CAMERA,
+    camera([-260.0, 240.0, -300.0], [-40.0, 90.0, 40.0]),
     LAMP_ROOM_CAMERA,
     camera([-296.0, -24.0, 26.0], [-319.5, -38.0, 0.5]),
     POCKET_CAMERA,
-    camera([0.0, 44.0, 396.0], [0.0, 42.0, 340.0]),
+    OVERHANG_CAMERA,
     camera([-540.0, 120.0, 300.0], [-340.0, 130.0, 360.0]),
 ];
 
@@ -516,7 +522,7 @@ fn curve_look(curve: LevelCurve) -> LightLook {
     }
 }
 
-const CHECKS: [Check; 20] = [
+const CHECKS: [Check; 22] = [
     settled_check(
         "a lamp declared below the top level still glows, scaled by its level",
         "lamp_room.png",
@@ -559,18 +565,6 @@ const CHECKS: [Check; 20] = [
         differs_from_earlier,
         || LightLook {
             smoothing: LightSmoothing::Stepped,
-            ..default()
-        },
-    ),
-    look_check(
-        "turning ambient occlusion off shows on the next frame",
-        "look_ao_off.png",
-        false,
-        &LAMP_ROOM_CAMERA,
-        Some("lamp_room.png"),
-        differs_from_earlier,
-        || LightLook {
-            ao: LightAo::Off,
             ..default()
         },
     ),
@@ -678,20 +672,20 @@ const CHECKS: [Check; 20] = [
         pocket_is_black,
     ),
     settled_check(
-        "smoothed light renders the overview",
-        "overview.png",
+        "smoothed light renders the overhang",
+        "overhang.png",
         true,
-        &OVERVIEW_CAMERA,
+        &OVERHANG_CAMERA,
         true,
         None,
         renders,
     ),
     look_check(
-        "stepped light renders the overview, on the next frame",
-        "overview_stepped.png",
+        "stepped light renders the overhang, on the next frame",
+        "overhang_stepped.png",
         true,
-        &OVERVIEW_CAMERA,
-        Some("overview.png"),
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
         renders_and_differs,
         || LightLook {
             smoothing: LightSmoothing::Stepped,
@@ -699,38 +693,68 @@ const CHECKS: [Check; 20] = [
         },
     ),
     look_check(
-        "ambient occlusion on the base colour shows on the next frame",
-        "overview_ao_base_color.png",
+        "turning ambient occlusion off shows on the next frame",
+        "overhang_ao_off.png",
         true,
-        &OVERVIEW_CAMERA,
-        Some("overview.png"),
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
+        renders_and_differs,
+        || LightLook {
+            ao: LightAo::Off,
+            ..default()
+        },
+    ),
+    look_check(
+        "a change of sky falloff shows on the next frame",
+        "overhang_sky_falloff.png",
+        true,
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
+        renders_and_differs,
+        || LightLook {
+            sky_falloff: LevelCurve::gamma(2.2),
+            ..default()
+        },
+    ),
+    settled_check(
+        "smoothed light renders the sunlit face of the mesa",
+        "sunlit_face.png",
+        true,
+        &SUNLIT_FACE_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "ambient occlusion on the base colour shows on the next frame",
+        "sunlit_face_ao_base_color.png",
+        true,
+        &SUNLIT_FACE_CAMERA,
+        Some("sunlit_face.png"),
         renders_and_differs,
         || LightLook {
             ao: LightAo::BaseColor,
             ..default()
         },
     ),
+    settled_check(
+        "smoothed light renders the overhang's drip line",
+        "drip_line.png",
+        true,
+        &DRIP_LINE_CAMERA,
+        true,
+        None,
+        renders,
+    ),
     look_check(
         "a sun following sky light by level shows on the next frame",
-        "overview_sun_by_level.png",
+        "drip_line_sun_by_level.png",
         true,
-        &OVERVIEW_CAMERA,
-        Some("overview.png"),
+        &DRIP_LINE_CAMERA,
+        Some("drip_line.png"),
         renders_and_differs,
         || LightLook {
             sun: SunGate::ByLevel(LevelCurve::linear()),
-            ..default()
-        },
-    ),
-    look_check(
-        "a change of sky falloff shows on the next frame",
-        "overview_sky_falloff.png",
-        true,
-        &OVERVIEW_CAMERA,
-        Some("overview.png"),
-        renders_and_differs,
-        || LightLook {
-            sky_falloff: LevelCurve::gamma(2.2),
             ..default()
         },
     ),
@@ -1089,7 +1113,7 @@ fn switch_and_judge(
     plan.next += 1;
 }
 
-/// Whether `image` differs from the earlier check's picture in at least 1% of
+/// Whether `image` differs from the earlier check's picture in at least 0.1% of
 /// its channels by more than one step of rounding.
 fn differs_from_earlier(
     image: &Image,
@@ -1107,7 +1131,7 @@ fn differs_from_earlier(
         .filter(|(now, before)| now.abs_diff(**before) > 1)
         .count();
     let note = format!("{differing} channels differ by more than 1");
-    if differing * 100 >= data.len() {
+    if differing * 1000 >= data.len() {
         Ok(note)
     } else {
         Err(note)

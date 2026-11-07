@@ -100,7 +100,7 @@ fn settled(world: LampWorld) -> App {
     let mut last = work_done(&app);
     update_until(&mut app, "the world's light to settle", |app| {
         let now = work_done(app);
-        if now == last && light_is_settled(app) {
+        if now == last && light_is_settled(app) && every_chunk_ready(app) {
             quiet_frames += 1;
         } else {
             quiet_frames = 0;
@@ -112,6 +112,23 @@ fn settled(world: LampWorld) -> App {
 }
 
 type LitMaterial = VoxelWorldMaterial<DefaultVoxelMaterial>;
+
+/// Whether every spawned chunk is ready, so no chunk task is left to land
+/// light.
+fn every_chunk_ready(app: &mut App) -> bool {
+    let keys: Vec<ChunkKey> = app
+        .world_mut()
+        .query::<&Chunk<LampWorld>>()
+        .iter(app.world())
+        .map(|chunk| chunk.key())
+        .collect();
+    app.world_mut()
+        .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
+            keys.iter()
+                .all(|key| voxel_world.chunk_state(*key) == Some(ChunkStatus::Ready))
+        })
+        .unwrap()
+}
 
 fn light_is_settled(app: &mut App) -> bool {
     app.world_mut()
