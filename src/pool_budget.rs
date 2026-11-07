@@ -24,6 +24,9 @@ pub(crate) enum JobKind {
     /// A relight of a chunk's light, in a world with light propagation.
     #[cfg(feature = "light_propagation")]
     Relight,
+    /// A sky probe, in a world with light propagation.
+    #[cfg(feature = "light_propagation")]
+    SkyProbe,
     Chunk,
     /// A stand-in for a second kind of job, in tests.
     #[cfg(test)]
@@ -32,7 +35,7 @@ pub(crate) enum JobKind {
 
 impl JobKind {
     const COUNT: usize =
-        1 + cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
+        1 + 2 * cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
 
     fn index(self) -> usize {
         self as usize
@@ -102,6 +105,13 @@ impl<C> PoolBudget<C> {
     fn running_target(&self) -> usize {
         let finished: usize = self.finished_last_frame.iter().sum();
         (2 * finished).max(MIN_TASKS_PER_THREAD * self.threads())
+    }
+
+    /// How many task pool threads no job of any kind keeps busy.
+    #[cfg(feature = "light_propagation")]
+    pub fn idle(&self) -> usize {
+        let running: usize = self.running.iter().sum();
+        self.threads().saturating_sub(running)
     }
 
     /// Whether another job of `kind` may start with at most `cap` of its kind

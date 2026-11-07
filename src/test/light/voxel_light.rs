@@ -1,7 +1,7 @@
 //! Tests of voxel light from emissive voxels at LOD level 0, read through
 //! `light_at`. Sky light is off in all of them.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,12 @@ pub(super) type Hints = Arc<dyn Fn(IVec3) -> FillHint + Send + Sync>;
 pub(super) struct Hold {
     pub chunk: IVec3,
     pub released: AtomicBool,
+    /// Whether the lookups held are those inside the chunk position, made by
+    /// sky probes and by walks of the chunks below, instead of its chunk
+    /// task's padding.
+    pub inside: bool,
+    /// How many lookups have waited on the hold.
+    pub waited: AtomicU32,
 }
 
 static HOLDING: Mutex<()> = Mutex::new(());
@@ -41,6 +47,18 @@ impl Hold {
         Arc::new(Self {
             chunk,
             released: AtomicBool::new(false),
+            inside: false,
+            waited: AtomicU32::new(0),
+        })
+    }
+
+    /// Holds back every lookup of a voxel inside the chunk position `chunk`
+    /// made for that position: its sky probes and the walks through it of the
+    /// chunks below. The position must not spawn a chunk.
+    pub fn inside(chunk: IVec3) -> Arc<Self> {
+        Arc::new(Self {
+            inside: true,
+            ..Arc::into_inner(Self::new(chunk)).unwrap()
         })
     }
 
@@ -57,6 +75,7 @@ impl Hold {
     }
 
     fn wait(&self) {
+        self.waited.fetch_add(1, Ordering::AcqRel);
         let deadline = Instant::now() + Duration::from_secs(20);
         while !self.released.load(Ordering::Acquire) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
@@ -126,7 +145,7 @@ impl VoxelWorldConfig for LampWorld {
                 // chunk below reads only voxels inside the chunks above it, so
                 // holding back the padding holds back the chunk's task alone.
                 let inside = position.div_euclid(IVec3::splat(32)) == chunk;
-                if let (Some(hold), false) = (&hold, inside) {
+                if let Some(hold) = hold.as_ref().filter(|hold| hold.inside == inside) {
                     hold.wait();
                 }
                 scene(position)

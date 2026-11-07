@@ -63,6 +63,9 @@ const MAX_FRAMES: u32 = 5000;
 const MANY_RUNS: usize = 9;
 const RUNS: usize = 5;
 const IDLE_FRAMES: usize = 2000;
+/// Frames a lit world is left at rest to check that its light starts no work.
+#[cfg(feature = "light_propagation")]
+const IDLE_LIGHT_FRAMES: usize = 200;
 const FLY_FRAMES: usize = 1200;
 /// Camera speed in voxels per second of wall-clock time, just under the speed
 /// `stream_in` can keep up with.
@@ -215,6 +218,71 @@ impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         BenchWorld::<TERRAIN, false>.voxel_lookup_delegate()
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+}
+
+/// The sine terrain streamed out to `LOD_SPAWNING_DISTANCE` chunks in four
+/// levels of detail, lit with the default light settings, with fill hints
+/// for the rock below and the air above it when `HINTED`. Its scenarios
+/// report what coarse chunks' light costs, and gate nothing yet.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct LodWorld<const HINTED: bool>;
+
+#[cfg(feature = "light_propagation")]
+const LOD_SPAWNING_DISTANCE: u32 = 48;
+
+#[cfg(feature = "light_propagation")]
+impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        LOD_SPAWNING_DISTANCE
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        SineWorld::default().voxel_lookup_delegate()
+    }
+
+    fn chunk_lod(
+        &self,
+        chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        camera_position: Vec3,
+    ) -> LodLevel {
+        let camera_chunk = (camera_position / 32.0).floor();
+        match chunk_position.as_vec3().distance(camera_chunk) {
+            distance if distance < 4.0 => 0,
+            distance if distance < 10.0 => 1,
+            distance if distance < 24.0 => 2,
+            _ => 3,
+        }
+    }
+
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        // The terrain lies within 16 voxels of y = 0.
+        if !HINTED {
+            FillHint::Unknown
+        } else if key.position.y + key.extent() <= -1 {
+            FillHint::Uniform(WorldVoxel::Solid(1))
+        } else if key.position.y >= 1 {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else {
+            FillHint::Unknown
+        }
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
@@ -586,12 +654,30 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics
 }
 
-/// `stream_in` on the world with lamps, lit, with what solving its light
-/// cost: in chunk tasks and relight tasks on the pool, against the same chunks
-/// solved one after another on one thread, and on the main thread landing
-/// light and starting relights.
+#[cfg(feature = "light_propagation")]
+fn light_is_settled<C: VoxelWorldConfig>(app: &mut App) -> bool {
+    let mut state = SystemState::<VoxelWorld<C>>::new(app.world_mut());
+    state.get(app.world()).unwrap().light_is_settled()
+}
+
+/// Runs frames after a stream until the world's light is settled. Returns how
+/// long that took, in milliseconds.
+#[cfg(feature = "light_propagation")]
+fn settle_light<C: VoxelWorldConfig>(app: &mut App) -> f64 {
+    let start = Instant::now();
+    for _ in 0..MAX_FRAMES {
+        if light_is_settled::<C>(app) {
+            break;
+        }
+        app.update();
+    }
+    assert!(light_is_settled::<C>(app), "light didn't settle");
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 /// `stream_in` on a lit world, with what working out its direct sky and
-/// solving its light cost in chunk tasks.
+/// solving its light cost in chunk tasks, and how long sky probes take to
+/// bring its light to rest after the stream. Light at rest starts no work.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,
@@ -600,8 +686,37 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 
     let mut app = build_app(C::default());
     let result = stream_in::<C>(&mut app);
+    let streamed = light_stats::<C>(app.world()).expect("a lit world");
+    let rest_ms = settle_light::<C>(&mut app);
     let stats = light_stats::<C>(app.world()).expect("a lit world");
+    for _ in 0..IDLE_LIGHT_FRAMES {
+        app.update();
+    }
+    let idle = light_stats::<C>(app.world()).expect("a lit world");
     let mut metrics = Metrics::new();
+    metrics.insert(format!("{prefix}.rest_ms"), rest_ms);
+    metrics.insert(format!("{prefix}.probes_in_stream"), streamed.probes as f64);
+    metrics.insert(format!("{prefix}.probes"), stats.probes as f64);
+    metrics.insert(
+        format!("{prefix}.probe_lookups"),
+        stats.probe_lookups as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.probes_discarded"),
+        stats.probes_discarded as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.record_kib"),
+        stats.record_bytes as f64 / 1024.0,
+    );
+    metrics.insert(
+        format!("{prefix}.idle_probes"),
+        (idle.probes - stats.probes) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.idle_relights"),
+        (idle.relights - stats.relights) as f64,
+    );
     metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
     metrics.insert(format!("{prefix}.near_time_ms"), result.near_time_ms);
     metrics.insert(format!("{prefix}.frames"), result.frames as f64);
@@ -625,6 +740,59 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics
 }
 
+/// `stream_in` on a world with levels of detail, with what coarse chunks'
+/// light cost: their solves in chunk tasks, their walks' lookups, the slots
+/// they took and the copies of their slots they keep.
+///
+/// The cost gate for a coarse chunk's solve, walk included, is 250 µs a
+/// chunk in `coarse_solve_us_per_chunk`, set from the first runs in real
+/// chunk tasks at about 150 µs. It's checked by hand; nothing compares it.
+#[cfg(feature = "light_propagation")]
+fn scenario_stream_in_lod<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
+    prefix: &str,
+) -> Metrics {
+    use bevy_voxel_world::light_bench::light_stats;
+
+    let mut app = build_app(C::default());
+    let result = stream_in::<C>(&mut app);
+    let stats = light_stats::<C>(app.world()).expect("a lit world");
+    let coarse = stats.coarse_solves.max(1) as f64;
+    let mut metrics = Metrics::new();
+    metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
+    metrics.insert(
+        format!("{prefix}.chunks"),
+        chunk_count::<C>(&mut app) as f64,
+    );
+    metrics.insert(format!("{prefix}.solves"), stats.solves as f64);
+    metrics.insert(
+        format!("{prefix}.coarse_solves"),
+        stats.coarse_solves as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.coarse_solve_us_per_chunk"),
+        stats.coarse_solve_ms * 1000.0 / coarse,
+    );
+    metrics.insert(
+        format!("{prefix}.coarse_lookups_per_chunk"),
+        stats.coarse_lookups as f64 / coarse,
+    );
+    metrics.insert(
+        format!("{prefix}.slot_allocations"),
+        stats.slot_allocations as f64,
+    );
+    metrics.insert(format!("{prefix}.evictions"), stats.evictions as f64);
+    metrics.insert(
+        format!("{prefix}.coarse_copy_mib"),
+        stats.coarse_copy_bytes as f64 / (1024.0 * 1024.0),
+    );
+    frame_metrics(prefix, &result.frame_times, &mut metrics);
+    metrics
+}
+
+/// `stream_in` on the world with lamps, lit, with what solving its light
+/// cost: in chunk tasks and relight tasks on the pool, against the same chunks
+/// solved one after another on one thread, and on the main thread landing
+/// light and starting relights.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lamps() -> Metrics {
     use bevy_voxel_world::light_bench::{light_stats, solve_published_serially};
@@ -634,6 +802,8 @@ fn scenario_stream_in_lamps() -> Metrics {
     let mut metrics = scenario_stream_in::<Lit>(prefix);
     let mut app = build_app(Lit::default());
     stream_in::<Lit>(&mut app);
+    let rest_ms = settle_light::<Lit>(&mut app);
+    metrics.insert(format!("{prefix}.rest_ms"), rest_ms);
     let stats = light_stats::<Lit>(app.world()).expect("a lit world");
     let (serial_solves, serial_ms) = solve_published_serially::<Lit>(app.world());
     metrics.insert(format!("{prefix}.solves"), stats.solves as f64);
@@ -862,6 +1032,14 @@ fn run_all(only: Option<&str>) -> Metrics {
     #[cfg(feature = "light_propagation")]
     step("stream_in_flat_lit", RUNS, &|| {
         scenario_stream_in_lit::<LitBenchWorld<FLAT>>("stream_in_flat_lit")
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lod", RUNS, &|| {
+        scenario_stream_in_lod::<LodWorld<false>>("stream_in_lod")
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lod_hinted", RUNS, &|| {
+        scenario_stream_in_lod::<LodWorld<true>>("stream_in_lod_hinted")
     });
     metrics
 }

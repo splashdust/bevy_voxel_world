@@ -10,6 +10,8 @@ use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, Floor
 use crate::prelude::*;
 
 #[cfg(feature = "light_propagation")]
+mod coarse;
+#[cfg(feature = "light_propagation")]
 mod look;
 #[cfg(feature = "light_propagation")]
 mod materials;
@@ -21,6 +23,8 @@ mod relights;
 mod route;
 #[cfg(feature = "light_propagation")]
 mod sky_light;
+#[cfg(feature = "light_propagation")]
+mod sky_record;
 #[cfg(feature = "light_propagation")]
 mod slots;
 #[cfg(feature = "light_propagation")]

@@ -22,9 +22,16 @@
 //! 2. Fill hints of the chunk positions above it: a `Uniform` air hint counts
 //!    as clear and a `Uniform` solid hint as blocked, with no lookups. A hint
 //!    is ignored for a chunk position holding voxel edits.
-//! 3. A walk upward a row at a time through the world's voxel lookups, if the
-//!    walk budget can carry every open column through at least one chunk's
-//!    height. Otherwise the task skips it.
+//! 3. The [sky record](super::record): the masks of the positions above it the
+//!    world has already seen, read when the task starts.
+//! 4. A walk upward a row at a time through the world's voxel lookups, over
+//!    the positions the hints and the record leave unknown, if the walk budget
+//!    can carry every open column through at least one chunk's height.
+//!    Otherwise the task skips it.
+//!
+//! When the chunk lands, its answer is checked against the record again, which
+//! may have learned more meanwhile. Columns still unsettled then wait for
+//! [sky probes](super::probe).
 //!
 //! A column with a solid proved above it gets no direct sky. Every other
 //! column is provisional and gets direct sky until something proves otherwise,
@@ -128,35 +135,50 @@ impl SkyRule {
 
 /// What a fill hint says about a chunk position above a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Hinted {
+pub(crate) enum Hinted {
     Unknown,
     Air,
     Solid,
 }
 
+impl Hinted {
+    /// What `hint` says, or `Unknown` for a chunk position voxel edits reach.
+    pub fn of<I: Copy + PartialEq>(hint: FillHint<I>, edited: bool) -> Self {
+        match hint {
+            _ if edited => Hinted::Unknown,
+            FillHint::Unknown => Hinted::Unknown,
+            FillHint::Uniform(voxel) if voxel.is_solid() => Hinted::Solid,
+            FillHint::Uniform(_) => Hinted::Air,
+        }
+    }
+}
+
 /// A chunk position above a chunk, as its walk reads it.
 pub(crate) struct Above<I> {
     hinted: Hinted,
+    /// The position's columns holding a solid, from the sky record.
+    recorded: Option<Columns>,
     /// The voxel edits in the position, read before the world's lookups.
     edits: Option<Arc<HashMap<IVec3, WorldVoxel<I>>>>,
 }
 
 impl<I> Above<I> {
-    /// The position with fill hint `hint` and voxel edits `edits`. A hint is
-    /// ignored where there are edits.
+    /// The position with fill hint `hint`, its mask `recorded` in the sky
+    /// record, and voxel edits `edits`. A hint is ignored where there are
+    /// edits.
     pub fn new(
         hint: FillHint<I>,
+        recorded: Option<Columns>,
         edits: Option<Arc<HashMap<IVec3, WorldVoxel<I>>>>,
     ) -> Self
     where
         I: Copy + PartialEq,
     {
-        let hinted = match (hint, &edits) {
-            (_, Some(_)) | (FillHint::Unknown, _) => Hinted::Unknown,
-            (FillHint::Uniform(voxel), None) if voxel.is_solid() => Hinted::Solid,
-            (FillHint::Uniform(_), None) => Hinted::Air,
-        };
-        Self { hinted, edits }
+        Self {
+            hinted: Hinted::of(hint, edits.is_some()),
+            recorded,
+            edits,
+        }
     }
 }
 
@@ -171,6 +193,27 @@ pub(crate) struct SkyWalk<I> {
     /// budget, lowest first.
     pub above: Vec<Above<I>>,
     pub delegate: VoxelLookupDelegate<I>,
+    /// What the main thread needs to check the answer when the chunk lands.
+    pub found: SkyFound,
+}
+
+/// What a chunk task found out about its columns besides its column answer,
+/// so that the main thread can check the answer against the sky record when
+/// the chunk lands.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SkyFound {
+    /// The columns open in the chunk's padding row above it.
+    pub open: Columns,
+    /// By position above the chunk, lowest first, whether the answer takes
+    /// in its voxels: from a fill hint, the sky record or a walk.
+    pub known: Vec<bool>,
+    /// The edit count of each position above the chunk when the task
+    /// started.
+    pub edits: Vec<u64>,
+    /// The edit count of the chunk's own position when the task started.
+    pub own_edits: u64,
+    /// The sky record's generation when the task started.
+    pub generation: u64,
 }
 
 /// How many positions above a chunk a walk can reach within its budget.
@@ -188,54 +231,69 @@ pub(crate) struct WalkCounters {
 }
 
 impl<I: Copy + PartialEq> SkyWalk<I> {
-    /// The column answer of `chunk`, the level-0 chunk the walk is for.
-    pub fn answer(self, chunk: &ChunkData<I>, counters: &WalkCounters) -> ColumnAnswer {
+    /// The column answer of `chunk`, the level-0 chunk the walk is for, and
+    /// what was found on the way.
+    pub fn answer(
+        mut self,
+        chunk: &ChunkData<I>,
+        counters: &WalkCounters,
+    ) -> (ColumnAnswer, SkyFound) {
+        let mut found = std::mem::take(&mut self.found);
+        found.known = vec![false; self.above.len()];
         if self.window == 0 {
-            return ColumnAnswer::all_proved();
+            found.open = [!0; CHUNK];
+            return (ColumnAnswer::all_proved(), found);
         }
-        let mut open = padding_row(chunk);
-        if open.iter().all(|column| *column == 0) {
-            return ColumnAnswer::none();
-        }
-
-        let fully_hinted = self.above.len() as u32 == self.window;
+        found.open = padding_row(chunk);
+        let mut open = found.open;
         if self.above.iter().any(|above| above.hinted == Hinted::Solid) {
-            return ColumnAnswer::none();
+            return (ColumnAnswer::none(), found);
         }
-        if fully_hinted && self.above.iter().all(|above| above.hinted == Hinted::Air) {
-            return ColumnAnswer {
-                sky: open,
-                provisional: [0; CHUNK],
-            };
+        for (known, above) in found.known.iter_mut().zip(&self.above) {
+            if let Some(recorded) = &above.recorded {
+                for (open, solid) in open.iter_mut().zip(recorded) {
+                    *open &= !solid;
+                }
+            }
+            *known = above.hinted == Hinted::Air || above.recorded.is_some();
+        }
+        if open.iter().all(|column| *column == 0) {
+            return (ColumnAnswer::none(), found);
+        }
+        let complete = self.above.len() as u32 == self.window;
+        if complete && found.known.iter().all(|known| *known) {
+            return (proved(open), found);
         }
 
         let open_count: u32 = open.iter().map(|column| column.count_ones()).sum();
         if open_count * CHUNK_SIZE_U > WALK_BUDGET {
-            return ColumnAnswer {
-                sky: open,
-                provisional: open,
-            };
+            return (provisional(open), found);
         }
         counters.walks.fetch_add(1, Ordering::Relaxed);
-        let (proved, lookups) = self.walk(&mut open);
+        let (blocked, lookups) = self.walk(&mut open, &mut found.known);
         counters
             .lookups
             .fetch_add(lookups as u64, Ordering::Relaxed);
-        ColumnAnswer {
-            sky: open,
-            provisional: if proved { [0; CHUNK] } else { open },
-        }
+        let answer = if blocked || complete && found.known.iter().all(|known| *known) {
+            proved(open)
+        } else {
+            provisional(open)
+        };
+        (answer, found)
     }
 
-    /// Walks the columns still set in `open` upward a row at a time, clearing
-    /// each one a solid blocks, until every column is blocked, the window ends
-    /// or the budget runs out. Returns whether the columns left open were
-    /// proved clear, and how many lookups it made.
-    fn walk(&self, open: &mut Columns) -> (bool, u32) {
+    /// Walks the columns still set in `open` upward a row at a time through
+    /// the positions not yet `known`, clearing each column a solid blocks,
+    /// until every column is blocked, the window ends or the budget runs out.
+    /// Marks each position it walks through whole as known.
+    ///
+    /// Returns whether every column was blocked, and how many lookups it
+    /// made.
+    fn walk(&self, open: &mut Columns, known: &mut [bool]) -> (bool, u32) {
         let mut budget = WALK_BUDGET;
         let mut lookups = 0;
         for (index, above) in self.above.iter().enumerate() {
-            if above.hinted == Hinted::Air {
+            if known[index] {
                 continue;
             }
             let position = self.position + IVec3::new(0, index as i32 + 1, 0);
@@ -269,13 +327,30 @@ impl<I: Copy + PartialEq> SkyWalk<I> {
                     return (true, lookups);
                 }
             }
+            known[index] = true;
         }
-        (self.above.len() as u32 == self.window, lookups)
+        (false, lookups)
+    }
+}
+
+/// The answer for the columns `sky`, each proved clear.
+pub(crate) fn proved(sky: Columns) -> ColumnAnswer {
+    ColumnAnswer {
+        sky,
+        provisional: [0; CHUNK],
+    }
+}
+
+/// The answer for the columns `sky`, none of them proved clear yet.
+pub(crate) fn provisional(sky: Columns) -> ColumnAnswer {
+    ColumnAnswer {
+        sky,
+        provisional: sky,
     }
 }
 
 /// The columns whose voxel in the chunk's padding row above it is open.
-fn padding_row<I: Copy + PartialEq>(chunk: &ChunkData<I>) -> Columns {
+pub(crate) fn padding_row<I: Copy + PartialEq>(chunk: &ChunkData<I>) -> Columns {
     match (&chunk.fill_type, &chunk.voxels) {
         (FillType::Empty, _) => [!0; CHUNK],
         (FillType::Uniform(voxel), _) => {

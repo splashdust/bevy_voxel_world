@@ -19,7 +19,7 @@ use crate::prelude::*;
 
 /// Sky light under `sky` at `sky_reach`, with sky fill off, and voxel light at
 /// the default voxel reach.
-fn sky_light(sky: Sky, sky_reach: u8) -> LightPropagation {
+pub(super) fn sky_light(sky: Sky, sky_reach: u8) -> LightPropagation {
     LightPropagation {
         sky,
         sky_reach,
@@ -64,7 +64,7 @@ fn shaft_world(light: LightPropagation) -> LampWorld {
     }
 }
 
-fn light_is_settled(app: &mut App) -> bool {
+pub(super) fn light_is_settled(app: &mut App) -> bool {
     app.world_mut()
         .run_system_once(|voxel_world: VoxelWorld<LampWorld>| {
             voxel_world.light_is_settled()
@@ -73,7 +73,7 @@ fn light_is_settled(app: &mut App) -> bool {
 }
 
 /// The level-0 chunks spawned in `app`.
-fn spawned(app: &mut App) -> Vec<IVec3> {
+pub(super) fn spawned(app: &mut App) -> Vec<IVec3> {
     chunk_keys::<LampWorld>(app)
         .into_iter()
         .filter(|key| key.lod_level == 0)
@@ -82,7 +82,7 @@ fn spawned(app: &mut App) -> Vec<IVec3> {
 }
 
 /// Whether every spawned chunk but `held` is Ready and light has settled.
-fn settled_but(app: &mut App, held: Option<IVec3>) -> bool {
+pub(super) fn settled_but(app: &mut App, held: Option<IVec3>) -> bool {
     let chunks = spawned(app);
     !chunks.is_empty()
         && chunks
@@ -95,7 +95,7 @@ fn settled_but(app: &mut App, held: Option<IVec3>) -> bool {
 }
 
 /// An app of `world` run until every chunk is Ready and light has settled.
-fn settled(world: LampWorld) -> App {
+pub(super) fn settled(world: LampWorld) -> App {
     let mut app = app(world);
     update_until(&mut app, "the world to settle", |app| {
         settled_but(app, None)
@@ -103,13 +103,16 @@ fn settled(world: LampWorld) -> App {
     app
 }
 
-fn levels(app: &mut App, position: IVec3) -> LightLevels {
+pub(super) fn levels(app: &mut App, position: IVec3) -> LightLevels {
     light_at(app, position).unwrap_or_else(|| panic!("no light at {position}"))
 }
 
 /// The light of every voxel of the level-0 chunk at `chunk`, or `None` if it
 /// has none published.
-fn chunk_light(app: &mut App, chunk: IVec3) -> Option<Vec<(IVec3, LightLevels)>> {
+pub(super) fn chunk_light(
+    app: &mut App,
+    chunk: IVec3,
+) -> Option<Vec<(IVec3, LightLevels)>> {
     app.world_mut()
         .run_system_once(
             move |settings: Res<LightSettings<LampWorld>>,
@@ -134,7 +137,7 @@ fn chunk_light(app: &mut App, chunk: IVec3) -> Option<Vec<(IVec3, LightLevels)>>
         .unwrap()
 }
 
-fn walk_lookups(app: &App) -> u64 {
+pub(super) fn walk_lookups(app: &App) -> u64 {
     app.world()
         .resource::<LightSettings<LampWorld>>()
         .counters()
@@ -348,7 +351,7 @@ fn a_fill_hint_settles_columns_with_no_lookups_and_never_changes_light() {
 // --- Ground truth ---------------------------------------------------------------
 
 /// The chunks around the origin, where the camera is.
-fn around_origin() -> Vec<IVec3> {
+pub(super) fn around_origin() -> Vec<IVec3> {
     (-1..=1)
         .flat_map(|z| {
             (-1..=1).flat_map(move |y| (-1..=1).map(move |x| IVec3::new(x, y, z)))

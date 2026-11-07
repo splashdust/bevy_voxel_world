@@ -5,7 +5,7 @@ use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::voxel::WorldVoxel;
 
 use super::kernel::Plane;
-use super::sky::ColumnAnswer;
+use super::sky::{ColumnAnswer, Columns};
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 const PADDED: usize = PADDED_CHUNK_SIZE as usize;
@@ -38,6 +38,24 @@ impl Occupancy {
     pub fn has_open_voxel(&self) -> bool {
         !matches!(self, Occupancy::Solid)
     }
+
+    /// Which of the chunk's columns along y hold a solid voxel, as the sky
+    /// record keeps them.
+    pub fn solid_columns(&self) -> Columns {
+        match self {
+            Occupancy::Open => [0; CHUNK],
+            Occupancy::Solid => [!0; CHUNK],
+            Occupancy::Mixed(columns) => {
+                let mut solid = [0; CHUNK];
+                for row in columns.as_chunks::<CHUNK>().0 {
+                    for (x, column) in row.iter().enumerate() {
+                        solid[x] |= column;
+                    }
+                }
+                solid
+            }
+        }
+    }
 }
 
 /// An emissive voxel of a chunk: where it is in the chunk, and its level.
@@ -55,6 +73,11 @@ pub(crate) struct LightInputs {
     pub occupancy: Occupancy,
     pub emissive: Vec<EmissiveVoxel>,
     /// Which columns sky light enters at the chunk's top.
+    ///
+    /// Its `sky` is kept current. Its `provisional` is as of the last time
+    /// `sky` changed: columns proved clear since are tracked by the world's
+    /// [`SkyProbes`](super::probe::SkyProbes), which don't replace a chunk's
+    /// inputs when only that changes.
     pub columns: ColumnAnswer,
 }
 
@@ -139,6 +162,15 @@ impl LightInputs {
 }
 
 impl LightInputs {
+    /// These inputs with the column answer `columns`.
+    pub fn with_columns(&self, columns: ColumnAnswer) -> Self {
+        Self {
+            occupancy: self.occupancy.clone(),
+            emissive: self.emissive.clone(),
+            columns,
+        }
+    }
+
     /// The chunk's voxels with direct sky, as a [`Plane`]: in each column its
     /// answer lets sky light into, the open voxels from the chunk's top down
     /// to the first solid voxel. `None` if no voxel has direct sky.

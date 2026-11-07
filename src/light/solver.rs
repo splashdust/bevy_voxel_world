@@ -35,7 +35,7 @@ use super::faces::{could_reach_sooner, Face, FaceHashes};
 use super::inputs::{LightInputs, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
-use super::sky::{ColumnAnswer, SkyWalk, WalkCounters};
+use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
 use super::view::{LightView, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -140,6 +140,20 @@ pub(crate) struct LightCounters {
     /// nanoseconds.
     pub column_nanos: AtomicU64,
     pub walks: WalkCounters,
+    /// Sky probes started.
+    pub probes: AtomicU64,
+    /// Voxel lookups sky probes made.
+    pub probe_lookups: AtomicU64,
+    /// Sky probes whose mask was thrown away, because their position was
+    /// edited while they ran or the sky record was emptied.
+    pub probes_discarded: AtomicU64,
+    /// Coarse chunks solved, in their chunk tasks.
+    pub coarse_solves: AtomicU64,
+    /// Time coarse chunk tasks spent solving light, walks included, in
+    /// nanoseconds.
+    pub coarse_nanos: AtomicU64,
+    /// Voxel lookups coarse chunks' walks made.
+    pub coarse_lookups: AtomicU64,
 }
 
 /// The 3×3×3 chunk positions around a chunk, at
@@ -166,6 +180,9 @@ pub(crate) struct Solved {
     /// The bytes of the chunk's slot, in a world showing its light, for a
     /// chunk whose own voxels already call for a slot.
     pub bytes: Option<Box<[u8]>>,
+    /// What a chunk task found out about the chunk's columns, with sky light
+    /// on. A relight finds nothing.
+    pub sky: Option<SkyFound>,
 }
 
 /// A chunk task's part in solving light: the world's settings, its world view
@@ -182,17 +199,17 @@ impl<I: Copy + PartialEq> LightTask<I> {
     /// a level-0 chunk with the default data shape.
     pub fn solve(self, chunk: &ChunkData<I>) -> Solved {
         let settings = &self.settings;
-        let columns = match self.walk {
+        let (columns, found) = match self.walk {
             Some(walk) => {
                 let started = Instant::now();
-                let columns = walk.answer(chunk, &settings.counters.walks);
+                let (columns, found) = walk.answer(chunk, &settings.counters.walks);
                 settings
                     .counters
                     .column_nanos
                     .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                columns
+                (columns, Some(found))
             }
-            None => ColumnAnswer::none(),
+            None => (ColumnAnswer::none(), None),
         };
         let (inputs, scanned) = LightInputs::of(chunk, &settings.emission, columns);
         if scanned {
@@ -202,7 +219,9 @@ impl<I: Copy + PartialEq> LightTask<I> {
                 .fetch_add(1, Ordering::Relaxed);
         }
         let snapshot = read_snapshot(&self.view, chunk.key.position, settings);
-        solve(snapshot, Arc::new(inputs), settings)
+        let mut solved = solve(snapshot, Arc::new(inputs), settings);
+        solved.sky = found;
+        solved
     }
 }
 
@@ -286,6 +305,7 @@ fn solve<I>(
         reaches,
         own,
         bytes,
+        sky: None,
     }
 }
 

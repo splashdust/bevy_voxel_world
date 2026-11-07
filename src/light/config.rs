@@ -154,8 +154,19 @@ pub struct LightPropagation {
     /// Shows on the next frame. See [`LightLook`] for its defaults.
     pub look: LightLook,
 
-    /// The most memory, in bytes, the world keeps about which columns are open
-    /// to the sky.
+    /// The most memory, in bytes, the world keeps in its sky record: which
+    /// columns of each chunk position it has seen hold a solid voxel.
+    ///
+    /// A chunk reads the record to know which of its columns sky light enters
+    /// without looking up the voxels above it again, so a chunk spawning
+    /// again under positions the record holds gets its direct sky right on
+    /// its first publish. Past the cap, the least recently used positions are
+    /// forgotten. Forgetting costs only time, never different light: a
+    /// forgotten position is looked up again when a chunk needs it.
+    ///
+    /// A mixed position takes about 192 bytes, and a position that is all air
+    /// or has a solid in every column about 64. Values below 3 KiB are
+    /// raised to it with a warning.
     ///
     /// A limit. Defaults to 16 MiB.
     pub sky_record_cap: usize,
@@ -201,6 +212,15 @@ impl LightPropagation {
                 "light propagation: a sky clearance of 0 chunks is below 1, using 1"
             );
             config.sky = Sky::Clearance { chunks: 1 };
+        }
+        if config.sky_record_cap < super::record::MIN_CAP {
+            warn_once!(
+                "light propagation: sky_record_cap {} is below {}, using {}",
+                config.sky_record_cap,
+                super::record::MIN_CAP,
+                super::record::MIN_CAP
+            );
+            config.sky_record_cap = super::record::MIN_CAP;
         }
         config.sky_fill = config.sky_fill.map(|fill| match fill {
             SkyFill::Paths(paths) => SkyFill::Paths(paths.clamped()),

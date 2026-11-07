@@ -44,6 +44,15 @@
 //! voxels touching its solids, so it loses its shadows and its lamps' glow;
 //! it takes a slot again when one comes free.
 //!
+//! A coarse chunk (see [`coarse`](super::coarse)) takes a slot on the same
+//! rule from its own cells, and its shell holds its own padding cells. Its
+//! tag with a slot also carries its LOD level in bits 24–27. It keeps a copy
+//! of its slot's bytes while it holds one, so `light_at` can read its cells.
+//! When it gives way to a nearer chunk it drops the copy and shows the
+//! brightest level a tenth of its faces see, and it takes no slot again until
+//! its chunk task runs again, since a coarse chunk that a camera nears is
+//! split into finer chunks anyway.
+//!
 //! The render world writes queued bytes into the slot's part of the texture
 //! during the frame they were extracted with, so the mesh, the tag and the
 //! light show in the same frame. A slot freed and given to another chunk is
@@ -75,14 +84,16 @@ use bevy::render::{
 };
 use std::hash::BuildHasher;
 
+use super::coarse::takes_coarse_path;
 use super::config::LightPropagation;
 use super::faces::Face;
+use super::slot::cell_index;
 use super::slot::{
     across, border_plane, most_common, shell_cell, slot_bytes, write_shell, FacesSee,
     Seen, ShellPlane, PLANE_BYTES,
 };
 use super::solver::{ChannelLight, ChunkLight};
-use crate::chunk::Chunk;
+use crate::chunk::{Chunk, ChunkKey};
 use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_U};
 use crate::configuration::VoxelWorldConfig;
 
@@ -91,6 +102,10 @@ pub(crate) const SLOT_SIDE: u32 = CHUNK_SIZE_U + 2;
 
 /// The tag bit of a chunk with a slot.
 pub(crate) const HAS_SLOT: u32 = 1 << 31;
+
+/// The lowest of the tag bits holding a coarse chunk's LOD level when it has
+/// a slot.
+const LOD_SHIFT: u32 = 24;
 
 /// The levels of a chunk with no slot, as the low byte of its tag.
 fn tag_levels(sky: u8, voxel: u8) -> u8 {
@@ -165,6 +180,32 @@ struct RouteChunk {
     tag: u32,
 }
 
+/// A coarse chunk the route knows of.
+struct CoarseChunk {
+    key: ChunkKey,
+    shown: bool,
+    /// What its tag holds without a slot.
+    levels: u8,
+    /// Its slot's bytes: kept until it's shown, and as a copy while it holds
+    /// a slot.
+    bytes: Option<Box<[u8]>>,
+    slot: Option<u32>,
+    tag: u32,
+}
+
+impl CoarseChunk {
+    fn new(key: ChunkKey, levels: u8) -> Self {
+        Self {
+            key,
+            shown: false,
+            levels,
+            bytes: None,
+            slot: None,
+            tag: levels as u32,
+        }
+    }
+}
+
 /// World `C`'s light texture and the slots in it. Only a lit world that shows
 /// its light has one.
 #[derive(Resource)]
@@ -185,6 +226,7 @@ pub(crate) struct LightRoute<C> {
     free: Vec<u32>,
     holders: HashMap<u32, Entity>,
     chunks: EntityHashMap<RouteChunk>,
+    coarse: EntityHashMap<CoarseChunk>,
     /// The chunk at each level-0 position whose light has landed.
     at: HashMap<IVec3, Entity>,
     /// Chunks needing a slot that have none.
@@ -225,6 +267,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             free: Vec::new(),
             holders: HashMap::default(),
             chunks: EntityHashMap::default(),
+            coarse: EntityHashMap::default(),
             at: HashMap::default(),
             starved: EntityHashSet::default(),
             uploads: HashMap::default(),
@@ -349,14 +392,24 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
-    /// The tag of the chunk `entity` as its mesh is shown, placing light that
-    /// landed for it meanwhile. `position` is its level-0 position, or `None`
-    /// for a chunk above level 0, which gets the levels of a chunk with no
-    /// light, as does one whose light hasn't landed.
-    fn show(&mut self, entity: Entity, position: Option<IVec3>) -> u32 {
-        let Some(position) = position else {
-            return self.unlit_levels as u32;
-        };
+    /// The tag of the chunk `entity` with `key` as its mesh is shown, placing
+    /// light that landed for it meanwhile. A chunk whose light hasn't landed
+    /// gets the levels of a chunk with no light. `coarse` says whether it's a
+    /// coarse chunk.
+    fn show(&mut self, entity: Entity, key: ChunkKey, coarse: bool) -> u32 {
+        if coarse {
+            let unlit = self.unlit_levels;
+            let chunk = self
+                .coarse
+                .entry(entity)
+                .or_insert_with(|| CoarseChunk::new(key, unlit));
+            if !chunk.shown {
+                chunk.shown = true;
+                self.settle_coarse(entity);
+            }
+            return self.coarse[&entity].tag;
+        }
+        let position = key.position;
         let unlit = self.unlit_levels as u32;
         let chunk = self
             .chunks
@@ -372,6 +425,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Forgets the despawned chunk `entity`, freeing its slot. Its
     /// neighbours' shells keep its last planes.
     pub fn forget(&mut self, entity: Entity) {
+        if let Some(chunk) = self.coarse.remove(&entity) {
+            if let Some(slot) = chunk.slot {
+                self.free_slot(slot);
+            }
+            return;
+        }
         let Some(chunk) = self.chunks.remove(&entity) else {
             return;
         };
@@ -381,6 +440,90 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.starved.remove(&entity);
         if let Some(slot) = chunk.slot {
             self.free_slot(slot);
+        }
+    }
+
+    /// Takes the light that landed for the coarse chunk `entity` with `key`:
+    /// the levels its tag holds without a slot, and its slot's bytes if it
+    /// needs one.
+    pub fn coarse_landed(
+        &mut self,
+        entity: Entity,
+        key: ChunkKey,
+        levels: u8,
+        bytes: Option<Box<[u8]>>,
+    ) {
+        let unlit = self.unlit_levels;
+        let chunk = self
+            .coarse
+            .entry(entity)
+            .or_insert_with(|| CoarseChunk::new(key, unlit));
+        chunk.levels = levels;
+        chunk.bytes = bytes;
+        self.settle_coarse(entity);
+    }
+
+    /// The byte of the slot of the coarse chunk `entity` at `cell`, in padded
+    /// cell coordinates, while it holds a slot.
+    pub fn coarse_cell(&self, entity: Entity, cell: UVec3) -> Option<u8> {
+        let chunk = self.coarse.get(&entity)?;
+        chunk.slot?;
+        Some(chunk.bytes.as_ref()?[cell_index(cell)])
+    }
+
+    /// The bytes coarse chunks keep as copies of their slots.
+    pub fn coarse_copy_bytes(&self) -> usize {
+        self.coarse
+            .values()
+            .filter(|chunk| chunk.slot.is_some())
+            .filter_map(|chunk| chunk.bytes.as_ref())
+            .map(|bytes| bytes.len())
+            .sum()
+    }
+
+    /// Brings the shown coarse chunk `entity`'s slot and tag in line with its
+    /// light. One with bytes takes a slot if it can, and otherwise drops them
+    /// and shows its levels.
+    fn settle_coarse(&mut self, entity: Entity) {
+        let Some(chunk) = self.coarse.get(&entity) else {
+            return;
+        };
+        if !chunk.shown {
+            return;
+        }
+        let (key, wants_slot, held) = (chunk.key, chunk.bytes.is_some(), chunk.slot);
+        let slot = match (wants_slot, held) {
+            (true, Some(slot)) => Some(slot),
+            (true, None) => self.take_slot(entity, self.distance_to(key.centre())),
+            (false, held) => {
+                if let Some(slot) = held {
+                    self.free_slot(slot);
+                    self.counters.given_back += 1;
+                }
+                None
+            }
+        };
+        let chunk = self.coarse.get_mut(&entity).unwrap();
+        chunk.slot = slot;
+        let tag = match slot {
+            Some(slot) => {
+                let bytes = chunk
+                    .bytes
+                    .clone()
+                    .expect("a chunk taking a slot has bytes");
+                self.uploads.insert(slot, Upload::Full(bytes));
+                self.counters.full_writes += 1;
+                HAS_SLOT | (key.lod_level as u32) << LOD_SHIFT | slot
+            }
+            None => {
+                chunk.bytes = None;
+                chunk.levels as u32
+            }
+        };
+        let chunk = self.coarse.get_mut(&entity).unwrap();
+        if chunk.tag != tag {
+            chunk.tag = tag;
+            self.changed_tags.push((entity, tag));
         }
     }
 
@@ -426,7 +569,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .across
             .iter()
             .fold(chunk.own, |sees, across| sees.join(*across));
-        let slot = chunk.slot;
+        let (slot, position) = (chunk.slot, chunk.position);
         self.starved.remove(&entity);
         let tag = if sees.needs_slot() {
             match (slot, face) {
@@ -438,8 +581,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     self.write_full(entity, slot, &light);
                     HAS_SLOT | slot
                 }
-                (None, _) => match self.take_slot(entity) {
+                (None, _) => match self.take_slot(entity, self.distance(position)) {
                     Some(slot) => {
+                        self.chunks.get_mut(&entity).unwrap().slot = Some(slot);
                         if face.is_some() {
                             self.counters.late_allocations += 1;
                         }
@@ -521,9 +665,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
-    /// A slot for the chunk `entity`: a free one, or one taken from the
-    /// holder farthest from the cameras if it's farther than this chunk.
-    fn take_slot(&mut self, entity: Entity) -> Option<u32> {
+    /// A slot for the chunk `entity`, `near` from the cameras: a free one, or
+    /// one taken from the holder farthest from the cameras if it's farther
+    /// than this chunk.
+    fn take_slot(&mut self, entity: Entity, near: f32) -> Option<u32> {
         if self.slots_per_axis.is_none() {
             let (capacity, axes) = texture_shape(self.capacity, self.max_side);
             if capacity < self.capacity {
@@ -543,17 +688,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.next_slot += 1;
                 self.next_slot - 1
             }
-            None => self.evict_for(entity)?,
+            None => self.evict_for(near)?,
         };
         self.holders.insert(slot, entity);
-        self.chunks.get_mut(&entity).unwrap().slot = Some(slot);
         self.counters.allocations += 1;
         Some(slot)
     }
 
     /// Takes the slot of the holder farthest from the cameras, if it's
-    /// farther than the chunk `entity`, falling it back to flat light.
-    fn evict_for(&mut self, entity: Entity) -> Option<u32> {
+    /// farther than `near`, falling it back to flat light.
+    fn evict_for(&mut self, near: f32) -> Option<u32> {
         if !self.warned_full {
             self.warned_full = true;
             warn!(
@@ -563,18 +707,23 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.capacity
             );
         }
-        let near = self.distance(self.chunks[&entity].position);
         let (slot, holder, far) = self
             .holders
             .iter()
-            .map(|(slot, holder)| {
-                (*slot, *holder, self.distance(self.chunks[holder].position))
-            })
+            .map(|(slot, holder)| (*slot, *holder, self.holder_distance(*holder)))
             .max_by(|a, b| a.2.total_cmp(&b.2))?;
         if far <= near {
             return None;
         }
         self.holders.remove(&slot);
+        self.counters.evictions += 1;
+        if let Some(chunk) = self.coarse.get_mut(&holder) {
+            chunk.slot = None;
+            chunk.bytes = None;
+            chunk.tag = chunk.levels as u32;
+            self.changed_tags.push((holder, chunk.tag));
+            return Some(slot);
+        }
         let chunk = self.chunks.get_mut(&holder).unwrap();
         chunk.slot = None;
         let light = chunk.light.clone();
@@ -585,7 +734,6 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         chunk.tag = tag;
         self.changed_tags.push((holder, tag));
         self.starved.insert(holder);
-        self.counters.evictions += 1;
         Some(slot)
     }
 
@@ -608,10 +756,22 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// How far the middle of the level-0 chunk at `position` is from the
     /// nearest camera.
     fn distance(&self, position: IVec3) -> f32 {
-        let middle = (position.as_vec3() + 0.5) * CHUNK_SIZE_F;
+        self.distance_to((position.as_vec3() + 0.5) * CHUNK_SIZE_F)
+    }
+
+    /// How far the slot holder `holder` is from the nearest camera.
+    fn holder_distance(&self, holder: Entity) -> f32 {
+        match self.coarse.get(&holder) {
+            Some(chunk) => self.distance_to(chunk.key.centre()),
+            None => self.distance(self.chunks[&holder].position),
+        }
+    }
+
+    /// How far `point` is from the nearest camera.
+    fn distance_to(&self, point: Vec3) -> f32 {
         self.cameras
             .iter()
-            .map(|camera| camera.distance(middle))
+            .map(|camera| camera.distance(point))
             .fold(f32::INFINITY, f32::min)
     }
 
@@ -658,15 +818,16 @@ fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> u32 {
 pub(crate) fn tag_chunk<C: VoxelWorldConfig>(chunk: &mut EntityCommands) {
     chunk.queue(|mut chunk: EntityWorldMut| {
         let entity = chunk.id();
-        let position = chunk
-            .get::<Chunk<C>>()
-            .map(|chunk| chunk.key())
-            .filter(|key| key.lod_level == 0)
-            .map(|key| key.position);
+        let Some((key, coarse)) = chunk.get::<Chunk<C>>().map(|chunk| {
+            let key = chunk.key();
+            (key, takes_coarse_path(key, chunk.data_shape()))
+        }) else {
+            return;
+        };
         chunk.world_scope(|world| {
             world.resource_scope::<LightRoute<C>, _>(|world, mut route| {
                 route.set_device(world.get_resource::<RenderDevice>());
-                let tag = route.show(entity, position);
+                let tag = route.show(entity, key, coarse);
                 for (changed, tag) in route.take_changed_tags() {
                     if let Ok(mut changed) = world.get_entity_mut(changed) {
                         changed.insert(MeshTag::new(tag));
