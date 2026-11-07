@@ -32,12 +32,13 @@ use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
 use super::fill::{cell_bit, open_cells, CELL};
+use super::hinted::air_inputs;
 use super::inputs::LightInputs;
 use super::probe::SkyProbes;
 use super::relight::LightWork;
 use super::sky::{walkable, Columns, Hinted, SkyRule};
 use super::solver::ChunkLight;
-use super::view::ViewChunk;
+use super::view::{ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::ChunkRequests;
@@ -64,7 +65,7 @@ const STEPS: [IVec3; 6] = [
     IVec3::NEG_Z,
 ];
 
-type View = HashMap<IVec3, ViewChunk>;
+type View = ViewMaps;
 
 /// Takes this frame's committed voxel edits into the light of world `C`, and
 /// triggers the relights they call for.
@@ -162,6 +163,25 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     for (position, voxels) in &by_chunk {
         let count = edits.edit_count(*position);
         let before = count - voxels.len() as u64;
+        if view.is_air(*position) {
+            // Hinted air's voxels are its hint with the edits over them.
+            let old = view.air[position].inputs.clone();
+            let air = air_inputs(*position, &edits, emission, old.columns.clone());
+            for p in voxels {
+                let local = local(*p);
+                if old.occupancy.is_solid(local.x, local.y, local.z)
+                    != voxel(*p).is_solid()
+                {
+                    columns.push((*position, local.x, local.z));
+                }
+            }
+            old_occupancy.insert(*position, old.occupancy.solid_columns());
+            view.air.insert(*position, air);
+            relight.insert(*position);
+            current.insert(*position);
+            work.fill_touch(*position);
+            continue;
+        }
         let chunk = view.get_mut(position).filter(|chunk| chunk.edits == before);
         let Some(chunk) = chunk else {
             // The chunk's next chunk task works out its inputs.
@@ -218,6 +238,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         });
         chunk.edits = count;
         current.insert(*position);
+        work.hinted_touch(*position);
     }
 
     // The sky record, and the direct sky of the chunks below.
@@ -244,7 +265,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             // tells: at an unloaded position the record doesn't hold, its
             // voxels are left for a sky probe to look up.
             let blocked = if current.contains(position) {
-                Some(column_blocked_in(&view[position].light.inputs, *x, *z))
+                Some(column_blocked_in(view.inputs(*position).unwrap(), *x, *z))
             } else if placed {
                 Some(true)
             } else if mask.is_some() {
@@ -273,7 +294,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         for (position, mask) in &masks {
             let count = edits.edit_count(*position);
             if current.contains(position) {
-                let occupancy = &view[position].light.inputs.occupancy;
+                let occupancy = &view.inputs(*position).unwrap().occupancy;
                 let open = record.keeps_cells().then(|| open_cells(occupancy));
                 record.insert(*position, &occupancy.solid_columns(), open, count);
             } else if let Some(mask) = mask {
@@ -304,6 +325,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             if let Some(chunk) = view.get(&above).filter(|chunk| chunk.edits == count) {
                 return Some(column_blocked_in(&chunk.light.inputs, x, z));
             }
+            if let Some(air) = view.air.get(&above).filter(|air| air.edits == count) {
+                return Some(column_blocked_in(&air.inputs, x, z));
+            }
             if let Some(mask) = settings.record.lock().unwrap().get(above, count) {
                 return Some(mask[x] >> z & 1 == 1);
             }
@@ -327,11 +351,14 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 if k > 1 && status(&view, below + IVec3::Y, x, z) == Some(true) {
                     break;
                 }
-                let Some(chunk) = view.get(&below) else {
-                    continue;
+                let (entity, inputs) = match view.get(&below) {
+                    Some(chunk) => (chunk.entity, &chunk.light.inputs),
+                    None => match view.air.get(&below) {
+                        Some(air) => (ENTRY, &air.inputs),
+                        None => continue,
+                    },
                 };
-                let entity = chunk.entity;
-                let answer = &chunk.light.inputs.columns;
+                let answer = &inputs.columns;
                 let has_sky = answer.sky[x] >> z & 1 == 1;
                 let new = if blocked {
                     if !has_sky {
@@ -366,14 +393,21 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                         reachable == window,
                     )
                 };
-                let chunk = view.get_mut(&below).unwrap();
-                let light = &chunk.light;
-                chunk.light = std::sync::Arc::new(ChunkLight {
-                    inputs: std::sync::Arc::new(light.inputs.with_columns(new)),
-                    sky: light.sky.clone(),
-                    voxel: light.voxel.clone(),
-                    precision: light.precision,
-                });
+                match view.get_mut(&below) {
+                    Some(chunk) => {
+                        let light = &chunk.light;
+                        chunk.light = std::sync::Arc::new(ChunkLight {
+                            inputs: std::sync::Arc::new(light.inputs.with_columns(new)),
+                            sky: light.sky.clone(),
+                            voxel: light.voxel.clone(),
+                            precision: light.precision,
+                        });
+                    }
+                    None => {
+                        let air = view.air.get_mut(&below).unwrap();
+                        air.inputs = std::sync::Arc::new(air.inputs.with_columns(new));
+                    }
+                }
                 work.fill_touch(below);
                 if quiet {
                     relight.insert(below);
@@ -385,10 +419,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     drop(view);
 
+    // Hinted air holding no light entry passes its relight on.
     for position in relight {
-        if work.has_light(position) {
-            work.trigger_urgent(position);
-        }
+        work.trigger_urgent(position);
     }
     work.add_edit_time(started);
 }
@@ -426,10 +459,15 @@ fn touches_light(view: &View, p: IVec3, solid: bool) -> bool {
 }
 
 /// Whether the open voxel at `p` holds light in either channel, or `None` if
-/// it is solid or its chunk isn't in the view.
+/// it is solid or its chunk isn't in the view. An open voxel of hinted air
+/// holding no light entry may hold light, which nothing keeps.
 fn open_light(view: &View, p: IVec3) -> Option<bool> {
-    let chunk = view.get(&chunk_containing(p))?;
     let local = local(p);
+    let Some(chunk) = view.get(&chunk_containing(p)) else {
+        let air = view.air.get(&chunk_containing(p))?;
+        return (!air.inputs.occupancy.is_solid(local.x, local.y, local.z))
+            .then_some(true);
+    };
     let light = &chunk.light;
     if light.inputs.occupancy.is_solid(local.x, local.y, local.z) {
         return None;
@@ -442,11 +480,11 @@ fn open_light(view: &View, p: IVec3) -> Option<bool> {
 
 /// Whether the voxel at `p` is emissive.
 fn emits(view: &View, p: IVec3) -> bool {
-    let Some(chunk) = view.get(&chunk_containing(p)) else {
+    let Some(inputs) = view.inputs(chunk_containing(p)) else {
         return false;
     };
     let local = local(p);
-    chunk.light.inputs.emissive.iter().any(|emitter| {
+    inputs.emissive.iter().any(|emitter| {
         (emitter.x as usize, emitter.y as usize, emitter.z as usize)
             == (local.x, local.y, local.z)
     })

@@ -41,6 +41,11 @@
 //! again from its published voxels and voxel edits, and the chunks around it
 //! relight if they changed.
 //!
+//! Light entries, the light of hinted air beside loaded solids, relight like
+//! chunks. A relight that would go on into hinted air holding no light entry
+//! passes on through it to the chunks beside it: see
+//! [`hinted`](super::hinted).
+//!
 //! A chunk that retires relights nothing, unless it had provisional columns.
 //! Its neighbours keep the light it gave them, which was the truth while it
 //! was loaded, and their next solve reads it as solid. A chunk with provisional
@@ -63,6 +68,7 @@ use futures_lite::future;
 use super::coarse::CoarseSolved;
 use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
+use super::hinted::{self, passes_into_air};
 use super::inputs::Rescan;
 use super::levels::LevelScale;
 use super::levels::LightLevels;
@@ -71,7 +77,7 @@ use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
 use super::solver::{relight, ChunkLight, KeptLight, Solved};
-use super::view::{LightView, ViewChunk};
+use super::view::{AirInputs, LightView, ViewChunk, ENTRY};
 use super::{LightSettings, SolvedLight};
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::{ChunkState, ChunkStateOf};
@@ -138,6 +144,15 @@ struct Running {
     version: u64,
 }
 
+/// What a chunk retiring leaves for light at its position.
+enum Left {
+    Nothing,
+    /// A light entry, keeping the chunk's light.
+    Entry(Arc<ChunkLight>),
+    /// Hinted air holding no light entry.
+    Air,
+}
+
 /// A chunk's light that changed as it landed, for the shader.
 struct LandedLight {
     position: IVec3,
@@ -193,6 +208,16 @@ pub(crate) struct LightWork<C> {
     /// Main-thread time this frame's voxel edits spent, in nanoseconds,
     /// which landing takes off its budget.
     edit_nanos: u64,
+    /// The world view, where relights find the hinted air they pass on
+    /// through.
+    pub view: LightView,
+    /// Chunks that landed, retired or had voxels edited since hinted air was
+    /// last looked at, around which light entries may be made or dropped:
+    /// see [`hinted::follow`](super::hinted::follow).
+    hinted_touched: Vec<IVec3>,
+    /// Light entries whose first solve hasn't landed. It changes no inputs,
+    /// so it ripples to no neighbour.
+    fresh: HashSet<IVec3>,
     _world: PhantomData<C>,
 }
 
@@ -216,6 +241,9 @@ impl<C> Default for LightWork<C> {
             clock: 0,
             frame_nanos: 0,
             edit_nanos: 0,
+            view: LightView::default(),
+            hinted_touched: Vec::new(),
+            fresh: HashSet::new(),
             _world: PhantomData,
         }
     }
@@ -296,7 +324,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
-    /// Marks the chunk at `position` for a relight, if it has light.
+    /// Marks the chunk or light entry at `position` for a relight, if it has
+    /// light. Hinted air with no light entry passes the relight on to the
+    /// chunks around it.
     pub fn trigger(&mut self, position: IVec3) {
         self.trigger_as(position, false);
     }
@@ -309,7 +339,18 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     }
 
     fn trigger_as(&mut self, position: IVec3, urgent: bool) {
+        self.trigger_from(position, position, urgent);
+    }
+
+    /// Marks the chunk or light entry at `position` for a relight, as
+    /// [`trigger_as`](Self::trigger_as) does. Where `position` is hinted air
+    /// holding no light entry, the relight passes on through it instead,
+    /// within the 3×3×3 around `origin`: see [`pass_on`](Self::pass_on).
+    fn trigger_from(&mut self, position: IVec3, origin: IVec3, urgent: bool) {
         let Some(chunk) = self.chunks.get_mut(&position) else {
+            if self.view.read().is_air(position) {
+                self.pass_on(position, origin, urgent);
+            }
             return;
         };
         chunk.urgent |= urgent;
@@ -322,6 +363,100 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             }
             LightState::Relighting { .. } => LightState::Relighting { dirty: true },
         };
+    }
+
+    /// Passes a relight on through the hinted air at `air`, which holds no
+    /// light entry: the chunks and light entries beside it relight instead,
+    /// and beside any such air it touches, within the 3×3×3 around `origin`,
+    /// where the change that started the relight is.
+    ///
+    /// Light crosses hinted air, but such air holds no light to compare, so a
+    /// relight can't stop there. A change at `origin` can't reach a chunk
+    /// past the 3×3×3 around it, whose boxes reach no further.
+    pub fn pass_on(&mut self, air: IVec3, origin: IVec3, urgent: bool) {
+        let within = |position: IVec3| (position - origin).abs().max_element() <= 1;
+        let mut relight = Vec::new();
+        {
+            let view = self.view.read();
+            let mut seen = HashSet::from([air]);
+            let mut next = vec![air];
+            while let Some(position) = next.pop() {
+                for face in Face::ALL {
+                    let beside = position + face.offset();
+                    if !within(beside) || !seen.insert(beside) {
+                        continue;
+                    }
+                    if view.is_air(beside) {
+                        next.push(beside);
+                    } else if self.chunks.contains_key(&beside) {
+                        relight.push(beside);
+                    }
+                }
+            }
+        }
+        for position in relight {
+            self.trigger_as(position, urgent);
+        }
+    }
+
+    /// Adds a light entry at `position`, which the world view now holds, and
+    /// queues its first solve.
+    pub fn add_entry(&mut self, position: IVec3) {
+        self.chunks.insert(
+            position,
+            LightChunk {
+                entity: ENTRY,
+                state: LightState::Clean,
+                urgent: false,
+            },
+        );
+        self.fresh.insert(position);
+        self.fill_touch(position);
+        self.trigger(position);
+    }
+
+    /// Forgets the light entry at `position`, which the world view no longer
+    /// holds.
+    pub fn forget_entry(&mut self, position: IVec3) {
+        if self
+            .chunks
+            .get(&position)
+            .is_some_and(|chunk| chunk.entity == ENTRY)
+        {
+            self.chunks.remove(&position);
+            self.queue.remove(&position);
+            self.settings_queue.remove(&position);
+            self.fill_queue.remove(&position);
+            self.held.remove(&position);
+            self.fresh.remove(&position);
+            self.fill_touch(position);
+        }
+    }
+
+    /// Whether the light entry at `position` is still there, so light solved
+    /// for it lands.
+    fn has_entry(&self, position: IVec3) -> bool {
+        self.chunks
+            .get(&position)
+            .is_some_and(|chunk| chunk.entity == ENTRY)
+    }
+
+    /// The version the next light to land in the world view gets.
+    pub fn next_version(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock - 1
+    }
+
+    /// The chunks that landed, retired or had voxels edited since this was
+    /// last called, around which hinted air changes.
+    pub fn take_hinted_touched(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.hinted_touched)
+    }
+
+    /// Notes that the voxels of the chunk at `position` changed, so light
+    /// entries around it may be made or dropped.
+    pub fn hinted_touch(&mut self, position: IVec3) {
+        self.hinted_touched.push(position);
     }
 
     /// Marks the chunk at `position` for a relight after a settings change,
@@ -440,6 +575,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             new_voxels: source == Source::ChunkTask,
         };
         let mut triggers = Vec::new();
+        // Hinted air beside an arriving chunk that its light passes on into.
+        let mut passes = Vec::new();
         {
             let mut view = view.write();
             match source {
@@ -452,6 +589,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     {
                         return None;
                     }
+                    // A light entry's first solve changes no inputs a
+                    // neighbour reads, so it ripples nowhere.
+                    let fresh = self.fresh.remove(&position);
                     if solved.rescanned.is_none()
                         && chunk.light.same_levels(&solved.light)
                     {
@@ -460,7 +600,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         return None;
                     }
                     for face in Face::ALL {
-                        if chunk.faces.differs_at(&solved.faces, face) {
+                        if !fresh && chunk.faces.differs_at(&solved.faces, face) {
                             triggers.push(position + face.offset());
                         }
                     }
@@ -488,9 +628,20 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     let old = view
                         .insert(position, new)
                         .filter(|old| old.entity == entity);
+                    view.air.remove(&position);
                     for face in Face::ALL {
-                        let Some(neighbour) = view.get(&(position + face.offset()))
-                        else {
+                        let beside = position + face.offset();
+                        if view.is_air(beside) {
+                            if passes_into_air(
+                                &solved.light,
+                                &view.air[&beside].inputs,
+                                face,
+                            ) {
+                                passes.push(beside);
+                            }
+                            continue;
+                        }
+                        let Some(neighbour) = view.get(&beside) else {
                             continue;
                         };
                         let index = face as usize;
@@ -534,6 +685,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             if let Some(chunk) = self.chunks.get_mut(&position) {
                 if chunk.entity != entity {
                     self.positions.remove(&chunk.entity);
+                    self.fresh.remove(&position);
                     self.queue.remove(&position);
                     self.settings_queue.remove(&position);
                     self.fill_queue.remove(&position);
@@ -551,9 +703,13 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             });
             self.positions.insert(entity, position);
             self.fill_touch(position);
+            self.hinted_touch(position);
         }
-        for position in triggers {
-            self.trigger_as(position, urgent);
+        for target in triggers {
+            self.trigger_from(target, position, urgent);
+        }
+        for air in passes {
+            self.pass_on(air, position, urgent);
         }
         if source == Source::ChunkTask && old_settings {
             self.trigger_settings(position);
@@ -652,8 +808,18 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     /// Forgets the despawned chunk `entity`: its light state, its queued
     /// relight and its entry in the world view. Relights nothing. Returns
-    /// where the chunk was, if it had light.
-    fn forget(&mut self, entity: Entity, view: &LightView) -> Option<IVec3> {
+    /// where the chunk was, if it had light, and what it left there.
+    ///
+    /// A chunk in hinted air, as `hinted_air` tells, leaves its voxels for the
+    /// solves around it, which are the hint's: a light entry with its light
+    /// where a loaded chunk's solid touches it, otherwise its inputs as
+    /// hinted air.
+    fn forget(
+        &mut self,
+        entity: Entity,
+        view: &LightView,
+        hinted_air: impl Fn(IVec3) -> bool,
+    ) -> Option<(IVec3, Left)> {
         self.landing.retain(|landing| landing.entity != entity);
         self.held.retain(|_, landing| landing.entity != entity);
         self.kept_landing.retain(|(_, held, _)| *held != entity);
@@ -661,25 +827,57 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.coarse_landing.retain(|(_, held, _)| *held != entity);
         self.coarse.remove(&entity);
         let position = self.positions.remove(&entity)?;
+        let mut clean = true;
         if self
             .chunks
             .get(&position)
             .is_some_and(|chunk| chunk.entity == entity)
         {
-            self.chunks.remove(&position);
+            clean = self.chunks.remove(&position).unwrap().state == LightState::Clean;
             self.queue.remove(&position);
             self.settings_queue.remove(&position);
             self.fill_queue.remove(&position);
         }
         self.fill_touch(position);
+        self.hinted_touch(position);
         let mut view = view.write();
-        if view
+        if !view
             .get(&position)
             .is_some_and(|chunk| chunk.entity == entity)
         {
-            view.remove(&position);
+            return Some((position, Left::Nothing));
         }
-        Some(position)
+        if !hinted_air(position) {
+            view.remove(&position);
+            return Some((position, Left::Nothing));
+        }
+        if hinted::touched(&view, position) {
+            let chunk = view.get_mut(&position).unwrap();
+            chunk.entity = ENTRY;
+            let light = chunk.light.clone();
+            self.chunks.insert(
+                position,
+                LightChunk {
+                    entity: ENTRY,
+                    state: LightState::Clean,
+                    urgent: false,
+                },
+            );
+            // Its relight was cut short with the chunk.
+            if !clean {
+                self.trigger(position);
+            }
+            return Some((position, Left::Entry(light)));
+        }
+        let chunk = view.remove(&position).unwrap();
+        view.air.insert(
+            position,
+            AirInputs {
+                inputs: chunk.light.inputs.clone(),
+                edits: chunk.edits,
+            },
+        );
+        Some((position, Left::Air))
     }
 
     /// Starts relights for the Ready chunks of `queue`, nearest a camera
@@ -713,7 +911,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             .iter()
             .filter(|position| {
                 self.chunks.get(*position).is_some_and(|chunk| {
-                    matches!(states.get(chunk.entity), Ok(ChunkState::Ready))
+                    chunk.entity == ENTRY
+                        || matches!(states.get(chunk.entity), Ok(ChunkState::Ready))
                 })
             })
             .map(|position| (distance_to_nearest(*position, &cameras), *position))
@@ -733,11 +932,6 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let nanos = started.elapsed().as_nanos() as u64;
         self.edit_nanos += nanos;
         self.frame_nanos += nanos;
-    }
-
-    /// Whether the chunk at `position` has light, so it can relight.
-    pub fn has_light(&self, position: IVec3) -> bool {
-        self.chunks.contains_key(&position)
     }
 
     /// Starts a relight task for the dirty chunk at `position`.
@@ -773,7 +967,17 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let task = AsyncComputeTaskPool::get().spawn(async move {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("relight_task").entered();
-            relight(&task_settings, &view, position, rescan)
+            let started = Instant::now();
+            let solved = relight(&task_settings, &view, position, rescan);
+            let nanos = started.elapsed().as_nanos() as u64;
+            let counters = &task_settings.counters;
+            counters.relight_nanos.fetch_add(nanos, Ordering::Relaxed);
+            if entity == ENTRY {
+                counters
+                    .entry_relight_nanos
+                    .fetch_add(nanos, Ordering::Relaxed);
+            }
+            solved
         });
         self.running.push(Running {
             position,
@@ -785,6 +989,12 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         });
         budget.started(JobKind::Relight);
         settings.counters().relights.fetch_add(1, Ordering::Relaxed);
+        if entity == ENTRY {
+            settings
+                .counters()
+                .entry_relights
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -799,19 +1009,29 @@ impl<C: VoxelWorldConfig> Relights<C> {
         mut removed: RemovedComponents<ChunkStateOf<C>>,
         mut work: ResMut<LightWork<C>>,
         settings: Res<LightSettings<C>>,
+        world: Res<C>,
         mut route: Option<ResMut<LightRoute<C>>>,
         mut probes: Option<ResMut<SkyProbes<C>>>,
     ) {
         for entity in removed.read() {
-            let position = work.forget(entity, &settings.view);
+            let left = work.forget(entity, &settings.view, |position| {
+                hinted::is_hinted_air(world.as_ref(), position)
+            });
             if let Some(route) = route.as_mut() {
                 route.forget(entity);
+                if let Some((position, Left::Entry(light))) = &left {
+                    route.entry_landed(*position, light.clone());
+                }
             }
-            if let (Some(probes), Some(position)) = (probes.as_mut(), position) {
-                if probes.forget(position, entity) {
-                    for neighbour in face_neighbours(position) {
-                        work.trigger(neighbour);
-                    }
+            let (Some(probes), Some((position, left))) = (probes.as_mut(), left) else {
+                continue;
+            };
+            if !matches!(left, Left::Nothing) {
+                // Hinted air keeps the columns its chunk was waiting on.
+                probes.rekey(position, ENTRY);
+            } else if probes.forget(position, entity) {
+                for neighbour in face_neighbours(position) {
+                    work.trigger_from(neighbour, position, false);
                 }
             }
         }
@@ -899,7 +1119,10 @@ impl<C: VoxelWorldConfig> Relights<C> {
         {
             return;
         }
-        let ready = |entity: Entity| matches!(chunks.get(entity), Ok(ChunkState::Ready));
+        // A light entry has no chunk to wait for.
+        let ready = |entity: Entity| {
+            entity == ENTRY || matches!(chunks.get(entity), Ok(ChunkState::Ready))
+        };
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("land_light").entered();
         let started = Instant::now();
@@ -982,7 +1205,12 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 work.trigger(position);
                 continue;
             }
-            if chunks.get(entity).is_ok() {
+            let alive = if entity == ENTRY {
+                work.has_entry(position)
+            } else {
+                chunks.get(entity).is_ok()
+            };
+            if alive {
                 if source == Source::ChunkTask
                     && landing.solved.generation < settings.task.sky_generation
                 {
@@ -1049,14 +1277,18 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     }
                 }
                 if let (Some(route), Some(landed)) = (route.as_mut(), landed) {
-                    route.light_landed(
-                        landed.position,
-                        landed.entity,
-                        landed.light,
-                        landed.own,
-                        landed.bytes,
-                        landed.new_voxels,
-                    );
+                    if landed.entity == ENTRY {
+                        route.entry_landed(landed.position, landed.light);
+                    } else {
+                        route.light_landed(
+                            landed.position,
+                            landed.entity,
+                            landed.light,
+                            landed.own,
+                            landed.bytes,
+                            landed.new_voxels,
+                        );
+                    }
                 }
             }
             if source == Source::Relight {

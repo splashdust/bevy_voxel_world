@@ -11,7 +11,7 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use super::config::LightPrecision;
-use super::faces::Face;
+use super::faces::{Face, FaceHashes};
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
@@ -360,6 +360,20 @@ pub struct LightStats {
     pub fill_probes: u64,
     /// Voxel lookups fill probes made.
     pub fill_probe_lookups: u64,
+    /// Time relight tasks spent, in milliseconds.
+    pub relight_ms: f64,
+    /// Relight tasks started for light entries.
+    pub entry_relights: u64,
+    /// Time relight tasks for light entries spent, in milliseconds.
+    pub entry_relight_ms: f64,
+    /// Light entries in the world view now.
+    pub entries: u64,
+    /// What the light entries in the world view now keep: their face hashes,
+    /// each channel's bit planes where it isn't one level, and occupancy
+    /// where an edit gave them a solid.
+    pub entry_bytes: u64,
+    /// Hinted air holding no light entry that the world view keeps now.
+    pub air_positions: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -373,6 +387,25 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
     let route = world.get_resource::<LightRoute<C>>();
     let slots = route.map(|route| route.counters).unwrap_or_default();
+    let (entries, entry_bytes, air_positions) = {
+        let view = settings.view.read();
+        let mut entries = 0;
+        let mut bytes = 0;
+        for chunk in view.values().filter(|chunk| chunk.is_entry()) {
+            entries += 1;
+            bytes += size_of::<FaceHashes>();
+            let light = &chunk.light;
+            for channel in [&light.sky, &light.voxel] {
+                if let ChannelLight::Planes(planes) = channel {
+                    bytes += size_of_val(&**planes);
+                }
+            }
+            if let Occupancy::Mixed(columns) = &light.inputs.occupancy {
+                bytes += size_of_val(&**columns);
+            }
+        }
+        (entries, bytes as u64, view.air.len() as u64)
+    };
     Some(LightStats {
         slot_allocations: slots.allocations,
         late_allocations: slots.late_allocations,
@@ -407,6 +440,12 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         fill_main_thread_ms: ms(&counters.fill_main_thread_nanos),
         fill_probes: counters.fill_probes.load(Ordering::Relaxed),
         fill_probe_lookups: counters.fill_probe_lookups.load(Ordering::Relaxed),
+        relight_ms: ms(&counters.relight_nanos),
+        entry_relights: counters.entry_relights.load(Ordering::Relaxed),
+        entry_relight_ms: ms(&counters.entry_relight_nanos),
+        entries,
+        entry_bytes,
+        air_positions,
     })
 }
 

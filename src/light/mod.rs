@@ -20,6 +20,7 @@ pub(crate) mod config;
 mod edit;
 mod faces;
 pub(crate) mod fill;
+pub(crate) mod hinted;
 mod inputs;
 mod kernel;
 mod levels;
@@ -93,6 +94,10 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     /// notes it when it starts, so a relight's light can wait for a mesh that
     /// shows the edits it read.
     pub edit_frame: AtomicU64,
+    /// Hinted air chunk tasks added to the world view as they started, whose
+    /// columns the sky probes have yet to take on: see
+    /// [`hinted::follow`].
+    pub new_air: Mutex<Vec<IVec3>>,
     _world: PhantomData<C>,
 }
 
@@ -130,6 +135,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                     .map(|rule| CoarseWalk::new(key, rule, world, edits, delegate)),
             }));
         }
+        self.add_air_around(key.position, world, edits);
         let own_edits = edits.edit_count(key.position);
         let kept = self
             .view
@@ -187,8 +193,32 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         }))
     }
 
+    /// Adds the hinted air around the level-0 chunk at `position` that the
+    /// world view doesn't hold yet, so the chunk's solve reads it.
+    fn add_air_around(
+        &self,
+        position: IVec3,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+    ) {
+        let mut record = self.sky_rule.map(|_| self.record.lock().unwrap());
+        let added = hinted::add_air_around(
+            &mut self.view.write(),
+            position,
+            world,
+            edits,
+            &self.task.emission,
+            self.sky_rule,
+            record.as_deref_mut(),
+        );
+        if !added.is_empty() {
+            self.new_air.lock().unwrap().extend(added);
+        }
+    }
+
     /// The light at the voxel at `position`, from the finest published chunk
-    /// covering it whose light has landed, or `None` if none has.
+    /// covering it whose light has landed, or `None` if none has. Where no
+    /// chunk's has, a light entry holding the voxel gives its light.
     ///
     /// A level-0 chunk reads its light in the world view and its published
     /// voxels. A coarse chunk reads the cell holding the voxel in the copy of
@@ -201,7 +231,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         route: Option<&route::LightRoute<C>>,
         position: IVec3,
     ) -> Option<LightLevels> {
-        chunk_map.covering(position).find_map(|chunk| {
+        let found = chunk_map.covering(position).find_map(|chunk| {
             let key = chunk.key;
             if !takes_coarse_path(key, chunk.data_shape) {
                 let light = self.view.read().get(&key.position)?.light.clone();
@@ -214,7 +244,38 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             route
                 .and_then(|route| route.coarse_cell(chunk.entity, cell))
                 .or_else(|| work.coarse_levels(chunk.entity))
-        })
+        });
+        found.or_else(|| self.entry_light_at(position))
+    }
+
+    /// The light a light entry holds at the voxel at `position`.
+    fn entry_light_at(&self, position: IVec3) -> Option<LightLevels> {
+        let chunk = crate::chunk::chunk_containing(position);
+        let light = self
+            .view
+            .read()
+            .get(&chunk)
+            .filter(|chunk| chunk.is_entry())?
+            .light
+            .clone();
+        let local = (position - chunk * crate::chunk::CHUNK_SIZE_I).as_uvec3();
+        let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
+        if light.inputs.occupancy.is_solid(x, y, z) {
+            let level = light
+                .inputs
+                .emissive
+                .iter()
+                .find(|emitter| {
+                    (emitter.x, emitter.y, emitter.z) == (x as u8, y as u8, z as u8)
+                })
+                .map_or(0, |emitter| emitter.level);
+            return Some(LightLevels::new(0, level));
+        }
+        Some(LightLevels::of_steps(
+            light.sky.at(x, y, z),
+            light.voxel.at(x, y, z),
+            light.precision,
+        ))
     }
 }
 
@@ -278,16 +339,19 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     let record = Mutex::new(record);
     let mut work = LightWork::<C>::default();
     work.tracks_fill = fill_on;
+    let view = LightView::default();
+    work.view = view.clone();
     app.insert_resource(LightSettings::<C> {
         sky_rule,
         config,
         emissive_materials,
         task,
-        view: LightView::default(),
+        view,
         record,
         fill_cells,
         reset: AtomicBool::new(false),
         edit_frame: AtomicU64::new(0),
+        new_air: Mutex::new(Vec::new()),
         _world: PhantomData,
     })
     .insert_resource(work)
@@ -301,6 +365,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
                 SkyProbes::<C>::collect.run_if(resource_exists::<SkyProbes<C>>),
                 probe::reset_light::<C>,
                 Relights::<C>::land,
+                hinted::follow::<C>,
                 SkyFillWork::<C>::follow.run_if(resource_exists::<SkyFillWork<C>>),
             )
                 .chain()
@@ -473,13 +538,19 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
                     commands.remove_resource::<SkyProbes<C>>();
                     budget.set_running(JobKind::SkyProbe, 0);
                 }
-                let lit: Vec<(IVec3, Entity)> = settings
-                    .view
-                    .read()
-                    .iter()
-                    .filter(|(_, chunk)| chunk.light.inputs.columns.has_sky())
-                    .map(|(position, chunk)| (*position, chunk.entity))
-                    .collect();
+                let lit: Vec<(IVec3, Entity)> = {
+                    let view = settings.view.read();
+                    view.iter()
+                        .filter(|(_, chunk)| chunk.light.inputs.columns.has_sky())
+                        .map(|(position, chunk)| (*position, chunk.entity))
+                        .chain(
+                            view.air
+                                .iter()
+                                .filter(|(_, air)| air.inputs.columns.has_sky())
+                                .map(|(position, _)| (*position, view::ENTRY)),
+                        )
+                        .collect()
+                };
                 for (position, entity) in lit {
                     let none = ColumnAnswer::none();
                     probe::replace_columns(&settings.view, position, entity, none);
@@ -601,6 +672,7 @@ fn relight_settings<C: VoxelWorldConfig>(
         .iter()
         .filter(|(position, chunk)| {
             sky_changed_at.contains(*position)
+                || chunk.is_entry()
                 || match &chunk.light.inputs.occupancy {
                     Occupancy::Mixed(_) => true,
                     Occupancy::Solid => emission_changed,
@@ -613,6 +685,19 @@ fn relight_settings<C: VoxelWorldConfig>(
         .collect();
     for position in marked {
         work.trigger_settings(position);
+    }
+    // Hinted air holding no light entry whose direct sky changed passes the
+    // change on to the chunks around it.
+    let air: Vec<IVec3> = {
+        let view = settings.view.read();
+        sky_changed_at
+            .iter()
+            .filter(|position| view.is_air(**position))
+            .copied()
+            .collect()
+    };
+    for position in air {
+        work.trigger(position);
     }
 }
 

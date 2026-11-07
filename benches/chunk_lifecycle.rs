@@ -229,12 +229,27 @@ impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
 /// light settings: slabs of stone 8 voxels thick and 64 wide, from y = 64 to
 /// 72, every 128 voxels along x and z. The ground under them gets its light
 /// from sky fill, which neither bench world shows.
+///
+/// With `HINTS` at [`ABOVE_HIGHEST_SOLID`] or [`EVERY_ALL_AIR_POSITION`] its
+/// fill hints say where chunk positions are air, and the streaming policy
+/// spawns none of those outside the protected radius.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
-struct IslandWorld;
+struct IslandWorld<const HINTS: u8 = NO_HINTS>;
 
 #[cfg(feature = "light_propagation")]
-impl VoxelWorldConfig for IslandWorld {
+const NO_HINTS: u8 = 0;
+/// Air hints at every chunk position above the highest solid of its
+/// footprint.
+#[cfg(feature = "light_propagation")]
+const ABOVE_HIGHEST_SOLID: u8 = 1;
+/// Air hints at every chunk position whose voxels are all air, under the
+/// islands too.
+#[cfg(feature = "light_propagation")]
+const EVERY_ALL_AIR_POSITION: u8 = 2;
+
+#[cfg(feature = "light_propagation")]
+impl<const HINTS: u8> VoxelWorldConfig for IslandWorld<HINTS> {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
@@ -265,6 +280,28 @@ impl VoxelWorldConfig for IslandWorld {
                 }
             })
         })
+    }
+
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        // The terrain lies within 16 voxels of y = 0, and the islands fill
+        // the chunk positions at y = 2 of their footprints.
+        let position = key.position;
+        let under_island = key.lod_level == 0
+            && position.x.rem_euclid(4) < 2
+            && position.z.rem_euclid(4) < 2;
+        let air = match HINTS {
+            ABOVE_HIGHEST_SOLID if under_island => position.y >= 3,
+            ABOVE_HIGHEST_SOLID => position.y >= 1,
+            EVERY_ALL_AIR_POSITION => {
+                position.y >= 1 && !(under_island && position.y == 2)
+            }
+            _ => false,
+        };
+        if air && key.lod_level == 0 {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else {
+            FillHint::Unknown
+        }
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
@@ -815,6 +852,27 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics.insert(format!("{prefix}.walks"), stats.walks as f64);
     metrics.insert(format!("{prefix}.walk_lookups"), stats.walk_lookups as f64);
     metrics.insert(format!("{prefix}.relights"), stats.relights as f64);
+    // Hinted air's cost: relight CPU for light entries against all of it,
+    // and what the light entries and hinted air keep at rest.
+    metrics.insert(format!("{prefix}.relight_ms"), stats.relight_ms);
+    metrics.insert(
+        format!("{prefix}.entry_relights"),
+        stats.entry_relights as f64,
+    );
+    metrics.insert(format!("{prefix}.entry_relight_ms"), stats.entry_relight_ms);
+    metrics.insert(format!("{prefix}.entries"), stats.entries as f64);
+    metrics.insert(
+        format!("{prefix}.entry_kib"),
+        stats.entry_bytes as f64 / 1024.0,
+    );
+    metrics.insert(
+        format!("{prefix}.air_positions"),
+        stats.air_positions as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.publishes"),
+        app.world().resource::<Tracker>().publishes as f64,
+    );
     metrics.insert(
         format!("{prefix}.main_thread_total_ms"),
         stats.main_thread_ms,
@@ -1368,6 +1426,18 @@ fn run_all(only: Option<&str>) -> Metrics {
     #[cfg(feature = "light_propagation")]
     step("stream_in_islands", RUNS, &|| {
         scenario_stream_in_lit::<IslandWorld>("stream_in_islands")
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_islands_hinted_above", RUNS, &|| {
+        scenario_stream_in_lit::<IslandWorld<ABOVE_HIGHEST_SOLID>>(
+            "stream_in_islands_hinted_above",
+        )
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_islands_hinted_air", RUNS, &|| {
+        scenario_stream_in_lit::<IslandWorld<EVERY_ALL_AIR_POSITION>>(
+            "stream_in_islands_hinted_air",
+        )
     });
     #[cfg(feature = "light_propagation")]
     step("stream_in_lod", RUNS, &|| {
