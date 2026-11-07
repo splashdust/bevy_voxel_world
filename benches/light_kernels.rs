@@ -12,6 +12,8 @@
 //!     … -- compare <before>[,<before>…] <after>[,<after>…]
 //!     … -- save-binary <name>     # on the baseline commit
 //!     … -- ab <name>              # on the candidate
+//!     … -- seed                   # seeding sky fill alone
+//!     … -- field                  # sky fill's field alone, both models
 //!
 //! The kernel runs on boxes cut from the light reference scene: caves, shafts,
 //! a sealed room and a floating island, with emissive voxels scattered on
@@ -22,6 +24,11 @@
 //! neighbours' border planes, at both slot formats. The emissive scan runs on a chunk of layered
 //! terrain and on
 //! chunks of random materials, with emissive lists of several lengths.
+//!
+//! Sky fill's field is built under both models over the floating island, the
+//! mesa and the ground around them, and worked out again after an edit there.
+//! Sky openness is held against the 46–59 µs of CPU per shaded position its
+//! probe took.
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
@@ -356,9 +363,9 @@ const FILL_CHUNKS: [IVec3; 10] = [
     IVec3::new(1, 1, 12),
 ];
 
-/// The field of sky fill's default model over the learned positions, with
-/// each cell's masks worked out from the scene's voxels.
-fn fill_field(scene: &mut Scene) -> FillField {
+/// Each learned position with its cell masks, `open` and `direct`, worked
+/// out from the scene's voxels.
+fn fill_masks(scene: &mut Scene) -> Vec<(IVec3, u64, u64)> {
     let low = FILL_FROM * 32;
     let high = (FILL_TO + IVec3::ONE) * 32;
     let width = (high.x - low.x) as usize;
@@ -374,7 +381,7 @@ fn fill_field(scene: &mut Scene) -> FillField {
                 .unwrap_or(i32::MIN);
         }
     }
-    let mut field = FillField::default();
+    let mut masks = Vec::new();
     for cz in FILL_FROM.z..=FILL_TO.z {
         for cy in FILL_FROM.y..=FILL_TO.y {
             for cx in FILL_FROM.x..=FILL_TO.x {
@@ -401,12 +408,72 @@ fn fill_field(scene: &mut Scene) -> FillField {
                         }
                     }
                 }
-                field.learn(IVec3::new(cx, cy, cz), open, direct);
+                masks.push((IVec3::new(cx, cy, cz), open, direct));
             }
         }
     }
+    masks
+}
+
+/// The field of sky fill's default model over the learned positions.
+fn fill_field(scene: &mut Scene) -> FillField {
+    let mut field = FillField::default();
+    for (position, open, direct) in fill_masks(scene) {
+        field.learn(position, open, direct);
+    }
     field.settle();
     field
+}
+
+/// Updating sky fill's field under each model: learning every position at
+/// once, per shaded position (one with an open cell that isn't direct sky),
+/// and working out the field again after a cell on the ground under the
+/// floating island fills in and opens again, as a voxel edit there would.
+fn field_metrics(metrics: &mut Metrics) {
+    let masks = fill_masks(&mut Scene::new());
+    let shaded = masks
+        .iter()
+        .filter(|(_, open, direct)| open & !direct != 0)
+        .count();
+    metrics.insert("field.shaded_positions".into(), shaded as f64);
+    // The first chunk lit by fill with a shaded cell.
+    let (edited, open, direct) = *FILL_CHUNKS
+        .iter()
+        .filter_map(|chunk| masks.iter().find(|(position, ..)| position == chunk))
+        .find(|(_, open, direct)| open & !direct != 0)
+        .unwrap();
+    // The lowest open cell that isn't direct sky.
+    let cell = (open & !direct).trailing_zeros();
+    for name in ["paths", "openness"] {
+        let model = || match name {
+            "paths" => FillField::default(),
+            _ => FillField::openness(),
+        };
+        let mut build = f64::INFINITY;
+        let mut edit = f64::INFINITY;
+        for _ in 0..REPEATS {
+            let mut field = model();
+            for (position, open, direct) in &masks {
+                field.learn(*position, *open, *direct);
+            }
+            let start = Instant::now();
+            black_box(field.settle());
+            build = build.min(start.elapsed().as_secs_f64() * 1e6);
+
+            let start = Instant::now();
+            field.learn(edited, open & !(1 << cell), direct);
+            black_box(field.settle());
+            field.learn(edited, open, direct);
+            black_box(field.settle());
+            edit = edit.min(start.elapsed().as_secs_f64() * 1e6 / 2.0);
+        }
+        metrics.insert(format!("field.{name}.build_ms"), build / 1000.0);
+        metrics.insert(
+            format!("field.{name}.us_per_shaded_position"),
+            build / shaded as f64,
+        );
+        metrics.insert(format!("field.{name}.edit_us"), edit);
+    }
 }
 
 /// Seeding sky fill with the default model, on chunks it lights, at the
@@ -451,6 +518,8 @@ fn run_all() -> Metrics {
     let mut metrics = Metrics::new();
     eprintln!("seeding sky fill...");
     seed_metrics(&mut metrics);
+    eprintln!("sky fill's field...");
+    field_metrics(&mut metrics);
     eprintln!("cutting boxes from the reference scene...");
     let dumps = dumps();
     metrics.insert("kernel.boxes".into(), dumps.len() as f64);
@@ -589,6 +658,13 @@ fn main() {
                 println!("{key:<38} {value:>10.2}");
             }
         }
+        ["field"] => {
+            let mut metrics = Metrics::new();
+            field_metrics(&mut metrics);
+            for (key, value) in &metrics {
+                println!("{key:<38} {value:>10.2}");
+            }
+        }
         ["compare", before, after] => {
             if !compare(&load_all(before), &load_all(after)) {
                 std::process::exit(1);
@@ -606,8 +682,8 @@ fn main() {
         [] => {}
         _ => {
             eprintln!(
-                "usage: light_kernels run <label> | compare <before> <after> \
-                 | save-binary <name> | ab <baseline>"
+                "usage: light_kernels run <label> | seed | field \
+                 | compare <before> <after> | save-binary <name> | ab <baseline>"
             );
             std::process::exit(2);
         }

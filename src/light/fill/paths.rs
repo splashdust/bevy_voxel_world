@@ -312,6 +312,7 @@ impl PathField {
         let fill = CellFill {
             open: entry.cells.open,
             direct: entry.cells.direct,
+            sunlit: 0,
             levels,
         };
         if entry.fill == fill {
@@ -409,6 +410,7 @@ impl PathField {
                     .unwrap_or(CellFill {
                         open: 0,
                         direct: 0,
+                        sunlit: 0,
                         levels: [0; 64],
                     });
                 self.entries.insert(

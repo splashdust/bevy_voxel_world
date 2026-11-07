@@ -25,6 +25,7 @@
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map, and still after a change to 256 levels at runtime.
+//!   It stays exactly black with sky fill on under sky openness.
 //! - Each change of the look shows on the frame after it's made, and the glow
 //!   still scales with each lamp's declared level.
 //! - A sealed pocket stays exactly black at minimum brightness 0 under every
@@ -44,7 +45,8 @@
 //! it also saves each picture there.
 //!
 //! In the browser, `check` can't start processes of its own, so each part
-//! runs from its own page load: `?check-sky-off` and `?check-sky-on`. Each
+//! runs from its own page load: `?check-sky-off`, `?check-sky-on` and
+//! `?check-sky-openness`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -293,6 +295,8 @@ struct CaveWorld {
     /// For the pixel checks: with sky light, but no sky fill, or with no sky
     /// light.
     check_sky: Option<bool>,
+    /// For the pixel checks: with sky light and sky fill under sky openness.
+    check_openness: bool,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -305,6 +309,7 @@ impl Default for CaveWorld {
     fn default() -> Self {
         Self {
             check_sky: None,
+            check_openness: false,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -399,6 +404,10 @@ impl VoxelWorldConfig for CaveWorld {
             ..default()
         };
         Some(match self.check_sky {
+            _ if self.check_openness => LightPropagation {
+                sky_fill: Some(SkyFill::Openness(OpenFill::default())),
+                ..light
+            },
             None => light,
             Some(true) => LightPropagation {
                 sky_fill: None,
@@ -480,8 +489,9 @@ fn add_lights(commands: &mut Commands) {
 fn main() {
     match arguments().first().map(String::as_str) {
         Some("check") => return check(),
-        Some("check-sky-off") => return check_part(false),
-        Some("check-sky-on") => return check_part(true),
+        Some("check-sky-off") => return check_part(false, false),
+        Some("check-sky-on") => return check_part(true, false),
+        Some("check-sky-openness") => return check_part(true, true),
         Some("budget") => return budget(),
         _ => {}
     }
@@ -887,6 +897,17 @@ const CHECKS: [Check; 23] = [
     ),
 ];
 
+/// The checks run with sky fill on under sky openness.
+const OPENNESS_CHECKS: [Check; 1] = [settled_check(
+    "a sealed pocket under sky openness is exactly black",
+    "sealed_pocket_openness.png",
+    true,
+    &POCKET_CAMERA,
+    true,
+    None,
+    pocket_is_black,
+)];
+
 /// The pictures of the checks so far, by file.
 #[derive(Resource, Default)]
 struct Pictures(std::collections::HashMap<&'static str, Image>);
@@ -980,19 +1001,23 @@ struct CheckPlan {
     precision: LightPrecision,
 }
 
-/// Runs the checks with sky light off, then with it on, each in a process of
-/// its own, since a world's sky rule is read once.
+/// Runs the checks with sky light off, then with it on, then with sky fill
+/// under sky openness, each in a page load of its own in the browser.
 #[cfg(target_arch = "wasm32")]
 fn check() {
-    error!("in the browser, run ?check-sky-off and ?check-sky-on, each in a page load");
+    error!(
+        "in the browser, run ?check-sky-off, ?check-sky-on and ?check-sky-openness, \
+         each in a page load"
+    );
 }
 
-/// Runs the checks with sky light off, then with it on, each in a process of
-/// its own, since a world's sky rule is read once.
+/// Runs the checks with sky light off, then with it on, then with sky fill
+/// under sky openness, each in a process of its own, since a world's sky rule
+/// is read once.
 #[cfg(not(target_arch = "wasm32"))]
 fn check() {
     let mut failed = false;
-    for sky in ["sky-off", "sky-on"] {
+    for sky in ["sky-off", "sky-on", "sky-openness"] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
             .args(std::env::args().skip(2))
@@ -1005,19 +1030,21 @@ fn check() {
     }
 }
 
-/// Runs the checks with sky light on or off.
-fn check_part(sky: bool) {
+/// Runs the checks with sky light on or off, or those with sky fill under sky
+/// openness.
+fn check_part(sky: bool, openness: bool) {
     App::new()
         .add_plugins(plugins_without_window())
         .add_plugins(VoxelWorldPlugin::with_config(CaveWorld {
             check_sky: Some(sky),
+            check_openness: openness,
             ..default()
         }))
         .init_resource::<Pictures>()
         .add_systems(
             Startup,
             move |commands: Commands, images: ResMut<Assets<Image>>| {
-                setup_check(commands, images, sky)
+                setup_check(commands, images, sky, openness)
             },
         )
         .add_systems(Update, (run_checks, follow_plan_look).chain())
@@ -1036,9 +1063,17 @@ fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
     }
 }
 
-fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: bool) {
-    let checks: Vec<&'static Check> =
-        CHECKS.iter().filter(|check| check.sky == sky).collect();
+fn setup_check(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    sky: bool,
+    openness: bool,
+) {
+    let checks: Vec<&'static Check> = if openness {
+        OPENNESS_CHECKS.iter().collect()
+    } else {
+        CHECKS.iter().filter(|check| check.sky == sky).collect()
+    };
     let mut image =
         Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;

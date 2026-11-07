@@ -11,11 +11,10 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 pub use super::census::ChangeCounts;
-use super::config::{LightPrecision, PathFill};
+use super::config::{LightPrecision, OpenFill, PathFill, SkyFill};
 use super::faces::{Face, FaceHashes};
-use super::fill::paths::PathField;
 use super::fill::seed::{CellsAround, Seeding};
-use super::fill::PositionCells;
+use super::fill::{PositionCells, SkyFillField};
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
@@ -211,17 +210,24 @@ fn copy_rows<R: Row>(from: &[u128], to: &mut [R]) {
     }
 }
 
-/// Sky fill's field under [`SkyFill::Paths`](crate::prelude::SkyFill::Paths)
-/// with its defaults, learned from cell masks the caller works out.
-pub struct FillField(PathField);
+/// Sky fill's field under one of the models of
+/// [`SkyFill`](crate::prelude::SkyFill), with its defaults, learned from cell
+/// masks the caller works out.
+pub struct FillField(SkyFillField);
 
 impl Default for FillField {
     fn default() -> Self {
-        Self(PathField::new(&PathFill::default()))
+        Self(SkyFillField::new(&SkyFill::Paths(PathFill::default())))
     }
 }
 
 impl FillField {
+    /// The field of [`SkyFill::Openness`](crate::prelude::SkyFill::Openness)
+    /// with its defaults.
+    pub fn openness() -> Self {
+        Self(SkyFillField::new(&SkyFill::Openness(OpenFill::default())))
+    }
+
     /// Takes in a position's cells, one bit per 8-voxel cell at
     /// `x + y × 4 + z × 16`: `open` for cells holding no solid voxel, and
     /// `direct` for open cells whose voxels all have direct sky.
@@ -229,11 +235,14 @@ impl FillField {
         self.0.learn(position, PositionCells { open, direct });
     }
 
-    /// Works through everything learned.
-    pub fn settle(&mut self) {
+    /// Works through everything learned. Returns how many positions' cells
+    /// changed.
+    pub fn settle(&mut self) -> usize {
+        let mut changed = 0;
         while self.0.has_pending() {
-            self.0.update(std::time::Duration::MAX);
+            changed += self.0.update(std::time::Duration::MAX).len();
         }
+        changed
     }
 }
 

@@ -1,6 +1,9 @@
 //! Tests of sky fill: sky light reaching past where it falls and spreads,
 //! under high floating solids and into caves behind wide openings, read
 //! through `light_at`.
+//!
+//! The suite every model must pass runs once per model, in the modules
+//! `paths` and `openness` at the end.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -11,9 +14,7 @@ use bevy::prelude::*;
 
 use super::super::spawn_camera;
 use super::edits::settle;
-use super::reference::{
-    fill_reference, fill_reference_everywhere, fill_reference_in_steps, Reference,
-};
+use super::reference::{fill_reference_everywhere, fill_reference_in_steps, Reference};
 use super::sky_light::{
     chunk_light, levels, light_is_settled, settled_but, shaft_world, spawned,
 };
@@ -31,6 +32,19 @@ fn filled() -> LightPropagation {
         sky: Sky::Ceiling { y: 100 },
         ..default()
     }
+}
+
+/// [`filled`] with sky fill under `fill`.
+fn filled_with(fill: &SkyFill) -> LightPropagation {
+    LightPropagation {
+        sky_fill: Some(fill.clone()),
+        ..filled()
+    }
+}
+
+/// Sky openness with its defaults.
+fn openness() -> SkyFill {
+    SkyFill::Openness(OpenFill::default())
 }
 
 /// Stone below y = 0 and air above, with a slab of stone 8 voxels thick at
@@ -138,28 +152,271 @@ fn walling_up_a_caves_mouth_darkens_its_hall_and_opening_it_again_brings_fill_ba
     let wall: Vec<IVec3> = (0..24)
         .flat_map(|z| (0..24).map(move |y| IVec3::new(-32, y, z)))
         .collect();
-    let set = |app: &mut App, voxel: WorldVoxel| {
-        let wall = wall.clone();
-        app.world_mut()
-            .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
-                for p in &wall {
-                    voxel_world.set_voxel(*p, voxel);
-                }
-            })
-            .unwrap();
-    };
-    set(&mut app, WorldVoxel::Solid(STONE));
+    set_voxels(&mut app, &wall, WorldVoxel::Solid(STONE));
     settle(&mut app, "light to settle with the mouth walled up");
     assert_eq!(levels(&mut app, hall).sky, 0.0);
 
-    set(&mut app, WorldVoxel::Air);
+    set_voxels(&mut app, &wall, WorldVoxel::Air);
     settle(&mut app, "light to settle with the mouth open");
     assert_eq!(levels(&mut app, hall), lit);
 }
 
+fn set_voxels(app: &mut App, voxels: &[IVec3], voxel: WorldVoxel) {
+    let voxels = voxels.to_vec();
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
+            for p in &voxels {
+                voxel_world.set_voxel(*p, voxel);
+            }
+        })
+        .unwrap();
+}
+
+/// The sky light every voxel of `chunks` reads in `app`.
+fn sky_of(app: &mut App, chunks: &[IVec3]) -> Vec<(IVec3, f32)> {
+    chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk_light(app, *chunk)
+                .unwrap_or_else(|| panic!("{chunk} has no light"))
+                .into_iter()
+                .map(|(p, levels)| (p, levels.sky))
+        })
+        .collect()
+}
+
+/// The positions the world's sky fill field knows.
+fn known_to_fill(app: &mut App) -> Vec<IVec3> {
+    let settings = app.world().resource::<LightSettings<LampWorld>>();
+    let known = settings.fill_cells.read().keys().copied().collect();
+    known
+}
+
+/// The top step of `light`'s precision: 15 at 16 levels, 255 at 256.
+fn steps_of(light: &LightPropagation) -> u32 {
+    match light.precision {
+        LightPrecision::Steps16 => 15,
+        LightPrecision::Steps256 => 255,
+    }
+}
+
+/// The reference's sky light of `chunks` in a world of `scene` with `light`,
+/// with the positions `known` known to sky fill, in steps of its precision.
+fn reference_of(
+    chunks: &[IVec3],
+    known: &[IVec3],
+    scene: impl Fn(IVec3) -> WorldVoxel,
+    light: &LightPropagation,
+) -> bevy::platform::collections::HashMap<IVec3, u8> {
+    fill_reference_in_steps(
+        steps_of(light),
+        chunks,
+        known,
+        light.sky_reach as u32,
+        light.shape,
+        &light.sky,
+        light.sky_fill.as_ref().expect("sky fill is on"),
+        scene,
+    )
+}
+
+/// Fails unless every voxel of `chunks` in `app`, a world of `scene` with
+/// `light`, reads the reference's sky light, with the positions the field
+/// knows known to the reference.
+fn assert_matches_reference(
+    app: &mut App,
+    chunks: &[IVec3],
+    scene: impl Fn(IVec3) -> WorldVoxel,
+    light: &LightPropagation,
+    when: &str,
+) {
+    let known = known_to_fill(app);
+    let reference = reference_of(chunks, &known, scene, light);
+    let mut wrong = Vec::new();
+    let steps = steps_of(light);
+    for (p, sky) in sky_of(app, chunks) {
+        if sky != reference[&p] as f32 * 15.0 / steps as f32 {
+            wrong.push((p, sky, reference[&p]));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} voxels differ from the reference {when}, such as {:?}",
+        wrong.len(),
+        &wrong[..wrong.len().min(8)]
+    );
+}
+
+fn set_light(app: &mut App, light: LightPropagation) {
+    app.world_mut().resource_mut::<LampWorld>().light = Some(light);
+}
+
+/// [`slab_at`] with an island 8 voxels thick whose underside lies on the
+/// chunk boundary at y = 64, over two chunks of air on the ground's chunk
+/// boundary at y = 0.
+fn island_on_boundaries(p: IVec3) -> WorldVoxel {
+    slab_at(64)(p)
+}
+
+/// [`slab_at`] with a slab whose underside lies on the chunk boundary at
+/// y = 32, one chunk of air above the ground.
+fn low_slab_on_boundaries(p: IVec3) -> WorldVoxel {
+    slab_at(32)(p)
+}
+
+/// Chunks under and around the island of [`island_on_boundaries`].
+const AROUND_ISLAND: [IVec3; 6] = [
+    IVec3::ZERO,
+    IVec3::Y,
+    IVec3::new(1, 1, 0),
+    IVec3::new(-1, 0, -1),
+    IVec3::new(0, 2, 0),
+    IVec3::new(-2, 1, 0),
+];
+
+fn island_world(fill: &SkyFill) -> LampWorld {
+    LampWorld {
+        scene: Arc::new(island_on_boundaries),
+        light: Some(filled_with(fill)),
+        spawning_distance: 3,
+        ..default()
+    }
+}
+
+/// Stone below y = 0 and air above, with an island of stone 8 voxels thick
+/// at y = 72 to 80, from -8 to 24 along x and z: high above the ground and
+/// narrow, so the ground under it sees most of the sky.
+fn high_narrow_island(p: IVec3) -> WorldVoxel {
+    let island =
+        (72..80).contains(&p.y) && (-8..24).contains(&p.x) && (-8..24).contains(&p.z);
+    if p.y < 0 || island {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+fn high_island_world(fill: &SkyFill) -> LampWorld {
+    LampWorld {
+        scene: Arc::new(high_narrow_island),
+        light: Some(filled_with(fill)),
+        spawning_distance: 3,
+        ..default()
+    }
+}
+
+/// The middle of the ground under [`high_narrow_island`].
+const UNDER_HIGH_ISLAND: IVec3 = IVec3::new(8, 0, 8);
+
 #[test]
-fn a_1x1_shaft_lets_no_fill_through_and_a_sealed_pocket_stays_black() {
-    let mut app = settled(shaft_world(filled()));
+fn a_high_floating_island_under_sky_openness_leaves_no_straight_down_shade_where_most_of_the_sky_is_in_view(
+) {
+    // Paths leaves the ground straight under the island in shade.
+    let mut paths = settled(high_island_world(&SkyFill::default()));
+    assert!(levels(&mut paths, UNDER_HIGH_ISLAND).sky < 15.0);
+
+    let mut open = settled(high_island_world(&openness()));
+    let levels = levels(&mut open, UNDER_HIGH_ISLAND);
+    assert_eq!(levels.sky, 15.0, "{levels:?} under the island");
+    assert!(levels.direct_sky());
+}
+
+#[test]
+fn changing_sky_fill_from_paths_to_openness_at_runtime_settles_on_the_references_light_for_openness(
+) {
+    let chunks = [IVec3::ZERO, IVec3::Y];
+    let mut app = settled(high_island_world(&SkyFill::default()));
+    let light = filled_with(&openness());
+    set_light(&mut app, light.clone());
+    settle(&mut app, "light to settle under openness");
+    assert_matches_reference(
+        &mut app,
+        &chunks,
+        high_narrow_island,
+        &light,
+        "after changing to openness",
+    );
+    assert_eq!(levels(&mut app, UNDER_HIGH_ISLAND).sky, 15.0);
+}
+
+#[test]
+fn a_roof_built_over_ground_under_sky_openness_shades_it_and_taking_it_away_lights_it_again(
+) {
+    let mut app = settled(high_island_world(&openness()));
+    let lit = levels(&mut app, UNDER_HIGH_ISLAND);
+
+    // A roof 64 voxels wide, 16 voxels over the ground.
+    let roof: Vec<IVec3> = (-24..40)
+        .flat_map(|z| (-24..40).map(move |x| IVec3::new(x, 16, z)))
+        .collect();
+    set_voxels(&mut app, &roof, WorldVoxel::Solid(STONE));
+    settle(&mut app, "light to settle under the roof");
+    let shaded = levels(&mut app, UNDER_HIGH_ISLAND);
+    assert!(shaded.sky < 15.0, "{shaded:?} under the roof");
+    let with_roof = |p: IVec3| {
+        if p.y == 16 && (-24..40).contains(&p.x) && (-24..40).contains(&p.z) {
+            WorldVoxel::Solid(STONE)
+        } else {
+            high_narrow_island(p)
+        }
+    };
+    assert_matches_reference(
+        &mut app,
+        &[IVec3::ZERO],
+        with_roof,
+        &filled_with(&openness()),
+        "under the roof",
+    );
+
+    set_voxels(&mut app, &roof, WorldVoxel::Air);
+    settle(&mut app, "light to settle with the roof gone");
+    assert_eq!(levels(&mut app, UNDER_HIGH_ISLAND), lit);
+}
+
+#[test]
+fn out_of_range_sky_openness_settings_clamp() {
+    let app = settled(high_island_world(&SkyFill::Openness(OpenFill {
+        sun_at: 2.0,
+        gain: -1.0,
+        rays: 0,
+        reach: 100_000,
+    })));
+    let settings = app.world().resource::<LightSettings<LampWorld>>();
+    assert_eq!(
+        settings.config.sky_fill,
+        Some(SkyFill::Openness(OpenFill {
+            sun_at: 1.0,
+            gain: 0.0,
+            rays: 1,
+            reach: 512,
+        }))
+    );
+}
+
+// --- Once per model ----------------------------------------------------------
+
+fn after_streaming_settles_at_256_levels_every_fully_loaded_chunk_matches_the_fill_reference(
+    fill: SkyFill,
+) {
+    let light = LightPropagation {
+        precision: LightPrecision::Steps256,
+        ..filled_with(&fill)
+    };
+    let mut app = settled(LampWorld {
+        light: Some(light.clone()),
+        ..island_world(&fill)
+    });
+    assert_matches_reference(
+        &mut app,
+        &AROUND_ISLAND,
+        island_on_boundaries,
+        &light,
+        "at 256 levels",
+    );
+}
+
+fn a_1x1_shaft_lets_no_fill_through_and_a_sealed_pocket_stays_black(fill: SkyFill) {
+    let mut app = settled(shaft_world(filled_with(&fill)));
 
     for z in 20..26 {
         for y in 18..24 {
@@ -180,69 +437,15 @@ fn a_1x1_shaft_lets_no_fill_through_and_a_sealed_pocket_stays_black() {
     }
 }
 
-/// The sky light every voxel of `chunks` reads in `app`.
-fn sky_of(app: &mut App, chunks: &[IVec3]) -> Vec<(IVec3, f32)> {
-    chunks
-        .iter()
-        .flat_map(|chunk| {
-            chunk_light(app, *chunk)
-                .unwrap_or_else(|| panic!("{chunk} has no light"))
-                .into_iter()
-                .map(|(p, levels)| (p, levels.sky))
-        })
-        .collect()
-}
-
-/// Fails unless every voxel of `chunks` in `app`, a world of `scene` with
-/// `light`, reads the reference's sky light, with the spawned chunks known
-/// to sky fill.
-fn assert_matches_reference(
-    app: &mut App,
-    chunks: &[IVec3],
-    scene: impl Fn(IVec3) -> WorldVoxel,
-    light: &LightPropagation,
-    when: &str,
-) {
-    let Some(SkyFill::Paths(paths)) = &light.sky_fill else {
-        panic!("sky fill isn't on paths");
-    };
-    let known = spawned(app);
-    let steps = match light.precision {
-        LightPrecision::Steps16 => 15,
-        LightPrecision::Steps256 => 255,
-    };
-    let reference = fill_reference_in_steps(
-        steps,
-        chunks,
-        &known,
-        light.sky_reach as u32,
-        light.shape,
-        &light.sky,
-        paths,
-        scene,
-    );
-    let mut wrong = Vec::new();
-    for (p, sky) in sky_of(app, chunks) {
-        if sky != reference[&p] as f32 * 15.0 / steps as f32 {
-            wrong.push((p, sky, reference[&p]));
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "{} voxels differ from the reference {when}, such as {:?}",
-        wrong.len(),
-        &wrong[..wrong.len().min(8)]
-    );
-}
-
-fn set_light(app: &mut App, light: LightPropagation) {
-    app.world_mut().resource_mut::<LampWorld>().light = Some(light);
-}
-
 /// Streams a world of `scene` and holds the light of `chunks` against the
-/// reference, then again after a change of sky reach and one of sky fill.
-fn faces_match_the_reference(scene: fn(IVec3) -> WorldVoxel, chunks: &[IVec3]) {
-    let mut light = filled();
+/// reference, then again after a change of sky reach and one to `changed`.
+fn faces_match_the_reference(
+    fill: SkyFill,
+    changed: SkyFill,
+    scene: fn(IVec3) -> WorldVoxel,
+    chunks: &[IVec3],
+) {
+    let mut light = filled_with(&fill);
     let mut app = settled(LampWorld {
         scene: Arc::new(scene),
         light: Some(light.clone()),
@@ -256,81 +459,48 @@ fn faces_match_the_reference(scene: fn(IVec3) -> WorldVoxel, chunks: &[IVec3]) {
     settle(&mut app, "light to settle after a change of sky reach");
     assert_matches_reference(&mut app, chunks, scene, &light, "at sky reach 16");
 
-    light.sky_fill = Some(SkyFill::Paths(PathFill {
-        opening_power: 1.0,
-        beside_open_sky: 10.0,
-        ..default()
-    }));
+    light.sky_fill = Some(changed);
     set_light(&mut app, light.clone());
     settle(&mut app, "light to settle after a change of sky fill");
     assert_matches_reference(&mut app, chunks, scene, &light, "after the change of fill");
 }
 
-/// [`slab_at`] with an island 8 voxels thick whose underside lies on the
-/// chunk boundary at y = 64, over two chunks of air on the ground's chunk
-/// boundary at y = 0.
-fn island_on_boundaries(p: IVec3) -> WorldVoxel {
-    slab_at(64)(p)
-}
-
-/// [`slab_at`] with a slab whose underside lies on the chunk boundary at
-/// y = 32, one chunk of air above the ground.
-fn low_slab_on_boundaries(p: IVec3) -> WorldVoxel {
-    slab_at(32)(p)
-}
-
-#[test]
-fn faces_on_chunk_boundaries_under_a_floating_island_match_the_reference() {
-    faces_match_the_reference(island_on_boundaries, &[IVec3::ZERO, IVec3::Y]);
-}
-
-#[test]
-fn faces_on_chunk_boundaries_under_a_low_slab_match_the_reference() {
-    faces_match_the_reference(low_slab_on_boundaries, &[IVec3::ZERO]);
-}
-
-/// Chunks under and around the island of [`island_on_boundaries`].
-const AROUND_ISLAND: [IVec3; 6] = [
-    IVec3::ZERO,
-    IVec3::Y,
-    IVec3::new(1, 1, 0),
-    IVec3::new(-1, 0, -1),
-    IVec3::new(0, 2, 0),
-    IVec3::new(-2, 1, 0),
-];
-
-fn island_world() -> LampWorld {
-    LampWorld {
-        scene: Arc::new(island_on_boundaries),
-        light: Some(filled()),
-        spawning_distance: 3,
-        ..default()
+/// `fill` with other settings, for a change of sky fill.
+fn changed(fill: &SkyFill) -> SkyFill {
+    match fill {
+        SkyFill::Paths(_) => SkyFill::Paths(PathFill {
+            opening_power: 1.0,
+            beside_open_sky: 10.0,
+            ..default()
+        }),
+        SkyFill::Openness(_) => SkyFill::Openness(OpenFill {
+            sun_at: 0.6,
+            gain: 0.5,
+            rays: 16,
+            reach: 64,
+        }),
     }
 }
 
-#[test]
-fn after_streaming_settles_at_256_levels_every_fully_loaded_chunk_matches_the_fill_reference(
-) {
-    let light = LightPropagation {
-        precision: LightPrecision::Steps256,
-        ..filled()
-    };
-    let mut app = settled(LampWorld {
-        light: Some(light.clone()),
-        ..island_world()
-    });
-    assert_matches_reference(
-        &mut app,
-        &AROUND_ISLAND,
+fn faces_on_chunk_boundaries_under_a_floating_island_match_the_reference(fill: SkyFill) {
+    let changed = changed(&fill);
+    faces_match_the_reference(
+        fill,
+        changed,
         island_on_boundaries,
-        &light,
-        "at 256 levels",
+        &[IVec3::ZERO, IVec3::Y],
     );
 }
 
-#[test]
-fn arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_reference() {
-    let mut normal = settled(island_world());
+fn faces_on_chunk_boundaries_under_a_low_slab_match_the_reference(fill: SkyFill) {
+    let changed = changed(&fill);
+    faces_match_the_reference(fill, changed, low_slab_on_boundaries, &[IVec3::ZERO]);
+}
+
+fn arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_reference(
+    fill: SkyFill,
+) {
+    let mut normal = settled(island_world(&fill));
     let expected = sky_of(&mut normal, &AROUND_ISLAND);
 
     // The island's chunk arrives last, after the chunks around it have
@@ -340,7 +510,7 @@ fn arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_ref
     let hold = Hold::new(held);
     let mut app = app(LampWorld {
         hold: Some(hold.clone()),
-        ..island_world()
+        ..island_world(&fill)
     });
     let deadline = Instant::now() + Duration::from_secs(60);
     while !settled_but(&mut app, Some(held)) {
@@ -354,18 +524,25 @@ fn arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_ref
     settle(&mut app, "the held chunk to land");
     assert!(sky_of(&mut app, &AROUND_ISLAND) == expected);
 
-    let light = filled();
-    let Some(SkyFill::Paths(paths)) = &light.sky_fill else {
-        unreachable!()
-    };
-    let reference = fill_reference(
+    // Never brighter than a reference knowing every position whose cells
+    // could light the chunks: those within sky openness's rays of the 3×3×3
+    // around each.
+    let wide: Vec<IVec3> = AROUND_ISLAND
+        .iter()
+        .flat_map(|at| {
+            (-5..=5).flat_map(move |z| {
+                (-1..=5)
+                    .flat_map(move |y| (-5..=5).map(move |x| *at + IVec3::new(x, y, z)))
+            })
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let reference = reference_of(
         &AROUND_ISLAND,
-        &spawned(&mut app),
-        30,
-        LightShape::Round,
-        &light.sky,
-        paths,
+        &wide,
         island_on_boundaries,
+        &filled_with(&fill),
     );
     for (p, sky) in sky_of(&mut app, &AROUND_ISLAND) {
         assert!(
@@ -376,9 +553,10 @@ fn arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_ref
     }
 }
 
-#[test]
-fn light_reads_the_same_after_reset_light_rebuilds_the_record_and_the_field() {
-    let mut app = settled(island_world());
+fn light_reads_the_same_after_reset_light_rebuilds_the_record_and_the_field(
+    fill: SkyFill,
+) {
+    let mut app = settled(island_world(&fill));
     let before = sky_of(&mut app, &AROUND_ISLAND);
     assert!(before.iter().any(|(_, sky)| *sky > 0.0 && *sky < 15.0));
 
@@ -392,19 +570,26 @@ fn light_reads_the_same_after_reset_light_rebuilds_the_record_and_the_field() {
     assert!(sky_of(&mut app, &AROUND_ISLAND) == before);
 }
 
-#[test]
-fn a_cell_with_direct_sky_reads_15() {
-    let mut app = settled(island_world());
-
+fn a_cell_a_model_marks_as_direct_sky_reads_15(fill: SkyFill) {
     // The cell at the bottom of the open sky beside the island, at x = -64
-    // to -56.
-    for z in 0..8 {
-        for y in 0..8 {
-            for x in -64..-56 {
-                let p = IVec3::new(x, y, z);
-                let levels = levels(&mut app, p);
-                assert_eq!(levels.sky, 15.0, "at {p}");
-                assert!(levels.direct_sky());
+    // to -56, which every model marks as direct sky.
+    let mut app = settled(island_world(&fill));
+    // Under openness, a cell straight under a high narrow island too.
+    let mut open =
+        matches!(fill, SkyFill::Openness(_)).then(|| settled(high_island_world(&fill)));
+    let mut cells = vec![(&mut app, IVec3::new(-64, 0, 0))];
+    if let Some(open) = open.as_mut() {
+        cells.push((open, IVec3::new(8, 0, 8)));
+    }
+    for (app, min) in cells {
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let p = min + IVec3::new(x, y, z);
+                    let levels = levels(app, p);
+                    assert_eq!(levels.sky, 15.0, "at {p}");
+                    assert!(levels.direct_sky());
+                }
             }
         }
     }
@@ -426,10 +611,10 @@ fn minimal_and_shown(
     assert!(sky_of(minimal, chunks) == sky_of(shown, chunks), "{when}");
 }
 
-#[test]
 fn a_minimal_world_reads_the_same_light_as_a_shown_one_through_streaming_fill_and_a_settings_change(
+    fill: SkyFill,
 ) {
-    let world = island_world();
+    let world = island_world(&fill);
     let mut minimal = App::new();
     minimal
         .add_plugins((
@@ -441,23 +626,16 @@ fn a_minimal_world_reads_the_same_light_as_a_shown_one_through_streaming_fill_an
     minimal_and_shown(world.clone(), &mut apps, &AROUND_ISLAND, "after streaming");
 
     let changed = LampWorld {
-        light: Some(LightPropagation {
-            sky_fill: Some(SkyFill::Paths(PathFill {
-                opening_power: 1.0,
-                ..default()
-            })),
-            ..filled()
-        }),
+        light: Some(filled_with(&changed(&fill))),
         ..world
     };
     minimal_and_shown(changed, &mut apps, &AROUND_ISLAND, "after a change of fill");
 }
 
-#[test]
-fn turning_sky_fill_off_and_on_at_runtime_relights_to_match_the_reference() {
+fn turning_sky_fill_off_and_on_at_runtime_relights_to_match_the_reference(fill: SkyFill) {
     let chunks = [IVec3::ZERO];
-    let mut light = filled();
-    let mut app = settled(island_world());
+    let mut light = filled_with(&fill);
+    let mut app = settled(island_world(&fill));
     let lit = sky_of(&mut app, &chunks);
 
     light.sky_fill = None;
@@ -484,7 +662,7 @@ fn turning_sky_fill_off_and_on_at_runtime_relights_to_match_the_reference() {
         .world()
         .contains_resource::<crate::light::fill::driver::SkyFillWork<LampWorld>>());
 
-    set_light(&mut app, filled());
+    set_light(&mut app, filled_with(&fill));
     settle(&mut app, "light to settle with fill on again");
     assert!(sky_of(&mut app, &chunks) == lit);
 }
@@ -496,7 +674,7 @@ fn with_sky_fill_off_the_world_keeps_no_field_and_no_cells() {
             sky_fill: None,
             ..filled()
         }),
-        ..island_world()
+        ..island_world(&SkyFill::default())
     });
     assert!(!app
         .world()
@@ -544,16 +722,13 @@ fn worst_difference(
     scene: impl Fn(IVec3) -> WorldVoxel,
     light: &LightPropagation,
 ) -> f32 {
-    let Some(SkyFill::Paths(paths)) = &light.sky_fill else {
-        panic!("sky fill isn't on paths");
-    };
     let reference = fill_reference_everywhere(
         chunks,
         known,
         light.sky_reach as u32,
         light.shape,
         &light.sky,
-        paths,
+        light.sky_fill.as_ref().expect("sky fill is on"),
         scene,
     );
     read.iter()
@@ -674,3 +849,39 @@ fn hinted_air_holding_no_light_entry_reads_close_to_the_reference() {
     assert!(worst <= 2.0, "off by {worst}");
     assert!(read.iter().any(|(_, sky)| *sky > 0.0 && *sky < 15.0));
 }
+
+/// Runs each test of the suite every model of sky fill must pass, once under
+/// paths and once under sky openness, each with its defaults.
+macro_rules! once_per_model {
+    ($($test:ident),* $(,)?) => {
+        mod paths {
+            $(
+                #[test]
+                fn $test() {
+                    super::$test(crate::prelude::SkyFill::default());
+                }
+            )*
+        }
+
+        mod openness {
+            $(
+                #[test]
+                fn $test() {
+                    super::$test(super::openness());
+                }
+            )*
+        }
+    };
+}
+
+once_per_model!(
+    after_streaming_settles_at_256_levels_every_fully_loaded_chunk_matches_the_fill_reference,
+    a_1x1_shaft_lets_no_fill_through_and_a_sealed_pocket_stays_black,
+    faces_on_chunk_boundaries_under_a_floating_island_match_the_reference,
+    faces_on_chunk_boundaries_under_a_low_slab_match_the_reference,
+    arrival_order_changes_no_settled_fill_and_no_reading_is_brighter_than_the_reference,
+    light_reads_the_same_after_reset_light_rebuilds_the_record_and_the_field,
+    a_cell_a_model_marks_as_direct_sky_reads_15,
+    a_minimal_world_reads_the_same_light_as_a_shown_one_through_streaming_fill_and_a_settings_change,
+    turning_sky_fill_off_and_on_at_runtime_relights_to_match_the_reference,
+);

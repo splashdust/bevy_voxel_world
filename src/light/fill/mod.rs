@@ -18,6 +18,23 @@
 //! the region behind it. So a whole open face between two big spaces loses
 //! little, and a small door into a big room carries little.
 //!
+//! The other model, [`open`] (sky openness), lights each cell by the share of
+//! rays cast over the sky above it that reach a direct-sky cell. Where paths
+//! passes light along through openings, openness asks only what each cell
+//! sees: the ground under a high floating island sees most of the sky around
+//! it, so openness counts it as direct sky and it gets the sun, while paths
+//! leaves it in shade; and a cave is black past what its opening shows of the
+//! sky, where paths carries a pool of light further in. Openness costs more:
+//! its rays are cast again for every cell within their reach of a change.
+//!
+//! Two models sit behind one seam because neither is right for every world:
+//! which looks better and costs less depends on whether a world is mostly
+//! terrain, floating islands, caves or built interiors. So everything per
+//! voxel is shared, and a model only says how a cell's level is worked out.
+//! A cell a model counts as direct sky reads 15 and gets the sun; under
+//! openness such a cell's voxels may lack direct sky of their own, and a
+//! solve takes them as direct sky ([`CellFill::sunlit`]).
+//!
 //! Everything per voxel is shared by every model: a solve reads the cells of
 //! the 27 positions around its chunk onto a grid of 12×12×12 cells, blurs
 //! their levels over open cells to soften the steps between positions, and
@@ -34,13 +51,13 @@
 //! most every 500 ms: see [`driver`].
 
 pub(crate) mod driver;
+pub(crate) mod open;
 pub(crate) mod paths;
 pub(crate) mod seed;
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use bevy::log::warn_once;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
@@ -48,6 +65,7 @@ use super::config::SkyFill;
 use super::inputs::Occupancy;
 use super::sky::Columns;
 use crate::chunk::CHUNK_SIZE_U;
+use open::OpenField;
 use paths::PathField;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -70,7 +88,12 @@ pub(crate) struct PositionCells {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CellFill {
     pub open: u64,
+    /// The cells the model counts as direct sky. They read as level 15 and
+    /// get the sun.
     pub direct: u64,
+    /// The cells of `direct` whose voxels may lack direct sky of their own,
+    /// proved clear above. A solve takes their voxels as direct sky.
+    pub sunlit: u64,
     /// By cell, the level the blur starts from, in sixteenths of a level.
     pub levels: [u8; 64],
 }
@@ -165,22 +188,19 @@ impl FillCells {
 /// were worked out.
 ///
 /// Each call matches the model once, never per voxel.
+// A world holds one, so its size doesn't matter.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SkyFillField {
     Paths(PathField),
+    Openness(OpenField),
 }
 
 impl SkyFillField {
-    /// The field of `fill`, or `None` for a model not built yet.
-    pub fn new(fill: &SkyFill) -> Option<Self> {
+    /// The field of `fill`.
+    pub fn new(fill: &SkyFill) -> Self {
         match fill {
-            SkyFill::Paths(paths) => Some(SkyFillField::Paths(PathField::new(paths))),
-            SkyFill::Openness(_) => {
-                warn_once!(
-                    "light propagation: SkyFill::Openness isn't built yet, so sky fill \
-                     is off"
-                );
-                None
-            }
+            SkyFill::Paths(paths) => SkyFillField::Paths(PathField::new(paths)),
+            SkyFill::Openness(open) => SkyFillField::Openness(OpenField::new(open)),
         }
     }
 
@@ -189,6 +209,7 @@ impl SkyFillField {
     pub fn learn(&mut self, position: IVec3, cells: PositionCells) {
         match self {
             SkyFillField::Paths(field) => field.learn(position, cells),
+            SkyFillField::Openness(field) => field.learn(position, cells),
         }
     }
 
@@ -197,6 +218,7 @@ impl SkyFillField {
     pub fn forget(&mut self, position: IVec3) {
         match self {
             SkyFillField::Paths(field) => field.forget(position),
+            SkyFillField::Openness(field) => field.forget(position),
         }
     }
 
@@ -206,6 +228,7 @@ impl SkyFillField {
     pub fn update(&mut self, budget: Duration) -> Vec<IVec3> {
         match self {
             SkyFillField::Paths(field) => field.update(budget),
+            SkyFillField::Openness(field) => field.update(budget),
         }
     }
 
@@ -213,21 +236,30 @@ impl SkyFillField {
     pub fn has_pending(&self) -> bool {
         match self {
             SkyFillField::Paths(field) => field.has_pending(),
+            SkyFillField::Openness(field) => field.has_pending(),
         }
     }
 
     /// Positions the field doesn't know whose voxels could still raise a
-    /// level.
-    pub fn wanted_probes(&self) -> impl Iterator<Item = IVec3> + '_ {
-        match self {
-            SkyFillField::Paths(field) => field.wanted_probes(),
-        }
+    /// level, each with a position whose cells it could raise. A position
+    /// may come more than once.
+    pub fn wanted_probes(&self) -> impl Iterator<Item = (IVec3, IVec3)> + '_ {
+        let (paths, openness) = match self {
+            SkyFillField::Paths(field) => (Some(field.wanted_probes()), None),
+            SkyFillField::Openness(field) => (None, Some(field.wanted_probes())),
+        };
+        let paths = paths
+            .into_iter()
+            .flatten()
+            .map(|position| (position, position));
+        paths.chain(openness.into_iter().flatten())
     }
 
     /// The cells of `position`, if the field knows it.
     pub fn cells(&self, position: IVec3) -> Option<&CellFill> {
         match self {
             SkyFillField::Paths(field) => field.cells(position),
+            SkyFillField::Openness(field) => field.cells(position),
         }
     }
 
@@ -235,6 +267,7 @@ impl SkyFillField {
     pub fn bytes(&self) -> usize {
         match self {
             SkyFillField::Paths(field) => field.bytes(),
+            SkyFillField::Openness(field) => field.bytes(),
         }
     }
 }

@@ -36,7 +36,7 @@ use super::config::LightPrecision;
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
 use super::fill::seed::{CellsAround, FillSeeds, Seeding};
-use super::fill::FillCells;
+use super::fill::{FillCells, CELL};
 use super::inputs::{LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
@@ -547,8 +547,9 @@ fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
 
 /// Solves sky light for the chunk at the centre of `neighbours`, from the
 /// voxels with direct sky around it and, for a chunk that takes sky fill,
-/// the sky fill seeds `fill` found from the cells around it. Returns it with
-/// its face hashes, indexed by [`Face`].
+/// the sky fill seeds `fill` found from the cells around it, and the voxels
+/// of the cells sky fill counts as direct sky. Returns it with its face
+/// hashes, indexed by [`Face`].
 ///
 /// Direct sky holds the top level and doesn't fade. A chunk whose open voxels
 /// all have direct sky needs no spreading, and takes no sky fill.
@@ -564,11 +565,14 @@ pub(crate) fn solve_sky(
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
-    let direct: [Option<Box<Plane>>; 27] = std::array::from_fn(|index| {
+    let mut direct: [Option<Box<Plane>>; 27] = std::array::from_fn(|index| {
         neighbours[index]
             .as_ref()
             .and_then(|inputs| inputs.direct_sky())
     });
+    if let Some(seeding) = fill {
+        add_sunlit(&mut direct, neighbours, &seeding.sunlit);
+    }
     let own = direct[neighbour_index(IVec3::ZERO)].as_deref();
     if let Some(own) = own {
         let all_direct = (0..CHUNK * CHUNK).all(|column| {
@@ -602,6 +606,33 @@ pub(crate) fn solve_sky(
         }
     }
     (channel_light(planes, &centre.occupancy), faces)
+}
+
+/// Adds to `direct` the voxels of the cells `sunlit` holds for each position
+/// of `neighbours` that has inputs, which sky fill counts as direct sky.
+fn add_sunlit(
+    direct: &mut [Option<Box<Plane>>; 27],
+    neighbours: &Neighbourhood,
+    sunlit: &[u64; 27],
+) {
+    for (index, (plane, cells)) in direct.iter_mut().zip(sunlit).enumerate() {
+        if *cells == 0 || neighbours[index].is_none() {
+            continue;
+        }
+        let plane = plane.get_or_insert_with(|| Box::new([0; CHUNK * CHUNK]));
+        let mut left = *cells;
+        while left != 0 {
+            let bit = left.trailing_zeros() as usize;
+            left &= left - 1;
+            let (cx, cy, cz) = (bit & 3, bit >> 2 & 3, bit >> 4);
+            let z_bits = 0xffu32 << (cz * CELL);
+            for y in cy * CELL..(cy + 1) * CELL {
+                for x in cx * CELL..(cx + 1) * CELL {
+                    plane[x + y * CHUNK] |= z_bits;
+                }
+            }
+        }
+    }
 }
 
 fn centre(neighbours: &Neighbourhood) -> &LightInputs {

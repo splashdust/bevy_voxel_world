@@ -382,6 +382,15 @@ fn clamp_f32(value: f32, min: f32, max: f32, name: &str) -> f32 {
     clamped
 }
 
+/// The longest reach of [`OpenFill`], warning once if `reach` is longer.
+fn max_reach(reach: u32) -> u32 {
+    const MAX: u32 = 512;
+    if reach > MAX {
+        warn_once!("light propagation: reach {reach} is above {MAX}, using {MAX}");
+    }
+    MAX
+}
+
 fn at_least_one(value: u32, name: &str) -> u32 {
     if value >= 1 {
         return value;
@@ -423,10 +432,8 @@ pub enum SkyFill {
     /// Light passes from open space to open space through the openings between
     /// them, losing more through narrower openings.
     Paths(PathFill),
-    /// Each cell is lit by how much of the sky it sees.
-    ///
-    /// Not built yet: a world choosing it gets no sky fill, with a warning
-    /// logged once.
+    /// Each cell is lit by how much of the sky it sees, and a cell seeing
+    /// most of it counts as direct sky and gets the sun.
     Openness(OpenFill),
 }
 
@@ -499,18 +506,46 @@ impl PathFill {
 }
 
 /// The settings of [`SkyFill::Openness`].
+///
+/// Each open 8-voxel cell that isn't direct sky casts rays over the sky above
+/// it and is lit by the share that reaches open sky: a cell whose columns are
+/// all proved clear, met before a cell holding a solid. Under the default
+/// [`sky_falloff`](LightLook::sky_falloff), a cell's brightness is that share
+/// × [`gain`](Self::gain). A cell seeing at least [`sun_at`](Self::sun_at) of
+/// the sky counts as direct sky: it reads 15 and gets the sun. So the ground
+/// under a high floating island loses its straight-down shade and keeps only
+/// the sun's shadow, and a cave is black past what its opening shows of the
+/// sky.
+///
+/// Rays cost more than [`SkyFill::Paths`]: every cell that isn't direct sky
+/// casts each of its rays again when a voxel within
+/// [`reach`](Self::reach) below or beside it changes.
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub struct OpenFill {
-    /// The share of the sky, from 0 to 1, a cell must see to count as open to
-    /// the sky and get the sun. Defaults to 0.8.
+    /// The share of the sky, from 0 to 1, a cell must see to count as direct
+    /// sky and get the sun. A cell seeing none of the sky never does.
+    /// Defaults to 0.8.
+    ///
+    /// Costs nothing per frame. Relights on change.
     pub sun_at: f32,
-    /// How bright a cell is for the share of the sky it sees, at least 0.
-    /// Defaults to 1.
+    /// How bright a cell is for the share of the sky it sees, at least 0:
+    /// under the default sky falloff, the cell's brightness is the share ×
+    /// `gain`, up to level 14. Defaults to 1.
+    ///
+    /// Costs nothing per frame. Relights on change.
     pub gain: f32,
-    /// How many rays each cell casts toward the sky, at least 1. Defaults to 32.
+    /// How many rays each cell casts toward the sky, at least 1. Defaults to
+    /// 32.
+    ///
+    /// Working out a cell costs about as much as its rays: twice the rays,
+    /// twice the time. Relights on change.
     pub rays: u32,
-    /// How far, in voxels, a ray goes looking for the sky, at least 1. Defaults
-    /// to 128.
+    /// How far, in voxels, a ray goes looking for the sky, from 1 to 512.
+    /// Defaults to 128.
+    ///
+    /// A longer reach lets a ray look further, and makes a voxel edit cast
+    /// again the cells of more positions around it: the positions below and
+    /// beside an edit within `reach`. Relights on change.
     pub reach: u32,
 }
 
@@ -531,7 +566,7 @@ impl OpenFill {
             sun_at: clamp_f32(self.sun_at, 0.0, 1.0, "sun_at"),
             gain: clamp_f32(self.gain, 0.0, f32::MAX, "gain"),
             rays: at_least_one(self.rays, "rays"),
-            reach: at_least_one(self.reach, "reach"),
+            reach: at_least_one(self.reach, "reach").min(max_reach(self.reach)),
         }
     }
 }

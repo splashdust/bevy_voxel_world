@@ -18,9 +18,10 @@
 //! voxels all have direct sky: those are the chunks whose faces can read the
 //! fill around them.
 //!
-//! Fill probes read the positions the field asks for whose 3×3×3 holds a
-//! chunk taking sky fill, with whatever room the task pool has left after
-//! everything else, and nothing at rest.
+//! Fill probes read the positions the field asks for that could raise a
+//! level of a position whose 3×3×3 holds a chunk taking sky fill, with
+//! whatever room the task pool has left after everything else, and nothing
+//! at rest.
 
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
@@ -338,9 +339,9 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    /// Starts fill probes of the positions the field asks for whose 3×3×3
-    /// holds a chunk taking sky fill, nearest a camera first, as many as the
-    /// task pool has idle threads.
+    /// Starts fill probes of the positions the field asks for that could
+    /// raise a level of a position whose 3×3×3 holds a chunk taking sky fill,
+    /// nearest a camera first, as many as the task pool has idle threads.
     #[allow(clippy::too_many_arguments)]
     pub fn start_probes(
         mut fill: ResMut<Self>,
@@ -357,16 +358,20 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         }
         let candidates: Vec<IVec3> = {
             let view = settings.view.read();
-            fill.field
-                .wanted_probes()
-                .filter(|position| !fill.probing.contains(position))
-                .filter(|position| {
-                    around(*position).any(|around| {
-                        view.get(&around)
-                            .is_some_and(|chunk| takes_fill(&chunk.light.inputs))
-                    })
-                })
-                .collect()
+            let mut candidates = HashSet::new();
+            for (position, raises) in fill.field.wanted_probes() {
+                if candidates.contains(&position) || fill.probing.contains(&position) {
+                    continue;
+                }
+                let matters = around(raises).any(|around| {
+                    view.get(&around)
+                        .is_some_and(|chunk| takes_fill(&chunk.light.inputs))
+                });
+                if matters {
+                    candidates.insert(position);
+                }
+            }
+            candidates.into_iter().collect()
         };
         fill.wanted = candidates.len();
         let count = budget.idle();
@@ -478,5 +483,5 @@ fn distance_to_nearest(position: IVec3, cameras: &[Vec3]) -> u32 {
 /// The field of `config`, if it has sky light and sky fill on.
 pub(crate) fn field_of(config: &LightPropagation) -> Option<SkyFillField> {
     SkyRule::of(&config.sky)?;
-    SkyFillField::new(config.sky_fill.as_ref()?)
+    Some(SkyFillField::new(config.sky_fill.as_ref()?))
 }

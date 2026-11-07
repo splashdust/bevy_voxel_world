@@ -18,9 +18,7 @@ use crate::prelude::{LightShape, Sky, WorldVoxel};
 
 mod fill;
 
-pub(super) use fill::{
-    fill_reference, fill_reference_everywhere, fill_reference_in_steps,
-};
+pub(super) use fill::{fill_reference_everywhere, fill_reference_in_steps};
 
 /// Not reached by any source.
 const UNREACHED: u32 = u32::MAX;

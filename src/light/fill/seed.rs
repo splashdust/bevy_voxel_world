@@ -10,8 +10,10 @@
 //! darken what the blur gives, never brighten it. The blurred
 //! level of each lit cell, rounded to a step of the world's precision, seeds
 //! every voxel of the cell inside the kernel's box, so at 256 levels fill's
-//! fractions reach the voxels it lights. A direct-sky cell isn't a seed, since its
-//! voxels have direct sky already, but its level takes part in the blur.
+//! fractions reach the voxels it lights. A direct-sky cell isn't a seed,
+//! since its voxels have direct sky already, or take it from the solve when
+//! the model counts them as direct sky alone, but its level takes part in
+//! the blur.
 //!
 //! Seeds enter the kernel at the distance from a source at the top level that
 //! holds their level. The seeds entering at each distance run 7 voxels
@@ -63,8 +65,13 @@ pub(crate) struct FillSeeds {
 pub(crate) struct Seeding {
     /// `None` if nothing in the box holds fill.
     pub seeds: Option<FillSeeds>,
-    /// A hash of `seeds`, the same for two solves seeding the same voxels at
-    /// the same levels.
+    /// By position, at the index
+    /// [`neighbour_index`](crate::light::solver::neighbour_index) gives, the
+    /// cells whose voxels the solve takes as direct sky: see
+    /// [`CellFill::sunlit`].
+    pub sunlit: [u64; 27],
+    /// A hash of `seeds` and `sunlit`, the same for two solves seeding the
+    /// same voxels at the same levels.
     pub hash: u64,
     /// The time finding and hashing them took.
     pub took: Duration,
@@ -76,10 +83,15 @@ impl Seeding {
     pub fn of(around: &CellsAround, scale: &LevelScale) -> Self {
         let started = Instant::now();
         let seeds = FillSeeds::of(around, scale);
+        let sunlit = std::array::from_fn(|index| {
+            around[index].as_ref().map_or(0, |cells| cells.sunlit)
+        });
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         seeds.hash(&mut hasher);
+        sunlit.hash(&mut hasher);
         Self {
             seeds,
+            sunlit,
             hash: hasher.finish(),
             took: started.elapsed(),
         }
@@ -680,6 +692,7 @@ mod tests {
             Some(Arc::new(CellFill {
                 open,
                 direct,
+                sunlit: 0,
                 levels,
             }))
         });
@@ -710,6 +723,7 @@ mod tests {
             Some(Arc::new(CellFill {
                 open: if py == 0 { !0xffff } else { !0 },
                 direct: if py == 2 { 0xf000_0000_0000_0000 } else { 0 },
+                sunlit: 0,
                 levels,
             }))
         });
