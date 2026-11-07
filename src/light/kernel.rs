@@ -70,6 +70,9 @@ pub(crate) trait Row:
 
     /// `column` as the row's low 32 bits.
     fn from_u32(column: u32) -> Self;
+
+    /// `column` as the row's low 64 bits.
+    fn from_u64(column: u64) -> Self;
 }
 
 impl Row for u64 {
@@ -86,6 +89,11 @@ impl Row for u64 {
     fn from_u32(column: u32) -> Self {
         column as u64
     }
+
+    #[inline]
+    fn from_u64(column: u64) -> Self {
+        column
+    }
 }
 
 impl Row for u128 {
@@ -100,6 +108,11 @@ impl Row for u128 {
 
     #[inline]
     fn from_u32(column: u32) -> Self {
+        column as u128
+    }
+
+    #[inline]
+    fn from_u64(column: u64) -> Self {
         column as u128
     }
 }
@@ -131,7 +144,15 @@ pub(crate) struct LightBox<R> {
     /// The voxels of `fresh` on the faces at z = 0 and z = 31, each a word
     /// along x, by y.
     z_faces: [[u32; 2]; CHUNK],
+    /// Where a run also writes the level of the layer of voxels just outside
+    /// each of the chunk's faces, if it does.
+    shell: Option<Box<ShellLevels>>,
 }
+
+/// The level of each voxel just outside a chunk's faces, by
+/// [`Face`], at `u + v × 32` for the voxel in front of the chunk's voxel
+/// [`Face::voxel`]`(u, v)`.
+pub(crate) type ShellLevels = [[u8; CHUNK * CHUNK]; 6];
 
 impl<R: Row> LightBox<R> {
     /// A box for light of `reach`, with every voxel closed and none lit. A row
@@ -150,7 +171,23 @@ impl<R: Row> LightBox<R> {
             pass: vec![R::ZERO; side * side],
             fresh: vec![0; CHUNK * CHUNK],
             z_faces: [[0; 2]; CHUNK],
+            shell: None,
         }
+    }
+
+    /// Makes later runs also write the levels of the layer of voxels just
+    /// outside the chunk's faces, read back with
+    /// [`shell_levels`](Self::shell_levels). Voxels outside the box's reach
+    /// minus one keep 0, as do lit voxels and seeds.
+    pub fn capture_shell(&mut self) {
+        self.shell
+            .get_or_insert_with(|| Box::new([[0; CHUNK * CHUNK]; 6]));
+    }
+
+    /// The shell levels the last run wrote, after
+    /// [`capture_shell`](Self::capture_shell).
+    pub fn shell_levels(&self) -> Option<&ShellLevels> {
+        self.shell.as_deref()
     }
 
     pub fn reach(&self) -> usize {
@@ -200,6 +237,11 @@ impl<R: Row> LightBox<R> {
             plane.fill(0);
         }
         *faces = [0; 6];
+        if let Some(shell) = &mut self.shell {
+            for face in shell.iter_mut() {
+                face.fill(0);
+            }
+        }
         let (reach, side) = (self.reach, self.side);
         if lit {
             self.hash_lit_faces(faces);
@@ -247,6 +289,11 @@ impl<R: Row> LightBox<R> {
                     }
                 }
                 self.hash_faces(round, faces);
+            }
+            // The shell lies one voxel outside the chunk, where rounds up to
+            // the box's reach minus one still work.
+            if round < reach && self.shell.is_some() {
+                self.capture_shell_round(level);
             }
             std::mem::swap(&mut self.reached, &mut self.next);
             if changed == R::ZERO && next_seed == seeds.len() {
@@ -309,6 +356,58 @@ impl<R: Row> LightBox<R> {
             self.z_faces[y] = [near, far];
         }
         any
+    }
+
+    /// Writes `level` into the shell levels for the voxels just outside the
+    /// chunk that this round reached.
+    fn capture_shell_round(&mut self, level: u8) {
+        let (reach, side) = (self.reach, self.side);
+        let Some(shell) = self.shell.as_deref_mut() else {
+            return;
+        };
+        let (next, reached) = (&self.next, &self.reached);
+        let fresh = |row: usize| next[row] & !reached[row];
+        let mut set = |face: Face, u: usize, v: usize| {
+            let cell = &mut shell[face as usize][u + v * CHUNK];
+            if *cell == 0 {
+                *cell = level;
+            }
+        };
+        let (near, far) = (reach - 1, reach + CHUNK);
+        for (face, x) in [(Face::NegX, near), (Face::PosX, far)] {
+            for y in 0..CHUNK {
+                let mut bits = (fresh(x + (y + reach) * side) >> reach).low_u32();
+                while bits != 0 {
+                    let z = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    set(face, y, z);
+                }
+            }
+        }
+        for (face, y) in [(Face::NegY, near), (Face::PosY, far)] {
+            for x in 0..CHUNK {
+                let mut bits = (fresh(x + reach + y * side) >> reach).low_u32();
+                while bits != 0 {
+                    let z = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    set(face, x, z);
+                }
+            }
+        }
+        for y in 0..CHUNK {
+            for x in 0..CHUNK {
+                let row = fresh(x + reach + (y + reach) * side);
+                if row == R::ZERO {
+                    continue;
+                }
+                if (row >> near).low_u32() & 1 == 1 {
+                    set(Face::NegZ, x, y);
+                }
+                if (row >> far).low_u32() & 1 == 1 {
+                    set(Face::PosZ, x, y);
+                }
+            }
+        }
     }
 
     /// Mixes into `faces` the chunk's lit voxels on each face, as reached in

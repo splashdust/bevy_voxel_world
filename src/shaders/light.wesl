@@ -14,6 +14,10 @@
 // the one level of each channel every face of the chunk sees. Each texel holds
 // sky light in its low nibble and voxel light in its high one. A lamp's own
 // cell holds 15 in its voxel half and its declared level in its sky half.
+//
+// A chunk above LOD level 0 with a slot holds its LOD level L in bits 24-27.
+// Its slot's cells are `1 << L` voxels wide, so its local position is divided
+// by that width, keeping the corner of its first cell at (1, 1, 1).
 
 import bevy_pbr::render::{
     pbr_types::PbrInput,
@@ -144,11 +148,13 @@ fn smoothed_read(origin: vec3<i32>, front: vec3<f32>, axis: vec3<f32>) -> vec2<f
 // A face on the grid, with its normal on an axis and its position on a plane
 // between voxels, reads the voxel in front of it, at `local + normal / 2`.
 // Any other face reads the voxel there alone.
-fn sample_light(tag: u32, local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
+fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
     if (tag & HAS_SLOT) == 0u {
         let voxel = f32((tag >> 4u) & 15u);
         return LightLevels(f32(tag & 15u), vec3<f32>(voxel), vec3<f32>(0.0));
     }
+    let width = f32(1u << ((tag >> 24u) & 15u));
+    let local = (chunk_local - vec3<f32>(1.0)) / width + vec3<f32>(1.0);
     let origin = slot_origin(tag);
     let n = normal / max(length(normal), 1e-4);
     let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));

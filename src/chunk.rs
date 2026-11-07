@@ -673,10 +673,10 @@ where
     /// What the task needs to solve the chunk's light, in a world with light
     /// propagation.
     #[cfg(feature = "light_propagation")]
-    pub light: Option<crate::light::solver::LightTask<I>>,
+    pub light: Option<crate::light::TaskLight<I>>,
     /// The chunk's solved light, once `post_voxel` has run.
     #[cfg(feature = "light_propagation")]
-    pub solved_light: Option<crate::light::solver::Solved>,
+    pub solved_light: Option<crate::light::SolvedLight>,
     _marker: PhantomData<C>,
 }
 

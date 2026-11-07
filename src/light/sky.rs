@@ -128,10 +128,22 @@ impl SkyRule {
 
 /// What a fill hint says about a chunk position above a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Hinted {
+pub(crate) enum Hinted {
     Unknown,
     Air,
     Solid,
+}
+
+impl Hinted {
+    /// What `hint` says, or `Unknown` for a chunk position voxel edits reach.
+    pub fn of<I: Copy + PartialEq>(hint: FillHint<I>, edited: bool) -> Self {
+        match hint {
+            _ if edited => Hinted::Unknown,
+            FillHint::Unknown => Hinted::Unknown,
+            FillHint::Uniform(voxel) if voxel.is_solid() => Hinted::Solid,
+            FillHint::Uniform(_) => Hinted::Air,
+        }
+    }
 }
 
 /// A chunk position above a chunk, as its walk reads it.
@@ -151,12 +163,10 @@ impl<I> Above<I> {
     where
         I: Copy + PartialEq,
     {
-        let hinted = match (hint, &edits) {
-            (_, Some(_)) | (FillHint::Unknown, _) => Hinted::Unknown,
-            (FillHint::Uniform(voxel), None) if voxel.is_solid() => Hinted::Solid,
-            (FillHint::Uniform(_), None) => Hinted::Air,
-        };
-        Self { hinted, edits }
+        Self {
+            hinted: Hinted::of(hint, edits.is_some()),
+            edits,
+        }
     }
 }
 

@@ -140,6 +140,13 @@ pub(crate) struct LightCounters {
     /// nanoseconds.
     pub column_nanos: AtomicU64,
     pub walks: WalkCounters,
+    /// Coarse chunks solved, in their chunk tasks.
+    pub coarse_solves: AtomicU64,
+    /// Time coarse chunk tasks spent solving light, walks included, in
+    /// nanoseconds.
+    pub coarse_nanos: AtomicU64,
+    /// Voxel lookups coarse chunks' walks made.
+    pub coarse_lookups: AtomicU64,
 }
 
 /// The 3×3×3 chunk positions around a chunk, at

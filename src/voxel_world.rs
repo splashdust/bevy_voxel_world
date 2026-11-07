@@ -188,6 +188,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
     #[cfg(feature = "light_propagation")]
     light_work: Option<Res<'w, crate::light::relight::LightWork<C>>>,
+    #[cfg(feature = "light_propagation")]
+    light_route: Option<Res<'w, crate::light::route::LightRoute<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -225,19 +227,31 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
 
     /// The light at the voxel at `position`, as levels from 0 to 15.
     ///
-    /// It reads the light landed for the level-0 chunk holding the voxel: a
-    /// solid voxel reads 0, an emissive voxel its own level, and an open voxel
-    /// the light that reached it. Light beside a chunk that isn't loaded can
-    /// read darker than the truth, never brighter. A chunk's light can change
-    /// after it appears, as chunks arriving around it relight it;
-    /// [`VoxelWorld::light_is_settled`] says when that has finished.
+    /// It reads the light landed for the finest published chunk holding the
+    /// voxel. In a level-0 chunk a solid voxel reads 0, an emissive voxel its
+    /// own level, and an open voxel the light that reached it. Light beside a
+    /// chunk that isn't loaded can read darker than the truth, never brighter.
+    /// A chunk's light can change after it appears, as chunks arriving around
+    /// it relight it; [`VoxelWorld::light_is_settled`] says when that has
+    /// finished.
+    ///
+    /// A chunk above LOD level 0, or a level-0 chunk with a non-default
+    /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
+    /// renders, which is plausible rather than exact: the cell holding the
+    /// voxel while the chunk holds a slot in the world's light texture, and
+    /// otherwise the one level per channel its tag shows.
     ///
     /// Returns `None` when the world has no light propagation, or no published
-    /// level-0 chunk holds the voxel.
+    /// chunk holding the voxel has light yet.
     #[cfg(feature = "light_propagation")]
     pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
         let light = self.light.as_ref()?;
-        light.light_at(&self.chunk_map.get_read_lock(), position)
+        light.light_at(
+            &self.chunk_map.get_read_lock(),
+            self.light_work.as_ref()?,
+            self.light_route.as_deref(),
+            position,
+        )
     }
 
     /// Whether the world's light has caught up with its chunks: no relight is
