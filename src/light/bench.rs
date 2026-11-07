@@ -10,11 +10,16 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use super::faces::Face;
 use super::inputs::LightInputs;
+use super::inputs::{EmissiveVoxel, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
+use super::route::LightRoute;
 use super::sky::ColumnAnswer;
+use super::slot::{border_plane, slot_bytes, write_shell};
 use super::solver::{neighbour_index, solve_sky, solve_voxel};
+use super::solver::{ChannelLight, ChunkLight};
 use super::view::Snapshot;
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
@@ -189,6 +194,61 @@ fn copy_rows<R: Row>(from: &[u128], to: &mut [R]) {
     }
 }
 
+/// A chunk's light and its six face neighbours', for timing what landing
+/// does to fill a slot.
+pub struct SlotBox {
+    light: ChunkLight,
+    neighbours: [ChunkLight; 6],
+}
+
+impl SlotBox {
+    /// The light the last spread of `kernel_box` left, in a chunk whose open
+    /// voxels `open` says, at positions from -32 to 63 relative to the chunk.
+    /// Each face neighbour gets the same light, with its own open voxels.
+    pub fn new(kernel_box: &KernelBox, open: impl Fn(IVec3) -> bool) -> Self {
+        let chunk = |offset: IVec3| {
+            let mut solid: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+            for y in 0..CHUNK {
+                for x in 0..CHUNK {
+                    for z in 0..CHUNK {
+                        let local = IVec3::new(x as i32, y as i32, z as i32);
+                        if !open(local + offset * CHUNK as i32) {
+                            solid[x + y * CHUNK] |= 1 << z;
+                        }
+                    }
+                }
+            }
+            ChunkLight {
+                inputs: Arc::new(LightInputs {
+                    occupancy: Occupancy::Mixed(solid),
+                    emissive: Vec::<EmissiveVoxel>::new(),
+                    columns: ColumnAnswer::none(),
+                }),
+                sky: ChannelLight::Uniform(15),
+                voxel: ChannelLight::Planes(kernel_box.planes.clone()),
+            }
+        };
+        Self {
+            light: chunk(IVec3::ZERO),
+            neighbours: Face::ALL.map(|face| chunk(face.offset())),
+        }
+    }
+
+    /// Turns the chunk's bit planes into a slot's bytes with the table.
+    pub fn slot_bytes(&self) -> Box<[u8]> {
+        slot_bytes(&self.light)
+    }
+
+    /// Copies the six face neighbours' border planes into the shell of
+    /// `bytes`.
+    pub fn shell_planes(&self, bytes: &mut [u8]) {
+        for face in Face::ALL {
+            let plane = border_plane(&self.neighbours[face as usize], face.opposite());
+            write_shell(bytes, face, Some(&plane));
+        }
+    }
+}
+
 /// Scans a chunk's voxels, 34 on a side with their padding, for its occupancy
 /// and, with a non-empty `emission` list of materials and levels, its emissive
 /// voxels. Returns how many emissive voxels it found.
@@ -232,13 +292,37 @@ pub struct LightStats {
     pub walks: u64,
     /// Voxel lookups those walks made.
     pub walk_lookups: u64,
+    /// In a world showing its light, slots given to chunks, counting late ones
+    /// and evictions.
+    pub slot_allocations: u64,
+    /// Slots given to chunks whose faces saw one level, when a neighbour's
+    /// border plane stopped matching it.
+    pub late_allocations: u64,
+    /// Slots given back by chunks whose faces came to see one level.
+    pub slots_given_back: u64,
+    /// Slots taken from a chunk farther from the camera for a nearer one.
+    pub evictions: u64,
+    /// Shell planes written alone, after a neighbour's light changed.
+    pub plane_writes: u64,
+    /// Slots written whole.
+    pub full_writes: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
 pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
     let counters = world.get_resource::<LightSettings<C>>()?.counters();
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
+    let slots = world
+        .get_resource::<LightRoute<C>>()
+        .map(|route| route.counters)
+        .unwrap_or_default();
     Some(LightStats {
+        slot_allocations: slots.allocations,
+        late_allocations: slots.late_allocations,
+        slots_given_back: slots.given_back,
+        evictions: slots.evictions,
+        plane_writes: slots.plane_writes,
+        full_writes: slots.full_writes,
         emissive_scans: counters.emissive_scans.load(Ordering::Relaxed),
         solves: counters.solves.load(Ordering::Relaxed),
         solve_ms: ms(&counters.solve_nanos),

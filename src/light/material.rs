@@ -210,7 +210,7 @@ pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
     let material = ExtendedMaterial {
         base,
         extension: VoxelWorldBindings {
-            light_texture: route.texture.clone(),
+            light_texture: route.placeholder.clone(),
             look: LookUniform::new(&config),
             _material: PhantomData,
         },
@@ -223,9 +223,42 @@ pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
         .resource_mut::<Assets<VoxelWorldMaterial<M>>>()
         .add(material);
     add_material_path::<C, VoxelWorldMaterial<M>>(app, Some(handle));
+    app.add_systems(
+        PostUpdate,
+        make_texture::<C, M>.run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+    );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
         .insert_chunk_components = route::tag_chunk::<C>;
+}
+
+/// Makes world `C`'s light texture, once a chunk first takes a slot, and
+/// gives it to the world's material in place of the placeholder.
+fn make_texture<C: VoxelWorldConfig, M: Material>(world: &mut World)
+where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let image = world.resource::<LightRoute<C>>().texture_image();
+    let texture = world.resource_mut::<Assets<Image>>().add(image);
+    world
+        .resource_mut::<LightRoute<C>>()
+        .texture_made(texture.clone());
+    let Some(handle) = world
+        .resource::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
+        .handle
+        .clone()
+    else {
+        return;
+    };
+    // Changing the material makes Bevy prepare its bind group again, with the
+    // new texture.
+    if let Some(mut material) = world
+        .resource_mut::<Assets<VoxelWorldMaterial<M>>>()
+        .get_mut(&handle)
+    {
+        material.extension.light_texture = texture;
+    }
 }
 
 #[cfg(test)]

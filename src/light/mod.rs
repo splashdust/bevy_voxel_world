@@ -19,6 +19,7 @@ pub(crate) mod material;
 pub(crate) mod relight;
 pub(crate) mod route;
 pub(crate) mod sky;
+pub(crate) mod slot;
 pub(crate) mod solver;
 pub(crate) mod view;
 

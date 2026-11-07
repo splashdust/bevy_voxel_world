@@ -39,12 +39,14 @@ use std::time::{Duration, Instant};
 use bevy::mesh::MeshTag;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::render::renderer::RenderDevice;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
 
 use super::faces::{could_reach_sooner, Face};
 use super::levels::LevelScale;
 use super::route::LightRoute;
+use super::slot::FacesSee;
 use super::solver::{relight, ChunkLight, Solved};
 use super::view::{LightView, ViewChunk};
 use super::LightSettings;
@@ -99,9 +101,13 @@ struct Running {
 
 /// A chunk's light that changed as it landed, for the shader.
 struct LandedLight {
+    position: IVec3,
     entity: Entity,
     light: Arc<ChunkLight>,
+    own: FacesSee,
     bytes: Option<Box<[u8]>>,
+    /// Whether it came from a chunk task, whose voxels may be new.
+    new_voxels: bool,
 }
 
 /// The light work of world `C` on the main thread: each chunk's light state,
@@ -211,9 +217,12 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             mut solved,
         } = landing;
         let landed = LandedLight {
+            position,
             entity,
             light: solved.light.clone(),
+            own: solved.own,
             bytes: solved.bytes.take(),
+            new_voxels: source == Source::ChunkTask,
         };
         let mut triggers = Vec::new();
         {
@@ -397,20 +406,29 @@ impl<C: VoxelWorldConfig> Relights<C> {
     /// budget allows, and carries the rest over to the next frame.
     ///
     /// In a world showing its light, a chunk whose light changed gets its new
-    /// tag and slot as its light lands.
+    /// tag and slot as its light lands, and its neighbours' shells follow.
+    /// Slots freed meanwhile go to chunks waiting for one.
+    #[allow(clippy::too_many_arguments)]
     pub fn land(
         mut commands: Commands,
         mut work: ResMut<LightWork<C>>,
         settings: Res<LightSettings<C>>,
         chunks: Query<(), With<ChunkStateOf<C>>>,
         mut route: Option<ResMut<LightRoute<C>>>,
+        cameras: Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
+        device: Option<Res<RenderDevice>>,
     ) {
-        if work.landing.is_empty() {
+        let refill = route.as_ref().is_some_and(|route| route.wants_refill());
+        if work.landing.is_empty() && !refill {
             return;
         }
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("land_light").entered();
         let started = Instant::now();
+        if let Some(route) = route.as_mut() {
+            route.set_cameras(cameras.iter().map(|camera| camera.translation()));
+            route.set_device(device.as_deref());
+        }
         let scales = (&settings.task.voxel_scale, settings.task.sky_scale.as_ref());
         while let Some(landing) = work.landing.pop_front() {
             let (position, entity, source) =
@@ -418,14 +436,14 @@ impl<C: VoxelWorldConfig> Relights<C> {
             if chunks.contains(entity) {
                 let landed = work.land(landing, &settings.view, scales);
                 if let (Some(route), Some(landed)) = (route.as_mut(), landed) {
-                    let LandedLight {
-                        entity,
-                        light,
-                        bytes,
-                    } = landed;
-                    if let Some(tag) = route.light_landed(entity, &light, bytes) {
-                        commands.entity(entity).try_insert(MeshTag::new(tag));
-                    }
+                    route.light_landed(
+                        landed.position,
+                        landed.entity,
+                        landed.light,
+                        landed.own,
+                        landed.bytes,
+                        landed.new_voxels,
+                    );
                 }
             }
             if source == Source::Relight {
@@ -433,6 +451,12 @@ impl<C: VoxelWorldConfig> Relights<C> {
             }
             if started.elapsed() >= LANDING_BUDGET {
                 break;
+            }
+        }
+        if let Some(route) = route.as_mut() {
+            route.refill();
+            for (entity, tag) in route.take_changed_tags() {
+                commands.entity(entity).try_insert(MeshTag::new(tag));
             }
         }
         work.add_frame_time(started);

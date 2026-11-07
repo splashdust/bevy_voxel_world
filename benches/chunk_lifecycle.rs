@@ -663,6 +663,16 @@ fn scenario_stream_in_lamps() -> Metrics {
         format!("{prefix}.main_thread_max_frame_ms"),
         stats.max_frame_ms,
     );
+    for (name, count) in [
+        ("slot_allocations", stats.slot_allocations),
+        ("late_allocations", stats.late_allocations),
+        ("slots_given_back", stats.slots_given_back),
+        ("evictions", stats.evictions),
+        ("plane_writes", stats.plane_writes),
+        ("full_writes", stats.full_writes),
+    ] {
+        metrics.insert(format!("{prefix}.{name}"), count as f64);
+    }
     metrics
 }
 

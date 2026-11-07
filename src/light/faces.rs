@@ -51,7 +51,7 @@ impl Face {
     /// The chunk's voxel at `u` and `v` on this face, `u` and `v` running
     /// along the other two axes in x, y, z order. A face and its opposite
     /// give touching voxels the same `u` and `v`.
-    fn voxel(self, u: usize, v: usize) -> (usize, usize, usize) {
+    pub fn voxel(self, u: usize, v: usize) -> (usize, usize, usize) {
         let far = self as usize & 1 == 1;
         let side = if far { CHUNK - 1 } else { 0 };
         match self {

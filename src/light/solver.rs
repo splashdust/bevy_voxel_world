@@ -36,6 +36,7 @@ use super::inputs::{LightInputs, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyWalk, WalkCounters};
+use super::slot::{own_faces_see, slot_bytes, FacesSee};
 use super::view::{LightView, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::voxel::WorldVoxel;
@@ -159,9 +160,11 @@ pub(crate) struct Solved {
     /// By [`Face`], whether the chunk's light could reach the neighbour sooner
     /// than the neighbour's light says, judged against the version in `seen`.
     pub reaches: [bool; 6],
+    /// In a world showing its light, what the chunk's faces read from its
+    /// own voxels.
+    pub own: FacesSee,
     /// The bytes of the chunk's slot, in a world showing its light, for a
-    /// chunk with both solid and open voxels, so with faces, whose light
-    /// varies.
+    /// chunk whose own voxels already call for a slot.
     pub bytes: Option<Box<[u8]>>,
 }
 
@@ -270,15 +273,18 @@ fn solve<I>(
             );
         }
     }
-    let has_faces = matches!(light.inputs.occupancy, Occupancy::Mixed(_));
-    let bytes = (settings.routed && has_faces)
-        .then(|| super::route::slot_bytes(&light))
-        .flatten();
+    let own = if settings.routed {
+        own_faces_see(&light)
+    } else {
+        FacesSee::default()
+    };
+    let bytes = own.needs_slot().then(|| slot_bytes(&light));
     Solved {
         light,
         faces,
         seen,
         reaches,
+        own,
         bytes,
     }
 }

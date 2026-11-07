@@ -16,6 +16,10 @@
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map.
+//! - A slot given to another chunk the frame after it's freed never shows the
+//!   other chunk's light: two lamps in rooms carved deep in the rock switch on
+//!   and off in turn, so their chunks take and give back the same slot, while
+//!   every frame of the dark room beside one of them stays black.
 //!
 //! The lamp room's checks run with sky light off because the room spans a
 //! chunk boundary with more open columns than a chunk's walk can settle, so
@@ -420,9 +424,11 @@ struct Check {
     earlier: Option<&'static str>,
     judge:
         fn(&Image, &Camera, &GlobalTransform, Option<&Image>) -> Result<String, String>,
+    /// Whether it switches the slot lamps while judging a picture each frame.
+    switches_lamps: bool,
 }
 
-const CHECKS: [Check; 4] = [
+const CHECKS: [Check; 5] = [
     Check {
         name: "a lamp declared below the top level still glows, scaled by its level",
         file: "lamp_room.png",
@@ -431,6 +437,7 @@ const CHECKS: [Check; 4] = [
         shadow_maps: true,
         earlier: None,
         judge: dim_lamp_glows,
+        switches_lamps: false,
     },
     Check {
         name: "a sealed pocket with no light in reach is exactly black",
@@ -440,6 +447,17 @@ const CHECKS: [Check; 4] = [
         shadow_maps: true,
         earlier: None,
         judge: pocket_is_black,
+        switches_lamps: false,
+    },
+    Check {
+        name: "a slot given to another chunk the frame after it's freed never shows the other chunk's light",
+        file: "slot_room.png",
+        sky: true,
+        camera: &SLOT_ROOM_CAMERA,
+        shadow_maps: true,
+        earlier: None,
+        judge: pocket_is_black,
+        switches_lamps: true,
     },
     Check {
         name: "a sun with no shadow map leaves a sealed pocket exactly black",
@@ -449,6 +467,7 @@ const CHECKS: [Check; 4] = [
         shadow_maps: false,
         earlier: None,
         judge: pocket_is_black,
+        switches_lamps: false,
     },
     Check {
         name: "a sun with no shadow map leaves propagated shade as it was",
@@ -458,12 +477,75 @@ const CHECKS: [Check; 4] = [
         shadow_maps: false,
         earlier: Some("lamp_room.png"),
         judge: matches_earlier,
+        switches_lamps: false,
     },
 ];
 
 /// The pictures of the checks so far, by file.
 #[derive(Resource, Default)]
 struct Pictures(std::collections::HashMap<&'static str, Image>);
+
+// --- The slot check's rooms --------------------------------------------------
+//
+// Below the cave floor everything is rock. The check carves two rooms there,
+// in the same place in two chunks that aren't neighbours. The dark room has
+// no lamp, and its chunk has a lamp of its own in a sealed cell one voxel big
+// behind its wall, so the chunk needs a slot only while that lamp is on. The
+// lit room's lamp lights its room, so its chunk needs a slot only while that
+// lamp is on. The lamps switch in turn, so each chunk takes the slot the
+// other just gave back. Had the dark room's chunk read the lit room's bytes
+// for a frame, its walls would show the lamp's light.
+
+/// The chunk holding the dark room.
+const DARK_CHUNK: IVec3 = IVec3::new(0, -20, 0);
+/// The chunk holding the lit room, three chunks along x.
+const LIT_CHUNK: IVec3 = IVec3::new(3, -20, 0);
+/// Each room, in its chunk's voxels.
+const ROOM: Bounds = Bounds::new([4, 4, 4], [28, 28, 28]);
+/// The lamp in the lit room, in its chunk's voxels.
+const LIT_LAMP: IVec3 = IVec3::new(16, 4, 16);
+/// The sealed cell behind the dark room's wall, and its lamp.
+const SEALED_CELL: IVec3 = IVec3::new(1, 1, 1);
+const SEALED_LAMP: IVec3 = IVec3::new(2, 1, 1);
+/// Frames between switching the lamps, and frames judged in all.
+const SWITCH_EVERY: u32 = 3;
+const SWITCHED_FRAMES: u32 = 90;
+
+const SLOT_ROOM_CAMERA: FixedCamera = camera([16.0, -624.0, 6.0], [16.0, -626.0, 27.0]);
+
+fn carve_slot_rooms(voxel_world: &mut VoxelWorld<CaveWorld>) {
+    for chunk in [DARK_CHUNK, LIT_CHUNK] {
+        for x in ROOM.min[0]..ROOM.max[0] {
+            for y in ROOM.min[1]..ROOM.max[1] {
+                for z in ROOM.min[2]..ROOM.max[2] {
+                    voxel_world
+                        .set_voxel(chunk * 32 + IVec3::new(x, y, z), WorldVoxel::Air);
+                }
+            }
+        }
+    }
+    voxel_world.set_voxel(DARK_CHUNK * 32 + SEALED_CELL, WorldVoxel::Air);
+}
+
+/// Switches on the lit room's lamp and off the sealed one, or the other way.
+fn switch_lamps(voxel_world: &mut VoxelWorld<CaveWorld>, lit_room: bool) {
+    let lamp = |on: bool| {
+        if on {
+            WorldVoxel::Solid(LAMP)
+        } else {
+            WorldVoxel::Solid(STONE)
+        }
+    };
+    voxel_world.set_voxel(
+        LIT_CHUNK * 32 + LIT_LAMP,
+        if lit_room {
+            lamp(true)
+        } else {
+            WorldVoxel::Air
+        },
+    );
+    voxel_world.set_voxel(DARK_CHUNK * 32 + SEALED_LAMP, lamp(!lit_room));
+}
 
 #[derive(Resource)]
 struct CheckPlan {
@@ -477,6 +559,11 @@ struct CheckPlan {
     frame: u32,
     waiting: bool,
     failed: bool,
+    /// Frames judged so far while switching the slot lamps.
+    switched: u32,
+    /// Pictures of the switching frames not yet judged, and how many failed.
+    shots_out: u32,
+    shots_failed: u32,
     /// Where to save the pictures, if anywhere.
     directory: Option<std::path::PathBuf>,
 }
@@ -552,6 +639,9 @@ fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: b
         frame: 0,
         waiting: false,
         failed: false,
+        switched: 0,
+        shots_out: 0,
+        shots_failed: 0,
         directory: std::env::args().nth(2).map(Into::into),
     });
 }
@@ -567,7 +657,7 @@ fn run_checks(
     >,
     mut suns: Query<&mut DirectionalLight>,
     chunks: Query<&Chunk<CaveWorld>>,
-    voxel_world: VoxelWorld<CaveWorld>,
+    mut voxel_world: VoxelWorld<CaveWorld>,
     mut exit: MessageWriter<AppExit>,
 ) {
     plan.frame += 1;
@@ -600,6 +690,14 @@ fn run_checks(
             sun.shadow_maps_enabled = check.shadow_maps;
         }
         plan.moved_at_frame = frame;
+        if check.switches_lamps {
+            carve_slot_rooms(&mut voxel_world);
+            switch_lamps(&mut voxel_world, true);
+        }
+        return;
+    }
+    if check.switches_lamps && plan.switched > 0 {
+        switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
     }
     let waited = frame - plan.moved_at_frame;
@@ -610,6 +708,11 @@ fn run_checks(
             plan.failed = true;
             plan.next += 1;
         }
+        return;
+    }
+
+    if check.switches_lamps {
+        switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
     }
 
@@ -663,6 +766,55 @@ fn matches_earlier(
     } else {
         Err(format!("{differing} channels differ by more than 1"))
     }
+}
+
+/// Switches the slot lamps every few frames and judges a picture of every
+/// frame black, then moves on once every picture is judged.
+fn switch_and_judge(
+    commands: &mut Commands,
+    plan: &mut CheckPlan,
+    voxel_world: &mut VoxelWorld<CaveWorld>,
+    name: &'static str,
+) {
+    if plan.switched < SWITCHED_FRAMES {
+        if plan.switched.is_multiple_of(SWITCH_EVERY) {
+            let lit_room = (plan.switched / SWITCH_EVERY) % 2 == 1;
+            switch_lamps(voxel_world, lit_room);
+        }
+        plan.switched += 1;
+        plan.shots_out += 1;
+        let frame = plan.switched;
+        commands
+            .spawn(Screenshot::image(plan.target.clone()))
+            .observe(
+                move |captured: On<ScreenshotCaptured>, mut plan: ResMut<CheckPlan>| {
+                    plan.shots_out -= 1;
+                    if let Err(note) = pocket_is_black(
+                        &captured.image,
+                        &Camera::default(),
+                        &GlobalTransform::default(),
+                        None,
+                    ) {
+                        println!("  frame {frame}: {note}");
+                        plan.shots_failed += 1;
+                    }
+                },
+            );
+        return;
+    }
+    if plan.shots_out > 0 {
+        return;
+    }
+    if plan.shots_failed == 0 {
+        println!("PASS {name}: {SWITCHED_FRAMES} frames black");
+    } else {
+        println!(
+            "FAIL {name}: {} of {SWITCHED_FRAMES} frames weren't black",
+            plan.shots_failed
+        );
+        plan.failed = true;
+    }
+    plan.next += 1;
 }
 
 fn pocket_is_black(
