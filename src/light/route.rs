@@ -316,6 +316,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         image
     }
 
+    /// The texture a material made now binds: the light texture once it's
+    /// made, or else the placeholder.
+    pub fn texture(&self) -> Handle<Image> {
+        self.texture
+            .clone()
+            .unwrap_or_else(|| self.placeholder.clone())
+    }
+
     pub fn texture_made(&mut self, texture: Handle<Image>) {
         self.texture = Some(texture);
         self.texture_wanted = false;
