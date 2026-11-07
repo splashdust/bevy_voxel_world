@@ -333,6 +333,67 @@ fn hand_added_materials_get_a_copy_per_lit_world() {
 }
 
 #[test]
+fn a_look_change_reaches_the_copy_of_a_hand_added_material_in_its_own_world_alone() {
+    let tint = TintMaterial {
+        tint: LinearRgba::RED,
+    };
+    let mut app = custom_material_app();
+    app.add_plugins(
+        VoxelWorldPlugin::with_config(LampFloor::<0> {
+            init_custom_materials: false,
+            ..default()
+        })
+        .with_material(tint.clone()),
+    )
+    .add_plugins(
+        VoxelWorldPlugin::with_config(LampFloor::<1> {
+            init_custom_materials: false,
+            ..default()
+        })
+        .with_material(tint.clone()),
+    )
+    .add_systems(
+        Startup,
+        (spawn_camera::<LampFloor>, spawn_camera::<LampFloor<1>>),
+    );
+    let shared = app
+        .world_mut()
+        .resource_mut::<Assets<TintMaterial>>()
+        .add(tint);
+    app.insert_resource(VoxelWorldMaterialHandle { handle: shared });
+    run_until_floor_shown::<LampFloor>(&mut app);
+    run_until_floor_shown::<LampFloor<1>>(&mut app);
+    let brightness = |app: &mut App, copy: &Handle<VoxelWorldMaterial<TintMaterial>>| {
+        app.world()
+            .resource::<Assets<VoxelWorldMaterial<TintMaterial>>>()
+            .get(copy)
+            .unwrap()
+            .extension
+            .look()
+            .voxel_brightness
+    };
+    let first = chunk_materials::<LampFloor, VoxelWorldMaterial<TintMaterial>>(&mut app)
+        [0]
+    .clone();
+    let second =
+        chunk_materials::<LampFloor<1>, VoxelWorldMaterial<TintMaterial>>(&mut app)[0]
+            .clone();
+    let default_brightness = brightness(&mut app, &first);
+
+    app.world_mut()
+        .resource_mut::<LampFloor>()
+        .light
+        .as_mut()
+        .unwrap()
+        .look
+        .voxel_brightness = 250.0;
+    app.update();
+
+    assert_eq!(brightness(&mut app, &first), 250.0);
+    assert_eq!(brightness(&mut app, &second), default_brightness);
+}
+
+#[test]
 fn a_minimal_lit_world_with_a_custom_material_wraps_nothing() {
     let mut app = custom_material_app();
     app.add_plugins(VoxelWorldPlugin::<LampFloor>::minimal().with_material(
