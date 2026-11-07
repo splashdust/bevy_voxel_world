@@ -10,13 +10,13 @@
 //! the chunks its light reaches.
 //!
 //! Probes start after chunk tasks, with the room left in the world's
-//! [`PoolBudget`]: one keeps running while any chunk waits, more start while
-//! the task pool has idle threads, and none once nothing waits. A probe of a
-//! position that is mostly air reads most of its voxels, much more than a
-//! chunk task's walk, so more than one at a time while chunks stream in would
-//! slow the stream. Chunks with the
-//! fewest provisional columns go first, since they are the most likely to show
-//! wrong light and the cheapest to settle, and the nearest among equals.
+//! [`PoolBudget`]: as many start as the task pool has idle threads, so none
+//! start while chunk tasks keep every thread busy, and none once nothing
+//! waits. A probe of a position that is mostly air reads most of its voxels,
+//! much more than a chunk task's walk, so probes taking threads from chunk
+//! tasks would slow the stream. Chunks with the fewest provisional columns go
+//! first, since they are the most likely to show wrong light and the cheapest
+//! to settle, and the nearest among equals.
 //!
 //! A probe notes its position's edit count when it starts. If the count moved
 //! by the time it finishes, its mask is thrown away and the position is probed
@@ -576,8 +576,8 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     }
 
     /// Starts probes for the waiting chunks, fewest provisional columns first
-    /// and nearest a camera among equals: one if none is running, and as many
-    /// more as the task pool has idle threads.
+    /// and nearest a camera among equals, as many as the task pool has idle
+    /// threads. While chunk tasks keep every thread busy, none start.
     pub fn start(
         mut probes: ResMut<Self>,
         mut budget: ResMut<PoolBudget<C>>,
@@ -591,10 +591,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         }
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("start_sky_probes").entered();
-        // One probe always runs while any chunk waits, so streaming can't
-        // starve them, but no more than one takes a thread chunk tasks want.
-        let floor = probes.running.is_empty() as usize;
-        let mut count = budget.idle().max(floor);
+        let mut count = budget.idle();
         // On WASM tasks run between frames on the main thread, so one probe
         // a frame is the most that can't make a frame hitch.
         if settings.main_thread {
