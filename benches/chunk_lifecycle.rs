@@ -693,6 +693,10 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 /// `stream_in` on a world with levels of detail, with what coarse chunks'
 /// light cost: their solves in chunk tasks, their walks' lookups, the slots
 /// they took and the copies of their slots they keep.
+///
+/// The cost gate for a coarse chunk's solve, walk included, is 250 µs a
+/// chunk in `coarse_solve_us_per_chunk`, set from the first runs in real
+/// chunk tasks at about 150 µs. It's checked by hand; nothing compares it.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lod<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,

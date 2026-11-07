@@ -248,15 +248,23 @@ impl Cells {
         for (cell, level) in &self.lamps {
             bytes[cell_index(*cell)] = LAMP_MARKER | level;
         }
+        let edge = |v: usize| v == 0 || v == SIDE - 1;
         for y in 0..SIDE {
             for x in 0..SIDE {
-                for z in 0..SIDE {
-                    let outside = [x, y, z]
-                        .iter()
-                        .filter(|v| **v == 0 || **v == SIDE - 1)
-                        .count();
-                    if outside >= 2 {
-                        bytes[cell_index(UVec3::new(x as u32, y as u32, z as u32))] = 0;
+                let zs: &[usize] = match (edge(x), edge(y)) {
+                    (true, true) => &[],
+                    (true, false) | (false, true) => &[0, SIDE - 1],
+                    (false, false) => continue,
+                };
+                let cell =
+                    |z: usize| cell_index(UVec3::new(x as u32, y as u32, z as u32));
+                if zs.is_empty() {
+                    for z in 0..SIDE {
+                        bytes[cell(z)] = 0;
+                    }
+                } else {
+                    for &z in zs {
+                        bytes[cell(z)] = 0;
                     }
                 }
             }
@@ -571,7 +579,8 @@ pub(crate) struct CoarseWalk<I> {
     /// The height of each row, and what a fill hint says of the chunk
     /// position holding it.
     rows: Vec<(i32, Hinted)>,
-    edits: VoxelEditReader<I>,
+    /// The world's voxel edits, if any lie in the positions the walk passes.
+    edits: Option<VoxelEditReader<I>>,
     delegate: VoxelLookupDelegate<I>,
 }
 
@@ -596,6 +605,7 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
         .min(i32::MAX as i64);
         let reader = edits.reader();
         let committed = edits.committed();
+        let mut edited = false;
         let mut hints = HashMap::<i64, Hinted>::new();
         let mut rows = Vec::new();
         let (mut y, mut step) = (top + width, width);
@@ -606,10 +616,9 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
                     key.position + IVec3::Y * ((region as i32 + 1) * key.extent()),
                     key.lod_level,
                 );
-                Hinted::of(
-                    world.chunk_fill_hint(above),
-                    committed.reach(above, IVec3::ZERO),
-                )
+                let reached = committed.reach(above, IVec3::ZERO);
+                edited |= reached;
+                Hinted::of(world.chunk_fill_hint(above), reached)
             });
             rows.push((y as i32, hinted));
             if rows.len() % 8 == 0 {
@@ -621,7 +630,7 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
             min,
             width: width as i32,
             rows,
-            edits: reader,
+            edits: edited.then_some(reader),
             delegate,
         }
     }
@@ -672,7 +681,8 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
                 let clear = rows.iter().all(|&y| {
                     let at = IVec3::new(middle.x, y, middle.z);
                     made += 1;
-                    let voxel = self.edits.get(at).unwrap_or_else(|| {
+                    let edit = self.edits.as_ref().and_then(|edits| edits.get(at));
+                    let voxel = edit.unwrap_or_else(|| {
                         let chunk = chunk_containing(at);
                         let lookup = lookups
                             .entry(chunk)
