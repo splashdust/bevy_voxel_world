@@ -379,6 +379,7 @@ fn make_entry<C: VoxelWorldConfig>(
             version,
             edits: air.edits,
             emission,
+            fill_seeds: None,
         },
     );
     work.add_entry(position);

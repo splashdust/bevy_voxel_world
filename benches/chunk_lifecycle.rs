@@ -891,6 +891,10 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
         stats.fill_relights as f64,
     );
     metrics.insert(
+        format!("{prefix}.fill_relights_skipped"),
+        stats.fill_relights_skipped as f64,
+    );
+    metrics.insert(
         format!("{prefix}.fill_update_us_per_chunk_in_stream"),
         streamed.fill_update_ms * 1000.0 / chunks,
     );

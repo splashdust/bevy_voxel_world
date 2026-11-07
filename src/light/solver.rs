@@ -27,14 +27,14 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::LocalKey;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
 use super::config::LightPrecision;
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
-use super::fill::seed::{CellsAround, FillSeeds};
+use super::fill::seed::{CellsAround, FillSeeds, Seeding};
 use super::fill::FillCells;
 use super::inputs::{LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
@@ -189,11 +189,15 @@ pub(crate) struct LightCounters {
     pub coarse_lookups: AtomicU64,
     /// Solves that seeded sky fill.
     pub fill_seeded: AtomicU64,
-    /// Time solves spent seeding sky fill, from reading the cells to the
-    /// end of the 7-voxel run, in nanoseconds.
+    /// Time solves spent seeding sky fill, from the cells around the chunk
+    /// to the end of the 7-voxel run, in nanoseconds. Filling the box's open
+    /// and lit rows, which every solve of sky light does, isn't counted.
     pub fill_seed_nanos: AtomicU64,
     /// Relights started because a sky fill cell changed.
     pub fill_relights: AtomicU64,
+    /// Of those, the relights that stopped before solving because the
+    /// chunk's seeds were the ones its light was solved from.
+    pub fill_relights_skipped: AtomicU64,
     /// Main-thread time spent updating the sky fill field, in nanoseconds.
     pub fill_update_nanos: AtomicU64,
     /// Main-thread time spent on sky fill in all, from collecting fill
@@ -248,6 +252,9 @@ pub(crate) struct Solved {
     /// For a relight that found the chunk's emissive voxels again, the inputs
     /// it read from the world view, which its light's inputs replace.
     pub rescanned: Option<Arc<LightInputs>>,
+    /// The hash of the sky fill seeds it was solved from, for a chunk that
+    /// takes sky fill: see [`Seeding`].
+    pub fill_seeds: Option<u64>,
 }
 
 impl Solved {
@@ -295,8 +302,9 @@ impl<I: Copy + PartialEq> LightTask<I> {
                 .emissive_scans
                 .fetch_add(1, Ordering::Relaxed);
         }
+        let seeding = seeding(settings, &inputs, chunk.key.position);
         let snapshot = read_snapshot(&self.view, chunk.key.position, settings);
-        let mut solved = solve(snapshot, Arc::new(inputs), settings);
+        let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding);
         solved.sky = found;
         solved.own_edits = self.own_edits;
         solved.edit_frame = self.edit_frame;
@@ -355,6 +363,7 @@ pub(crate) fn relight<I: Copy + PartialEq>(
     view: &LightView,
     position: IVec3,
     rescan: Option<Rescan<I>>,
+    unless_seeds: Option<u64>,
 ) -> Option<Solved> {
     let read = view.read().get(&position)?.light.inputs.clone();
     let (inputs, rescanned) = match rescan {
@@ -370,10 +379,34 @@ pub(crate) fn relight<I: Copy + PartialEq>(
         }
         None => (read, None),
     };
+    let seeding = seeding(settings, &inputs, position);
+    if let (Some(seeding), Some(solved_from)) = (&seeding, unless_seeds) {
+        if seeding.hash == solved_from && rescanned.is_none() {
+            settings
+                .counters
+                .fill_relights_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    }
     let snapshot = read_snapshot(view, position, settings);
-    let mut solved = solve(snapshot, inputs, settings);
+    let mut solved = solve(snapshot, inputs, settings, seeding);
     solved.rescanned = rescanned;
     Some(solved)
+}
+
+/// The sky fill seeds of the chunk at `position` with `inputs`, for a chunk
+/// that takes sky fill in a world with sky light and sky fill on.
+fn seeding<I>(
+    settings: &LightTaskSettings<I>,
+    inputs: &LightInputs,
+    position: IVec3,
+) -> Option<Seeding> {
+    let (cells, scale) = (settings.fill.as_ref()?, settings.sky_scale.as_ref()?);
+    if !inputs.touches_solid() {
+        return None;
+    }
+    Some(Seeding::of(&read_cells(cells, position), scale))
 }
 
 fn read_snapshot<I>(
@@ -391,26 +424,23 @@ fn read_snapshot<I>(
 }
 
 /// Solves the light of the chunk whose own inputs are `inputs`, among the
-/// chunks around it in `snapshot`, and compares it with its face neighbours'
-/// light.
+/// chunks around it in `snapshot`, with its sky fill seeds `seeding`, and
+/// compares it with its face neighbours' light.
 fn solve<I>(
     mut snapshot: Snapshot,
     inputs: Arc<LightInputs>,
     settings: &LightTaskSettings<I>,
+    seeding: Option<Seeding>,
 ) -> Solved {
     snapshot.neighbours[neighbour_index(IVec3::ZERO)] = Some(inputs.clone());
     let started = Instant::now();
-    let fill = settings
-        .fill
-        .as_ref()
-        .filter(|_| inputs.touches_solid())
-        .map(|cells| read_cells(cells, snapshot.position));
+    let fill_seeds = seeding.as_ref().map(|seeding| seeding.hash);
     let (sky, sky_faces) = match &settings.sky_scale {
         Some(scale) => solve_sky(
             &snapshot.neighbours,
             scale,
             settings.shape,
-            fill.as_ref(),
+            seeding.as_ref(),
             &settings.counters,
         ),
         None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
@@ -466,6 +496,7 @@ fn solve<I>(
         generation: settings.generation,
         emission: settings.emission_generation,
         rescanned: None,
+        fill_seeds,
     }
 }
 
@@ -508,8 +539,8 @@ fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
 
 /// Solves sky light for the chunk at the centre of `neighbours`, from the
 /// voxels with direct sky around it and, for a chunk that takes sky fill,
-/// the sky fill cells `fill` around it. Returns it with its face hashes,
-/// indexed by [`Face`].
+/// the sky fill seeds `fill` found from the cells around it. Returns it with
+/// its face hashes, indexed by [`Face`].
 ///
 /// Direct sky holds the top level and doesn't fade. A chunk whose open voxels
 /// all have direct sky needs no spreading, and takes no sky fill.
@@ -517,7 +548,7 @@ pub(crate) fn solve_sky(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
     shape: LightShape,
-    fill: Option<&CellsAround>,
+    fill: Option<&Seeding>,
     counters: &LightCounters,
 ) -> (ChannelLight, [u64; 6]) {
     let centre = centre(neighbours);
@@ -543,8 +574,7 @@ pub(crate) fn solve_sky(
             return (ChannelLight::Uniform(top), FaceHashes::uniform(top));
         }
     }
-    let seeding = Instant::now();
-    let seeds = fill.and_then(|around| FillSeeds::of(around, scale));
+    let seeds = fill.and_then(|seeding| Some((seeding.seeds.as_ref()?, seeding.took)));
     if direct.iter().all(Option::is_none) && seeds.is_none() {
         return unlit;
     }
@@ -554,7 +584,7 @@ pub(crate) fn solve_sky(
         shape,
         &[],
         Some(&direct),
-        seeds.as_ref().map(|seeds| (seeds, seeding, counters)),
+        seeds.map(|(seeds, took)| (seeds, took, counters)),
     );
     if let Some(own) = own {
         for plane in planes.iter_mut() {
@@ -577,9 +607,9 @@ fn channel_light(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChannelLight {
         .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
 }
 
-/// Sky fill's seeds for a solve, when it started seeding, and where to count
-/// the time seeding took.
-type Filling<'a> = (&'a FillSeeds, Instant, &'a LightCounters);
+/// Sky fill's seeds for a solve, the time finding them took, and where to
+/// count the time seeding took.
+type Filling<'a> = (&'a FillSeeds, Duration, &'a LightCounters);
 
 /// Spreads light through the box around the chunk at the centre of
 /// `neighbours`, from `seeds`, from the voxels set in `lit`, a plane per
@@ -625,12 +655,14 @@ fn spread_in<R: Row>(
             });
         }
         let fill_rows = match fill {
-            Some((seeds, started, counters)) => {
+            Some((seeds, finding, counters)) => {
+                let started = Instant::now();
                 let rows = seeds.rows(light_box.open_rows_mut(), reach);
+                let took = finding + started.elapsed();
                 counters.fill_seeded.fetch_add(1, Ordering::Relaxed);
                 counters
                     .fill_seed_nanos
-                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    .fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
                 rows
             }
             None => Vec::new(),
