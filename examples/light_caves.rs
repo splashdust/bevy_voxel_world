@@ -37,6 +37,8 @@
 //!   kind of level curve, with entry 0 set above 0.
 //! - Stepped light renders the lamp room and the overhang, as smoothed light
 //!   does.
+//! - Each viewpoint keys 1 to 6 switch to sees spawned chunks over at least
+//!   a fifth of its picture.
 //! - A slot given to another chunk the frame after it's freed never shows the
 //!   other chunk's light: two lamps in rooms carved deep in the rock switch on
 //!   and off in turn, so their chunks take and give back the same slot, while
@@ -506,13 +508,17 @@ const SUNLIT_FACE_CAMERA: FixedCamera = camera([20.0, 60.0, 250.0], [0.0, 40.0, 
 /// sky light falls off beside the slab and the cave mouths beyond it.
 const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 372.0]);
 
+/// The viewpoints keys 1 to 6 switch to in a window. Each stays within the
+/// world's spawning distance of what it looks at, so it sees spawned chunks.
 const CAMERAS: [FixedCamera; 6] = [
-    camera([-260.0, 240.0, -300.0], [-40.0, 90.0, 40.0]),
+    // The hills and the plateau the shaft opens on, from above.
+    camera([-150.0, 170.0, -120.0], [-320.0, 100.0, 0.0]),
     LAMP_ROOM_CAMERA,
     camera([-296.0, -24.0, 26.0], [-319.5, -38.0, 0.5]),
     POCKET_CAMERA,
     OVERHANG_CAMERA,
-    camera([-540.0, 120.0, 300.0], [-340.0, 130.0, 360.0]),
+    // The mesa and the slab sticking out of it, from the side.
+    camera([-150.0, 110.0, 250.0], [0.0, 60.0, 340.0]),
 ];
 
 fn transform_of(camera: &FixedCamera) -> Transform {
@@ -701,7 +707,7 @@ fn curve_look(curve: LevelCurve) -> LightLook {
     }
 }
 
-const CHECKS: [Check; 23] = [
+const CHECKS: [Check; 29] = [
     settled_check(
         "a lamp declared below the top level still glows, scaled by its level",
         "lamp_room.png",
@@ -952,7 +958,50 @@ const CHECKS: [Check; 23] = [
             ..default()
         },
     ),
+    view_check("viewpoint 1 shows the world", "view_1.png", &CAMERAS[0]),
+    view_check("viewpoint 2 shows the world", "view_2.png", &CAMERAS[1]),
+    view_check("viewpoint 3 shows the world", "view_3.png", &CAMERAS[2]),
+    view_check("viewpoint 4 shows the world", "view_4.png", &CAMERAS[3]),
+    view_check("viewpoint 5 shows the world", "view_5.png", &CAMERAS[4]),
+    view_check("viewpoint 6 shows the world", "view_6.png", &CAMERAS[5]),
 ];
+
+/// A check that `camera`, one of the viewpoints keys 1 to 6 switch to in a
+/// window, sees spawned chunks over most of its picture rather than the
+/// clear color.
+const fn view_check(
+    name: &'static str,
+    file: &'static str,
+    camera: &'static FixedCamera,
+) -> Check {
+    settled_check(name, file, true, camera, true, None, shows_the_world)
+}
+
+/// Whether at most 80% of `image`'s pixels are the clear color, so the
+/// camera sees spawned chunks and not only empty space. The sky is the
+/// clear color too, so a view with a horizon is partly clear.
+fn shows_the_world(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pixels = data.as_chunks::<4>().0;
+    let clear = ClearColor::default().0.to_srgba().to_u8_array();
+    let empty = pixels
+        .iter()
+        .filter(|pixel| {
+            (0..3).all(|channel| pixel[channel].abs_diff(clear[channel]) <= 2)
+        })
+        .count();
+    let note = format!("{empty} of {} pixels are the clear color", pixels.len());
+    if empty * 10 <= pixels.len() * 8 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
 
 /// The checks run with sky fill on under sky openness.
 const OPENNESS_CHECKS: [Check; 1] = [settled_check(
