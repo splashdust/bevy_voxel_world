@@ -806,6 +806,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         if let Some(light) = self.light {
             chunk_task.light = light.task_for(
                 key,
+                entity,
                 data_shape,
                 self.configuration,
                 self.voxel_edits,

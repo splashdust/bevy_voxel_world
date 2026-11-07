@@ -93,6 +93,8 @@ pub(super) struct LampWorld {
     pub hold: Option<Arc<Hold>>,
     pub spawning_distance: u32,
     pub hints: Option<Hints>,
+    /// Holds back meshing the chunk at its position until it is released.
+    pub mesh_hold: Option<Arc<Hold>>,
 }
 
 impl Default for LampWorld {
@@ -107,6 +109,7 @@ impl Default for LampWorld {
             hold: None,
             spawning_distance: 2,
             hints: None,
+            mesh_hold: None,
         }
     }
 }
@@ -151,6 +154,26 @@ impl VoxelWorldConfig for LampWorld {
                 scene(position)
             })
         })
+    }
+
+    fn chunk_meshing_delegate(
+        &self,
+    ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
+        let hold = self.mesh_hold.clone()?;
+        Some(Box::new(
+            move |position, lod, data_shape, mesh_shape, previous| {
+                let mut mesh = crate::configuration::default_chunk_meshing_delegate(
+                    position, lod, data_shape, mesh_shape, previous,
+                );
+                let hold = Some(hold.clone()).filter(|hold| hold.chunk == position);
+                Box::new(move |voxels, data_shape, mesh_shape, mapper| {
+                    if let Some(hold) = &hold {
+                        hold.wait();
+                    }
+                    mesh(voxels, data_shape, mesh_shape, mapper)
+                })
+            },
+        ))
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {

@@ -197,6 +197,76 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         }
     }
 
+    /// Takes the column at `x`, `z` out of the columns of the chunk at
+    /// `position`, which a voxel edit above it has blocked. Returns the
+    /// chunk's new column answer if it was waiting for probes.
+    pub fn column_blocked(
+        &mut self,
+        position: IVec3,
+        x: usize,
+        z: usize,
+    ) -> Option<ColumnAnswer> {
+        let chunk = self.waiting.get_mut(&position)?;
+        chunk.sky[x] &= !(1 << z);
+        let answer = chunk.answer();
+        if answer.provisional.iter().all(|column| *column == 0) {
+            self.remove(position);
+        }
+        Some(answer)
+    }
+
+    /// Lets sky light into the column at `x`, `z` of the chunk `entity` at
+    /// `position`, which a voxel edit above it has opened, and returns the
+    /// chunk's new column answer. `current` is its answer so far.
+    ///
+    /// `known` says, by position above the chunk that a probe can reach,
+    /// lowest first, whether its voxels are known, and `complete` whether
+    /// those positions make up the sky rule's whole window. With every
+    /// position known, the column is proved clear; otherwise the chunk waits
+    /// for probes of the unknown ones, showing direct sky until then.
+    pub fn column_opened(
+        &mut self,
+        position: IVec3,
+        entity: Entity,
+        (x, z): (usize, usize),
+        current: &ColumnAnswer,
+        known: Vec<bool>,
+        complete: bool,
+    ) -> ColumnAnswer {
+        let bit = 1 << z;
+        if let Some(chunk) = self.waiting.get_mut(&position) {
+            chunk.sky[x] |= bit;
+            for (was, now) in chunk.known.iter_mut().zip(&known) {
+                *was &= *now;
+            }
+            let answer = chunk.answer();
+            if answer.provisional.iter().all(|column| *column == 0) {
+                self.remove(position);
+            }
+            return answer;
+        }
+        let mut sky = current.sky;
+        sky[x] |= bit;
+        if complete && known.iter().all(|known| *known) {
+            let mut answer = current.clone();
+            answer.sky = sky;
+            return answer;
+        }
+        let chunk = Waiting {
+            entity,
+            sky,
+            known,
+            complete,
+        };
+        let answer = chunk.answer();
+        self.waiting.insert(position, chunk);
+        self.columns
+            .entry(position.xz())
+            .or_default()
+            .push(position.y);
+        answer
+    }
+
     /// Forgets the waiting chunk `entity` at `position` as it retires. Returns
     /// whether it was waiting, so its neighbours may have read provisional
     /// direct sky from it.

@@ -26,6 +26,13 @@
 //! or relighting. A chunk runs at most one relight: a newer trigger marks it
 //! dirty, the running relight still lands, and one more follows.
 //!
+//! Relights a voxel edit triggers are urgent (see [`edit`](super::edit)):
+//! they start at once, ahead of the pool budget, and so does their ripple. A
+//! chunk being re-meshed for the edit holds its relit light until a mesh of
+//! the voxels that relight read lands, so its old mesh never shows light
+//! worked out for its new voxels, such as a placed block's old floor face
+//! reading the new solid's level of 0.
+//!
 //! A chunk that retires relights nothing, unless it had provisional columns.
 //! Its neighbours keep the light it gave them, which was the truth while it
 //! was loaded, and their next solve reads it as solid. A chunk with provisional
@@ -51,7 +58,7 @@ use super::levels::LevelScale;
 use super::probe::{face_neighbours, SkyProbes};
 use super::route::LightRoute;
 use super::slot::FacesSee;
-use super::solver::{relight, ChunkLight, Solved};
+use super::solver::{relight, ChunkLight, KeptLight, Solved};
 use super::view::{LightView, ViewChunk};
 use super::{LightSettings, SolvedLight};
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F};
@@ -81,6 +88,9 @@ enum LightState {
 struct LightChunk {
     entity: Entity,
     state: LightState,
+    /// Whether its next relight starts at once, ahead of the pool budget, as
+    /// relights rippling from a voxel edit do.
+    urgent: bool,
 }
 
 /// Where a result to land came from.
@@ -96,12 +106,23 @@ struct Landing {
     entity: Entity,
     source: Source,
     solved: Solved,
+    /// Whether the relights it triggers are urgent.
+    urgent: bool,
+    /// For a relight, the world's edit frame when it started: see
+    /// [`LightSettings::edit_frame`].
+    edit_frame: u64,
+    /// For a relight, the version of the chunk's light in the world view when
+    /// it started.
+    version: u64,
 }
 
 struct Running {
     position: IVec3,
     entity: Entity,
     task: Task<Option<Solved>>,
+    urgent: bool,
+    edit_frame: u64,
+    version: u64,
 }
 
 /// A chunk's light that changed as it landed, for the shader.
@@ -126,6 +147,15 @@ pub(crate) struct LightWork<C> {
     queue: HashSet<IVec3>,
     running: Vec<Running>,
     landing: VecDeque<Landing>,
+    /// Relit light of chunks being re-meshed, held until their new mesh
+    /// lands, by position.
+    held: HashMap<IVec3, Landing>,
+    /// The light kept by the chunk tasks of chunks re-meshed after a voxel
+    /// edit, waiting to reach the shader with their new mesh.
+    kept_landing: Vec<(IVec3, Entity, KeptLight)>,
+    /// For each chunk whose chunk task published, the world's edit frame when
+    /// that task started, so its mesh shows every edit before then.
+    meshed: HashMap<Entity, u64>,
     /// The light coarse chunk tasks solved, waiting to land.
     coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved)>,
     /// The levels each coarse chunk's tag holds without a slot, as in a
@@ -135,6 +165,9 @@ pub(crate) struct LightWork<C> {
     clock: u64,
     /// Main-thread time spent this frame, in nanoseconds.
     frame_nanos: u64,
+    /// Main-thread time this frame's voxel edits spent, in nanoseconds,
+    /// which landing takes off its budget.
+    edit_nanos: u64,
     _world: PhantomData<C>,
 }
 
@@ -146,10 +179,14 @@ impl<C> Default for LightWork<C> {
             queue: HashSet::new(),
             running: Vec::new(),
             landing: VecDeque::new(),
+            held: HashMap::new(),
+            kept_landing: Vec::new(),
+            meshed: HashMap::new(),
             coarse_landing: Vec::new(),
             coarse: HashMap::new(),
             clock: 0,
             frame_nanos: 0,
+            edit_nanos: 0,
             _world: PhantomData,
         }
     }
@@ -158,7 +195,10 @@ impl<C> Default for LightWork<C> {
 impl<C: VoxelWorldConfig> LightWork<C> {
     /// Whether no relight is queued or running, and no light waits to land.
     pub fn is_settled(&self) -> bool {
-        self.queue.is_empty() && self.running.is_empty() && self.landing.is_empty()
+        self.queue.is_empty()
+            && self.running.is_empty()
+            && self.landing.is_empty()
+            && self.held.is_empty()
     }
 
     /// Queues the light a chunk task solved for the chunk `entity` with
@@ -167,7 +207,13 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     pub fn arrive(&mut self, key: ChunkKey, entity: Entity, solved: SolvedLight) {
         match solved {
             SolvedLight::Level0(solved) => {
+                self.meshed.insert(entity, solved.edit_frame);
                 self.arrive_level_0(key.position, entity, solved)
+            }
+            SolvedLight::Kept(kept) => {
+                self.meshed.insert(entity, kept.edit_frame);
+                self.kept_landing.retain(|(_, held, _)| *held != entity);
+                self.kept_landing.push((key.position, entity, kept));
             }
             SolvedLight::Coarse(solved) => {
                 self.coarse_landing.retain(|(_, held, _)| *held != entity);
@@ -193,8 +239,22 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 entity,
                 source: Source::ChunkTask,
                 solved,
+                urgent: false,
+                edit_frame: 0,
+                version: 0,
             }),
         }
+    }
+
+    /// Whether the chunk `entity` shows a mesh of its voxels as of the
+    /// world's edit frame `edit_frame`: it is `ready`, or the task of the mesh
+    /// it shows started no earlier.
+    fn shows_mesh_of(&self, entity: Entity, edit_frame: u64, ready: bool) -> bool {
+        ready
+            || self
+                .meshed
+                .get(&entity)
+                .is_some_and(|meshed| *meshed >= edit_frame)
     }
 
     /// Marks every chunk with light for a relight.
@@ -207,9 +267,21 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     /// Marks the chunk at `position` for a relight, if it has light.
     pub fn trigger(&mut self, position: IVec3) {
+        self.trigger_as(position, false);
+    }
+
+    /// Marks the chunk at `position` for a relight that starts at once, ahead
+    /// of the pool budget and whatever its chunk state, if it has light. The
+    /// relights its ripple triggers are urgent too.
+    pub fn trigger_urgent(&mut self, position: IVec3) {
+        self.trigger_as(position, true);
+    }
+
+    fn trigger_as(&mut self, position: IVec3, urgent: bool) {
         let Some(chunk) = self.chunks.get_mut(&position) else {
             return;
         };
+        chunk.urgent |= urgent;
         chunk.state = match chunk.state {
             LightState::Clean | LightState::Dirty => {
                 self.queue.insert(position);
@@ -242,17 +314,35 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     ///
     /// Returns the chunk's light if it changed, with the bytes of its slot,
     /// for the shader.
+    ///
+    /// A relight of a chunk being re-meshed, which isn't `ready` and shows a
+    /// mesh older than the edits the relight read, triggers its ripple at
+    /// once but holds its light until a new enough mesh lands: see
+    /// [`hold`](Self::hold).
     fn land(
         &mut self,
         landing: Landing,
         view: &LightView,
         scales: (&LevelScale, Option<&LevelScale>),
+        ready: bool,
     ) -> Option<LandedLight> {
+        let mut landing = landing;
+        if landing.source == Source::Relight {
+            rebase(&mut landing, view);
+        }
+        if landing.source == Source::Relight
+            && !self.shows_mesh_of(landing.entity, landing.edit_frame, ready)
+        {
+            self.hold(landing, view);
+            return None;
+        }
         let Landing {
             position,
             entity,
             source,
             mut solved,
+            urgent,
+            ..
         } = landing;
         let landed = LandedLight {
             position,
@@ -277,6 +367,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     }
                     if chunk.light.same_levels(&solved.light) {
                         chunk.faces = solved.faces;
+                        self.held.remove(&position);
                         return None;
                     }
                     for face in Face::ALL {
@@ -295,6 +386,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         light: solved.light.clone(),
                         faces: solved.faces,
                         version: self.clock,
+                        edits: solved.own_edits,
                     };
                     self.clock += 1;
                     let old = view
@@ -341,23 +433,106 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
 
         if source == Source::ChunkTask {
-            if let Some(chunk) = self.chunks.get(&position) {
+            // Light held for the chunk's old inputs is stale.
+            self.held.remove(&position);
+            if let Some(chunk) = self.chunks.get_mut(&position) {
                 if chunk.entity != entity {
                     self.positions.remove(&chunk.entity);
                     self.queue.remove(&position);
                     self.chunks.remove(&position);
+                } else if let LightState::Relighting { .. } = chunk.state {
+                    // The running relight read the old inputs, so it is
+                    // thrown away as it lands, and another must follow.
+                    chunk.state = LightState::Relighting { dirty: true };
                 }
             }
             self.chunks.entry(position).or_insert(LightChunk {
                 entity,
                 state: LightState::Clean,
+                urgent: false,
             });
             self.positions.insert(entity, position);
         }
         for position in triggers {
-            self.trigger(position);
+            self.trigger_as(position, urgent);
         }
         Some(landed)
+    }
+
+    /// Whether `landing` is a chunk task's light older than the inputs the
+    /// world view holds for its chunk: the task started before a voxel edit
+    /// the view has taken in since.
+    fn is_stale_task(&self, landing: &Landing, view: &LightView) -> bool {
+        landing.source == Source::ChunkTask
+            && view.read().get(&landing.position).is_some_and(|chunk| {
+                chunk.entity == landing.entity && chunk.edits > landing.solved.own_edits
+            })
+    }
+
+    /// Holds a relight's light for a chunk being re-meshed, so its old mesh
+    /// never shows light worked out for its new voxels. Its ripple goes on at
+    /// once: the neighbours across faces whose hashes changed relight, and
+    /// the world view keeps the new hashes. A newer held light replaces an
+    /// older one.
+    fn hold(&mut self, landing: Landing, view: &LightView) {
+        let position = landing.position;
+        let mut triggers = Vec::new();
+        let same = {
+            let mut view = view.write();
+            let Some(chunk) = view.get_mut(&position) else {
+                return;
+            };
+            if chunk.entity != landing.entity
+                || !Arc::ptr_eq(&chunk.light.inputs, &landing.solved.light.inputs)
+            {
+                return;
+            }
+            for face in Face::ALL {
+                if chunk.faces.differs_at(&landing.solved.faces, face) {
+                    triggers.push(position + face.offset());
+                }
+            }
+            chunk.faces = landing.solved.faces;
+            chunk.light.same_levels(&landing.solved.light)
+        };
+        let urgent = landing.urgent;
+        if same {
+            self.held.remove(&position);
+        } else {
+            self.held.insert(position, landing);
+        }
+        for position in triggers {
+            self.trigger_as(position, urgent);
+        }
+    }
+
+    /// Lands the light held for the chunk at `position` once its new mesh has
+    /// landed. Returns it for the shader, unless the chunk's inputs changed
+    /// meanwhile.
+    fn release(&mut self, position: IVec3, view: &LightView) -> Option<LandedLight> {
+        let mut landing = self.held.remove(&position)?;
+        rebase(&mut landing, view);
+        let Landing {
+            entity, mut solved, ..
+        } = landing;
+        let mut view = view.write();
+        let chunk = view.get_mut(&position)?;
+        if chunk.entity != entity
+            || !Arc::ptr_eq(&chunk.light.inputs, &solved.light.inputs)
+        {
+            return None;
+        }
+        chunk.light = solved.light.clone();
+        chunk.version = self.clock;
+        self.clock += 1;
+        Some(LandedLight {
+            position,
+            entity,
+            light: solved.light,
+            own: solved.own,
+            bytes: solved.bytes.take(),
+            new_voxels: true,
+        })
     }
 
     /// Forgets the despawned chunk `entity`: its light state, its queued
@@ -365,6 +540,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// where the chunk was, if it had light.
     fn forget(&mut self, entity: Entity, view: &LightView) -> Option<IVec3> {
         self.landing.retain(|landing| landing.entity != entity);
+        self.held.retain(|_, landing| landing.entity != entity);
+        self.kept_landing.retain(|(_, held, _)| *held != entity);
+        self.meshed.remove(&entity);
         self.coarse_landing.retain(|(_, held, _)| *held != entity);
         self.coarse.remove(&entity);
         let position = self.positions.remove(&entity)?;
@@ -388,6 +566,56 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     fn add_frame_time(&mut self, started: Instant) {
         self.frame_nanos += started.elapsed().as_nanos() as u64;
+    }
+
+    /// Adds the main-thread time this frame's voxel edits took since
+    /// `started`, which landing takes off its budget.
+    pub fn add_edit_time(&mut self, started: Instant) {
+        let nanos = started.elapsed().as_nanos() as u64;
+        self.edit_nanos += nanos;
+        self.frame_nanos += nanos;
+    }
+
+    /// Whether the chunk at `position` has light, so it can relight.
+    pub fn has_light(&self, position: IVec3) -> bool {
+        self.chunks.contains_key(&position)
+    }
+
+    /// Starts a relight task for the dirty chunk at `position`.
+    fn start_relight(
+        &mut self,
+        position: IVec3,
+        settings: &LightSettings<C>,
+        budget: &mut PoolBudget<C>,
+    ) {
+        self.queue.remove(&position);
+        let chunk = self.chunks.get_mut(&position).unwrap();
+        chunk.state = LightState::Relighting { dirty: false };
+        let urgent = std::mem::take(&mut chunk.urgent);
+        let entity = chunk.entity;
+        let edit_frame = settings.edit_frame.load(Ordering::Relaxed);
+        let version = settings
+            .view
+            .read()
+            .get(&position)
+            .map_or(0, |chunk| chunk.version);
+        let task_settings = settings.task.clone();
+        let view = settings.view.clone();
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            #[cfg(feature = "trace")]
+            let _span = bevy::log::info_span!("relight_task").entered();
+            relight(&task_settings, &view, position)
+        });
+        self.running.push(Running {
+            position,
+            entity,
+            task,
+            urgent,
+            edit_frame,
+            version,
+        });
+        budget.started(JobKind::Relight);
+        settings.counters().relights.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -425,6 +653,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_relights").entered();
         work.frame_nanos = 0;
+        work.edit_nanos = 0;
         let mut finished = 0;
         let mut index = 0;
         while index < work.running.len() {
@@ -436,15 +665,31 @@ impl<C: VoxelWorldConfig> Relights<C> {
             };
             finished += 1;
             let Running {
-                position, entity, ..
+                position,
+                entity,
+                urgent,
+                edit_frame,
+                version,
+                ..
             } = work.running.swap_remove(index);
             match solved {
-                Some(solved) => work.landing.push_back(Landing {
-                    position,
-                    entity,
-                    source: Source::Relight,
-                    solved,
-                }),
+                Some(solved) => {
+                    let landing = Landing {
+                        position,
+                        entity,
+                        source: Source::Relight,
+                        solved,
+                        urgent,
+                        edit_frame,
+                        version,
+                    };
+                    // Urgent light lands ahead of the rest.
+                    if urgent {
+                        work.landing.push_front(landing);
+                    } else {
+                        work.landing.push_back(landing);
+                    }
+                }
                 None => work.relight_done(position, entity),
             }
         }
@@ -467,7 +712,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         mut commands: Commands,
         mut work: ResMut<LightWork<C>>,
         settings: Res<LightSettings<C>>,
-        chunks: Query<(), With<ChunkStateOf<C>>>,
+        chunks: Query<&ChunkStateOf<C>>,
         mut route: Option<ResMut<LightRoute<C>>>,
         cameras: Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
         device: Option<Res<RenderDevice>>,
@@ -476,9 +721,15 @@ impl<C: VoxelWorldConfig> Relights<C> {
         configuration: Res<C>,
     ) {
         let refill = route.as_ref().is_some_and(|route| route.wants_refill());
-        if work.landing.is_empty() && work.coarse_landing.is_empty() && !refill {
+        if work.landing.is_empty()
+            && work.coarse_landing.is_empty()
+            && work.held.is_empty()
+            && work.kept_landing.is_empty()
+            && !refill
+        {
             return;
         }
+        let ready = |entity: Entity| matches!(chunks.get(entity), Ok(ChunkState::Ready));
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("land_light").entered();
         let started = Instant::now();
@@ -489,7 +740,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         // Coarse chunks' light lands whole every frame: it relights nothing
         // and costs a few map writes.
         for (key, entity, solved) in std::mem::take(&mut work.coarse_landing) {
-            if !chunks.contains(entity) {
+            if chunks.get(entity).is_err() {
                 continue;
             }
             work.coarse.insert(entity, solved.levels);
@@ -497,12 +748,56 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 route.coarse_landed(entity, key, solved.levels, solved.bytes);
             }
         }
+        // Chunks whose new mesh landed this frame get the light held for them,
+        // or the light their chunk task kept, whatever the budget, so mesh and
+        // light show together.
+        let released: Vec<IVec3> = work
+            .held
+            .iter()
+            .filter(|(_, landing)| {
+                work.shows_mesh_of(
+                    landing.entity,
+                    landing.edit_frame,
+                    ready(landing.entity),
+                )
+            })
+            .map(|(position, _)| *position)
+            .collect();
+        for position in released {
+            let landed = work.release(position, &settings.view);
+            if let (Some(route), Some(landed)) = (route.as_mut(), landed) {
+                route.light_landed(
+                    landed.position,
+                    landed.entity,
+                    landed.light,
+                    landed.own,
+                    landed.bytes,
+                    landed.new_voxels,
+                );
+            }
+        }
+        for (position, entity, kept) in std::mem::take(&mut work.kept_landing) {
+            // Light that changed since the task kept it is landing on its own.
+            let current = settings.view.read().get(&position).is_some_and(|chunk| {
+                chunk.entity == entity && Arc::ptr_eq(&chunk.light, &kept.light)
+            });
+            if let (true, Some(route)) = (current, route.as_mut()) {
+                route.light_landed(
+                    position, entity, kept.light, kept.own, kept.bytes, true,
+                );
+            }
+        }
+
         let scales = (&settings.task.voxel_scale, settings.task.sky_scale.as_ref());
+        let budget = LANDING_BUDGET.saturating_sub(Duration::from_nanos(work.edit_nanos));
         let mut record = probes.is_some().then(|| settings.record.lock().unwrap());
         while let Some(mut landing) = work.landing.pop_front() {
             let (position, entity, source) =
                 (landing.position, landing.entity, landing.source);
-            if chunks.contains(entity) {
+            if work.is_stale_task(&landing, &settings.view) {
+                continue;
+            }
+            if chunks.get(entity).is_ok() {
                 if let (Some(probes), Some(record)) = (probes.as_mut(), record.as_mut()) {
                     probes.chunk_landed(
                         position,
@@ -514,7 +809,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                         &settings.view,
                     );
                 }
-                let landed = work.land(landing, &settings.view, scales);
+                let landed = work.land(landing, &settings.view, scales, ready(entity));
                 if let Some(probes) = probes.as_mut() {
                     for position in probes.take_relights() {
                         work.trigger(position);
@@ -534,7 +829,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
             if source == Source::Relight {
                 work.relight_done(position, entity);
             }
-            if started.elapsed() >= LANDING_BUDGET {
+            if started.elapsed() >= budget {
                 break;
             }
         }
@@ -565,9 +860,19 @@ impl<C: VoxelWorldConfig> Relights<C> {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("start_relights").entered();
             let started = Instant::now();
+            // Urgent relights go straight to the pool.
+            let urgent: Vec<IVec3> = work
+                .queue
+                .iter()
+                .filter(|position| work.chunks[*position].urgent)
+                .copied()
+                .collect();
+            for position in urgent {
+                work.start_relight(position, &settings, &mut budget);
+            }
             let slots =
                 budget.slots(JobKind::Relight, configuration.max_active_chunk_threads());
-            if slots > 0 {
+            if slots > 0 && !work.queue.is_empty() {
                 let cameras: Vec<Vec3> =
                     cameras.iter().map(|camera| camera.translation()).collect();
                 let candidates: Vec<(u32, IVec3)> = work
@@ -580,26 +885,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     })
                     .map(|position| (distance_to_nearest(*position, &cameras), *position))
                     .collect();
-                let thread_pool = AsyncComputeTaskPool::get();
                 for position in first_in_start_order(candidates, slots) {
-                    work.queue.remove(&position);
-                    let chunk = work.chunks.get_mut(&position).unwrap();
-                    chunk.state = LightState::Relighting { dirty: false };
-                    let entity = chunk.entity;
-                    let task_settings = settings.task.clone();
-                    let view = settings.view.clone();
-                    let task = thread_pool.spawn(async move {
-                        #[cfg(feature = "trace")]
-                        let _span = bevy::log::info_span!("relight_task").entered();
-                        relight(&task_settings, &view, position)
-                    });
-                    work.running.push(Running {
-                        position,
-                        entity,
-                        task,
-                    });
-                    budget.started(JobKind::Relight);
-                    settings.counters().relights.fetch_add(1, Ordering::Relaxed);
+                    work.start_relight(position, &settings, &mut budget);
                 }
             }
             work.add_frame_time(started);
@@ -614,6 +901,30 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 .fetch_max(work.frame_nanos, Ordering::Relaxed);
         }
     }
+}
+
+/// Moves a relight's light onto the inputs the world view holds for its chunk
+/// now, if voxel edits gave the chunk new inputs while the relight ran and no
+/// other light has landed for it since. Its light is then a step behind the
+/// edits, and the relight they triggered follows; landing it keeps light
+/// moving while a chunk is edited every frame.
+fn rebase(landing: &mut Landing, view: &LightView) {
+    let view = view.read();
+    let Some(chunk) = view.get(&landing.position) else {
+        return;
+    };
+    let light = &landing.solved.light;
+    if chunk.entity != landing.entity
+        || chunk.version != landing.version
+        || Arc::ptr_eq(&chunk.light.inputs, &light.inputs)
+    {
+        return;
+    }
+    landing.solved.light = Arc::new(ChunkLight {
+        inputs: chunk.light.inputs.clone(),
+        sky: light.sky.clone(),
+        voxel: light.voxel.clone(),
+    });
 }
 
 /// How far the middle of the level-0 chunk at `position` is from the nearest

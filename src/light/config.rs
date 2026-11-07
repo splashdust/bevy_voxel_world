@@ -47,6 +47,21 @@ use bevy::reflect::Reflect;
 ///
 /// Light needs the crate's `light_propagation` cargo feature.
 ///
+/// # Voxel edits
+///
+/// Light follows a voxel set with
+/// [`VoxelWorld::set_voxel`](crate::prelude::VoxelWorld::set_voxel) on its
+/// own. On native, a single voxel edit's light lands within 2 frames of the
+/// frame that commits it, while streaming leaves the task pool room, and
+/// relighting takes at most 1 ms of the main thread in any frame. An edit
+/// whose light reaches more than about 40 chunks can take 3 or 4 frames. An
+/// edit where no light is, such as in a dark cave, relights nothing.
+///
+/// Every edit set in one frame is worked out together as one change, and has
+/// no such limit: it costs about 0.2 to 0.9 µs per voxel on the main thread,
+/// plus the falling sky light below each column it opens to the sky. The
+/// light it calls for lands over as many frames as it needs.
+///
 /// # Showing light
 ///
 /// With [`shown`](Self::shown) on, the crate draws the world's chunks with its

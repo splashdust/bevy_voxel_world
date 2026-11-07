@@ -260,6 +260,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// waiting to start or running, no solved light is waiting to land, and
     /// no sky probe is waiting or running. A loading screen can wait on it.
     ///
+    /// A voxel edit makes it false from when it is set until its light has
+    /// landed, including the light of chunks re-meshed for it, which waits
+    /// for their new meshes.
+    ///
     /// Sky probes look up the voxels above chunks whose own tasks couldn't
     /// tell whether sky light reaches them, which takes a while after a
     /// stream: until they finish, such chunks show direct sky in columns
@@ -276,7 +280,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             .light
             .as_ref()
             .is_some_and(|light| light.reset.load(std::sync::atomic::Ordering::Acquire));
+        let edited = self.light.is_some() && self.voxel_edits.has_pending();
         !reset
+            && !edited
             && self
                 .light_work
                 .as_ref()

@@ -39,6 +39,43 @@ impl Occupancy {
         !matches!(self, Occupancy::Solid)
     }
 
+    /// Makes the voxel at `x`, `y`, `z` solid or open. Call
+    /// [`normalize`](Self::normalize) once done setting voxels.
+    pub fn set(&mut self, x: usize, y: usize, z: usize, solid: bool) {
+        if self.is_solid(x, y, z) == solid {
+            return;
+        }
+        let columns = match self {
+            Occupancy::Mixed(columns) => columns,
+            _ => {
+                let fill = if matches!(self, Occupancy::Solid) {
+                    !0
+                } else {
+                    0
+                };
+                *self = Occupancy::Mixed(Box::new([fill; CHUNK * CHUNK]));
+                let Occupancy::Mixed(columns) = self else {
+                    unreachable!()
+                };
+                columns
+            }
+        };
+        columns[x + y * CHUNK] ^= 1 << z;
+    }
+
+    /// Stores a chunk whose voxels are all solid or all open as such, after
+    /// [`set`](Self::set).
+    pub fn normalize(&mut self) {
+        let Occupancy::Mixed(columns) = self else {
+            return;
+        };
+        if columns.iter().all(|column| *column == 0) {
+            *self = Occupancy::Open;
+        } else if columns.iter().all(|column| *column == !0) {
+            *self = Occupancy::Solid;
+        }
+    }
+
     /// Which of the chunk's columns along y hold a solid voxel, as the sky
     /// record keeps them.
     pub fn solid_columns(&self) -> Columns {

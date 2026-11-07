@@ -23,6 +23,8 @@ pub(crate) struct ViewChunk {
     /// Changes whenever `light` does, and never goes back, so a task can tell
     /// whether the light it compared against is still there when it lands.
     pub version: u64,
+    /// The edit count of the chunk's position its inputs reflect.
+    pub edits: u64,
 }
 
 /// The world view of one world, by level-0 chunk position.

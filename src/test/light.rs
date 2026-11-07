@@ -12,6 +12,8 @@ use crate::prelude::*;
 #[cfg(feature = "light_propagation")]
 mod coarse;
 #[cfg(feature = "light_propagation")]
+mod edits;
+#[cfg(feature = "light_propagation")]
 mod materials;
 #[cfg(feature = "light_propagation")]
 mod reference;

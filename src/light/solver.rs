@@ -183,6 +183,13 @@ pub(crate) struct Solved {
     /// What a chunk task found out about the chunk's columns, with sky light
     /// on. A relight finds nothing.
     pub sky: Option<SkyFound>,
+    /// The edit count of the chunk's position when its chunk task started,
+    /// which its voxels reflect. 0 for a relight, which keeps the inputs it
+    /// read.
+    pub own_edits: u64,
+    /// The world's edit frame when its chunk task started, or 0 for a
+    /// relight: see [`LightSettings::edit_frame`](super::LightSettings).
+    pub edit_frame: u64,
 }
 
 /// A chunk task's part in solving light: the world's settings, its world view
@@ -191,6 +198,10 @@ pub(crate) struct LightTask<I> {
     pub settings: Arc<LightTaskSettings<I>>,
     pub view: LightView,
     pub walk: Option<SkyWalk<I>>,
+    /// The edit count of the chunk's position when the task started.
+    pub own_edits: u64,
+    /// The world's edit frame when the task started.
+    pub edit_frame: u64,
 }
 
 impl<I: Copy + PartialEq> LightTask<I> {
@@ -221,7 +232,49 @@ impl<I: Copy + PartialEq> LightTask<I> {
         let snapshot = read_snapshot(&self.view, chunk.key.position, settings);
         let mut solved = solve(snapshot, Arc::new(inputs), settings);
         solved.sky = found;
+        solved.own_edits = self.own_edits;
+        solved.edit_frame = self.edit_frame;
         solved
+    }
+}
+
+/// A chunk task's part when the world view already holds light for the
+/// chunk's voxels: a chunk re-meshed after a voxel edit, whose light the edit
+/// relights on its own. The task skips its solve and works out only what the
+/// chunk's new mesh needs from that light.
+pub(crate) struct KeptTask<I> {
+    pub settings: Arc<LightTaskSettings<I>>,
+    pub light: Arc<ChunkLight>,
+    /// The world's edit frame when the task started.
+    pub edit_frame: u64,
+}
+
+/// The light a chunk task kept, as [`KeptTask`] reads it.
+pub(crate) struct KeptLight {
+    pub light: Arc<ChunkLight>,
+    /// In a world showing its light, what the chunk's faces read from its
+    /// own voxels.
+    pub own: FacesSee,
+    /// The bytes of the chunk's slot, for a chunk whose own voxels call for
+    /// one.
+    pub bytes: Option<Box<[u8]>>,
+    pub edit_frame: u64,
+}
+
+impl<I> KeptTask<I> {
+    pub fn solve(self) -> KeptLight {
+        let own = if self.settings.routed {
+            own_faces_see(&self.light)
+        } else {
+            FacesSee::default()
+        };
+        let bytes = own.needs_slot().then(|| slot_bytes(&self.light));
+        KeptLight {
+            light: self.light,
+            own,
+            bytes,
+            edit_frame: self.edit_frame,
+        }
     }
 }
 
@@ -306,6 +359,8 @@ fn solve<I>(
         own,
         bytes,
         sky: None,
+        own_edits: 0,
+        edit_frame: 0,
     }
 }
 

@@ -13,6 +13,7 @@
 
 mod coarse;
 pub(crate) mod config;
+mod edit;
 mod faces;
 mod inputs;
 mod kernel;
@@ -31,7 +32,7 @@ pub(crate) mod view;
 pub mod bench;
 
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
@@ -50,7 +51,7 @@ use probe::SkyProbes;
 use record::SkyRecord;
 use relight::{LightWork, Relights};
 use sky::{Above, SkyFound, SkyRule, SkyWalk};
-use solver::{LightCounters, LightTask, LightTaskSettings, Solved};
+use solver::{KeptLight, KeptTask, LightCounters, LightTask, LightTaskSettings, Solved};
 use view::LightView;
 
 /// The light settings world `C` returned at plugin build, with out-of-range
@@ -70,6 +71,10 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     pub record: Mutex<SkyRecord>,
     /// Set by `reset_light` until the light work picks it up.
     pub reset: AtomicBool,
+    /// How many frames have committed voxel edits. A chunk task or relight
+    /// notes it when it starts, so a relight's light can wait for a mesh that
+    /// shows the edits it read.
+    pub edit_frame: AtomicU64,
     _world: PhantomData<C>,
 }
 
@@ -78,16 +83,22 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         &self.task.counters
     }
 
-    /// What the task of the chunk with `key` needs to solve its light: a
-    /// level-0 chunk's solve, or a coarse chunk's for one above level 0 or
-    /// with another data shape.
+    /// What the task of the chunk `entity` with `key` needs to solve its
+    /// light: a level-0 chunk's solve, or a coarse chunk's for one above level
+    /// 0 or with another data shape.
+    ///
+    /// A level-0 chunk whose light the world view holds for its current voxel
+    /// edits is being re-meshed after an edit, which relights it without its
+    /// task: the task keeps that light and skips its solve.
     ///
     /// With sky light on, the task gets the world's lookup `delegate` to walk
     /// the chunk positions above the chunk, and the fill hints and voxel edits
     /// of those positions, read now.
+    #[allow(clippy::too_many_arguments)]
     pub fn task_for(
         &self,
         key: ChunkKey,
+        entity: Entity,
         data_shape: UVec3,
         world: &C,
         edits: &VoxelEdits<C, C::MaterialIndex>,
@@ -99,6 +110,20 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 walk: self
                     .sky_rule
                     .map(|rule| CoarseWalk::new(key, rule, world, edits, delegate)),
+            }));
+        }
+        let own_edits = edits.edit_count(key.position);
+        let kept = self
+            .view
+            .read()
+            .get(&key.position)
+            .filter(|chunk| chunk.entity == entity && chunk.edits == own_edits)
+            .map(|chunk| chunk.light.clone());
+        if let Some(light) = kept {
+            return Some(TaskLight::Kept(KeptTask {
+                settings: self.task.clone(),
+                light,
+                edit_frame: self.edit_frame.load(Ordering::Relaxed),
             }));
         }
         let walk = self.sky_rule.map(|rule| {
@@ -139,6 +164,8 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             settings: self.task.clone(),
             view: self.view.clone(),
             walk,
+            own_edits,
+            edit_frame: self.edit_frame.load(Ordering::Relaxed),
         }))
     }
 
@@ -177,6 +204,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
 /// What a chunk task needs to solve its chunk's light.
 pub(crate) enum TaskLight<I> {
     Level0(LightTask<I>),
+    Kept(KeptTask<I>),
     Coarse(CoarseTask<I>),
 }
 
@@ -184,6 +212,7 @@ impl<I: Copy + PartialEq> TaskLight<I> {
     pub fn solve(self, chunk: &crate::chunk::ChunkData<I>) -> SolvedLight {
         match self {
             TaskLight::Level0(task) => SolvedLight::Level0(task.solve(chunk)),
+            TaskLight::Kept(task) => SolvedLight::Kept(task.solve()),
             TaskLight::Coarse(task) => SolvedLight::Coarse(task.solve(chunk)),
         }
     }
@@ -196,6 +225,7 @@ impl<I: Copy + PartialEq> TaskLight<I> {
 )]
 pub(crate) enum SolvedLight {
     Level0(Solved),
+    Kept(KeptLight),
     Coarse(CoarseSolved),
 }
 
@@ -226,6 +256,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         view: LightView::default(),
         record,
         reset: AtomicBool::new(false),
+        edit_frame: AtomicU64::new(0),
         _world: PhantomData,
     })
     .init_resource::<LightWork<C>>()
@@ -235,6 +266,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             (
                 Relights::<C>::forget_despawned,
                 Relights::<C>::collect,
+                edit::relight_edits::<C>,
                 SkyProbes::<C>::collect.run_if(resource_exists::<SkyProbes<C>>),
                 probe::reset_light::<C>,
                 Relights::<C>::land,

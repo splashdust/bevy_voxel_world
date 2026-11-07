@@ -186,6 +186,12 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         counts.get(&position).copied().unwrap_or(0)
     }
 
+    /// Whether edits have been set since the last commit.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.lock().unwrap().is_empty()
+    }
+
     /// The committed edits, read once for a frame.
     pub(crate) fn committed(&self) -> CommittedEdits<'_, I> {
         CommittedEdits(self.committed.read().unwrap())

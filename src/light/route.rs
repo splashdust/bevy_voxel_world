@@ -353,10 +353,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         new_voxels: bool,
     ) {
         let unlit = self.unlit_levels as u32;
-        let first = !self
-            .chunks
-            .get(&entity)
-            .is_some_and(|chunk| chunk.light.is_some());
+        // A voxel edit gives a chunk new inputs without a chunk task.
+        let first = !self.chunks.get(&entity).is_some_and(|chunk| {
+            chunk
+                .light
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(&old.inputs, &light.inputs))
+        });
         let chunk = self
             .chunks
             .entry(entity)
