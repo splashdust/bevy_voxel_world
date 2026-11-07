@@ -12,7 +12,8 @@
 //! voxels. A channel with no source in its box does no work.
 //!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
-//! and it holds no sources. Nothing is kept for chunks that have retired, so
+//! and it holds no sources. Air a fill hint keeps from spawning reads as
+//! what its hint says instead: see [`hinted`](super::hinted). Nothing is kept for chunks that have retired, so
 //! light beside a chunk that isn't loaded, whether it hasn't arrived yet or has
 //! retired, can be darker than the truth, never brighter. It is exact for a
 //! chunk whose whole box is loaded.
@@ -143,6 +144,13 @@ pub(crate) struct LightCounters {
     pub snapshot_nanos: AtomicU64,
     /// Relight tasks started.
     pub relights: AtomicU64,
+    /// Time relight tasks spent, from reading the world view to the end of
+    /// their solve, in nanoseconds.
+    pub relight_nanos: AtomicU64,
+    /// Relight tasks started for light entries.
+    pub entry_relights: AtomicU64,
+    /// Time relight tasks for light entries spent, in nanoseconds.
+    pub entry_relight_nanos: AtomicU64,
     /// Main-thread time spent landing light and starting relights, in
     /// nanoseconds.
     pub main_thread_nanos: AtomicU64,

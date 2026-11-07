@@ -229,6 +229,9 @@ pub(crate) struct LightRoute<C> {
     coarse: EntityHashMap<CoarseChunk>,
     /// The chunk at each level-0 position whose light has landed.
     at: HashMap<IVec3, Entity>,
+    /// The light of each light entry, which the shells of the chunks beside
+    /// it read: see [`hinted`](super::hinted).
+    entries: HashMap<IVec3, Arc<ChunkLight>>,
     /// Chunks needing a slot that have none.
     starved: EntityHashSet,
     /// The writes for each slot, taken by the render world each frame.
@@ -269,6 +272,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             chunks: EntityHashMap::default(),
             coarse: EntityHashMap::default(),
             at: HashMap::default(),
+            entries: HashMap::default(),
             starved: EntityHashSet::default(),
             uploads: HashMap::default(),
             changed_tags: Vec::new(),
@@ -374,6 +378,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         chunk.own = own;
         chunk.bytes = bytes;
         self.at.insert(position, entity);
+        self.entries.remove(&position);
         if first || new_voxels {
             let across = Face::ALL.map(|face| {
                 self.neighbour_light(position, face)
@@ -384,7 +389,30 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             self.chunks.get_mut(&entity).unwrap().across = across;
         }
         self.settle(entity, None);
+        self.neighbours_follow(position, &light);
+    }
 
+    /// Takes the light that landed for the light entry at `position`, which
+    /// the chunks beside it read through their shells, as they read a
+    /// chunk's.
+    pub fn entry_landed(&mut self, position: IVec3, light: Arc<ChunkLight>) {
+        if self.at.contains_key(&position) {
+            return;
+        }
+        self.entries.insert(position, light.clone());
+        self.neighbours_follow(position, &light);
+    }
+
+    /// Forgets the light entry at `position`. The shells beside it keep its
+    /// last planes, as they keep a despawned chunk's.
+    pub fn entry_dropped(&mut self, position: IVec3) {
+        self.entries.remove(&position);
+    }
+
+    /// Brings what the face neighbours of the chunk or light entry at
+    /// `position` read across their faces in line with its new `light`, and
+    /// their shells and tags with it.
+    fn neighbours_follow(&mut self, position: IVec3, light: &Arc<ChunkLight>) {
         for face in Face::ALL {
             let Some(&neighbour) = self.at.get(&(position + face.offset())) else {
                 continue;
@@ -396,7 +424,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let Some(neighbour_light) = &chunk.light else {
                 continue;
             };
-            chunk.across[back as usize] = across(&neighbour_light.inputs, back, &light);
+            chunk.across[back as usize] = across(&neighbour_light.inputs, back, light);
             self.settle(neighbour, Some(back));
         }
     }
@@ -758,8 +786,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// The light of the chunk across `face` from the level-0 position
     /// `position`, if its light has landed.
     fn neighbour_light(&self, position: IVec3, face: Face) -> Option<Arc<ChunkLight>> {
-        let entity = self.at.get(&(position + face.offset()))?;
-        self.chunks.get(entity)?.light.clone()
+        let beside = position + face.offset();
+        match self.at.get(&beside) {
+            Some(entity) => self.chunks.get(entity)?.light.clone(),
+            None => self.entries.get(&beside).cloned(),
+        }
     }
 
     /// How far the middle of the level-0 chunk at `position` is from the

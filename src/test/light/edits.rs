@@ -89,7 +89,7 @@ fn origin_reference() -> &'static (Reference, Reference) {
     REFERENCE.get_or_init(|| reference(&[IVec3::ZERO], cavern))
 }
 
-fn set_voxels(app: &mut App, edits: &[(IVec3, WorldVoxel)]) {
+pub(super) fn set_voxels(app: &mut App, edits: &[(IVec3, WorldVoxel)]) {
     let edits = edits.to_vec();
     app.world_mut()
         .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
