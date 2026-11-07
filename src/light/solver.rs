@@ -30,12 +30,13 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use super::config::LightPrecision;
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
 use super::fill::seed::{CellsAround, FillSeeds};
 use super::fill::FillCells;
 use super::inputs::{LightInputs, Occupancy, Rescan};
-use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
@@ -45,12 +46,13 @@ use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// One channel of a chunk's light: one level for every open voxel, or a level
-/// per voxel as bit planes, 16 KiB at 16 levels.
+/// One channel of a chunk's light, in steps of its precision: one level for
+/// every open voxel, or a level per voxel as one bit plane per bit of the
+/// level, 16 KiB at 16 levels and 32 KiB at 256.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ChannelLight {
     Uniform(u8),
-    Planes(Box<[Plane; LEVEL_BITS]>),
+    Planes(Box<[Plane]>),
 }
 
 impl ChannelLight {
@@ -73,12 +75,17 @@ pub(crate) struct ChunkLight {
     pub inputs: Arc<LightInputs>,
     pub sky: ChannelLight,
     pub voxel: ChannelLight,
+    /// The precision its levels are steps of: the world's when it was
+    /// solved, which a change of precision leaves behind until it relights.
+    pub precision: LightPrecision,
 }
 
 impl ChunkLight {
     /// Whether `other` holds the same levels as this light in every voxel.
     pub fn same_levels(&self, other: &ChunkLight) -> bool {
-        self.sky == other.sky && self.voxel == other.voxel
+        self.precision == other.precision
+            && self.sky == other.sky
+            && self.voxel == other.voxel
     }
 
     /// The light at the chunk's voxel `local`, which holds `voxel`. A solid
@@ -99,7 +106,11 @@ impl ChunkLight {
             }
             _ => {
                 let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
-                LightLevels::new(self.sky.at(x, y, z), self.voxel.at(x, y, z))
+                LightLevels::of_steps(
+                    self.sky.at(x, y, z),
+                    self.voxel.at(x, y, z),
+                    self.precision,
+                )
             }
         }
     }
@@ -107,6 +118,7 @@ impl ChunkLight {
 
 /// What a world's chunk tasks need to solve light, shared by all of them.
 pub(crate) struct LightTaskSettings<I> {
+    pub precision: LightPrecision,
     pub voxel_scale: LevelScale,
     /// The levels of sky light, or `None` with sky light off.
     pub sky_scale: Option<LevelScale>,
@@ -114,7 +126,7 @@ pub(crate) struct LightTaskSettings<I> {
     /// Whether the world's chunks show their light, so a solve turns a
     /// chunk's light into the bytes of its slot.
     pub routed: bool,
-    /// Each emissive material and its level.
+    /// Each emissive material and its level, as a whole level from 0 to 15.
     pub emission: Vec<(I, u8)>,
     pub counters: Arc<LightCounters>,
     /// Counts the world's changes to these settings, so light solved under
@@ -403,7 +415,12 @@ fn solve<I>(
         .solve_nanos
         .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    let light = Arc::new(ChunkLight { inputs, sky, voxel });
+    let light = Arc::new(ChunkLight {
+        inputs,
+        sky,
+        voxel,
+        precision: settings.precision,
+    });
     let faces = FaceHashes {
         sky: sky_faces,
         voxel: voxel_faces,
@@ -486,8 +503,8 @@ fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
 /// the sky fill cells `fill` around it. Returns it with its face hashes,
 /// indexed by [`Face`].
 ///
-/// Direct sky holds level 15 and doesn't fade. A chunk whose open voxels all
-/// have direct sky needs no spreading, and takes no sky fill.
+/// Direct sky holds the top level and doesn't fade. A chunk whose open voxels
+/// all have direct sky needs no spreading, and takes no sky fill.
 pub(crate) fn solve_sky(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
@@ -514,11 +531,12 @@ pub(crate) fn solve_sky(
                     .solid_column(column % CHUNK, column / CHUNK)
         });
         if all_direct {
-            return (ChannelLight::Uniform(15), FaceHashes::uniform(15));
+            let top = scale.precision().top();
+            return (ChannelLight::Uniform(top), FaceHashes::uniform(top));
         }
     }
     let seeding = Instant::now();
-    let seeds = fill.and_then(|around| FillSeeds::of(around, scale.reach() as usize));
+    let seeds = fill.and_then(|around| FillSeeds::of(around, scale));
     if direct.iter().all(Option::is_none) && seeds.is_none() {
         return unlit;
     }
@@ -546,10 +564,7 @@ fn centre(neighbours: &Neighbourhood) -> &LightInputs {
         .expect("the chunk's own inputs")
 }
 
-fn channel_light(
-    planes: Box<[Plane; LEVEL_BITS]>,
-    occupancy: &Occupancy,
-) -> ChannelLight {
+fn channel_light(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChannelLight {
     one_level(&planes, occupancy)
         .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
 }
@@ -569,7 +584,7 @@ fn spread(
     seeds: &[Seed],
     lit: Option<&[Option<Box<Plane>>; 27]>,
     fill: Option<Filling<'_>>,
-) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
+) -> (Box<[Plane]>, [u64; 6]) {
     if scale.reach() <= MAX_ONE_WORD_REACH {
         spread_in(&ONE_WORD_BOX, neighbours, scale, shape, seeds, lit, fill)
     } else {
@@ -585,7 +600,7 @@ fn spread_in<R: Row>(
     seeds: &[Seed],
     lit: Option<&[Option<Box<Plane>>; 27]>,
     fill: Option<Filling<'_>>,
-) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
+) -> (Box<[Plane]>, [u64; 6]) {
     cached.with_borrow_mut(|light_box| {
         let light_box = match light_box {
             Some(light_box) if light_box.reach() == scale.reach() as usize => light_box,
@@ -603,7 +618,7 @@ fn spread_in<R: Row>(
         }
         let fill_rows = match fill {
             Some((seeds, started, counters)) => {
-                let rows = seeds.rows(light_box.open_rows_mut(), reach, scale);
+                let rows = seeds.rows(light_box.open_rows_mut(), reach);
                 counters.fill_seeded.fetch_add(1, Ordering::Relaxed);
                 counters
                     .fill_seed_nanos
@@ -612,8 +627,7 @@ fn spread_in<R: Row>(
             }
             None => Vec::new(),
         };
-        let mut planes: Box<[Plane; LEVEL_BITS]> =
-            Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]);
+        let mut planes = empty_planes(scale.precision());
         let mut faces = [0; 6];
         light_box.spread(
             seeds,
@@ -641,7 +655,8 @@ fn seeds(neighbours: &Neighbourhood, scale: &LevelScale) -> Vec<Seed> {
         let index = index as i32;
         let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
         for voxel in &inputs.emissive {
-            let Some(start) = scale.start(voxel.level) else {
+            let level = scale.precision().of_whole(voxel.level);
+            let Some(start) = scale.start(level) else {
                 continue;
             };
             let position = offset * CHUNK_SIZE_I
@@ -719,8 +734,14 @@ fn fill_rows<R: Row>(
     }
 }
 
+/// Bit planes of level 0 for every voxel of a chunk, one per bit of a level
+/// at `precision`.
+pub(crate) fn empty_planes(precision: LightPrecision) -> Box<[Plane]> {
+    vec![[0; CHUNK * CHUNK]; precision.bits()].into_boxed_slice()
+}
+
 /// The level every open voxel of the chunk holds, if they all hold the same.
-fn one_level(planes: &[Plane; LEVEL_BITS], occupancy: &Occupancy) -> Option<u8> {
+fn one_level(planes: &[Plane], occupancy: &Occupancy) -> Option<u8> {
     let mut level = None;
     for y in 0..CHUNK {
         for x in 0..CHUNK {
@@ -731,8 +752,10 @@ fn one_level(planes: &[Plane; LEVEL_BITS], occupancy: &Occupancy) -> Option<u8> 
             let column = x + y * CHUNK;
             let level = *level.get_or_insert_with(|| {
                 let z = open.trailing_zeros();
-                (0..LEVEL_BITS)
-                    .map(|bit| ((planes[bit][column] >> z & 1) as u8) << bit)
+                planes
+                    .iter()
+                    .enumerate()
+                    .map(|(bit, plane)| ((plane[column] >> z & 1) as u8) << bit)
                     .sum::<u8>()
             });
             for (bit, plane) in planes.iter().enumerate() {

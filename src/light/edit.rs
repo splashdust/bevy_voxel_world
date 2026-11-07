@@ -148,6 +148,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs: std::sync::Arc::new(inputs),
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
+                    precision: chunk.light.precision,
                 });
                 relight.insert(position);
             }
@@ -213,6 +214,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             inputs: std::sync::Arc::new(inputs),
             sky: chunk.light.sky.clone(),
             voxel: chunk.light.voxel.clone(),
+            precision: chunk.light.precision,
         });
         chunk.edits = count;
         current.insert(*position);
@@ -370,6 +372,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs: std::sync::Arc::new(light.inputs.with_columns(new)),
                     sky: light.sky.clone(),
                     voxel: light.voxel.clone(),
+                    precision: light.precision,
                 });
                 work.fill_touch(below);
                 if quiet {

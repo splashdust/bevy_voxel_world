@@ -218,6 +218,9 @@ pub(crate) struct LookUniform {
     pub smoothed: u32,
     /// 0 for [`LightAo::IndirectLight`], 1 for the base colour, 2 for off.
     pub ao: u32,
+    /// 1 at [`LightPrecision::Steps256`], whose texels and tags hold 8 bits
+    /// per channel, 0 at 16 levels.
+    pub steps_256: u32,
 }
 
 impl LookUniform {
@@ -246,6 +249,7 @@ impl LookUniform {
                 LightAo::BaseColor => 1,
                 LightAo::Off => 2,
             },
+            steps_256: (config.precision == LightPrecision::Steps256) as u32,
         }
     }
 }
@@ -355,11 +359,17 @@ where
     app.add_systems(
         PostUpdate,
         (
+            release_texture::<C, M>
+                .run_if(|route: Res<LightRoute<C>>| route.has_released())
+                .after(super::follow_config::<C>)
+                .before(AssetEventSystems),
             make_texture::<C, M>
-                .run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+                .run_if(|route: Res<LightRoute<C>>| route.texture_wanted())
+                .after(release_texture::<C, M>),
             apply_look::<C, M>
                 .run_if(resource_changed::<C>)
                 .after(super::follow_config::<C>)
+                .after(release_texture::<C, M>)
                 .before(AssetEventSystems),
         ),
     );
@@ -461,6 +471,30 @@ fn apply_look<C: VoxelWorldConfig, M: Material>(
     for id in changed {
         if let Some(mut material) = materials.get_mut(id) {
             material.extension.look = look;
+        }
+    }
+}
+
+/// Gives world `C`'s materials its placeholder in place of a light texture a
+/// change of precision or slot capacity replaced, so the old texture is
+/// dropped. The new one is made when a chunk next takes a slot.
+fn release_texture<C: VoxelWorldConfig, M: Material>(
+    mut route: ResMut<LightRoute<C>>,
+    mut materials: ResMut<Assets<VoxelWorldMaterial<M>>>,
+) where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let released: Vec<AssetId<Image>> =
+        route.take_released().iter().map(Handle::id).collect();
+    let ours: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| released.contains(&material.extension.light_texture.id()))
+        .map(|(id, _)| id)
+        .collect();
+    for id in ours {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.light_texture = route.placeholder.clone();
         }
     }
 }

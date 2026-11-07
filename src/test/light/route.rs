@@ -13,7 +13,10 @@ use super::super::{
     chunk_status, meshing_app, spawn_camera, update_until, DefaultVoxelMaterial,
 };
 use super::voxel_light::Hold;
+use bevy::render::render_resource::{TextureDimension, TextureFormat};
+
 use crate::light::route::LightRoute;
+use crate::light::LightSettings;
 use crate::prelude::*;
 use crate::rendering::VoxelWorldMaterial;
 
@@ -385,4 +388,187 @@ fn a_relight_updates_a_shown_chunks_slot() {
         bytes[(cell.z + cell.x * 34 + cell.y * 34 * 34) as usize],
         levels.sky as u8 | (levels.voxel as u8) << 4
     );
+}
+
+/// The light textures the world has made: 3D images bigger than one texel,
+/// with their formats and sizes.
+fn light_textures(app: &App) -> Vec<(AssetId<Image>, TextureFormat, UVec3)> {
+    app.world()
+        .resource::<Assets<Image>>()
+        .iter()
+        .filter(|(_, image)| image.texture_descriptor.dimension == TextureDimension::D3)
+        .map(|(id, image)| {
+            let size = image.texture_descriptor.size;
+            let size = UVec3::new(size.width, size.height, size.depth_or_array_layers);
+            (id, image.texture_descriptor.format, size)
+        })
+        .filter(|(_, _, size)| *size != UVec3::ONE)
+        .collect()
+}
+
+fn at_256_levels() -> FloorLampWorld {
+    FloorLampWorld {
+        light: Some(LightPropagation {
+            precision: LightPrecision::Steps256,
+            sky_fill: None,
+            ..default()
+        }),
+        ..default()
+    }
+}
+
+/// A level read on the 0 to 15 scale, as steps of 256 levels.
+fn steps(level: f32) -> u32 {
+    (level * 17.0).round() as u32
+}
+
+fn relights_started(app: &App) -> u64 {
+    app.world()
+        .resource::<LightSettings<FloorLampWorld>>()
+        .counters()
+        .relights
+        .load(Ordering::Relaxed)
+}
+
+/// Changes the world's light config, as a game's system would.
+fn change_light(app: &mut App, change: impl FnOnce(&mut LightPropagation)) {
+    let mut world = app.world_mut().resource_mut::<FloorLampWorld>();
+    change(world.light.as_mut().unwrap());
+}
+
+#[test]
+fn a_lit_world_at_256_levels_makes_its_texture_rg8uint_and_a_no_slot_chunks_tag_holds_8_and_8(
+) {
+    let mut app = floor_shown(at_256_levels());
+    update_until(&mut app, "the light texture to be made", |app| {
+        !light_textures(app).is_empty()
+    });
+    let textures = light_textures(&app);
+    assert_eq!(textures.len(), 1);
+    assert_eq!(textures[0].1, TextureFormat::Rg8Uint);
+
+    // A slot holds two bytes a texel, sky light then voxel light, and a
+    // lamp's own cell holds 255 in its voxel half and its level in its sky
+    // half.
+    let tag = tag_of(&mut app, IVec3::ZERO);
+    assert_ne!(tag & HAS_SLOT, 0, "tag {tag:#x}");
+    let bytes = app
+        .world()
+        .resource::<LightRoute<FloorLampWorld>>()
+        .queued_upload(tag & 0xFF_FFFF)
+        .expect("the slot's bytes are queued")
+        .to_vec();
+    assert_eq!(bytes.len(), 78_608);
+    let texel_at = |voxel: IVec3| {
+        let cell = voxel + IVec3::ONE;
+        let texel = (cell.z + cell.x * 34 + cell.y * 34 * 34) as usize;
+        (bytes[2 * texel] as u32, bytes[2 * texel + 1] as u32)
+    };
+    assert_eq!(texel_at(LAMP_AT), (255, 255));
+    assert_eq!(texel_at(DIM_LAMP_AT), (8 * 17, 255));
+    for voxel in [
+        LAMP_AT + IVec3::Y,
+        IVec3::new(9, 1, 16),
+        IVec3::new(2, 20, 30),
+    ] {
+        let levels = light_at(&mut app, voxel);
+        assert_eq!(
+            texel_at(voxel),
+            (steps(levels.sky), steps(levels.voxel)),
+            "at {voxel}"
+        );
+    }
+
+    // The floor beside it sees one level per channel: 8 bits each in its tag.
+    for position in FLOOR_ONLY {
+        let tag = tag_of(&mut app, position);
+        let levels = light_at(&mut app, position * 32 + IVec3::new(5, 1, 5));
+        assert_eq!(levels.sky, 15.0);
+        assert_eq!(
+            tag,
+            steps(levels.sky) | steps(levels.voxel) << 8,
+            "the chunk at {position}"
+        );
+        assert_eq!(tag & (0b111 << 28), 0, "tag {tag:#x}");
+    }
+}
+
+#[test]
+fn setting_precision_to_its_current_value_starts_no_relight_and_keeps_the_texture() {
+    let mut app = floor_shown(FloorLampWorld::default());
+    update_until(&mut app, "the light texture to be made", |app| {
+        !light_textures(app).is_empty()
+    });
+    for _ in 0..5 {
+        app.update();
+    }
+    let (texture, relights) = (light_textures(&app)[0].0, relights_started(&app));
+    let tag = tag_of(&mut app, IVec3::ZERO);
+
+    change_light(&mut app, |light| {
+        light.precision = LightPrecision::Steps16;
+        light.slot_capacity = 1024;
+    });
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(relights_started(&app), relights);
+    assert_eq!(light_textures(&app)[0].0, texture);
+    assert_eq!(tag_of(&mut app, IVec3::ZERO), tag);
+}
+
+#[test]
+fn changing_precision_or_slot_capacity_replaces_the_texture_and_chunks_take_slots_in_the_new_one(
+) {
+    let mut app = floor_shown(FloorLampWorld::default());
+    update_until(&mut app, "the light texture to be made", |app| {
+        !light_textures(app).is_empty()
+    });
+    let old = light_textures(&app)[0].0;
+
+    // Slot holders drop to one level per channel on the frame of the change,
+    // 8 bits each at 256 levels, and the old texture goes.
+    change_light(&mut app, |light| light.precision = LightPrecision::Steps256);
+    app.update();
+    let tag = tag_of(&mut app, IVec3::ZERO);
+    assert_eq!(tag & HAS_SLOT, 0, "tag {tag:#x}");
+    assert!(tag < 1 << 16, "tag {tag:#x}");
+    update_until(&mut app, "the old texture to go", |app| {
+        light_textures(app).iter().all(|(id, ..)| *id != old)
+    });
+
+    // As light lands again the chunk takes a slot in a texture of the new
+    // format.
+    update_until(&mut app, "the chunk to take a slot again", |app| {
+        tag_of(app, IVec3::ZERO) & HAS_SLOT != 0
+    });
+    let textures = light_textures(&app);
+    assert_eq!(textures.len(), 1);
+    assert_eq!(textures[0].1, TextureFormat::Rg8Uint);
+    assert_eq!(textures[0].2, UVec3::new(544, 272, 272));
+
+    // A change of slot capacity replaces it with one of the new shape.
+    let old = textures[0].0;
+    change_light(&mut app, |light| light.slot_capacity = 8);
+    app.update();
+    assert_eq!(tag_of(&mut app, IVec3::ZERO) & HAS_SLOT, 0);
+    update_until(&mut app, "a slot in a texture of 8 slots", |app| {
+        tag_of(app, IVec3::ZERO) & HAS_SLOT != 0
+            && light_textures(app).iter().all(|(id, ..)| *id != old)
+    });
+    let textures = light_textures(&app);
+    assert_eq!(textures.len(), 1);
+    assert_eq!(
+        (textures[0].1, textures[0].2),
+        (TextureFormat::Rg8Uint, UVec3::splat(68))
+    );
+
+    // And back to 16 levels.
+    change_light(&mut app, |light| light.precision = LightPrecision::Steps16);
+    update_until(&mut app, "a slot at 16 levels", |app| {
+        let textures = light_textures(app);
+        tag_of(app, IVec3::ZERO) & HAS_SLOT != 0
+            && textures.len() == 1
+            && textures[0].1 == TextureFormat::R8Uint
+    });
 }

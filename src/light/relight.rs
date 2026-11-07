@@ -65,6 +65,7 @@ use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
 use super::inputs::Rescan;
 use super::levels::LevelScale;
+use super::levels::LightLevels;
 use super::probe::{face_neighbours, SkyProbes};
 use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
@@ -184,7 +185,7 @@ pub(crate) struct LightWork<C> {
     coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved)>,
     /// The levels each coarse chunk's tag holds without a slot, as in a
     /// texel.
-    coarse: HashMap<Entity, u8>,
+    coarse: HashMap<Entity, LightLevels>,
     /// The version the next light to land gets.
     clock: u64,
     /// Main-thread time spent this frame, in nanoseconds.
@@ -254,7 +255,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     /// The levels the coarse chunk `entity`'s tag holds without a slot, as in
     /// a texel, once its light has landed.
-    pub fn coarse_levels(&self, entity: Entity) -> Option<u8> {
+    pub fn coarse_levels(&self, entity: Entity) -> Option<LightLevels> {
         self.coarse.get(&entity).copied()
     }
 
@@ -912,9 +913,17 @@ impl<C: VoxelWorldConfig> Relights<C> {
             if chunks.get(entity).is_err() {
                 continue;
             }
-            work.coarse.insert(entity, solved.levels);
+            let (sky, voxel) = solved.levels;
+            let levels = LightLevels::of_steps(sky, voxel, solved.precision);
+            work.coarse.insert(entity, levels);
             if let Some(route) = route.as_mut() {
-                route.coarse_landed(entity, key, solved.levels, solved.bytes);
+                route.coarse_landed(
+                    entity,
+                    key,
+                    solved.levels,
+                    solved.precision,
+                    solved.bytes,
+                );
             }
         }
         // Chunks whose new mesh landed this frame get the light held for them,
@@ -1017,6 +1026,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             inputs: Arc::new(light.inputs.with_columns(answer)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
+                            precision: light.precision,
                         });
                     }
                 }
@@ -1279,6 +1289,7 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         inputs: chunk.light.inputs.clone(),
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
+        precision: light.precision,
     });
 }
 

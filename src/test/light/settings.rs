@@ -53,10 +53,15 @@ const CHUNKS: [IVec3; 2] = [IVec3::ZERO, IVec3::Y];
 /// that light from outside it can't reach them.
 fn reference(world: &LampWorld) -> (Reference, Reference) {
     let light = world.light.as_ref().unwrap();
+    let top = match light.precision {
+        LightPrecision::Steps16 => 15,
+        LightPrecision::Steps256 => 255,
+    };
     let margin = IVec3::splat(32);
     let min = IVec3::ZERO - margin;
     let max = IVec3::new(32, 64, 32) + margin;
-    let sky = Reference::sky_light(
+    let sky = Reference::sky_light_in_steps(
+        top,
         min,
         max,
         light.sky_reach.clamp(1, 32) as u32,
@@ -65,7 +70,8 @@ fn reference(world: &LampWorld) -> (Reference, Reference) {
         scene,
     );
     let emissive = world.emissive.clone();
-    let voxel = Reference::voxel_light(
+    let voxel = Reference::voxel_light_in_steps(
+        top,
         min,
         max,
         light.voxel_reach.clamp(1, 32) as u32,
@@ -123,6 +129,77 @@ fn changes_settle_on_the_reference(
 
 fn light(world: &mut LampWorld) -> &mut LightPropagation {
     world.light.as_mut().unwrap()
+}
+
+#[test]
+fn changing_precision_at_runtime_settles_on_the_references_light_for_the_new_precision() {
+    let _app = changes_settle_on_the_reference(
+        world(),
+        &[
+            |world| light(world).precision = LightPrecision::Steps256,
+            |world| light(world).precision = LightPrecision::Steps16,
+        ],
+    );
+}
+
+#[test]
+fn changing_slot_capacity_at_runtime_settles_on_the_references_light() {
+    let _app = changes_settle_on_the_reference(
+        world(),
+        &[
+            |world| light(world).slot_capacity = 4,
+            |world| light(world).slot_capacity = 1024,
+        ],
+    );
+}
+
+#[test]
+fn after_streaming_settles_at_256_levels_every_fully_loaded_chunk_matches_the_reference()
+{
+    let mut world = world();
+    light(&mut world).precision = LightPrecision::Steps256;
+    let reference = reference(&world);
+    let mut app = super::voxel_light::app(world);
+    settle(&mut app, "the world to stream in");
+    assert_matches(&mut app, &CHUNKS, &reference, "at 256 levels");
+}
+
+#[test]
+fn light_at_at_256_levels_reads_on_the_same_0_to_15_scale() {
+    for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
+        let mut world = world();
+        light(&mut world).precision = precision;
+        let mut app = super::voxel_light::app(world);
+        settle(&mut app, "the world to stream in");
+        let per_level = match precision {
+            LightPrecision::Steps16 => 1.0,
+            LightPrecision::Steps256 => 17.0,
+        };
+        let mut fractions = 0;
+        for chunk in CHUNKS {
+            let light = super::sky_light::chunk_light(&mut app, chunk).unwrap();
+            for (p, levels) in light {
+                for level in [levels.sky, levels.voxel] {
+                    let steps = level * per_level;
+                    assert!(
+                        (steps - steps.round()).abs() < 1e-3
+                            && (0.0..=15.0).contains(&level),
+                        "{level} at {p} isn't a step of {precision:?}"
+                    );
+                    fractions += (level.fract() != 0.0) as u32;
+                }
+                assert_eq!(levels.direct_sky(), levels.sky == 15.0, "at {p}");
+            }
+        }
+        // The lamp's own voxel reads its declared level, and the voxel beside
+        // direct sky reads 14 at 16 levels and 247/17 at 256.
+        let lamp = super::sky_light::levels(&mut app, SURFACE_LAMP);
+        assert_eq!(lamp.voxel, 15.0);
+        match precision {
+            LightPrecision::Steps16 => assert_eq!(fractions, 0),
+            LightPrecision::Steps256 => assert!(fractions > 0),
+        }
+    }
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //!   was with the shadow map.
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
-//!   the sun's shadow map.
+//!   the sun's shadow map, and still after a change to 256 levels at runtime.
 //! - Each change of the look shows on the frame after it's made, and the glow
 //!   still scales with each lamp's declared level.
 //! - A sealed pocket stays exactly black at minimum brightness 0 under every
@@ -269,6 +269,8 @@ struct CaveWorld {
     check_sky: Option<bool>,
     /// How light looks. The pixel checks change it while running.
     look: LightLook,
+    /// How many levels light holds. The pixel checks change it while running.
+    precision: LightPrecision,
 }
 
 impl VoxelWorldConfig for CaveWorld {
@@ -299,17 +301,24 @@ impl VoxelWorldConfig for CaveWorld {
 
     fn light_propagation(&self) -> Option<LightPropagation> {
         let look = self.look.clone();
+        let precision = self.precision;
         Some(match self.check_sky {
-            None => LightPropagation { look, ..default() },
+            None => LightPropagation {
+                look,
+                precision,
+                ..default()
+            },
             Some(true) => LightPropagation {
                 sky_fill: None,
                 look,
+                precision,
                 ..default()
             },
             Some(false) => LightPropagation {
                 sky: Sky::Off,
                 sky_fill: None,
                 look,
+                precision,
                 ..default()
             },
         })
@@ -450,6 +459,8 @@ struct Check {
     /// without waiting for the world to settle. The camera and the sun must
     /// be as the check before left them.
     next_frame: bool,
+    /// How many levels light holds for the picture.
+    precision: LightPrecision,
 }
 
 type Judge =
@@ -476,6 +487,7 @@ const fn settled_check(
         switches_lamps: false,
         look: LightLook::default,
         next_frame: false,
+        precision: LightPrecision::Steps16,
     }
 }
 
@@ -501,6 +513,7 @@ const fn look_check(
         switches_lamps: false,
         look,
         next_frame: true,
+        precision: LightPrecision::Steps16,
     }
 }
 
@@ -522,7 +535,7 @@ fn curve_look(curve: LevelCurve) -> LightLook {
     }
 }
 
-const CHECKS: [Check; 22] = [
+const CHECKS: [Check; 23] = [
     settled_check(
         "a lamp declared below the top level still glows, scaled by its level",
         "lamp_room.png",
@@ -610,6 +623,18 @@ const CHECKS: [Check; 22] = [
         None,
         pocket_is_black,
     ),
+    Check {
+        precision: LightPrecision::Steps256,
+        ..settled_check(
+            "at 256 levels a sealed pocket is exactly black",
+            "sealed_pocket_256.png",
+            true,
+            &POCKET_CAMERA,
+            true,
+            None,
+            pocket_is_black,
+        )
+    },
     look_check(
         "a sealed pocket stays exactly black under a flat curve",
         "pocket_flat_curve.png",
@@ -661,6 +686,7 @@ const CHECKS: [Check; 22] = [
         switches_lamps: true,
         look: LightLook::default,
         next_frame: false,
+        precision: LightPrecision::Steps16,
     },
     settled_check(
         "a sun with no shadow map leaves a sealed pocket exactly black",
@@ -848,6 +874,9 @@ struct CheckPlan {
     /// The look the current check wants, which `follow_plan_look` gives the
     /// world.
     look: LightLook,
+    /// The precision the current check wants, which `follow_plan_look` gives
+    /// the world.
+    precision: LightPrecision,
 }
 
 /// Runs the checks with sky light off, then with it on, each in a process of
@@ -904,6 +933,9 @@ fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
     if world.look != plan.look {
         world.look = plan.look.clone();
     }
+    if world.precision != plan.precision {
+        world.precision = plan.precision;
+    }
 }
 
 fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: bool) {
@@ -936,6 +968,7 @@ fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: b
         shots_failed: 0,
         directory: std::env::args().nth(2).map(Into::into),
         look: LightLook::default(),
+        precision: LightPrecision::Steps16,
     });
 }
 
@@ -978,9 +1011,14 @@ fn run_checks(
         .iter()
         .any(|sun| sun.shadow_maps_enabled != check.shadow_maps);
     let look = (check.look)();
-    if *transform != wanted || shadow_maps_wrong || plan.look != look {
+    if *transform != wanted
+        || shadow_maps_wrong
+        || plan.look != look
+        || plan.precision != check.precision
+    {
         *transform = wanted;
         plan.look = look;
+        plan.precision = check.precision;
         for mut sun in &mut suns {
             sun.shadow_maps_enabled = check.shadow_maps;
         }

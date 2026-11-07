@@ -34,9 +34,6 @@ use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// How many bits a stored light level has.
-pub(crate) const LEVEL_BITS: usize = 4;
-
 /// One bit of a light level for each voxel of a chunk: a `u32` column along z
 /// at `x + y × 32`.
 pub(crate) type Plane = [u32; CHUNK * CHUNK];
@@ -118,7 +115,7 @@ impl Row for u128 {
 }
 
 /// A source of light in a box: the voxel at `x`, `y` and `z` of the box, and
-/// how many steps from a level-15 source its light starts at.
+/// how many steps from a source at the top level its light starts at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Seed {
     pub x: u8,
@@ -208,8 +205,8 @@ impl<R: Row> LightBox<R> {
 
     /// Spreads light from `seeds` through the box's open voxels in `shape`, and
     /// writes the level each of the chunk's voxels reaches into `planes`, one
-    /// plane per bit of the level. Voxels light doesn't reach, and closed ones,
-    /// keep level 0.
+    /// plane per bit of the level, as many as `scale`'s precision has bits.
+    /// Voxels light doesn't reach, and closed ones, keep level 0.
     ///
     /// `seeds` must be sorted by their start. A seed's own voxel is never
     /// written: it holds the level of its source, not of light reaching it.
@@ -234,11 +231,12 @@ impl<R: Row> LightBox<R> {
         fill: &[(usize, Vec<R>)],
         shape: LightShape,
         scale: &LevelScale,
-        planes: &mut [Plane; LEVEL_BITS],
+        planes: &mut [Plane],
         faces: &mut [u64; 6],
     ) {
         debug_assert!(seeds.windows(2).all(|pair| pair[0].start <= pair[1].start));
         debug_assert_eq!(scale.reach() as usize, self.reach);
+        debug_assert_eq!(planes.len(), scale.precision().bits());
         for plane in planes.iter_mut() {
             plane.fill(0);
         }

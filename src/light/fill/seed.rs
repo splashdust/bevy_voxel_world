@@ -8,13 +8,15 @@
 //! past the grid counting as the cell itself. The cells of a position the
 //! field doesn't know count as open and unlit, so knowing less can only
 //! darken what the blur gives, never brighten it. The blurred
-//! level of each lit cell, rounded to a whole level, seeds every voxel of the
-//! cell inside the kernel's box. A direct-sky cell isn't a seed, since its
+//! level of each lit cell, rounded to a step of the world's precision, seeds
+//! every voxel of the cell inside the kernel's box, so at 256 levels fill's
+//! fractions reach the voxels it lights. A direct-sky cell isn't a seed, since its
 //! voxels have direct sky already, but its level takes part in the blur.
 //!
-//! Each level's seeds then run 7 voxels through open voxels with no loss, so
-//! a surface inside the next cell doesn't lose a level per voxel, and enter
-//! the kernel at the distance from a level-15 source that holds their level.
+//! Seeds enter the kernel at the distance from a source at the top level
+//! that holds their level. The seeds entering at each distance run 7 voxels
+//! through open voxels with no loss, so a surface inside the next cell
+//! doesn't lose a level per voxel.
 
 use std::sync::Arc;
 
@@ -35,18 +37,19 @@ const BLUR: usize = 2;
 /// [`neighbour_index`](crate::light::solver::neighbour_index) gives.
 pub(crate) type CellsAround = [Option<Arc<CellFill>>; 27];
 
-/// Which cells of a chunk's grid seed which level.
+/// Which cells of a chunk's grid seed light at which distance.
 pub(crate) struct FillSeeds {
-    /// By level from 1 to 14, the grid cells, at `x + y × 12 + z × 144`,
-    /// that seed it.
-    levels: [Vec<u16>; 15],
+    /// By the distance from a source at the top level their light starts at,
+    /// the grid cells, at `x + y × 12 + z × 144`, that seed it.
+    starts: Vec<Vec<u16>>,
 }
 
 impl FillSeeds {
     /// The seeds of the chunk at the middle of `around`, for a kernel box
-    /// reaching `reach` voxels past each of its faces. `None` if nothing in
-    /// the box holds fill.
-    pub fn of(around: &CellsAround, reach: usize) -> Option<Self> {
+    /// whose levels `scale` gives. `None` if nothing in the box holds fill.
+    pub fn of(around: &CellsAround, scale: &LevelScale) -> Option<Self> {
+        let reach = scale.reach() as usize;
+        let top = scale.precision().top() as i32;
         let lit_anywhere = around.iter().flatten().any(|cells| {
             cells
                 .levels
@@ -109,7 +112,7 @@ impl FillSeeds {
             }
         }
         let mut seeds = Self {
-            levels: Default::default(),
+            starts: vec![Vec::new(); reach + 1],
         };
         let mut any = false;
         for at in 0..levels.len() {
@@ -120,33 +123,26 @@ impl FillSeeds {
             if [x, y, z].iter().any(|axis| !overlaps(*axis, reach)) {
                 continue;
             }
-            let level = ((levels[at] + 8) / 16).clamp(0, 14) as usize;
-            if level > 0 {
-                seeds.levels[level].push(at as u16);
+            // Sixteenths of a whole level to steps, rounded to the nearest.
+            let level = ((levels[at] * top / 15 + 8) / 16).clamp(0, top - 1) as u8;
+            if let Some(start) = scale.start(level) {
+                seeds.starts[start as usize].push(at as u16);
                 any = true;
             }
         }
         any.then_some(seeds)
     }
 
-    /// Each level's seeds as rows of a kernel box of `reach`, run through the
-    /// box's `open` rows, with the round of the kernel each joins at, which
-    /// `scale` gives. Levels that light nothing within reach are left out.
-    pub fn rows<R: Row>(
-        &self,
-        open: &[R],
-        reach: usize,
-        scale: &LevelScale,
-    ) -> Vec<(usize, Vec<R>)> {
+    /// The seeds starting at each distance as rows of a kernel box of
+    /// `reach`, run through the box's `open` rows, with the round of the
+    /// kernel each joins at, sorted by round.
+    pub fn rows<R: Row>(&self, open: &[R], reach: usize) -> Vec<(usize, Vec<R>)> {
         let side = crate::chunk::CHUNK_SIZE_U as usize + 2 * reach;
         let mut out = Vec::new();
-        for (level, cells) in self.levels.iter().enumerate() {
+        for (start, cells) in self.starts.iter().enumerate() {
             if cells.is_empty() {
                 continue;
             }
-            let Some(start) = scale.start(level as u8) else {
-                continue;
-            };
             let mut rows = vec![R::ZERO; side * side];
             for &at in cells {
                 let at = at as usize;
@@ -165,9 +161,8 @@ impl FillSeeds {
                 }
             }
             run(&mut rows, open, side);
-            out.push((start as usize, rows));
+            out.push((start, rows));
         }
-        out.sort_by_key(|(start, _)| *start);
         out
     }
 }

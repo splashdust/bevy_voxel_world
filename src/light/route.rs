@@ -10,15 +10,18 @@
 //!   more than one level (see [`slot`](super::slot) for which chunks need
 //!   one). A slot is 34³ texels: the chunk's 32³ voxels and a shell one voxel
 //!   deep around them, so a slot's cell is a voxel of the chunk's padded local
-//!   coordinates. Each texel is a byte, sky light in the low nibble and voxel
-//!   light in the high one. Texel rows run along the voxels' z, so one column
-//!   of the solver's bit planes is one row.
+//!   coordinates. At 16 levels each texel is an `R8Uint` byte, sky light in
+//!   the low nibble and voxel light in the high one, and at 256 levels two
+//!   bytes of `Rg8Uint`, sky light then voxel light (see
+//!   [`slot`](super::slot)). Texel rows run along the voxels' z, so one
+//!   column of the solver's bit planes is one row.
 //! - **The tag**, a `MeshTag` on the chunk entity. Bit 31 says whether the
 //!   chunk has a slot. With one, bits 0–23 are the slot's index. Without one,
-//!   bits 0–7 hold the one sky level and voxel level every face of the chunk
-//!   sees, as in a texel. Bits 28–30 are always clear. The crate sets the tag
-//!   on every chunk of a lit world showing its light, replacing any tag the
-//!   world's own systems set.
+//!   bits 0–15 hold the one sky level and voxel level every face of the chunk
+//!   sees: 4 bits each at 16 levels, sky in bits 0–3 and voxel in 4–7, and 8
+//!   bits each at 256 levels, sky in bits 0–7 and voxel in 8–15. Bits 28–30
+//!   are always clear. The crate sets the tag on every chunk of a lit world
+//!   showing its light, replacing any tag the world's own systems set.
 //!
 //! A slot's shell holds copies of the six face neighbours' border planes, so
 //! a face on a chunk boundary reads the light in front of it. The shell is
@@ -60,9 +63,15 @@
 //! drawn with the old one has been submitted, so it never shows the other
 //! chunk's light. The texture's `Image` asset is never changed after it's
 //! made, so nothing is written at rest.
+//!
+//! A change of precision or slot capacity replaces the texture: see
+//! [`LightRoute::replace_texture`]. Every chunk with a slot drops to its one
+//! level per channel, and takes a slot in the new texture as its light lands
+//! again.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
@@ -85,12 +94,13 @@ use bevy::render::{
 use std::hash::BuildHasher;
 
 use super::coarse::takes_coarse_path;
-use super::config::LightPropagation;
+use super::config::{LightPrecision, LightPropagation};
 use super::faces::Face;
-use super::slot::cell_index;
+use super::levels::LightLevels;
 use super::slot::{
-    across, border_plane, most_common, shell_cell, slot_bytes, write_shell, FacesSee,
-    Seen, ShellPlane, PLANE_BYTES,
+    across, border_plane, cell_index, convert_texels, most_common, shell_cell,
+    slot_bytes, texel_at, texel_bytes, texel_levels, texture_format, write_shell,
+    FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
 use super::solver::{ChannelLight, ChunkLight};
 use crate::chunk::{Chunk, ChunkKey};
@@ -107,10 +117,17 @@ pub(crate) const HAS_SLOT: u32 = 1 << 31;
 /// a slot.
 const LOD_SHIFT: u32 = 24;
 
-/// The levels of a chunk with no slot, as the low byte of its tag.
-fn tag_levels(sky: u8, voxel: u8) -> u8 {
-    sky | voxel << 4
+/// The tag of a chunk with no slot showing sky light `sky` and voxel light
+/// `voxel`, steps of `precision`.
+pub(crate) fn tag_levels(sky: u8, voxel: u8, precision: LightPrecision) -> u32 {
+    match precision {
+        LightPrecision::Steps16 => sky as u32 | (voxel as u32) << 4,
+        LightPrecision::Steps256 => sky as u32 | (voxel as u32) << 8,
+    }
 }
+
+/// How long refilling slots may take in a frame.
+const REFILL_BUDGET: Duration = Duration::from_millis(1);
 
 /// How many slots the texture holds along each of its axes, for `capacity`
 /// slots on a device whose 3D textures are at most `max_side` texels on a
@@ -184,8 +201,9 @@ struct RouteChunk {
 struct CoarseChunk {
     key: ChunkKey,
     shown: bool,
-    /// What its tag holds without a slot.
-    levels: u8,
+    /// The sky light and voxel light its tag holds without a slot, in steps
+    /// of the route's precision.
+    levels: (u8, u8),
     /// Its slot's bytes: kept until it's shown, and as a copy while it holds
     /// a slot.
     bytes: Option<Box<[u8]>>,
@@ -194,14 +212,14 @@ struct CoarseChunk {
 }
 
 impl CoarseChunk {
-    fn new(key: ChunkKey, levels: u8) -> Self {
+    fn new(key: ChunkKey, levels: (u8, u8), precision: LightPrecision) -> Self {
         Self {
             key,
             shown: false,
             levels,
             bytes: None,
             slot: None,
-            tag: levels as u32,
+            tag: tag_levels(levels.0, levels.1, precision),
         }
     }
 }
@@ -214,8 +232,13 @@ pub(crate) struct LightRoute<C> {
     /// needs a slot.
     pub placeholder: Handle<Image>,
     texture: Option<Handle<Image>>,
+    /// Textures replaced by a change of precision or slot capacity, until
+    /// the world's materials stop binding them.
+    released: Vec<Handle<Image>>,
     /// Whether the texture waits to be made.
     texture_wanted: bool,
+    /// The precision of the texture's format, and of the levels in tags.
+    precision: LightPrecision,
     /// The slot count, clamped to the device once the texture's shape is set.
     capacity: u32,
     slots_per_axis: Option<UVec3>,
@@ -236,9 +259,10 @@ pub(crate) struct LightRoute<C> {
     /// Tags changed for chunks, waiting to be set on them.
     changed_tags: Vec<(Entity, u32)>,
     cameras: Vec<Vec3>,
-    /// The tag's levels for a chunk with no light of its own, such as a chunk
-    /// above LOD level 0, or one whose light hasn't landed yet.
-    unlit_levels: u8,
+    /// The sky light, a whole level, of a chunk with no light of its own,
+    /// such as a chunk above LOD level 0, or one whose light hasn't landed
+    /// yet.
+    unlit_sky: u8,
     warned_full: bool,
     pub counters: SlotCounters,
     _world: PhantomData<C>,
@@ -259,7 +283,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         Self {
             placeholder: images.add(placeholder),
             texture: None,
+            released: Vec::new(),
             texture_wanted: false,
+            precision: config.precision,
             capacity: config.slot_capacity,
             slots_per_axis: None,
             max_side: None,
@@ -273,7 +299,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             uploads: HashMap::default(),
             changed_tags: Vec::new(),
             cameras: Vec::new(),
-            unlit_levels: tag_levels(sky, 0),
+            unlit_sky: sky,
             warned_full: false,
             counters: SlotCounters::default(),
             _world: PhantomData,
@@ -288,10 +314,124 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
-    /// Makes chunks with no light of their own show sky light at `sky` from
-    /// now on, after the world's sky rule changed.
+    /// Makes chunks with no light of their own show sky light at the whole
+    /// level `sky` from now on, after the world's sky rule changed.
     pub fn set_unlit_sky(&mut self, sky: u8) {
-        self.unlit_levels = tag_levels(sky, 0);
+        self.unlit_sky = sky;
+    }
+
+    /// The tag of a chunk with no light of its own.
+    fn unlit_tag(&self) -> u32 {
+        let sky = self.precision.of_whole(self.unlit_sky);
+        tag_levels(sky, 0, self.precision)
+    }
+
+    /// The tag of a chunk showing `levels`, steps of `from`, with no slot.
+    fn flat_levels(&self, (sky, voxel): (u8, u8), from: LightPrecision) -> u32 {
+        let to = self.precision;
+        tag_levels(to.convert(sky, from), to.convert(voxel, from), to)
+    }
+
+    /// Replaces the texture with one of `precision`'s format holding
+    /// `capacity` slots, after either changed.
+    ///
+    /// Every chunk with a slot drops it and shows its most common level per
+    /// channel, and changed tags wait in
+    /// [`take_changed_tags`](Self::take_changed_tags). The old texture waits
+    /// in [`take_released`](Self::take_released) for the world's materials to
+    /// stop binding it, and the new one is made only when a chunk next takes
+    /// a slot. A level-0 chunk takes one again when its light lands at the
+    /// new precision, or, with the precision unchanged, as slots are
+    /// refilled. A coarse chunk's slot is converted to the new format and
+    /// placed again.
+    pub fn replace_texture(&mut self, precision: LightPrecision, capacity: u32) {
+        let old = self.precision;
+        self.precision = precision;
+        self.capacity = capacity;
+        self.released.extend(self.texture.take());
+        self.texture_wanted = false;
+        self.slots_per_axis = None;
+        self.next_slot = 0;
+        self.free.clear();
+        self.holders.clear();
+        self.uploads.clear();
+        self.starved.clear();
+        self.warned_full = false;
+        let unlit = self.unlit_tag();
+        let entities: Vec<Entity> = self.chunks.keys().copied().collect();
+        for entity in entities {
+            let chunk = &self.chunks[&entity];
+            let had_slot = chunk.slot.is_some();
+            let tag = match &chunk.light {
+                None => unlit,
+                Some(light) => {
+                    let sees = chunk.sees();
+                    if had_slot || sees.needs_slot() {
+                        self.flat_levels(most_common(light), light.precision)
+                    } else {
+                        self.flat_levels(flat_tag(&sees, light), light.precision)
+                    }
+                }
+            };
+            let current = chunk
+                .light
+                .as_ref()
+                .is_some_and(|light| light.precision == precision);
+            let starved = current && (had_slot || chunk.sees().needs_slot());
+            let chunk = self.chunks.get_mut(&entity).unwrap();
+            let convert = |seen: Seen| match seen {
+                Seen::One(level) => Seen::One(precision.convert(level, old)),
+                seen => seen,
+            };
+            for across in &mut chunk.across {
+                across.sky = convert(across.sky);
+                across.voxel = convert(across.voxel);
+            }
+            chunk.slot = None;
+            chunk.shell = [None; 6];
+            chunk.bytes = None;
+            if starved && chunk.shown {
+                self.starved.insert(entity);
+            }
+            if chunk.tag != tag {
+                chunk.tag = tag;
+                if chunk.shown {
+                    self.changed_tags.push((entity, tag));
+                }
+            }
+        }
+        let coarse: Vec<Entity> = self.coarse.keys().copied().collect();
+        for entity in coarse {
+            let chunk = self.coarse.get_mut(&entity).unwrap();
+            chunk.levels = (
+                precision.convert(chunk.levels.0, old),
+                precision.convert(chunk.levels.1, old),
+            );
+            chunk.slot = None;
+            chunk.bytes = chunk
+                .bytes
+                .take()
+                .map(|bytes| convert_texels(&bytes, old, precision));
+            let tag = tag_levels(chunk.levels.0, chunk.levels.1, precision);
+            if chunk.tag != tag {
+                chunk.tag = tag;
+                if chunk.shown {
+                    self.changed_tags.push((entity, tag));
+                }
+            }
+            self.settle_coarse(entity);
+        }
+    }
+
+    /// The textures changes of precision or slot capacity replaced, once.
+    pub fn take_released(&mut self) -> Vec<Handle<Image>> {
+        std::mem::take(&mut self.released)
+    }
+
+    /// Whether a replaced texture waits for the world's materials to stop
+    /// binding it.
+    pub fn has_released(&self) -> bool {
+        !self.released.is_empty()
     }
 
     pub fn set_cameras(&mut self, cameras: impl Iterator<Item = Vec3>) {
@@ -314,7 +454,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 depth_or_array_layers: size.z,
             },
             TextureDimension::D3,
-            TextureFormat::R8Uint,
+            texture_format(self.precision),
             RenderAssetUsages::default(),
         );
         image.texture_descriptor.usage =
@@ -358,7 +498,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         bytes: Option<Box<[u8]>>,
         new_voxels: bool,
     ) {
-        let unlit = self.unlit_levels as u32;
+        let unlit = self.unlit_tag();
         // A voxel edit gives a chunk new inputs without a chunk task.
         let first = !self.chunks.get(&entity).is_some_and(|chunk| {
             chunk
@@ -378,7 +518,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let across = Face::ALL.map(|face| {
                 self.neighbour_light(position, face)
                     .map_or(FacesSee::default(), |neighbour| {
-                        across(&light.inputs, face, &neighbour)
+                        across(&light.inputs, face, &neighbour, self.precision)
                     })
             });
             self.chunks.get_mut(&entity).unwrap().across = across;
@@ -396,7 +536,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let Some(neighbour_light) = &chunk.light else {
                 continue;
             };
-            chunk.across[back as usize] = across(&neighbour_light.inputs, back, &light);
+            chunk.across[back as usize] =
+                across(&neighbour_light.inputs, back, &light, self.precision);
             self.settle(neighbour, Some(back));
         }
     }
@@ -407,11 +548,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// coarse chunk.
     fn show(&mut self, entity: Entity, key: ChunkKey, coarse: bool) -> u32 {
         if coarse {
-            let unlit = self.unlit_levels;
+            let unlit = (self.precision.of_whole(self.unlit_sky), 0);
+            let precision = self.precision;
             let chunk = self
                 .coarse
                 .entry(entity)
-                .or_insert_with(|| CoarseChunk::new(key, unlit));
+                .or_insert_with(|| CoarseChunk::new(key, unlit, precision));
             if !chunk.shown {
                 chunk.shown = true;
                 self.settle_coarse(entity);
@@ -419,7 +561,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return self.coarse[&entity].tag;
         }
         let position = key.position;
-        let unlit = self.unlit_levels as u32;
+        let unlit = self.unlit_tag();
         let chunk = self
             .chunks
             .entry(entity)
@@ -453,31 +595,39 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// Takes the light that landed for the coarse chunk `entity` with `key`:
-    /// the levels its tag holds without a slot, and its slot's bytes if it
-    /// needs one.
+    /// the sky and voxel light its tag holds without a slot, and its slot's
+    /// bytes if it needs one, both of `precision`.
     pub fn coarse_landed(
         &mut self,
         entity: Entity,
         key: ChunkKey,
-        levels: u8,
+        levels: (u8, u8),
+        precision: LightPrecision,
         bytes: Option<Box<[u8]>>,
     ) {
-        let unlit = self.unlit_levels;
+        let to = self.precision;
+        let levels = (
+            to.convert(levels.0, precision),
+            to.convert(levels.1, precision),
+        );
+        let bytes = bytes.map(|bytes| convert_texels(&bytes, precision, to));
         let chunk = self
             .coarse
             .entry(entity)
-            .or_insert_with(|| CoarseChunk::new(key, unlit));
+            .or_insert_with(|| CoarseChunk::new(key, levels, to));
         chunk.levels = levels;
         chunk.bytes = bytes;
         self.settle_coarse(entity);
     }
 
-    /// The byte of the slot of the coarse chunk `entity` at `cell`, in padded
-    /// cell coordinates, while it holds a slot.
-    pub fn coarse_cell(&self, entity: Entity, cell: UVec3) -> Option<u8> {
+    /// The light of the slot of the coarse chunk `entity` at `cell`, in
+    /// padded cell coordinates, while it holds a slot.
+    pub fn coarse_cell(&self, entity: Entity, cell: UVec3) -> Option<LightLevels> {
         let chunk = self.coarse.get(&entity)?;
         chunk.slot?;
-        Some(chunk.bytes.as_ref()?[cell_index(cell)])
+        let (sky, voxel) =
+            texel_at(chunk.bytes.as_ref()?, cell_index(cell), self.precision);
+        Some(texel_levels(sky, voxel, self.precision))
     }
 
     /// The bytes coarse chunks keep as copies of their slots.
@@ -526,7 +676,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
             None => {
                 chunk.bytes = None;
-                chunk.levels as u32
+                tag_levels(chunk.levels.0, chunk.levels.1, self.precision)
             }
         };
         let chunk = self.coarse.get_mut(&entity).unwrap();
@@ -542,9 +692,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// Gives free slots to the chunks waiting for one, nearest the cameras
-    /// first.
+    /// first, for as long as [`REFILL_BUDGET`] allows. Chunks left waiting
+    /// get theirs in later frames.
     pub fn refill(&mut self) {
-        while self.wants_refill() {
+        let started = Instant::now();
+        while self.wants_refill() && started.elapsed() < REFILL_BUDGET {
             let nearest = self
                 .starved
                 .iter()
@@ -574,13 +726,18 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let (true, Some(light)) = (chunk.shown, chunk.light.clone()) else {
             return;
         };
-        let sees = chunk
-            .across
-            .iter()
-            .fold(chunk.own, |sees, across| sees.join(*across));
+        let sees = chunk.sees();
         let (slot, position) = (chunk.slot, chunk.position);
         self.starved.remove(&entity);
-        let tag = if sees.needs_slot() {
+        let tag = if light.precision != self.precision {
+            // Light solved before a change of precision shows flat until it
+            // lands again at the new one.
+            if let Some(slot) = slot {
+                self.chunks.get_mut(&entity).unwrap().slot = None;
+                self.free_slot(slot);
+            }
+            self.flat_levels(most_common(&light), light.precision)
+        } else if sees.needs_slot() {
             match (slot, face) {
                 (Some(slot), Some(face)) => {
                     self.write_plane(entity, slot, face);
@@ -601,8 +758,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     }
                     None => {
                         self.starved.insert(entity);
-                        let (sky, voxel) = most_common(&light);
-                        tag_levels(sky, voxel) as u32
+                        self.flat_levels(most_common(&light), light.precision)
                     }
                 },
             }
@@ -612,7 +768,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.free_slot(slot);
                 self.counters.given_back += 1;
             }
-            flat_tag(&sees, &light)
+            self.flat_levels(flat_tag(&sees, &light), light.precision)
         };
         let chunk = self.chunks.get_mut(&entity).unwrap();
         if chunk.slot.is_none() {
@@ -638,8 +794,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let mut shell = [None; 6];
         for face in Face::ALL {
             if let Some(neighbour) = self.neighbour_light(position, face) {
-                let plane = border_plane(&neighbour, face.opposite());
-                write_shell(&mut bytes, face, Some(&plane));
+                let plane = border_plane(&neighbour, face.opposite(), self.precision);
+                write_shell(&mut bytes, face, Some(&plane), self.precision);
                 shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
             }
         }
@@ -655,7 +811,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(neighbour) = self.neighbour_light(position, face) else {
             return;
         };
-        let plane = border_plane(&neighbour, face.opposite());
+        let plane = border_plane(&neighbour, face.opposite(), self.precision);
         let hash = Some(FixedHasher.hash_one(&plane[..]));
         let shell = &mut self.chunks.get_mut(&entity).unwrap().shell[face as usize];
         if *shell == hash {
@@ -664,7 +820,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         *shell = hash;
         self.counters.plane_writes += 1;
         match self.uploads.get_mut(&slot) {
-            Some(Upload::Full(bytes)) => write_shell(bytes, face, Some(&plane)),
+            Some(Upload::Full(bytes)) => {
+                write_shell(bytes, face, Some(&plane), self.precision)
+            }
             Some(Upload::Planes(planes)) => planes[face as usize] = Some(plane),
             None => {
                 let mut planes: [Option<Box<ShellPlane>>; 6] = Default::default();
@@ -729,17 +887,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let Some(chunk) = self.coarse.get_mut(&holder) {
             chunk.slot = None;
             chunk.bytes = None;
-            chunk.tag = chunk.levels as u32;
+            chunk.tag = tag_levels(chunk.levels.0, chunk.levels.1, self.precision);
             self.changed_tags.push((holder, chunk.tag));
             return Some(slot);
         }
+        let light = self.chunks[&holder].light.clone();
+        let tag = light.map_or(self.unlit_tag(), |light| {
+            self.flat_levels(most_common(&light), light.precision)
+        });
         let chunk = self.chunks.get_mut(&holder).unwrap();
         chunk.slot = None;
-        let light = chunk.light.clone();
-        let tag = light.map_or(self.unlit_levels as u32, |light| {
-            let (sky, voxel) = most_common(&light);
-            tag_levels(sky, voxel) as u32
-        });
         chunk.tag = tag;
         self.changed_tags.push((holder, tag));
         self.starved.insert(holder);
@@ -809,17 +966,25 @@ impl RouteChunk {
             tag,
         }
     }
+
+    /// What its faces read, from its own voxels and across each face.
+    fn sees(&self) -> FacesSee {
+        self.across
+            .iter()
+            .fold(self.own, |sees, across| sees.join(*across))
+    }
 }
 
-/// The tag of a chunk with no slot whose faces see `sees`. A channel no face
-/// reads takes the chunk's own level, if it has one.
-fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> u32 {
+/// The levels of a chunk with no slot whose faces see `sees`, as sky and
+/// voxel light. A channel no face reads takes the chunk's own level, if it
+/// has one.
+fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> (u8, u8) {
     let level = |seen: Seen, channel: &ChannelLight| match (seen, channel) {
         (Seen::One(level), _) => level,
         (_, ChannelLight::Uniform(level)) => *level,
         _ => 0,
     };
-    tag_levels(level(sees.sky, &light.sky), level(sees.voxel, &light.voxel)) as u32
+    (level(sees.sky, &light.sky), level(sees.voxel, &light.voxel))
 }
 
 /// Sets the tag of a chunk of world `C` as its mesh is shown, and queues its
@@ -858,6 +1023,7 @@ pub(crate) fn add_render_systems<C: VoxelWorldConfig>(app: &mut App) {
         .insert_resource(RenderUploads::<C> {
             texture: None,
             slots_per_axis: UVec3::ONE,
+            texel_bytes: 1,
             pending: Vec::new(),
             _world: PhantomData,
         })
@@ -873,6 +1039,7 @@ pub(crate) fn add_render_systems<C: VoxelWorldConfig>(app: &mut App) {
 struct RenderUploads<C> {
     texture: Option<AssetId<Image>>,
     slots_per_axis: UVec3,
+    texel_bytes: usize,
     /// Each slot and what to write into it, oldest first.
     pending: Vec<(u32, Upload)>,
     _world: PhantomData<C>,
@@ -892,8 +1059,13 @@ fn extract_uploads<C: VoxelWorldConfig>(
     let (Some(texture), Some(axes)) = (&route.texture, route.slots_per_axis) else {
         return;
     };
+    // Writes for a texture since replaced would not fit the new one.
+    if uploads.texture != Some(texture.id()) {
+        uploads.pending.clear();
+    }
     uploads.texture = Some(texture.id());
     uploads.slots_per_axis = axes;
+    uploads.texel_bytes = texel_bytes(route.precision);
     uploads.pending.extend(route.uploads.drain());
 }
 
@@ -910,7 +1082,7 @@ fn write_uploads<C: VoxelWorldConfig>(
     let Some(image) = uploads.texture.and_then(|texture| images.get(texture)) else {
         return;
     };
-    let axes = uploads.slots_per_axis;
+    let (axes, wide) = (uploads.slots_per_axis, uploads.texel_bytes);
     let write = |slot: u32, origin: UVec3, extent: UVec3, bytes: &[u8]| {
         let slot_origin = UVec3::new(
             slot % axes.x,
@@ -932,7 +1104,7 @@ fn write_uploads<C: VoxelWorldConfig>(
             bytes,
             TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(extent.x),
+                bytes_per_row: Some(extent.x * wide as u32),
                 rows_per_image: Some(extent.y),
             },
             Extent3d {
@@ -950,7 +1122,7 @@ fn write_uploads<C: VoxelWorldConfig>(
             Upload::Planes(planes) => {
                 for face in Face::ALL {
                     if let Some(plane) = &planes[face as usize] {
-                        let (origin, extent, bytes) = plane_texels(face, plane);
+                        let (origin, extent, bytes) = plane_texels(face, plane, wide);
                         write(slot, origin, extent, &bytes);
                     }
                 }
@@ -960,10 +1132,11 @@ fn write_uploads<C: VoxelWorldConfig>(
 }
 
 /// Where a shell plane on `face` lies in its slot's texels, as the region's
-/// origin and extent, and its bytes in the region's order.
+/// origin and extent, and its bytes in the region's order, `wide` bytes a
+/// texel.
 ///
 /// A slot's texel x, y, z is its padded cell z, x, y.
-fn plane_texels(face: Face, plane: &ShellPlane) -> (UVec3, UVec3, Vec<u8>) {
+fn plane_texels(face: Face, plane: &ShellPlane, wide: usize) -> (UVec3, UVec3, Vec<u8>) {
     let texel = |u: usize, v: usize| {
         let cell = shell_cell(face, u, v);
         UVec3::new(cell.z, cell.x, cell.y)
@@ -971,12 +1144,14 @@ fn plane_texels(face: Face, plane: &ShellPlane) -> (UVec3, UVec3, Vec<u8>) {
     let origin = texel(0, 0);
     let extent =
         texel(CHUNK_SIZE_U as usize - 1, CHUNK_SIZE_U as usize - 1) - origin + UVec3::ONE;
-    let mut bytes = vec![0; PLANE_BYTES];
+    let mut bytes = vec![0; PLANE_TEXELS * wide];
     for v in 0..CHUNK_SIZE_U as usize {
         for u in 0..CHUNK_SIZE_U as usize {
             let at = texel(u, v) - origin;
-            bytes[(at.x + at.y * extent.x + at.z * extent.x * extent.y) as usize] =
-                plane[u + v * CHUNK_SIZE_U as usize];
+            let to =
+                (at.x + at.y * extent.x + at.z * extent.x * extent.y) as usize * wide;
+            let from = (u + v * CHUNK_SIZE_U as usize) * wide;
+            bytes[to..to + wide].copy_from_slice(&plane[from..from + wide]);
         }
     }
     (origin, extent, bytes)
@@ -1010,10 +1185,10 @@ mod tests {
 
     #[test]
     fn a_shell_plane_covers_one_layer_of_its_slot() {
-        let mut plane = [0u8; PLANE_BYTES];
+        let mut plane = [0u8; PLANE_TEXELS];
         plane[3 + 5 * 32] = 7;
         for face in Face::ALL {
-            let (origin, extent, bytes) = plane_texels(face, &plane);
+            let (origin, extent, bytes) = plane_texels(face, &plane, 1);
             assert_eq!(extent.element_product(), 32 * 32);
             let cell = shell_cell(face, 3, 5);
             let at = UVec3::new(cell.z, cell.x, cell.y) - origin;

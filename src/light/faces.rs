@@ -104,8 +104,8 @@ impl FaceHashes {
 /// It holds when, in either channel, at some pair of touching open voxels, the
 /// first distance from a source that holds `from`'s level is less than the
 /// last distance that holds `to`'s, with level 0 counting as `reach + 1`.
-/// Direct sky, at level 15, is a source itself, so a neighbour beside it is
-/// one step from a source. `sky_scale` is `None` with sky light off.
+/// Direct sky, at the top level, is a source itself, so a neighbour beside it
+/// is one step from a source. `sky_scale` is `None` with sky light off.
 pub(crate) fn could_reach_sooner(
     from: &ChunkLight,
     to: &ChunkLight,
@@ -113,6 +113,11 @@ pub(crate) fn could_reach_sooner(
     voxel_scale: &LevelScale,
     sky_scale: Option<&LevelScale>,
 ) -> bool {
+    // Light of another precision is from before a change of precision, which
+    // relights every chunk anyway.
+    if from.precision != to.precision {
+        return true;
+    }
     let channel_reaches = |scale: &LevelScale, of: fn(&ChunkLight) -> &ChannelLight| {
         if let ChannelLight::Uniform(0) = of(from) {
             return false;

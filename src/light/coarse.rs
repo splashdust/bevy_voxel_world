@@ -40,13 +40,15 @@ use std::time::Instant;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use super::config::LightShape;
+use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
-use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::sky::{Columns, Hinted, SkyRule, WALK_BUDGET};
-use super::slot::{cell_index, shell_cell, LAMP_MARKER, SLOT_BYTES};
-use super::solver::LightTaskSettings;
+use super::slot::{
+    cell_index, put_lamp, put_texel, shell_cell, texel_at, texel_bytes, SLOT_TEXELS,
+};
+use super::solver::{empty_planes, LightTaskSettings};
 use crate::chunk::{
     chunk_containing, ChunkData, ChunkKey, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U,
     PADDED_CHUNK_SIZE,
@@ -69,10 +71,12 @@ pub(crate) fn takes_coarse_path(key: ChunkKey, data_shape: UVec3) -> bool {
 
 /// A coarse chunk's light, as its task worked it out.
 pub(crate) struct CoarseSolved {
-    /// The levels its tag holds without a slot, as in a texel: the one level
-    /// per channel its faces see, or else the brightest level a tenth of
-    /// them see.
-    pub levels: u8,
+    /// The sky light and voxel light its tag holds without a slot: the one
+    /// level per channel its faces see, or else the brightest level a tenth
+    /// of them see.
+    pub levels: (u8, u8),
+    /// The precision of its levels and of its slot's format.
+    pub precision: LightPrecision,
     /// The bytes of its slot, in a world showing its light, if its faces see
     /// more than one level or a lamp.
     pub bytes: Option<Box<[u8]>>,
@@ -91,6 +95,7 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
         let started = Instant::now();
         let settings = &self.settings;
         let width = 1u32 << chunk.key.lod_level;
+        let precision = settings.precision;
         let cells = Cells::of(chunk, &settings.emission);
 
         let lit = match (self.walk, &settings.sky_scale) {
@@ -103,23 +108,24 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
         let sky = match (&lit, &settings.sky_scale) {
             (Some(lit), Some(scale)) if lit.iter().any(|column| *column != 0) => {
                 if lit == &cells.open {
-                    lit_levels(lit)
+                    lit_levels(lit, precision.top())
                 } else {
-                    let scale = LevelScale::coarse(scale.reach(), width);
+                    let scale = LevelScale::coarse(scale.reach(), width, precision);
                     spread(&cells.open, Some(lit), &[], &scale, settings.shape)
                 }
             }
-            _ => vec![0; SLOT_BYTES],
+            _ => vec![0; SLOT_TEXELS],
         };
         let voxel = if cells.lamps.is_empty() {
-            vec![0; SLOT_BYTES]
+            vec![0; SLOT_TEXELS]
         } else {
-            let scale = LevelScale::coarse(settings.voxel_scale.reach(), width);
+            let scale =
+                LevelScale::coarse(settings.voxel_scale.reach(), width, precision);
             spread(&cells.open, None, &cells.lamps, &scale, settings.shape)
         };
 
-        let bytes = cells.slot_bytes(&sky, &voxel);
-        let (levels, needs_slot) = cells.faces_see(&bytes);
+        let bytes = cells.slot_bytes(&sky, &voxel, precision);
+        let (levels, needs_slot) = cells.faces_see(&bytes, precision);
         let counters = &settings.counters;
         counters.coarse_solves.fetch_add(1, Ordering::Relaxed);
         counters
@@ -127,6 +133,7 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         CoarseSolved {
             levels,
+            precision,
             bytes: (settings.routed && needs_slot).then_some(bytes),
         }
     }
@@ -236,17 +243,22 @@ impl Cells {
         lit
     }
 
-    /// The bytes of the chunk's slot: sky light in each texel's low nibble and
-    /// voxel light in its high one, a lamp marker in each emissive cell, and
-    /// the shell's edges and corners left at 0.
-    fn slot_bytes(&self, sky: &[u8], voxel: &[u8]) -> Box<[u8]> {
-        let mut bytes: Box<[u8]> = sky
-            .iter()
-            .zip(voxel)
-            .map(|(sky, voxel)| sky | voxel << 4)
-            .collect();
+    /// The bytes of the chunk's slot, in the format of `precision`: each
+    /// cell's sky light and voxel light, a lamp marker in each emissive cell,
+    /// and the shell's edges and corners left at 0.
+    fn slot_bytes(
+        &self,
+        sky: &[u8],
+        voxel: &[u8],
+        precision: LightPrecision,
+    ) -> Box<[u8]> {
+        let wide = texel_bytes(precision);
+        let mut bytes = vec![0; SLOT_TEXELS * wide].into_boxed_slice();
+        for (texel, (sky, voxel)) in sky.iter().zip(voxel).enumerate() {
+            put_texel(&mut bytes, texel, *sky, *voxel, precision);
+        }
         for (cell, level) in &self.lamps {
-            bytes[cell_index(*cell)] = LAMP_MARKER | level;
+            put_lamp(&mut bytes, cell_index(*cell), *level, precision);
         }
         let edge = |v: usize| v == 0 || v == SIDE - 1;
         for y in 0..SIDE {
@@ -258,27 +270,26 @@ impl Cells {
                 };
                 let cell =
                     |z: usize| cell_index(UVec3::new(x as u32, y as u32, z as u32));
+                let mut clear =
+                    |z: usize| bytes[cell(z) * wide..(cell(z) + 1) * wide].fill(0);
                 if zs.is_empty() {
-                    for z in 0..SIDE {
-                        bytes[cell(z)] = 0;
-                    }
+                    (0..SIDE).for_each(&mut clear);
                 } else {
-                    for &z in zs {
-                        bytes[cell(z)] = 0;
-                    }
+                    zs.iter().copied().for_each(&mut clear);
                 }
             }
         }
         bytes
     }
 
-    /// What the chunk's faces read from `bytes`: the levels its tag holds
-    /// without a slot, and whether it needs one.
+    /// What the chunk's faces read from `bytes`, a slot of `precision`'s
+    /// format: the sky and voxel light its tag holds without a slot, and
+    /// whether it needs one.
     ///
     /// Faces read the open cells touching one of the chunk's own solid cells
     /// by a face, an edge or a corner, as at level 0, padding included. A
     /// chunk with no such cell reads all its open cells.
-    fn faces_see(&self, bytes: &[u8]) -> (u8, bool) {
+    fn faces_see(&self, bytes: &[u8], precision: LightPrecision) -> ((u8, u8), bool) {
         let interior = ALL_CELLS & !1 & !(1 << (SIDE - 1));
         let solid = |x: usize, y: usize| -> u64 {
             if (1..=CHUNK).contains(&x) && (1..=CHUNK).contains(&y) {
@@ -288,8 +299,8 @@ impl Cells {
                 0
             }
         };
-        let mut sky = [0u32; 16];
-        let mut voxel = [0u32; 16];
+        let mut sky = [0u32; 256];
+        let mut voxel = [0u32; 256];
         let mut count = |cells: &dyn Fn(usize, usize) -> u64| {
             let mut any = false;
             for y in 0..SIDE {
@@ -298,9 +309,10 @@ impl Cells {
                     while bits != 0 {
                         let z = bits.trailing_zeros();
                         bits &= bits - 1;
-                        let byte = bytes[cell_index(UVec3::new(x as u32, y as u32, z))];
-                        sky[(byte & 15) as usize] += 1;
-                        voxel[(byte >> 4) as usize] += 1;
+                        let cell = cell_index(UVec3::new(x as u32, y as u32, z));
+                        let (sky_level, voxel_level) = texel_at(bytes, cell, precision);
+                        sky[sky_level as usize] += 1;
+                        voxel[voxel_level as usize] += 1;
                         any = true;
                     }
                 }
@@ -346,21 +358,18 @@ impl Cells {
             })
         });
         let levels =
-            |counts: &[u32; 16]| counts.iter().filter(|count| **count > 0).count();
+            |counts: &[u32; 256]| counts.iter().filter(|count| **count > 0).count();
         let needs_slot = lamp || levels(&sky) > 1 || levels(&voxel) > 1;
-        (
-            brightest_tenth(&sky) | brightest_tenth(&voxel) << 4,
-            needs_slot,
-        )
+        ((brightest_tenth(&sky), brightest_tenth(&voxel)), needs_slot)
     }
 }
 
 /// The brightest level that, with every brighter one, makes up at least a
 /// tenth of `counts`, or 0 with nothing counted.
-fn brightest_tenth(counts: &[u32; 16]) -> u8 {
+fn brightest_tenth(counts: &[u32; 256]) -> u8 {
     let total: u32 = counts.iter().sum();
     let mut covered = 0;
-    for level in (0..16).rev() {
+    for level in (0..256).rev() {
         covered += counts[level];
         if covered > 0 && covered * 10 >= total {
             return level as u8;
@@ -421,10 +430,10 @@ impl CellRange {
     }
 }
 
-/// Levels of 15 in the `lit` cells and 0 elsewhere, in slot order.
-fn lit_levels(lit: &[u64]) -> Vec<u8> {
-    let mut levels = vec![0; SLOT_BYTES];
-    write_bits(&mut levels, lit, 15);
+/// The level `top` in the `lit` cells and 0 elsewhere, in slot order.
+fn lit_levels(lit: &[u64], top: u8) -> Vec<u8> {
+    let mut levels = vec![0; SLOT_TEXELS];
+    write_bits(&mut levels, lit, top);
     levels
 }
 
@@ -464,7 +473,7 @@ fn spread(
     } else {
         run(&TWO_WORD_BOXES, open, lit, lamps, scale, shape)
     };
-    let mut levels = vec![0; SLOT_BYTES];
+    let mut levels = vec![0; SLOT_TEXELS];
     for y in 0..CHUNK {
         for x in 0..CHUNK {
             let column = x + y * CHUNK;
@@ -493,7 +502,7 @@ fn spread(
         }
     }
     if let Some(lit) = lit {
-        write_bits(&mut levels, lit, 15);
+        write_bits(&mut levels, lit, scale.precision().top());
     }
     levels
 }
@@ -505,7 +514,7 @@ fn run<R: Row>(
     lamps: &[(UVec3, u8)],
     scale: &LevelScale,
     shape: LightShape,
-) -> (Box<[Plane; LEVEL_BITS]>, Box<super::kernel::ShellLevels>) {
+) -> (Box<[Plane]>, Box<super::kernel::ShellLevels>) {
     cached.with_borrow_mut(|boxes| {
         let reach = scale.reach() as usize;
         let index = match boxes
@@ -544,13 +553,12 @@ fn run<R: Row>(
                     x: (cell.x as usize + offset) as u8,
                     y: (cell.y as usize + offset) as u8,
                     z: (cell.z as usize + offset) as u8,
-                    start: scale.start(*level)?,
+                    start: scale.start(scale.precision().of_whole(*level))?,
                 })
             })
             .collect();
         seeds.sort_by_key(|seed| seed.start);
-        let mut planes: Box<[Plane; LEVEL_BITS]> =
-            Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]);
+        let mut planes = empty_planes(scale.precision());
         let mut faces = [0; 6];
         light_box.spread(
             &seeds,

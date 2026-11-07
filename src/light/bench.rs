@@ -10,15 +10,16 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use super::config::LightPrecision;
 use super::faces::Face;
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
-use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::route::LightRoute;
 use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
-use super::solver::{neighbour_index, solve_sky, solve_voxel};
+use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel};
 use super::solver::{ChannelLight, ChunkLight};
 use super::view::Snapshot;
 use super::LightSettings;
@@ -41,7 +42,7 @@ pub struct KernelBox {
     /// The lit rows, copied into the box before each spread, if it starts lit.
     lit: Option<Vec<u128>>,
     scale: LevelScale,
-    planes: Box<[Plane; LEVEL_BITS]>,
+    planes: Box<[Plane]>,
     faces: [u64; 6],
 }
 
@@ -55,7 +56,7 @@ impl KernelBox {
         open: impl Fn(IVec3) -> bool,
         sources: &[(IVec3, u8)],
     ) -> Self {
-        let scale = LevelScale::new(reach);
+        let scale = LevelScale::new(reach, LightPrecision::Steps16);
         let mut seeds: Vec<Seed> = sources
             .iter()
             .filter_map(|&(position, level)| {
@@ -104,10 +105,19 @@ impl KernelBox {
             rows,
             seeds,
             lit,
-            scale: LevelScale::new(reach),
-            planes: Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]),
+            scale: LevelScale::new(reach, LightPrecision::Steps16),
+            planes: empty_planes(LightPrecision::Steps16),
             faces: [0; 6],
         }
+    }
+
+    /// This box spreading light at 256 levels, where it spreads at 16 by
+    /// default. Seeds keep the distance they start at.
+    pub fn at_256_levels(mut self) -> Self {
+        let precision = LightPrecision::Steps256;
+        self.scale = LevelScale::new(self.scale.reach(), precision);
+        self.planes = empty_planes(precision);
+        self
     }
 
     /// Spreads light through the box in `shape`, hashing the chunk's faces
@@ -144,8 +154,10 @@ impl KernelBox {
     /// with direct sky reads 0, as the kernel leaves it.
     pub fn level(&self, local: UVec3) -> u8 {
         let column = local.x as usize + local.y as usize * CHUNK;
-        (0..LEVEL_BITS)
-            .map(|bit| ((self.planes[bit][column] >> local.z & 1) as u8) << bit)
+        self.planes
+            .iter()
+            .enumerate()
+            .map(|(bit, plane)| ((plane[column] >> local.z & 1) as u8) << bit)
             .sum()
     }
 }
@@ -156,7 +168,7 @@ fn spread_rows<R: Row>(
     lit: Option<&[u128]>,
     shape: LightShape,
     scale: &LevelScale,
-    planes: &mut [Plane; LEVEL_BITS],
+    planes: &mut [Plane],
     faces: &mut [u64; 6],
 ) {
     if let Some(lit) = lit {
@@ -202,10 +214,12 @@ pub struct SlotBox {
 }
 
 impl SlotBox {
-    /// The light the last spread of `kernel_box` left, in a chunk whose open
-    /// voxels `open` says, at positions from -32 to 63 relative to the chunk.
-    /// Each face neighbour gets the same light, with its own open voxels.
+    /// The light the last spread of `kernel_box` left, at its precision, in a
+    /// chunk whose open voxels `open` says, at positions from -32 to 63
+    /// relative to the chunk. Each face neighbour gets the same light, with
+    /// its own open voxels.
     pub fn new(kernel_box: &KernelBox, open: impl Fn(IVec3) -> bool) -> Self {
+        let precision = kernel_box.scale.precision();
         let chunk = |offset: IVec3| {
             let mut solid: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
             for y in 0..CHUNK {
@@ -225,8 +239,9 @@ impl SlotBox {
                     columns: ColumnAnswer::none(),
                     ring: true,
                 }),
-                sky: ChannelLight::Uniform(15),
+                sky: ChannelLight::Uniform(precision.top()),
                 voxel: ChannelLight::Planes(kernel_box.planes.clone()),
+                precision,
             }
         };
         Self {
@@ -235,7 +250,8 @@ impl SlotBox {
         }
     }
 
-    /// Turns the chunk's bit planes into a slot's bytes with the table.
+    /// Turns the chunk's bit planes into a slot's bytes with the table, in
+    /// the format of the light's precision.
     pub fn slot_bytes(&self) -> Box<[u8]> {
         slot_bytes(&self.light)
     }
@@ -244,8 +260,10 @@ impl SlotBox {
     /// `bytes`.
     pub fn shell_planes(&self, bytes: &mut [u8]) {
         for face in Face::ALL {
-            let plane = border_plane(&self.neighbours[face as usize], face.opposite());
-            write_shell(bytes, face, Some(&plane));
+            let precision = self.light.precision;
+            let neighbour = &self.neighbours[face as usize];
+            let plane = border_plane(neighbour, face.opposite(), precision);
+            write_shell(bytes, face, Some(&plane), precision);
         }
     }
 }

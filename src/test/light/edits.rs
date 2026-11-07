@@ -136,7 +136,10 @@ pub(super) fn assert_matches(
         for (p, levels) in light {
             assert_eq!(
                 (levels.sky, levels.voxel),
-                (reference.0.sky_at(p) as f32, reference.1.voxel_at(p) as f32),
+                (
+                    reference.0.read(reference.0.sky_at(p)),
+                    reference.1.read(reference.1.voxel_at(p))
+                ),
                 "at {p} in {chunk} {when}"
             );
         }

@@ -154,6 +154,22 @@ pub(in crate::test::light) fn fill_reference<I: Copy + PartialEq>(
     fill: &PathFill,
     voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
 ) -> HashMap<IVec3, u8> {
+    fill_reference_in_steps(15, chunks, known, reach, shape, sky, fill, voxel_at)
+}
+
+/// [`fill_reference`] with levels in steps up to `steps`: 15 at 16 levels,
+/// 255 at 256.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::test::light) fn fill_reference_in_steps<I: Copy + PartialEq>(
+    steps: u32,
+    chunks: &[IVec3],
+    known: &[IVec3],
+    reach: u32,
+    shape: LightShape,
+    sky: &Sky,
+    fill: &PathFill,
+    voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+) -> HashMap<IVec3, u8> {
     let loss = |f: f32| -> i32 {
         let levels = fill.whole_face_loss * (16.0 / f).powf(fill.opening_power);
         (levels * 16.0).min(240.0 * 8.0) as i32
@@ -222,8 +238,13 @@ pub(in crate::test::light) fn fill_reference<I: Copy + PartialEq>(
     for chunk in chunks {
         let min = *chunk * 32 - IVec3::splat(reach as i32);
         let max = *chunk * 32 + IVec3::splat(32 + reach as i32);
-        let mut box_light = Reference::sky_light(min, max, reach, shape, sky, &voxel_at);
-        let direct: Vec<bool> = box_light.sky.iter().map(|level| *level == 15).collect();
+        let mut box_light =
+            Reference::sky_light_in_steps(steps, min, max, reach, shape, sky, &voxel_at);
+        let direct: Vec<bool> = box_light
+            .sky
+            .iter()
+            .map(|level| *level as u32 == steps)
+            .collect();
 
         // Which chunks take fill: an open voxel touching a solid, counting
         // the padding, and not every open voxel with direct sky.
@@ -266,7 +287,7 @@ pub(in crate::test::light) fn fill_reference<I: Copy + PartialEq>(
         let distances = box_light.flood(&sources);
         for (i, distance) in distances.iter().enumerate() {
             let level = if direct[i] {
-                15
+                steps as u8
             } else if !box_light.open[i] {
                 0
             } else {
@@ -286,8 +307,8 @@ pub(in crate::test::light) fn fill_reference<I: Copy + PartialEq>(
     out
 }
 
-/// Writes into `seeds`, by voxel of `box_light`, the distance from a
-/// level-15 source at which sky fill's seeds start for the chunk at `chunk`.
+/// Writes into `seeds`, by voxel of `box_light`, the distance from a source
+/// at the top step at which sky fill's seeds start for the chunk at `chunk`.
 fn seed(
     seeds: &mut [Option<u32>],
     box_light: &Reference,
@@ -357,7 +378,8 @@ fn seed(
         }
     }
     let reach = box_light.reach;
-    let mut by_level: Vec<Vec<bool>> = vec![vec![false; seeds.len()]; 15];
+    let steps = box_light.top as i32;
+    let mut by_level: Vec<Vec<bool>> = vec![vec![false; seeds.len()]; steps as usize];
     for z in 0..GRID {
         for y in 0..GRID {
             for x in 0..GRID {
@@ -366,7 +388,8 @@ fn seed(
                 if !lit[g] {
                     continue;
                 }
-                let level = ((value[g] + 8) / 16).clamp(0, 14) as usize;
+                let level =
+                    ((value[g] * steps / 15 + 8) / 16).clamp(0, steps - 1) as usize;
                 if level == 0 {
                     continue;
                 }
@@ -388,7 +411,9 @@ fn seed(
         if !voxels.iter().any(|seeded| *seeded) {
             continue;
         }
-        let Some(start) = (0..=reach).find(|&d| level_at(reach, d) <= level as u8) else {
+        let Some(start) =
+            (0..=reach).find(|&d| level_at(reach, d, steps as u32) <= level as u32)
+        else {
             continue;
         };
         if start >= reach {
@@ -411,14 +436,15 @@ fn seed(
     }
 }
 
-/// The level `distance` steps from a level-15 source, at `reach`.
-fn level_at(reach: u32, distance: u32) -> u8 {
+/// The level `distance` steps from a source at the top step `top`, at
+/// `reach`.
+fn level_at(reach: u32, distance: u32, top: u32) -> u32 {
     if distance == 0 {
-        return 15;
+        return top;
     }
     if distance > reach {
         return 0;
     }
     let t = 1.0 - distance as f32 / (reach + 1) as f32;
-    ((15.0 * t).round() as u8).clamp(1, 14)
+    ((top as f32 * t).round() as u32).clamp(1, top - 1)
 }

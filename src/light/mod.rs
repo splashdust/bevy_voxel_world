@@ -42,6 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::asset::AssetEventSystems;
 use bevy::log::warn_once;
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use bevy::platform::collections::HashSet;
@@ -72,8 +73,8 @@ use view::LightView;
 /// one.
 #[derive(Resource)]
 pub(crate) struct LightSettings<C: VoxelWorldConfig> {
-    /// The config as last applied. `shown`, `precision` and `slot_capacity`
-    /// keep the values read at plugin build.
+    /// The config as last applied. `shown` keeps the value read at plugin
+    /// build.
     pub config: LightPropagation,
     pub emissive_materials: Vec<(C::MaterialIndex, Emission)>,
     /// What chunk tasks and relight tasks read to solve light.
@@ -210,10 +211,9 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             }
             let width = 1 << key.lod_level;
             let cell = ((position - key.min_voxel()) / width + 1).as_uvec3();
-            let texel = route
+            route
                 .and_then(|route| route.coarse_cell(chunk.entity, cell))
-                .or_else(|| work.coarse_levels(chunk.entity))?;
-            Some(LightLevels::of_texel(texel))
+                .or_else(|| work.coarse_levels(chunk.entity))
         })
     }
 }
@@ -340,7 +340,11 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
 /// A changed look is stored, for the world's material to write into its
 /// uniform on the same frame, and a changed sky record cap applies at once.
 /// A change of reach, shape, the sky rule, sky fill or the emissive list
-/// runs the settings relight: see [`relight_settings`]. A change of sky fill
+/// runs the settings relight: see [`relight_settings`]. A change of precision
+/// or slot capacity also replaces the world's light texture (see
+/// [`LightRoute::replace_texture`](route::LightRoute::replace_texture)), and
+/// a change of precision relights every loaded chunk, since every level is
+/// stored in steps of it. A change of sky fill
 /// or of the sky rule first builds the sky fill field again, at once, from
 /// the loaded chunks and the cells the sky record holds, so the relights
 /// read the new fill. Values equal to those last applied start nothing.
@@ -354,7 +358,7 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     mut work: ResMut<LightWork<C>>,
     mut probes: Option<ResMut<SkyProbes<C>>>,
     mut fill_work: Option<ResMut<SkyFillWork<C>>>,
-    route: Option<ResMut<route::LightRoute<C>>>,
+    mut route: Option<ResMut<route::LightRoute<C>>>,
     mut budget: ResMut<PoolBudget<C>>,
     chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -382,7 +386,11 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     let sky_reach_changed =
         config.sky_reach != applied.sky_reach && config.sky != Sky::Off;
     let fill_changed = config.sky_fill != applied.sky_fill;
-    let relights = sky_changed
+    let precision_changed = config.precision != applied.precision;
+    let texture_changed =
+        precision_changed || config.slot_capacity != applied.slot_capacity;
+    let relights = texture_changed
+        || sky_changed
         || fill_changed && config.sky != Sky::Off
         || emission_changed
         || sky_reach_changed
@@ -417,6 +425,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     settings.config.voxel_reach = config.voxel_reach;
     settings.config.shape = config.shape;
     settings.config.sky_fill = config.sky_fill.clone();
+    settings.config.precision = config.precision;
+    settings.config.slot_capacity = config.slot_capacity;
     settings.emissive_materials = emissive;
     let field = fill::driver::field_of(&settings.config);
     let old = settings.task.clone();
@@ -442,11 +452,18 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         )
     });
 
+    if let (true, Some(route)) = (texture_changed, route.as_mut()) {
+        route.replace_texture(config.precision, config.slot_capacity);
+        for (entity, tag) in route.take_changed_tags() {
+            commands.entity(entity).try_insert(MeshTag::new(tag));
+        }
+    }
+
     let mut sky_changed_at = HashSet::new();
     let mut new_probes: Option<SkyProbes<C>> = None;
     if sky_changed {
         settings.sky_rule = SkyRule::of(&settings.config.sky);
-        if let Some(mut route) = route {
+        if let Some(route) = route.as_mut() {
             route.set_unlit_sky(placeholder_sky(&settings.config));
         }
         let mut record = settings.record.lock().unwrap();
@@ -542,13 +559,20 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     if let Some(probes) = new_probes {
         commands.insert_resource(probes);
     }
-    relight_settings(
-        settings,
-        &mut work,
-        &chunk_map,
-        &sky_changed_at,
-        emission_changed,
-    );
+    if precision_changed {
+        let positions: Vec<IVec3> = settings.view.read().keys().copied().collect();
+        for position in positions {
+            work.trigger_settings(position);
+        }
+    } else {
+        relight_settings(
+            settings,
+            &mut work,
+            &chunk_map,
+            &sky_changed_at,
+            emission_changed,
+        );
+    }
 }
 
 /// The settings relight: marks for a relight every chunk with an open voxel
@@ -618,10 +642,12 @@ fn task_settings<C: VoxelWorldConfig>(
     routed: bool,
     fill: Option<FillCells>,
 ) -> LightTaskSettings<C::MaterialIndex> {
+    let precision = config.precision;
     LightTaskSettings {
-        voxel_scale: LevelScale::new(config.voxel_reach as u32),
+        precision,
+        voxel_scale: LevelScale::new(config.voxel_reach as u32, precision),
         sky_scale: (config.sky != Sky::Off)
-            .then(|| LevelScale::new(config.sky_reach as u32)),
+            .then(|| LevelScale::new(config.sky_reach as u32, precision)),
         shape: config.shape,
         routed,
         emission: emissive_materials

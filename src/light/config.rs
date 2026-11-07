@@ -191,16 +191,29 @@ pub struct LightPropagation {
     /// Relights on change. Defaults to [`SkyFill::Paths`] with its defaults.
     pub sky_fill: Option<SkyFill>,
 
-    /// How many light levels each voxel holds.
+    /// How many light levels each voxel holds. Levels read from 0 to 15
+    /// either way, in steps of 1/17 at 256 levels.
     ///
-    /// Replaces the texture on change. Defaults to [`LightPrecision::Steps16`].
+    /// At 16 levels plain surfaces show a faint terrace one level high
+    /// wherever light loses a level. 256 levels smooths them away and lets
+    /// sky fill's fractional levels reach the voxels it lights. It costs 2
+    /// bytes per voxel of light on the CPU, where 16 levels cost 1, and twice
+    /// the GPU memory per slot, 78,608 bytes, about 77 MiB at the default
+    /// [`slot_capacity`](Self::slot_capacity) of 1,024.
+    ///
+    /// Replaces the texture on change: every chunk with a slot drops to one
+    /// level per channel, the old texture is released, every loaded chunk
+    /// relights, and the new texture is made when a chunk next needs a slot.
+    /// Chunks look flat for about 1 to 2 s on native while their light lands
+    /// again. Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
 
     /// How many chunks the world's light texture holds at once, at least 1.
     ///
     /// A chunk takes a slot in the texture when its faces see more than one
     /// level of light. Each slot costs 39,304 bytes of GPU memory at 16
-    /// levels, so the default of 1,024 is about 38 MiB. The texture is made
+    /// levels, so the default of 1,024 is about 38 MiB, and 78,608 bytes at
+    /// 256 levels, about 77 MiB. The texture is made
     /// when the first chunk needs a slot, so a world where every chunk's
     /// faces see one level costs nothing.
     ///
@@ -214,7 +227,11 @@ pub struct LightPropagation {
     /// it looks flat, losing its shadows, and its lamps' faces lose their
     /// glow. Raise the count if that warning appears.
     ///
-    /// Replaces the texture on change. Defaults to 1,024.
+    /// Replaces the texture on change: every chunk with a slot drops to one
+    /// level per channel, the old texture is released, the settings relight
+    /// runs, and the new texture is made when a chunk next needs a slot.
+    /// Chunks look flat for about 1 to 2 s on native while they take slots
+    /// again. Defaults to 1,024.
     pub slot_capacity: u32,
 
     /// How light looks on chunk faces.

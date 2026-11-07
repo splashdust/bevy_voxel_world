@@ -19,7 +19,7 @@
 //! voxels with direct sky under the default sky clearance, at reaches that
 //! take one-`u64` rows and two-`u64` rows, in both shapes. Filling a slot
 //! turns the kernel's result on those boxes into bytes and copies six
-//! neighbours' border planes. The emissive scan runs on a chunk of layered
+//! neighbours' border planes, at both slot formats. The emissive scan runs on a chunk of layered
 //! terrain and on
 //! chunks of random materials, with emissive lists of several lengths.
 
@@ -450,12 +450,21 @@ fn scan_metrics(metrics: &mut Metrics) {
 }
 
 /// Filling a slot at landing: the solver's bit planes to bytes with the
-/// table, and the six shell planes from the neighbours' light.
+/// table, and the six shell planes from the neighbours' light, at 16 levels
+/// (`slot.*`) and at 256 (`slot256.*`).
 fn slot_metrics(dumps: &[Dump], metrics: &mut Metrics) {
+    slot_metrics_at(dumps, metrics, "slot", false);
+    slot_metrics_at(dumps, metrics, "slot256", true);
+}
+
+fn slot_metrics_at(dumps: &[Dump], metrics: &mut Metrics, name: &str, steps_256: bool) {
     let slots: Vec<SlotBox> = dumps
         .iter()
         .map(|dump| {
             let mut kernel_box = dump.kernel_box(14);
+            if steps_256 {
+                kernel_box = kernel_box.at_256_levels();
+            }
             kernel_box.spread(LightShape::Round);
             SlotBox::new(&kernel_box, |p| dump.open_at(p))
         })
@@ -468,7 +477,7 @@ fn slot_metrics(dumps: &[Dump], metrics: &mut Metrics) {
             })
         })
         .collect();
-    metrics.insert("slot.bytes.p50_us".into(), median(&mut times));
+    metrics.insert(format!("{name}.bytes.p50_us"), median(&mut times));
     let mut times: Vec<f64> = slots
         .iter()
         .map(|slot| {
@@ -479,7 +488,7 @@ fn slot_metrics(dumps: &[Dump], metrics: &mut Metrics) {
             })
         })
         .collect();
-    metrics.insert("slot.shell_planes.p50_us".into(), median(&mut times));
+    metrics.insert(format!("{name}.shell_planes.p50_us"), median(&mut times));
 }
 
 fn run_all() -> Metrics {

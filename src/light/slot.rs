@@ -10,33 +10,140 @@
 //! An emissive voxel touching an open voxel always needs a slot, since only a
 //! slot holds the lamp's own cell, which makes its faces glow.
 //!
+//! A slot's format follows the world's precision, and is chosen in one place,
+//! [`texel_bytes`] and [`texture_format`]: at 16 levels a texel is one
+//! `R8Uint` byte, sky light in its low nibble and voxel light in its high
+//! one; at 256 levels two bytes of `Rg8Uint`, sky light then voxel light.
+//!
 //! A solve works out what the chunk's own voxels show its faces, as
 //! [`own_faces_see`]. Landing works out what each loaded face neighbour's
 //! border shows them, as [`across`], whenever either chunk's light changes. A
 //! neighbour that isn't loaded shows them nothing.
 
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureFormat;
 
+use super::config::LightPrecision;
 use super::faces::Face;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::kernel::Plane;
+use super::levels::LightLevels;
 use super::solver::{ChannelLight, ChunkLight};
 use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 /// Cells along each side of a slot: a chunk and a shell one voxel deep.
 const SIDE: usize = CHUNK + 2;
-/// The bytes of one slot.
-pub(crate) const SLOT_BYTES: usize = SIDE * SIDE * SIDE;
-/// The bytes of one shell plane, at `u + v × 32` for the cell in front of the
-/// chunk's voxel [`Face::voxel`]`(u, v)`.
-pub(crate) const PLANE_BYTES: usize = CHUNK * CHUNK;
+/// The texels of one slot.
+pub(crate) const SLOT_TEXELS: usize = SIDE * SIDE * SIDE;
+/// The texels of one shell plane, at `u + v × 32` for the cell in front of
+/// the chunk's voxel [`Face::voxel`]`(u, v)`.
+pub(crate) const PLANE_TEXELS: usize = CHUNK * CHUNK;
 
-/// The bytes of a shell plane.
-pub(crate) type ShellPlane = [u8; PLANE_BYTES];
+/// The bytes of a shell plane, in the format of a precision.
+pub(crate) type ShellPlane = [u8];
 
-/// A lamp's own cell holds this in its voxel half.
-pub(crate) const LAMP_MARKER: u8 = 15 << 4;
+/// How many bytes a texel has at `precision`.
+#[inline]
+pub(crate) fn texel_bytes(precision: LightPrecision) -> usize {
+    match precision {
+        LightPrecision::Steps16 => 1,
+        LightPrecision::Steps256 => 2,
+    }
+}
+
+/// The format of a light texture at `precision`.
+pub(crate) fn texture_format(precision: LightPrecision) -> TextureFormat {
+    match precision {
+        LightPrecision::Steps16 => TextureFormat::R8Uint,
+        LightPrecision::Steps256 => TextureFormat::Rg8Uint,
+    }
+}
+
+/// Writes sky light `sky` and voxel light `voxel`, steps of `precision`, into
+/// the texel at `texel` of `bytes`.
+#[inline]
+pub(crate) fn put_texel(
+    bytes: &mut [u8],
+    texel: usize,
+    sky: u8,
+    voxel: u8,
+    precision: LightPrecision,
+) {
+    match precision {
+        LightPrecision::Steps16 => bytes[texel] = sky | voxel << 4,
+        LightPrecision::Steps256 => {
+            bytes[2 * texel] = sky;
+            bytes[2 * texel + 1] = voxel;
+        }
+    }
+}
+
+/// The sky half and voxel half of the texel at `texel` of `bytes`.
+#[inline]
+pub(crate) fn texel_at(
+    bytes: &[u8],
+    texel: usize,
+    precision: LightPrecision,
+) -> (u8, u8) {
+    match precision {
+        LightPrecision::Steps16 => (bytes[texel] & 15, bytes[texel] >> 4),
+        LightPrecision::Steps256 => (bytes[2 * texel], bytes[2 * texel + 1]),
+    }
+}
+
+/// The light of a texel's sky half `sky` and voxel half `voxel`: a lamp's own
+/// cell, whose voxel half holds the top level, holds no sky light and the
+/// lamp's level, from its sky half, as voxel light.
+pub(crate) fn texel_levels(sky: u8, voxel: u8, precision: LightPrecision) -> LightLevels {
+    if voxel == precision.top() {
+        LightLevels::of_steps(0, sky, precision)
+    } else {
+        LightLevels::of_steps(sky, voxel, precision)
+    }
+}
+
+/// Writes the marker of a lamp at the whole level `level` into the texel at
+/// `texel`: the top level, which no open voxel holds, in its voxel half, and
+/// its level in its sky half, which a solid never uses.
+pub(crate) fn put_lamp(
+    bytes: &mut [u8],
+    texel: usize,
+    level: u8,
+    precision: LightPrecision,
+) {
+    put_texel(
+        bytes,
+        texel,
+        precision.of_whole(level),
+        precision.top(),
+        precision,
+    );
+}
+
+/// `bytes`, a slot of `from`'s format, in the format of `to`.
+pub(crate) fn convert_texels(
+    bytes: &[u8],
+    from: LightPrecision,
+    to: LightPrecision,
+) -> Box<[u8]> {
+    if from == to {
+        return bytes.into();
+    }
+    let texels = bytes.len() / texel_bytes(from);
+    let mut out = vec![0; texels * texel_bytes(to)].into_boxed_slice();
+    for texel in 0..texels {
+        let (sky, voxel) = texel_at(bytes, texel, from);
+        put_texel(
+            &mut out,
+            texel,
+            to.convert(sky, from),
+            to.convert(voxel, from),
+            to,
+        );
+    }
+    out
+}
 
 /// For each byte, a `u64` with bit `i` of the byte moved to bit 0 of byte `i`.
 const SPREAD: [u64; 256] = {
@@ -185,13 +292,16 @@ fn seen_over(channel: &ChannelLight, voxels: &Plane) -> Seen {
     seen
 }
 
-/// The light a chunk's slot holds for its own voxels, with its shell at 0.
+/// The light a chunk's slot holds for its own voxels, with its shell at 0, in
+/// the format of the light's precision.
 ///
-/// Open voxels hold sky light in the low nibble and voxel light in the high
-/// one. Solid voxels hold 0, apart from each emissive voxel, which holds the
-/// lamp marker, 15, in its voxel half and its level in its sky half.
+/// Open voxels hold their sky light and voxel light. Solid voxels hold 0,
+/// apart from each emissive voxel, which holds a lamp's marker: see
+/// [`put_lamp`].
 pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
-    let mut bytes = vec![0u8; SLOT_BYTES].into_boxed_slice();
+    let precision = light.precision;
+    let wide = texel_bytes(precision);
+    let mut bytes = vec![0u8; SLOT_TEXELS * wide].into_boxed_slice();
     for y in 0..CHUNK {
         for x in 0..CHUNK {
             let column = x + y * CHUNK;
@@ -199,25 +309,41 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
             let row = 1 + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
             for shift in (0..CHUNK).step_by(8) {
                 let open_byte = (open >> shift) as usize & 0xFF;
-                let texels = nibbles(&light.sky, column, shift, open_byte)
-                    | nibbles(&light.voxel, column, shift, open_byte) << 4;
-                bytes[row + shift..row + shift + 8]
-                    .copy_from_slice(&texels.to_le_bytes());
+                let sky = levels(&light.sky, column, shift, open_byte);
+                let voxel = levels(&light.voxel, column, shift, open_byte);
+                let at = (row + shift) * wide;
+                match precision {
+                    LightPrecision::Steps16 => bytes[at..at + 8]
+                        .copy_from_slice(&(sky | voxel << 4).to_le_bytes()),
+                    LightPrecision::Steps256 => bytes[at..at + 16].copy_from_slice(
+                        &(every_other_byte(sky) | every_other_byte(voxel) << 8)
+                            .to_le_bytes(),
+                    ),
+                }
             }
         }
     }
     for lamp in &light.inputs.emissive {
         let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
-        bytes[(z + 1) + (x + 1) * SIDE + (y + 1) * SIDE * SIDE] =
-            LAMP_MARKER | lamp.level;
+        let texel = (z + 1) + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
+        put_lamp(&mut bytes, texel, lamp.level, precision);
     }
     bytes
 }
 
-/// The levels of one channel at 8 voxels of a column from `shift` up, one in
-/// the low nibble of each byte. Only the voxels set in `open` get a level.
+/// Byte `i` of `bytes` moved to byte `2i`.
 #[inline]
-fn nibbles(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
+fn every_other_byte(bytes: u64) -> u128 {
+    let mut wide = bytes as u128;
+    wide = (wide | wide << 32) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    wide = (wide | wide << 16) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    (wide | wide << 8) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF
+}
+
+/// The levels of one channel at 8 voxels of a column from `shift` up, one in
+/// each byte. Only the voxels set in `open` get a level.
+#[inline]
+fn levels(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
     match channel {
         ChannelLight::Uniform(level) => SPREAD[open] * *level as u64,
         ChannelLight::Planes(planes) => {
@@ -245,45 +371,71 @@ pub(crate) fn shell_cell(face: Face, u: usize, v: usize) -> UVec3 {
     cell
 }
 
-/// The index in a slot's bytes of the cell at `cell`, in padded coordinates.
+/// The index of the texel of the cell at `cell` in a slot, in padded
+/// coordinates.
 pub(crate) fn cell_index(cell: UVec3) -> usize {
     cell.z as usize + cell.x as usize * SIDE + cell.y as usize * SIDE * SIDE
 }
 
-/// Writes `plane` into the shell of `bytes` on `face`, or zeros with no plane.
-pub(crate) fn write_shell(bytes: &mut [u8], face: Face, plane: Option<&ShellPlane>) {
+/// Writes `plane` into the shell of `bytes` on `face`, or zeros with no plane,
+/// both in the format of `precision`.
+pub(crate) fn write_shell(
+    bytes: &mut [u8],
+    face: Face,
+    plane: Option<&ShellPlane>,
+    precision: LightPrecision,
+) {
+    let wide = texel_bytes(precision);
     for v in 0..CHUNK {
         for u in 0..CHUNK {
-            bytes[cell_index(shell_cell(face, u, v))] =
-                plane.map_or(0, |plane| plane[u + v * CHUNK]);
+            let to = cell_index(shell_cell(face, u, v)) * wide;
+            let from = (u + v * CHUNK) * wide;
+            match plane {
+                Some(plane) => {
+                    bytes[to..to + wide].copy_from_slice(&plane[from..from + wide])
+                }
+                None => bytes[to..to + wide].fill(0),
+            }
         }
     }
 }
 
-/// The light a chunk's voxels on `face` hold, as a slot holds them: the plane
-/// that goes into the shell of the neighbour across `face`.
-pub(crate) fn border_plane(light: &ChunkLight, face: Face) -> Box<ShellPlane> {
-    let mut plane = Box::new([0; PLANE_BYTES]);
+/// The light a chunk's voxels on `face` hold, as a slot of `precision` holds
+/// them: the plane that goes into the shell of the neighbour across `face`.
+pub(crate) fn border_plane(
+    light: &ChunkLight,
+    face: Face,
+    precision: LightPrecision,
+) -> Box<ShellPlane> {
+    let mut plane = vec![0; PLANE_TEXELS * texel_bytes(precision)].into_boxed_slice();
     let occupancy = &light.inputs.occupancy;
+    let from = light.precision;
     for v in 0..CHUNK {
         for u in 0..CHUNK {
             let (x, y, z) = face.voxel(u, v);
             if !occupancy.is_solid(x, y, z) {
-                plane[u + v * CHUNK] =
-                    light.sky.at(x, y, z) | light.voxel.at(x, y, z) << 4;
+                let sky = precision.convert(light.sky.at(x, y, z), from);
+                let voxel = precision.convert(light.voxel.at(x, y, z), from);
+                put_texel(&mut plane, u + v * CHUNK, sky, voxel, precision);
             }
         }
     }
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
-        plane[u + v * CHUNK] = LAMP_MARKER | lamp.level;
+        put_lamp(&mut plane, u + v * CHUNK, lamp.level, precision);
     });
     plane
 }
 
 /// What the faces of a chunk whose voxels are `own` read across `face` from
 /// the neighbour there, lit by `neighbour`: the neighbour's open border voxels
-/// touching one of the chunk's solid voxels.
-pub(crate) fn across(own: &LightInputs, face: Face, neighbour: &ChunkLight) -> FacesSee {
+/// touching one of the chunk's solid voxels, with levels in steps of
+/// `precision`.
+pub(crate) fn across(
+    own: &LightInputs,
+    face: Face,
+    neighbour: &ChunkLight,
+    precision: LightPrecision,
+) -> FacesSee {
     let back = face.opposite();
     let solid = rows(|u, v| {
         let (x, y, z) = face.voxel(u, v);
@@ -309,8 +461,11 @@ pub(crate) fn across(own: &LightInputs, face: Face, neighbour: &ChunkLight) -> F
             let u = cells.trailing_zeros() as usize;
             cells &= cells - 1;
             let (x, y, z) = back.voxel(u, v);
-            seen.sky = seen.sky.join(Seen::One(neighbour.sky.at(x, y, z)));
-            seen.voxel = seen.voxel.join(Seen::One(neighbour.voxel.at(x, y, z)));
+            let level = |channel: &ChannelLight| {
+                Seen::One(precision.convert(channel.at(x, y, z), neighbour.precision))
+            };
+            seen.sky = seen.sky.join(level(&neighbour.sky));
+            seen.voxel = seen.voxel.join(level(&neighbour.voxel));
             // Once the chunk needs a slot, the levels its faces see no longer
             // matter.
             if seen.needs_slot() {
@@ -322,7 +477,8 @@ pub(crate) fn across(own: &LightInputs, face: Face, neighbour: &ChunkLight) -> F
 }
 
 /// The most common level per channel among the open voxels touching a solid
-/// voxel of the chunk lit by `light`, as sky and voxel light.
+/// voxel of the chunk lit by `light`, as sky and voxel light in steps of the
+/// light's precision.
 pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
     let touching = match &light.inputs.occupancy {
         Occupancy::Mixed(solid) => Some(touching_open(solid)),
@@ -331,7 +487,7 @@ pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
     let most_common_level = |channel: &ChannelLight| match (channel, &touching) {
         (ChannelLight::Uniform(level), _) => *level,
         (ChannelLight::Planes(_), Some(touching)) => {
-            let mut counts = [0u32; 16];
+            let mut counts = [0u32; 256];
             for (column, &these) in touching.iter().enumerate() {
                 let mut voxels = these;
                 while voxels != 0 {
@@ -341,7 +497,9 @@ pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
                     counts[level as usize] += 1;
                 }
             }
-            (0..16).max_by_key(|level| counts[*level]).unwrap_or(0) as u8
+            (0..=light.precision.top() as usize)
+                .max_by_key(|level| counts[*level])
+                .unwrap_or(0) as u8
         }
         (ChannelLight::Planes(_), None) => 0,
     };

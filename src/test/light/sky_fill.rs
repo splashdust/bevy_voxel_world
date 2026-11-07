@@ -11,7 +11,7 @@ use bevy::prelude::*;
 
 use super::super::spawn_camera;
 use super::edits::settle;
-use super::reference::{fill_reference, Reference};
+use super::reference::{fill_reference, fill_reference_in_steps, Reference};
 use super::sky_light::{
     chunk_light, levels, light_is_settled, settled_but, shaft_world, spawned,
 };
@@ -205,7 +205,12 @@ fn assert_matches_reference(
         panic!("sky fill isn't on paths");
     };
     let known = spawned(app);
-    let reference = fill_reference(
+    let steps = match light.precision {
+        LightPrecision::Steps16 => 15,
+        LightPrecision::Steps256 => 255,
+    };
+    let reference = fill_reference_in_steps(
+        steps,
         chunks,
         &known,
         light.sky_reach as u32,
@@ -216,7 +221,7 @@ fn assert_matches_reference(
     );
     let mut wrong = Vec::new();
     for (p, sky) in sky_of(app, chunks) {
-        if sky != reference[&p] as f32 {
+        if sky != reference[&p] as f32 * 15.0 / steps as f32 {
             wrong.push((p, sky, reference[&p]));
         }
     }
@@ -299,6 +304,26 @@ fn island_world() -> LampWorld {
         spawning_distance: 3,
         ..default()
     }
+}
+
+#[test]
+fn after_streaming_settles_at_256_levels_every_fully_loaded_chunk_matches_the_fill_reference(
+) {
+    let light = LightPropagation {
+        precision: LightPrecision::Steps256,
+        ..filled()
+    };
+    let mut app = settled(LampWorld {
+        light: Some(light.clone()),
+        ..island_world()
+    });
+    assert_matches_reference(
+        &mut app,
+        &AROUND_ISLAND,
+        island_on_boundaries,
+        &light,
+        "at 256 levels",
+    );
 }
 
 #[test]

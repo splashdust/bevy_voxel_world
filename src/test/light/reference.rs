@@ -8,6 +8,9 @@
 //! A channel is worked out from its sources, each a voxel and the distance it
 //! starts at, so another kind of source, such as direct sky, adds sources
 //! without changing the flood.
+//!
+//! Levels are held in steps: 0 to 15 at 16 levels, 0 to 255 at 256, where
+//! direct sky holds `top`, 255.
 
 use bevy::prelude::*;
 
@@ -15,7 +18,7 @@ use crate::prelude::{LightShape, Sky, WorldVoxel};
 
 mod fill;
 
-pub(super) use fill::fill_reference;
+pub(super) use fill::{fill_reference, fill_reference_in_steps};
 
 /// Not reached by any source.
 const UNREACHED: u32 = u32::MAX;
@@ -29,6 +32,8 @@ pub(super) struct Reference {
     emissive: Vec<Option<u8>>,
     reach: u32,
     shape: LightShape,
+    /// The top step: 15 at 16 levels, 255 at 256.
+    pub top: u32,
     /// The voxel light level of every voxel.
     voxel: Vec<u8>,
     /// The sky light level of every voxel.
@@ -43,6 +48,19 @@ impl Reference {
     /// Light from outside the box doesn't enter it, so only voxels at least
     /// `reach` inside its faces are sure to be right.
     pub fn voxel_light<I: Copy + PartialEq>(
+        min: IVec3,
+        max: IVec3,
+        reach: u32,
+        shape: LightShape,
+        voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+        emission: impl Fn(I) -> Option<f32>,
+    ) -> Self {
+        Self::voxel_light_in_steps(15, min, max, reach, shape, voxel_at, emission)
+    }
+
+    /// [`voxel_light`](Self::voxel_light) with levels in steps up to `top`.
+    pub fn voxel_light_in_steps<I: Copy + PartialEq>(
+        top: u32,
         min: IVec3,
         max: IVec3,
         reach: u32,
@@ -75,6 +93,7 @@ impl Reference {
             emissive,
             reach,
             shape,
+            top,
             voxel: vec![0; count],
             sky: vec![0; count],
         };
@@ -82,7 +101,9 @@ impl Reference {
         let sources: Vec<(usize, u32)> = (0..count)
             .filter_map(|i| {
                 let level = reference.emissive[i]?;
-                reference.start_distance(level).map(|start| (i, start))
+                reference
+                    .start_distance(level as u32 * top / 15)
+                    .map(|start| (i, start))
             })
             .collect();
         let distances = reference.flood(&sources);
@@ -90,7 +111,7 @@ impl Reference {
             .iter()
             .enumerate()
             .map(|(i, distance)| match reference.emissive[i] {
-                Some(level) => level,
+                Some(level) => (level as u32 * top / 15) as u8,
                 None if !reference.open[i] => 0,
                 None => reference.level(*distance),
             })
@@ -121,8 +142,23 @@ impl Reference {
         sky: &Sky,
         voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
     ) -> Self {
+        Self::sky_light_in_steps(15, min, max, reach, shape, sky, voxel_at)
+    }
+
+    /// [`sky_light`](Self::sky_light) with levels in steps up to `steps`.
+    pub fn sky_light_in_steps<I: Copy + PartialEq>(
+        steps: u32,
+        min: IVec3,
+        max: IVec3,
+        reach: u32,
+        shape: LightShape,
+        sky: &Sky,
+        voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+    ) -> Self {
         let mut reference =
-            Self::voxel_light(min, max, reach, shape, &voxel_at, |_| None);
+            Self::voxel_light_in_steps(steps, min, max, reach, shape, &voxel_at, |_| {
+                None
+            });
         let size = reference.size;
         // The highest voxel each chunk's column must be clear up to.
         let top = |y: i32| -> Option<i32> {
@@ -166,7 +202,7 @@ impl Reference {
             .enumerate()
             .map(|(i, distance)| {
                 if direct[i] {
-                    15
+                    steps as u8
                 } else if !reference.open[i] {
                     0
                 } else {
@@ -177,14 +213,19 @@ impl Reference {
         reference
     }
 
-    /// The voxel light level at `position`.
+    /// The voxel light level at `position`, in steps.
     pub fn voxel_at(&self, position: IVec3) -> u8 {
         self.voxel[self.index(position).expect("a position in the box")]
     }
 
-    /// The sky light level at `position`.
+    /// The sky light level at `position`, in steps.
     pub fn sky_at(&self, position: IVec3) -> u8 {
         self.sky[self.index(position).expect("a position in the box")]
+    }
+
+    /// `steps` read on the 0 to 15 scale `light_at` reads.
+    pub fn read(&self, steps: u8) -> f32 {
+        steps as f32 * 15.0 / self.top as f32
     }
 
     fn index(&self, position: IVec3) -> Option<usize> {
@@ -198,23 +239,26 @@ impl Reference {
         )
     }
 
-    /// The level light holds `distance` steps from where it starts at level 15.
+    /// The level light holds `distance` steps from where it starts at the top
+    /// step.
     fn level(&self, distance: u32) -> u8 {
         if distance == 0 || distance > self.reach {
             return 0;
         }
+        let top = self.top as f32;
         let t = 1.0 - distance as f32 / (self.reach + 1) as f32;
-        ((15.0 * t).round() as u8).clamp(1, 14)
+        ((top * t).round()).clamp(1.0, top - 1.0) as u8
     }
 
-    /// The distance at which an emissive voxel at `level` starts: the first one
-    /// at which light holds no more than its level. `None` if light within
-    /// reach is always brighter, or the level is 0.
-    fn start_distance(&self, level: u8) -> Option<u32> {
-        if level >= 15 {
+    /// The distance at which an emissive voxel at `level`, in steps, starts:
+    /// the first one at which light holds no more than its level. `None` if
+    /// light within reach is always brighter, or the level is 0.
+    fn start_distance(&self, level: u32) -> Option<u32> {
+        if level >= self.top {
             return Some(0);
         }
-        (1..=self.reach).find(|&distance| self.level(distance) <= level && level > 0)
+        (1..=self.reach)
+            .find(|&distance| self.level(distance) as u32 <= level && level > 0)
     }
 
     /// The distance at which light first reaches each voxel from `sources`.

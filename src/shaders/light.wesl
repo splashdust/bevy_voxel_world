@@ -16,10 +16,17 @@
 //
 // The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
 // chunk's slot in the texture: 34 texels a side, the chunk's voxels in its
-// padded local coordinates, with texel rows along z. Without it, bits 0-7 hold
-// the one level of each channel every face of the chunk sees. Each texel holds
-// sky light in its low nibble and voxel light in its high one. A lamp's own
-// cell holds 15 in its voxel half and its declared level in its sky half.
+// padded local coordinates, with texel rows along z. Without it, the low bits
+// hold the one level of each channel every face of the chunk sees.
+//
+// The look's `steps_256` says how levels are stored. At 16 levels a texel is
+// one `R8Uint` byte, sky light in its low nibble and voxel light in its high
+// one, and a tag with no slot holds them the same way in bits 0-7. At 256
+// levels a texel is `Rg8Uint`, sky light in red and voxel light in green, and
+// a tag with no slot holds sky light in bits 0-7 and voxel light in bits 8-15.
+// Levels at 256 are read on the 0 to 15 scale, in steps of 1/17. A lamp's own
+// cell holds the top level, 15 or 255, in its voxel half and its declared
+// level in its sky half.
 //
 // A chunk above LOD level 0 with a slot holds its LOD level L in bits 24-27.
 // Its slot's cells are `1 << L` voxels wide, so its local position is divided
@@ -49,6 +56,8 @@ struct LightLook {
     minimum_brightness: f32,
     smoothed: u32,
     ao: u32,
+    // 1 at 256 levels, 0 at 16.
+    steps_256: u32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(200)
@@ -59,7 +68,6 @@ var<uniform> light_look: LightLook;
 
 const HAS_SLOT: u32 = 0x80000000u;
 const SLOT_SIDE: u32 = 34u;
-const TOP_LEVEL: u32 = 15u;
 
 // The look's `ao`, as `LightAo`: 0 is `IndirectLight`.
 const AO_BASE_COLOR: u32 = 1u;
@@ -90,13 +98,22 @@ fn slot_origin(tag: u32) -> vec3<i32> {
 // lamp's.
 fn load_cell(origin: vec3<i32>, cell: vec3<i32>) -> vec3<f32> {
     let inside = clamp(cell, vec3<i32>(0), vec3<i32>(i32(SLOT_SIDE) - 1));
-    let texel = textureLoad(light_texture, origin + inside.zxy, 0).r;
-    let sky = texel & 15u;
-    let voxel = texel >> 4u;
-    if voxel == TOP_LEVEL {
-        return vec3<f32>(0.0, f32(sky), f32(sky));
+    let texel = textureLoad(light_texture, origin + inside.zxy, 0);
+    var sky = texel.r & 15u;
+    var voxel = texel.r >> 4u;
+    var top = 15u;
+    var per_level = 1.0;
+    if light_look.steps_256 == 1u {
+        sky = texel.r;
+        voxel = texel.g;
+        top = 255u;
+        per_level = 17.0;
     }
-    return vec3<f32>(f32(sky), f32(voxel), 0.0);
+    if voxel == top {
+        let lamp = f32(sky) / per_level;
+        return vec3<f32>(0.0, lamp, lamp);
+    }
+    return vec3<f32>(f32(sky), f32(voxel), 0.0) / per_level;
 }
 
 // Blends one channel of the cell in front of a face with its neighbours in the
@@ -261,8 +278,13 @@ fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
 // wide, after dividing `local` by that width.
 fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
     if (tag & HAS_SLOT) == 0u {
-        let voxel = f32((tag >> 4u) & 15u);
-        return LightLevels(f32(tag & 15u), vec3<f32>(voxel), vec3<f32>(0.0));
+        var sky = f32(tag & 15u);
+        var voxel = f32((tag >> 4u) & 15u);
+        if light_look.steps_256 == 1u {
+            sky = f32(tag & 255u) / 17.0;
+            voxel = f32((tag >> 8u) & 255u) / 17.0;
+        }
+        return LightLevels(sky, vec3<f32>(voxel), vec3<f32>(0.0));
     }
     let width = f32(1u << ((tag >> 24u) & 15u));
     let local = (chunk_local - vec3<f32>(1.0)) / width + vec3<f32>(1.0);
