@@ -32,7 +32,7 @@ use bevy::prelude::*;
 
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
-use super::inputs::{LightInputs, Occupancy};
+use super::inputs::{LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
@@ -115,6 +115,14 @@ pub(crate) struct LightTaskSettings<I> {
     /// Each emissive material and its level.
     pub emission: Vec<(I, u8)>,
     pub counters: Arc<LightCounters>,
+    /// Counts the world's changes to these settings, so light solved under
+    /// older settings can be told apart as it lands.
+    pub generation: u64,
+    /// The `generation` of the last change to the sky rule.
+    pub sky_generation: u64,
+    /// The `generation` of the last change to the emissive list. A chunk's
+    /// emissive voxels found before it are stale.
+    pub emission_generation: u64,
 }
 
 /// Counts of light work in a world, for tests and benchmarks.
@@ -190,6 +198,23 @@ pub(crate) struct Solved {
     /// The world's edit frame when its chunk task started, or 0 for a
     /// relight: see [`LightSettings::edit_frame`](super::LightSettings).
     pub edit_frame: u64,
+    /// The [generation](LightTaskSettings::generation) of the settings it was
+    /// solved under.
+    pub generation: u64,
+    /// The [emission generation](LightTaskSettings::emission_generation) its
+    /// inputs' emissive voxels were found under.
+    pub emission: u64,
+    /// For a relight that found the chunk's emissive voxels again, the inputs
+    /// it read from the world view, which its light's inputs replace.
+    pub rescanned: Option<Arc<LightInputs>>,
+}
+
+impl Solved {
+    /// The chunk's inputs as the world view held them when the solve read
+    /// them.
+    pub fn read_inputs(&self) -> &Arc<LightInputs> {
+        self.rescanned.as_ref().unwrap_or(&self.light.inputs)
+    }
 }
 
 /// A chunk task's part in solving light: the world's settings, its world view
@@ -280,14 +305,34 @@ impl<I> KeptTask<I> {
 
 /// Solves the light of the chunk at `position` again from the world view, as a
 /// relight does. Returns `None` if the chunk is no longer in the view.
-pub(crate) fn relight<I>(
+///
+/// With `rescan`, it first finds the chunk's emissive voxels again under the
+/// world's emissive list, for a chunk whose emissive voxels were found under
+/// an older one.
+pub(crate) fn relight<I: Copy + PartialEq>(
     settings: &LightTaskSettings<I>,
     view: &LightView,
     position: IVec3,
+    rescan: Option<Rescan<I>>,
 ) -> Option<Solved> {
-    let inputs = view.read().get(&position)?.light.inputs.clone();
+    let read = view.read().get(&position)?.light.inputs.clone();
+    let (inputs, rescanned) = match rescan {
+        Some(rescan) => {
+            if !settings.emission.is_empty() {
+                settings
+                    .counters
+                    .emissive_scans
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            let inputs = read.rescanned(position, &rescan, &settings.emission);
+            (Arc::new(inputs), Some(read))
+        }
+        None => (read, None),
+    };
     let snapshot = read_snapshot(view, position, settings);
-    Some(solve(snapshot, inputs, settings))
+    let mut solved = solve(snapshot, inputs, settings);
+    solved.rescanned = rescanned;
+    Some(solved)
 }
 
 fn read_snapshot<I>(
@@ -361,6 +406,9 @@ fn solve<I>(
         sky: None,
         own_edits: 0,
         edit_frame: 0,
+        generation: settings.generation,
+        emission: settings.emission_generation,
+        rescanned: None,
     }
 }
 

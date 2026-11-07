@@ -32,6 +32,23 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
+/// A copy of the voxel world `C`'s config, which [`VoxelWorld`] reads in place
+/// of the config resource itself, so a system can take both `ResMut<C>` and
+/// `VoxelWorld<C>`.
+///
+/// It follows the config resource at the start of each frame where the config
+/// changed, so a system that changes the config sees the change through
+/// `VoxelWorld` from the next frame on.
+#[derive(Resource)]
+pub(crate) struct ConfigCopy<C>(pub Arc<C>);
+
+impl<C: VoxelWorldConfig> ConfigCopy<C> {
+    /// Copies the config resource again.
+    pub(crate) fn follow(world: Res<C>, mut copy: ResMut<Self>) {
+        copy.0 = Arc::new(world.clone());
+    }
+}
+
 /// The systems that run the chunk lifecycle of the voxel world `C`, in `PreUpdate`.
 ///
 /// Within a frame, they apply voxel edits, spawn and retire chunks, start chunk
@@ -183,7 +200,7 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    configuration: Res<'w, C>,
+    configuration: Res<'w, ConfigCopy<C>>,
     #[cfg(feature = "light_propagation")]
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
     #[cfg(feature = "light_propagation")]
@@ -222,7 +239,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         voxel_at(
             &self.voxel_edits.reader(),
             &self.chunk_map.get_map(),
-            self.configuration.as_ref(),
+            self.configuration.0.as_ref(),
             position,
         )
     }
@@ -263,6 +280,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// A voxel edit makes it false from when it is set until its light has
     /// landed, including the light of chunks re-meshed for it, which waits
     /// for their new meshes.
+    ///
+    /// A change of light settings that relights makes it false from the frame
+    /// the change is applied until the light of every chunk it relights has
+    /// landed.
     ///
     /// Sky probes look up the voxels above chunks whose own tasks couldn't
     /// tell whether sky light reaches them, which takes a while after a
@@ -332,10 +353,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let voxel_edits = self.voxel_edits.reader();
         let chunk_map = self.chunk_map.get_map();
-        let configuration = self.configuration.as_ref().clone();
+        let configuration = self.configuration.0.clone();
 
         Arc::new(move |position| {
-            voxel_at(&voxel_edits, &chunk_map, &configuration, position)
+            voxel_at(&voxel_edits, &chunk_map, configuration.as_ref(), position)
         })
     }
 

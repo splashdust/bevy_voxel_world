@@ -39,31 +39,35 @@ use bevy::asset::AssetEventSystems;
 use bevy::log::warn_once;
 use bevy::prelude::*;
 
-use crate::chunk::ChunkKey;
+use bevy::platform::collections::HashSet;
+
+use crate::chunk::{ChunkKey, FillType};
 use crate::chunk_lifecycle::ChunkLifecycle;
-use crate::chunk_map::ChunkMapData;
+use crate::chunk_map::{ChunkMap, ChunkMapData};
 use crate::configuration::{VoxelLookupDelegate, VoxelWorldConfig};
+use crate::pool_budget::{JobKind, PoolBudget};
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::VoxelWorldSet;
 use coarse::{takes_coarse_path, CoarseSolved, CoarseTask, CoarseWalk};
 use config::{Emission, LightPropagation, Sky};
+use inputs::Occupancy;
 use levels::LevelScale;
 pub use levels::LightLevels;
 use probe::SkyProbes;
 use record::SkyRecord;
 use relight::{LightWork, Relights};
-use sky::{Above, SkyFound, SkyRule, SkyWalk};
+use sky::{Above, ColumnAnswer, SkyFound, SkyRule, SkyWalk};
 use solver::{KeptLight, KeptTask, LightCounters, LightTask, LightTaskSettings, Solved};
 use view::LightView;
 
-/// The light settings world `C` returned at plugin build, with out-of-range
-/// values clamped. Only a world that returned a light config has one.
+/// The light settings of world `C` as last applied, with out-of-range values
+/// clamped. Only a world that returned a light config at plugin build has
+/// one.
 #[derive(Resource)]
 pub(crate) struct LightSettings<C: VoxelWorldConfig> {
-    /// The config as last applied. A field outside `look` is the value read
-    /// at plugin build.
+    /// The config as last applied. `shown`, `sky_fill`, `precision` and
+    /// `slot_capacity` keep the values read at plugin build.
     pub config: LightPropagation,
-    #[cfg_attr(not(test), expect(dead_code, reason = "nothing compares settings yet"))]
     pub emissive_materials: Vec<(C::MaterialIndex, Emission)>,
     /// What chunk tasks and relight tasks read to solve light.
     pub task: Arc<LightTaskSettings<C::MaterialIndex>>,
@@ -239,11 +243,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         return;
     };
     let config = config.clamped();
-    let emissive_materials: Vec<_> = world
-        .emissive_materials()
-        .into_iter()
-        .map(|(material, emission)| (material, emission.clamped()))
-        .collect();
+    let emissive_materials = clamped_emission(world);
     let routed = app.world().contains_resource::<route::LightRoute<C>>();
     let task = Arc::new(task_settings::<C>(&config, &emissive_materials, routed));
     let sky_rule = SkyRule::of(&config.sky);
@@ -282,9 +282,13 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             Relights::<C>::start
                 .after(ChunkLifecycle::<C>::apply_requests)
                 .before(ChunkLifecycle::<C>::start_chunk_tasks),
-            // Sky probes get the room chunk tasks leave.
-            SkyProbes::<C>::start
-                .run_if(resource_exists::<SkyProbes<C>>)
+            // Relights for a settings change get the room chunk tasks leave,
+            // and sky probes the room left after them.
+            (
+                Relights::<C>::start_settings,
+                SkyProbes::<C>::start.run_if(resource_exists::<SkyProbes<C>>),
+            )
+                .chain()
                 .after(ChunkLifecycle::<C>::start_chunk_tasks),
         )
             .in_set(VoxelWorldSet::<C>::default()),
@@ -297,15 +301,29 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     );
 }
 
-/// Compares world `C`'s light config with what it last applied, on frames
-/// where the world's config resource changed, and applies a changed look.
+/// Compares world `C`'s light config and emissive list with what it last
+/// applied, on frames where the world's config resource changed, and does
+/// the least the difference needs.
 ///
-/// Only `look` is applied: the world's material writes it into its uniform
-/// on the same frame. The rest is read once at plugin build, and changing
-/// `shown`, or returning `None` after `Some`, logs a warning once.
+/// A changed look is stored, for the world's material to write into its
+/// uniform on the same frame, and a changed sky record cap applies at once.
+/// A change of reach, shape, the sky rule or the emissive list runs the
+/// settings relight: see [`relight_settings`]. Values equal to those last
+/// applied start nothing.
+///
+/// `shown`, and returning `None` after `Some`, are read once at plugin
+/// build: changing them logs a warning once and changes nothing.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_config<C: VoxelWorldConfig>(
     world: Res<C>,
     mut settings: ResMut<LightSettings<C>>,
+    mut work: ResMut<LightWork<C>>,
+    mut probes: Option<ResMut<SkyProbes<C>>>,
+    route: Option<ResMut<route::LightRoute<C>>>,
+    mut budget: ResMut<PoolBudget<C>>,
+    chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+    edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+    mut commands: Commands,
 ) {
     let Some(config) = world.light_propagation() else {
         warn_once!(
@@ -320,10 +338,172 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
              changes nothing"
         );
     }
-    let look = config.look.clamped();
-    if look != settings.config.look {
-        settings.config.look = look;
+    let config = config.clamped();
+    let emissive = clamped_emission(world.as_ref());
+    let applied = &settings.config;
+    let sky_changed = config.sky != applied.sky;
+    let emission_changed = emissive != settings.emissive_materials;
+    // Sky reach changes nothing with sky light off.
+    let sky_reach_changed =
+        config.sky_reach != applied.sky_reach && config.sky != Sky::Off;
+    let relights = sky_changed
+        || emission_changed
+        || sky_reach_changed
+        || config.voxel_reach != applied.voxel_reach
+        || config.shape != applied.shape;
+    let cap_changed = config.sky_record_cap != applied.sky_record_cap;
+
+    if config.look != settings.config.look {
+        settings.config.look = config.look.clone();
     }
+    if cap_changed {
+        settings.config.sky_record_cap = config.sky_record_cap;
+        settings
+            .record
+            .lock()
+            .unwrap()
+            .set_cap(config.sky_record_cap);
+    }
+    settings.config.wasm_relight_budget = config.wasm_relight_budget;
+    if config.sky_reach != settings.config.sky_reach && !sky_reach_changed {
+        settings.config.sky_reach = config.sky_reach;
+    }
+    if !relights {
+        return;
+    }
+    let settings = settings.as_mut();
+    settings.config.sky = config.sky.clone();
+    settings.config.sky_reach = config.sky_reach;
+    settings.config.voxel_reach = config.voxel_reach;
+    settings.config.shape = config.shape;
+    settings.emissive_materials = emissive;
+    let old = settings.task.clone();
+    let generation = old.generation + 1;
+    settings.task = Arc::new(LightTaskSettings {
+        counters: old.counters.clone(),
+        generation,
+        sky_generation: if sky_changed {
+            generation
+        } else {
+            old.sky_generation
+        },
+        emission_generation: if emission_changed {
+            generation
+        } else {
+            old.emission_generation
+        },
+        ..task_settings::<C>(&settings.config, &settings.emissive_materials, old.routed)
+    });
+
+    let mut sky_changed_at = HashSet::new();
+    if sky_changed {
+        settings.sky_rule = SkyRule::of(&settings.config.sky);
+        if let Some(mut route) = route {
+            route.set_unlit_sky(placeholder_sky(&settings.config));
+        }
+        let mut record = settings.record.lock().unwrap();
+        match (settings.sky_rule, probes.as_mut()) {
+            (None, probes) => {
+                if probes.is_some() {
+                    commands.remove_resource::<SkyProbes<C>>();
+                    budget.set_running(JobKind::SkyProbe, 0);
+                }
+                let lit: Vec<(IVec3, Entity)> = settings
+                    .view
+                    .read()
+                    .iter()
+                    .filter(|(_, chunk)| chunk.light.inputs.columns.has_sky())
+                    .map(|(position, chunk)| (*position, chunk.entity))
+                    .collect();
+                for (position, entity) in lit {
+                    let none = ColumnAnswer::none();
+                    probe::replace_columns(&settings.view, position, entity, none);
+                    sky_changed_at.insert(position);
+                }
+            }
+            (Some(rule), Some(probes)) => {
+                probes.set_rule(rule);
+                sky_changed_at.extend(probe::answer_loaded_again(
+                    probes,
+                    &settings.view,
+                    &mut record,
+                    &chunk_map,
+                    &edits,
+                    world.as_ref(),
+                ));
+            }
+            (Some(rule), None) => {
+                record.clear();
+                let mut probes = SkyProbes::<C>::new(rule);
+                sky_changed_at.extend(probe::answer_loaded_again(
+                    &mut probes,
+                    &settings.view,
+                    &mut record,
+                    &chunk_map,
+                    &edits,
+                    world.as_ref(),
+                ));
+                commands.insert_resource(probes);
+            }
+        }
+    }
+    relight_settings(
+        settings,
+        &mut work,
+        &chunk_map,
+        &sky_changed_at,
+        emission_changed,
+    );
+}
+
+/// The settings relight: marks for a relight every chunk with an open voxel
+/// touching a solid by a face, an edge or a corner, counting the solids in
+/// its padding, and every chunk whose direct sky changed. Old light shows
+/// until new light lands.
+///
+/// A chunk with open and solid voxels always has such an open voxel, and a
+/// chunk of air has one exactly when a solid lies in its padding. A chunk of
+/// air with no solid in its padding keeps its light, which may then be a
+/// setting behind: within reach of nothing, only its direct sky could change,
+/// and that relights it. A solid chunk has no open voxel, and relights only
+/// when `emission_changed`, to find its emissive voxels again for its
+/// neighbours' solves.
+fn relight_settings<C: VoxelWorldConfig>(
+    settings: &LightSettings<C>,
+    work: &mut LightWork<C>,
+    chunk_map: &ChunkMap<C, C::MaterialIndex>,
+    sky_changed_at: &HashSet<IVec3>,
+    emission_changed: bool,
+) {
+    let chunk_map = chunk_map.get_read_lock();
+    let marked: Vec<IVec3> = settings
+        .view
+        .read()
+        .iter()
+        .filter(|(position, chunk)| {
+            sky_changed_at.contains(*position)
+                || match &chunk.light.inputs.occupancy {
+                    Occupancy::Mixed(_) => true,
+                    Occupancy::Solid => emission_changed,
+                    Occupancy::Open => chunk_map
+                        .get(&ChunkKey::new(**position, 0))
+                        .is_some_and(|data| matches!(data.fill_type, FillType::Mixed)),
+                }
+        })
+        .map(|(position, _)| *position)
+        .collect();
+    for position in marked {
+        work.trigger_settings(position);
+    }
+}
+
+/// World `C`'s emissive list, with each level clamped.
+fn clamped_emission<C: VoxelWorldConfig>(world: &C) -> Vec<(C::MaterialIndex, Emission)> {
+    world
+        .emissive_materials()
+        .into_iter()
+        .map(|(material, emission)| (material, emission.clamped()))
+        .collect()
 }
 
 /// The level of sky light a chunk shows before its light lands: direct sky,
@@ -353,5 +533,8 @@ fn task_settings<C: VoxelWorldConfig>(
             .map(|(material, emission)| (*material, emission.whole_level()))
             .collect(),
         counters: Arc::new(LightCounters::default()),
+        generation: 0,
+        sky_generation: 0,
+        emission_generation: 0,
     }
 }

@@ -225,6 +225,40 @@ impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
     }
 }
 
+/// The world of `stream_in`, lit, with light settings that `settings_lit`
+/// changes while it runs.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct SettingsWorld {
+    light: LightPropagation,
+}
+
+#[cfg(feature = "light_propagation")]
+impl VoxelWorldConfig for SettingsWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        BenchWorld::<SINE, false>.voxel_lookup_delegate()
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(self.light.clone())
+    }
+}
+
 /// The sine terrain streamed out to `LOD_SPAWNING_DISTANCE` chunks in four
 /// levels of detail, lit with the default light settings, with fill hints
 /// for the rock below and the air above it when `HINTED`. Its scenarios
@@ -951,6 +985,68 @@ fn scenario_edits_lit() -> Metrics {
     metrics
 }
 
+/// Changes of light settings on the lit sine terrain once its light is at
+/// rest, each made through the config resource, as a game's system would:
+/// sky reach, voxel reach, a sky ceiling in place of the clearance, sky light
+/// off, and back on. Reports for each how long light took to settle, in
+/// frames run as fast as they go, how many relights it started, and the most
+/// main thread light took in one frame.
+#[cfg(feature = "light_propagation")]
+fn scenario_settings_lit() -> Metrics {
+    use bevy_voxel_world::light_bench::light_stats;
+
+    let prefix = "settings_lit";
+    let mut app = build_app(SettingsWorld::default());
+    stream_in::<SettingsWorld>(&mut app);
+    settle_light::<SettingsWorld>(&mut app);
+
+    type Change = (&'static str, fn(&mut LightPropagation));
+    let changes: [Change; 5] = [
+        ("sky_reach", |light| light.sky_reach = 16),
+        ("voxel_reach", |light| light.voxel_reach = 8),
+        ("sky_ceiling", |light| light.sky = Sky::Ceiling { y: 64 }),
+        ("sky_off", |light| light.sky = Sky::Off),
+        ("sky_on", |light| light.sky = Sky::default()),
+    ];
+    let mut metrics = Metrics::new();
+    for (name, change) in changes {
+        let stats = |app: &App| light_stats::<SettingsWorld>(app.world()).unwrap();
+        let before = stats(&app);
+        change(&mut app.world_mut().resource_mut::<SettingsWorld>().light);
+        let start = Instant::now();
+        let mut frames = 0;
+        let mut worst_ms: f64 = 0.0;
+        loop {
+            let main = stats(&app).main_thread_ms;
+            app.update();
+            worst_ms = worst_ms.max(stats(&app).main_thread_ms - main);
+            frames += 1;
+            if light_is_settled::<SettingsWorld>(&mut app) {
+                break;
+            }
+            assert!(frames < MAX_FRAMES, "light didn't settle after {name}");
+        }
+        let settle_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let after = stats(&app);
+        metrics.insert(format!("{prefix}.{name}.settle_ms"), settle_ms);
+        metrics.insert(format!("{prefix}.{name}.frames"), frames as f64);
+        metrics.insert(
+            format!("{prefix}.{name}.relights"),
+            (after.relights - before.relights) as f64,
+        );
+        metrics.insert(
+            format!("{prefix}.{name}.probes"),
+            (after.probes - before.probes) as f64,
+        );
+        metrics.insert(format!("{prefix}.{name}.max_main_thread_ms"), worst_ms);
+    }
+    metrics.insert(
+        format!("{prefix}.chunks"),
+        chunk_count::<SettingsWorld>(&mut app) as f64,
+    );
+    metrics
+}
+
 /// `stream_in` on the world with lamps, lit, with what solving its light
 /// cost: in chunk tasks and relight tasks on the pool, against the same chunks
 /// solved one after another on one thread, and on the main thread landing
@@ -1205,6 +1301,8 @@ fn run_all(only: Option<&str>) -> Metrics {
     });
     #[cfg(feature = "light_propagation")]
     step("edits_lit", RUNS, &scenario_edits_lit);
+    #[cfg(feature = "light_propagation")]
+    step("settings_lit", RUNS, &scenario_settings_lit);
     metrics
 }
 
@@ -1230,6 +1328,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_lit")
         || key.starts_with("stream_in_flat_lit")
         || key.starts_with("edits_lit")
+        || key.starts_with("settings_lit")
     {
         return Gate::ReportOnly;
     }

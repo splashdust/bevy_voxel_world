@@ -26,7 +26,7 @@ const FLOOR_LAMP: IVec3 = IVec3::new(-6, 3, 2);
 /// shaft at x = 8, z = 8 and a roof hole 3 voxels wide at x and z from 20 to
 /// 23 open its roof to the sky. A lamp sits in its floor, and a sealed pocket
 /// of air lies in the stone above it.
-fn cavern(p: IVec3) -> WorldVoxel {
+pub(super) fn cavern(p: IVec3) -> WorldVoxel {
     let cavern =
         (-12..44).contains(&p.x) && (4..16).contains(&p.y) && (-12..44).contains(&p.z);
     let shaft = p.x == 8 && p.z == 8 && (16..40).contains(&p.y);
@@ -102,7 +102,7 @@ fn set_voxels(app: &mut App, edits: &[(IVec3, WorldVoxel)]) {
 
 /// Runs `app` until every spawned chunk is Ready and light has settled, for a
 /// few frames in a row.
-fn settle(app: &mut App, what: &str) {
+pub(super) fn settle(app: &mut App, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut frames_done = 0;
     while frames_done < 3 {
@@ -117,7 +117,7 @@ fn settle(app: &mut App, what: &str) {
 }
 
 /// Fails unless every voxel of `chunks` reads the light of `reference`.
-fn assert_matches(
+pub(super) fn assert_matches(
     app: &mut App,
     chunks: &[IVec3],
     reference: &(Reference, Reference),
@@ -246,7 +246,7 @@ fn a_radius_8_bomb_and_its_undo_match_the_reference() {
     edit_and_undo(&[IVec3::ZERO], &bomb);
 }
 
-fn relights_started(app: &App) -> u64 {
+pub(super) fn relights_started(app: &App) -> u64 {
     app.world()
         .resource::<LightSettings<LampWorld>>()
         .counters()

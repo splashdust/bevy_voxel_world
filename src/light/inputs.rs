@@ -1,8 +1,11 @@
 //! What a chunk keeps for the solves of the chunks around it: its occupancy,
 //! its emissive voxels and its column answer.
 
-use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
+use bevy::prelude::*;
+
+use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::voxel::WorldVoxel;
+use crate::voxel_edits::EditBucket;
 
 use super::kernel::Plane;
 use super::sky::{ColumnAnswer, Columns};
@@ -198,7 +201,46 @@ impl LightInputs {
     }
 }
 
+/// What a relight reads to find a chunk's emissive voxels again after the
+/// world's emissive list changed: the chunk's published data, and the voxel
+/// edits of its position, which may be newer than that data.
+pub(crate) struct Rescan<I> {
+    pub data: ChunkData<I>,
+    pub edits: Option<EditBucket<I>>,
+}
+
 impl LightInputs {
+    /// These inputs with the emissive voxels of `rescan` under the emissive
+    /// list `emission`, keeping the occupancy and column answer, which no
+    /// emissive list changes.
+    ///
+    /// The chunk at `position` must be a level-0 chunk with the default data
+    /// shape.
+    pub fn rescanned<I: Copy + PartialEq>(
+        &self,
+        position: IVec3,
+        rescan: &Rescan<I>,
+        emission: &[(I, u8)],
+    ) -> Self {
+        let mut emissive = scan_emissive(&rescan.data, emission);
+        if let (Some(edits), false) = (&rescan.edits, emission.is_empty()) {
+            let min = position * CHUNK_SIZE_I;
+            for (at, voxel) in edits.iter() {
+                let local = *at - min;
+                let (x, y, z) = (local.x as u8, local.y as u8, local.z as u8);
+                emissive.retain(|emitter| (emitter.x, emitter.y, emitter.z) != (x, y, z));
+                if let Some(level) = uniform_emission(*voxel, emission) {
+                    emissive.push(EmissiveVoxel { x, y, z, level });
+                }
+            }
+        }
+        Self {
+            occupancy: self.occupancy.clone(),
+            emissive,
+            columns: self.columns.clone(),
+        }
+    }
+
     /// These inputs with the column answer `columns`.
     pub fn with_columns(&self, columns: ColumnAnswer) -> Self {
         Self {
@@ -228,6 +270,36 @@ impl LightInputs {
         }
         Some(plane)
     }
+}
+
+/// The emissive voxels of the level-0 chunk `chunk`, of the default data
+/// shape, under the emissive list `emission`.
+fn scan_emissive<I: Copy + PartialEq>(
+    chunk: &ChunkData<I>,
+    emission: &[(I, u8)],
+) -> Vec<EmissiveVoxel> {
+    if emission.is_empty() {
+        return Vec::new();
+    }
+    let voxels = match (&chunk.fill_type, &chunk.voxels) {
+        (FillType::Empty, _) => return Vec::new(),
+        (FillType::Uniform(voxel), _) => {
+            return match uniform_emission(*voxel, emission) {
+                Some(level) => every_voxel(level),
+                None => Vec::new(),
+            };
+        }
+        (FillType::Mixed, Some(voxels)) => voxels,
+        (FillType::Mixed, None) => unreachable!("a mixed chunk stores its voxels"),
+    };
+    let mut emissive = Vec::new();
+    for z in 0..CHUNK {
+        for y in 0..CHUNK {
+            let start = 1 + (y + 1) * PADDED + (z + 1) * PADDED * PADDED;
+            find_emissive(&voxels[start..start + CHUNK], emission, y, z, &mut emissive);
+        }
+    }
+    emissive
 }
 
 /// The emissive voxels of one row of voxels along x, at `y` and `z`.

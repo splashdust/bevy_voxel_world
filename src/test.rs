@@ -255,6 +255,30 @@ fn chunk_data<C: VoxelWorldConfig>(
         .unwrap()
 }
 
+#[test]
+fn a_system_can_hold_res_mut_of_the_config_and_voxel_world_together() {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>)
+        .add_systems(
+            Update,
+            |mut world: ResMut<FloorWorld>, voxel_world: VoxelWorld<FloorWorld>| {
+                world.set_changed();
+                voxel_world.get_voxel(IVec3::ZERO);
+            },
+        );
+
+    let below_ground = IVec3::new(1, -3, 1);
+    update_until(&mut app, "generated voxel to be readable", |app| {
+        app.world_mut()
+            .run_system_once(move |voxel_world: VoxelWorld<FloorWorld>| {
+                voxel_world.get_voxel(below_ground)
+            })
+            .unwrap()
+            == WorldVoxel::Solid(1)
+    });
+}
+
 #[derive(Resource, Default)]
 struct Published(Vec<IVec3>);
 

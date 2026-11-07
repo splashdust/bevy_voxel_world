@@ -348,6 +348,11 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The materials whose voxels give off light, and how much. Empty by
     /// default, and then no chunk looks for light sources among its voxels.
     ///
+    /// Relights on change, like a change of reach: every chunk with a solid
+    /// looks for its emissive voxels again in a relight task, about 40 to
+    /// 100 µs a chunk on the task pool, and its neighbours relight again
+    /// where its emissive voxels changed.
+    ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.
     #[cfg(feature = "light_propagation")]

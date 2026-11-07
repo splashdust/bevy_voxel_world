@@ -378,6 +378,32 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         }
     }
 
+    /// Works out the column answer of the loaded chunk `entity` at `position`
+    /// again from `padding`, the columns open in its padding row above it, the
+    /// fill hints and the sky record, as if its task had found nothing more.
+    /// It waits for probes if columns stay provisional.
+    pub fn answer_again(
+        &mut self,
+        position: IVec3,
+        entity: Entity,
+        padding: Columns,
+        record: &mut SkyRecord,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+        world: &C,
+    ) -> ColumnAnswer {
+        let window = self.rule.window(position.y);
+        let open = if window == 0 { [!0; CHUNK] } else { padding };
+        let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
+        let (sky, known) = from_hints(world, position, open, &counts);
+        self.settle(position, entity, sky, known, &counts, record)
+    }
+
+    /// Follows the sky rule `rule` from now on. Waiting chunks must then have
+    /// their answers worked out again: see [`answer_loaded_again`].
+    pub fn set_rule(&mut self, rule: SkyRule) {
+        self.rule = rule;
+    }
+
     /// Forgets every waiting chunk and drops the running probes.
     fn clear(&mut self) {
         self.waiting.clear();
@@ -542,42 +568,67 @@ pub(crate) fn reset_light<C: VoxelWorldConfig>(
     if let Some(mut probes) = probes {
         let mut record = settings.record.lock().unwrap();
         record.clear();
-        probes.clear();
-        let loaded: Vec<(IVec3, Entity, ColumnAnswer)> = {
-            let view = settings.view.read();
-            for (position, chunk) in view.iter() {
-                let mask = chunk.light.inputs.occupancy.solid_columns();
-                record.insert(*position, &mask, edits.edit_count(*position));
-            }
-            view.iter()
-                .map(|(position, chunk)| {
-                    (*position, chunk.entity, chunk.light.inputs.columns.clone())
-                })
-                .collect()
-        };
-        let chunk_map = chunk_map.get_read_lock();
-        for (position, entity, columns) in loaded {
-            let Some(data) = chunk_map.get(&ChunkKey::new(position, 0)) else {
-                continue;
-            };
-            let window = probes.rule.window(position.y);
-            let open = if window == 0 {
-                [!0; CHUNK]
-            } else {
-                padding_row(data)
-            };
-            let counts =
-                edit_counts(&edits, position, super::sky::walkable(window) as usize);
-            let (sky, known) =
-                from_hints(configuration.as_ref(), position, open, &counts);
-            let answer =
-                probes.settle(position, entity, sky, known, &counts, &mut record);
-            if answer != columns {
-                replace_columns(&settings.view, position, entity, answer);
-            }
-        }
+        answer_loaded_again(
+            &mut probes,
+            &settings.view,
+            &mut record,
+            &chunk_map,
+            &edits,
+            &configuration,
+        );
     }
     work.trigger_all();
+}
+
+/// Forgets every waiting chunk, records every loaded chunk's own mask, and
+/// works each one's column answer out again from its padding row, the fill
+/// hints and `record`, under the sky rule of `probes`. Chunks whose answer
+/// changed get it in the world view `view`.
+///
+/// Returns the positions of the chunks whose direct sky changed.
+pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
+    probes: &mut SkyProbes<C>,
+    view: &LightView,
+    record: &mut SkyRecord,
+    chunk_map: &ChunkMap<C, C::MaterialIndex>,
+    edits: &VoxelEdits<C, C::MaterialIndex>,
+    world: &C,
+) -> Vec<IVec3> {
+    probes.clear();
+    let loaded: Vec<(IVec3, Entity, ColumnAnswer)> = {
+        let view = view.read();
+        for (position, chunk) in view.iter() {
+            let mask = chunk.light.inputs.occupancy.solid_columns();
+            record.insert(*position, &mask, edits.edit_count(*position));
+        }
+        view.iter()
+            .map(|(position, chunk)| {
+                (*position, chunk.entity, chunk.light.inputs.columns.clone())
+            })
+            .collect()
+    };
+    let chunk_map = chunk_map.get_read_lock();
+    let mut changed = Vec::new();
+    for (position, entity, columns) in loaded {
+        let Some(data) = chunk_map.get(&ChunkKey::new(position, 0)) else {
+            continue;
+        };
+        let answer = probes.answer_again(
+            position,
+            entity,
+            padding_row(data),
+            record,
+            edits,
+            world,
+        );
+        if answer.sky != columns.sky {
+            changed.push(position);
+        }
+        if answer != columns {
+            replace_columns(view, position, entity, answer);
+        }
+    }
+    changed
 }
 
 /// The edit counts of the `count` positions above the chunk at `position`,
@@ -617,7 +668,7 @@ fn from_hints<C: VoxelWorldConfig>(
 
 /// Gives the chunk `entity` at `position` the column answer `answer` in the
 /// world view, keeping its light. Relights then read the new answer.
-fn replace_columns(
+pub(crate) fn replace_columns(
     view: &LightView,
     position: IVec3,
     entity: Entity,

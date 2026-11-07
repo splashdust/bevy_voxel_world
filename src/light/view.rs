@@ -25,6 +25,9 @@ pub(crate) struct ViewChunk {
     pub version: u64,
     /// The edit count of the chunk's position its inputs reflect.
     pub edits: u64,
+    /// The [emission generation](super::solver::LightTaskSettings::emission_generation)
+    /// its inputs' emissive voxels were found under.
+    pub emission: u64,
 }
 
 /// The world view of one world, by level-0 chunk position.

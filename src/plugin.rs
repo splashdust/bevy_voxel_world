@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 #[cfg(feature = "light_propagation")]
 use bevy::render::render_resource::AsBindGroup;
@@ -278,6 +279,8 @@ where
     /// `add_custom_material_path` if it has one.
     fn build_world(&self, app: &mut App, add_custom_material_path: fn(&mut App, &C, &M)) {
         app.init_resource::<C>()
+            .insert_resource(ConfigCopy(Arc::new(self.config.clone())))
+            .add_systems(First, ConfigCopy::<C>::follow.run_if(resource_changed::<C>))
             .add_systems(PreStartup, Internals::<C>::setup)
             .insert_resource(SpawnMeshes::<C>::new(self.spawn_meshes))
             .add_systems(

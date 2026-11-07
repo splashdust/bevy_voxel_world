@@ -3,9 +3,12 @@
 //!
 //! Each field's documentation says when a change to it takes effect:
 //!
-//! - **Read once at plugin build:** changing it later does nothing.
+//! - **Read once at plugin build:** changing it later logs a warning once and
+//!   does nothing.
 //! - **Relights on change:** every chunk with a solid near its open voxels
-//!   works its light out again. Old light shows until new light lands.
+//!   works its light out again. Old light shows until new light lands,
+//!   nearest the camera first, and the world settles in about 1 to 2 s on
+//!   native.
 //! - **Replaces the texture on change:** as a relight, and the world's light
 //!   texture is made again in the new format.
 //! - **Shows on the next frame:** only the shader reads it.
@@ -44,6 +47,33 @@ use bevy::reflect::Reflect;
 /// Every field says when a change to it takes effect, as one of: read once at
 /// plugin build, relights on change, replaces the texture on change, shows on
 /// the next frame, or a limit.
+///
+/// # Changing settings while the world runs
+///
+/// A world keeps its `LightPropagation` in a field of its config and returns
+/// a clone of it. A system changes it through `ResMut` of the config, which it
+/// can hold together with [`VoxelWorld`](crate::prelude::VoxelWorld). On
+/// frames where the config changed, the crate compares the new settings and
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials)
+/// with those it last applied and does the least the difference needs, so a
+/// value set equal to the current one costs nothing, and settings at rest
+/// cost no work per chunk. Out-of-range values set at runtime are clamped, as
+/// at plugin build.
+///
+/// A change that relights works out again the light of every chunk with an
+/// open voxel touching a solid, counting the solids just past its faces: on
+/// native, a change of reach or shape takes about 1 to 2 s to settle, with a
+/// brief seam between old and new light, nearest the camera first. Relights
+/// for a settings change start after chunk tasks, so streaming goes on at
+/// its usual pace. A chunk of air with no solid beside it keeps its light,
+/// which `light_at` can read a setting behind. A chunk above LOD level 0
+/// takes the new settings only when its chunk task runs again.
+/// [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
+/// is false until every relight has landed.
+///
+/// Whether `light_propagation` returns `None`, and [`shown`](Self::shown), are
+/// read once at plugin build: changing either later logs a warning once and
+/// changes nothing.
 ///
 /// Light needs the crate's `light_propagation` cargo feature.
 ///
@@ -109,24 +139,37 @@ pub struct LightPropagation {
 
     /// Where sky light enters the world.
     ///
-    /// Relights on change. Defaults to [`Sky::Clearance`] of 16 chunks.
+    /// Relights on change. Each loaded chunk works out which of its columns
+    /// sky light enters again from the sky record, which is kept, and from
+    /// fill hints; columns those don't settle show direct sky until sky
+    /// probes look up the voxels above them, as after streaming in. Turning
+    /// sky light on after [`Sky::Off`] starts with an empty record, so caves
+    /// can flash bright briefly while their columns are disproved.
+    ///
+    /// Defaults to [`Sky::Clearance`] of 16 chunks.
     pub sky: Sky,
 
     /// How many voxels sky light spreads past where it falls straight down,
     /// from 1 to 32.
     ///
-    /// Relights on change. Defaults to 30.
+    /// Relights on change, costing a solve of every chunk with a solid near
+    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// native. With sky light off it relights nothing. Defaults to 30.
     pub sky_reach: u8,
 
     /// How many voxels voxel light spreads from an emissive voxel at level 15,
     /// from 1 to 32.
     ///
-    /// Relights on change. Defaults to 14, which loses one level per voxel.
+    /// Relights on change, costing a solve of every chunk with a solid near
+    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// native. Defaults to 14, which loses one level per voxel.
     pub voxel_reach: u8,
 
     /// The shape light spreads in, for both kinds of light.
     ///
-    /// Relights on change. Defaults to [`LightShape::Round`].
+    /// Relights on change, costing a solve of every chunk with a solid near
+    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// native. Defaults to [`LightShape::Round`].
     pub shape: LightShape,
 
     /// How sky light reaches past where it falls and spreads, such as under a
@@ -183,7 +226,7 @@ pub struct LightPropagation {
     /// or has a solid in every column about 64. Values below 3 KiB are
     /// raised to it with a warning.
     ///
-    /// A limit. Defaults to 16 MiB.
+    /// A limit, applied at once on change. Defaults to 16 MiB.
     pub sky_record_cap: usize,
 
     /// The most main-thread time per frame spent relighting on WASM, where

@@ -288,6 +288,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
+    /// Makes chunks with no light of their own show sky light at `sky` from
+    /// now on, after the world's sky rule changed.
+    pub fn set_unlit_sky(&mut self, sky: u8) {
+        self.unlit_levels = tag_levels(sky, 0);
+    }
+
     pub fn set_cameras(&mut self, cameras: impl Iterator<Item = Vec3>) {
         self.cameras.clear();
         self.cameras.extend(cameras);

@@ -149,6 +149,17 @@ impl SkyRecord {
             },
         );
         self.order.push_back((position, self.clock));
+        self.evict_past_cap();
+    }
+
+    /// Holds at most `cap` bytes from now on, forgetting the least recently
+    /// used positions past it.
+    pub fn set_cap(&mut self, cap: usize) {
+        self.cap = cap;
+        self.evict_past_cap();
+    }
+
+    fn evict_past_cap(&mut self) {
         while self.bytes > self.cap {
             let Some((oldest, used)) = self.order.pop_front() else {
                 break;
