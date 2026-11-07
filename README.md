@@ -172,6 +172,46 @@ Other `VoxelWorldConfig` methods that matter with LOD levels:
 
 The consuming code is responsible for hiding seams between levels. `examples/noise_terrain_lod.rs` streams terrain 500 chunks out in six levels, uses fill hints, and hides cracks with skirts by returning `WorldVoxel::Unset` in the padding of its level-1 chunks.
 
+## Light propagation
+
+A world can light its chunks with light that spreads through its open voxels: sky light falling from the open sky, and voxel light from emissive materials. A voxel with no open path to a source is pitch black, however close it is to the surface, so caves are dark and the ground under an overhang is shaded.
+
+Light is behind the `light_propagation` cargo feature, off by default:
+
+```bash
+$ cargo add bevy_voxel_world --features light_propagation
+```
+
+Each world opts in on its own by returning a config:
+
+```rust
+impl VoxelWorldConfig for MyWorld {
+    // ...
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+
+    fn emissive_materials(&self) -> Vec<(u8, Emission)> {
+        vec![(LAMP, Emission::level(15.0))]
+    }
+}
+```
+
+A world that returns `None`, the default, pays nothing. One that opts in gets, by default:
+
+- Sky light entering a column with no solid voxel in the 16 chunks above it, spreading 30 voxels past where it falls, and sky fill carrying it further under high floating things and into caves with wide mouths.
+- Voxel light spreading 14 voxels from a lamp at level 15, and lamps' faces glowing.
+- Bevy's sun only on faces with direct sky, so it never shines into a cave through rock that hasn't spawned.
+- 16 light levels, smoothed across faces, for up to 1 byte per voxel on the CPU and up to about 38 MiB of GPU memory for the light texture.
+
+Set a `GlobalAmbientLight` of about 600: light scales it down in shade, and caves stay black at any value. Propagated light shades chunks only, and `VoxelWorld::light_at` reads the light at a voxel, so a game can dim its own entities to match.
+
+Every setting, what it costs and when a change shows are in the rustdoc of [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning.rs) puts each setting on a dial and prints the config you pick as Rust:
+
+```bash
+$ cargo run -r --example light_tuning --features light_propagation
+```
+
 ## AI Disclosure
 
 From version 0.19.0 of `bevy_voxel_world`, AI has been used to implement new features, optimize existing ones and write some documentation (such as release notes). On prior versions, AI was used only sparingly for some of the upgrade work to keep up with Bevy versions.

@@ -72,6 +72,13 @@ name = "light_caves"
 path = "examples/light_caves.rs"
 required-features = ["light_propagation"]
 
+[[example]]
+name = "light_tuning"
+path = "examples/light_tuning.rs"
+required-features = ["light_propagation"]
+# Its tests check that the config it prints is the Rust that builds it.
+test = true
+
 [[bench]]
 name = "chunk_lifecycle"
 harness = false

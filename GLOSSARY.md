@@ -102,6 +102,14 @@ _Avoid_: skylit, exposed
 Sky light that goes beyond direct sky into open space, so the ground under something high stays lit while a narrow opening lets none of it through. A world chooses how it's worked out: by the best path from the sky through openings, or by sky openness.
 _Avoid_: ambient fill, bounce light
 
+**Paths**:
+The default way of working out sky fill: a level for each connected open region of 8-voxel cells, passed between regions through the openings between them, losing more through an opening that fills less of the region behind it.
+_Avoid_: flood fill (the kernel's spreading, which is per voxel)
+
+**Sky fill field**:
+What a world keeps to work out sky fill: a level for each open 8-voxel cell of the chunk positions it has seen, kept current on the main thread under the world's model of sky fill. It counts against the sky record's cap.
+_Avoid_: fill map, sky field
+
 **Sky openness**:
 How much of the sky a place sees, from none of it to all of it, as one way of working out sky fill. A place that sees most of the sky has direct sky.
 _Avoid_: sky view factor, ambient occlusion
@@ -134,9 +142,17 @@ _Avoid_: temporary light, fallback light
 Generating the voxels of a chunk position only to learn which of its columns hold a solid. No chunk spawns from it.
 _Avoid_: ghost chunk, hidden chunk
 
+**Fill probe**:
+A sky probe that sky fill asks for, at the lowest priority, at a chunk position whose voxels could still raise a level in a chunk that takes sky fill.
+_Avoid_: fill lookup
+
 **Sky record**:
 What a world remembers about which columns hold a solid at the chunk positions it has seen. Forgetting any of it costs only time, never different light.
 _Avoid_: heightmap, top map
+
+**Hinted air**:
+A level-0 chunk position that a fill hint of air keeps from spawning. Light reads it as open voxels with its own direct sky, not as a neighbour that isn't loaded.
+_Avoid_: empty chunk, skipped chunk
 
 **Light entry**:
 Light a world keeps for a chunk position that a fill hint keeps from spawning as air, where a loaded chunk's solid touches it, so the faces beside it read the right light. It has no voxels, entity or mesh, and goes once no solid touches it.
@@ -149,6 +165,10 @@ _Avoid_: light update, re-solve
 **Relight ripple**:
 A relight that starts at the chunks whose own voxels or direct sky changed, and goes on to a neighbour only where light reached their shared face differently.
 _Avoid_: wave, cascade, flood
+
+**Settings relight**:
+The relight a change of light settings starts: every chunk and light entry with an open voxel touching a solid, nearest the camera first, after chunk tasks. Old light shows until the new light lands.
+_Avoid_: full relight, rebuild
 
 **World view**:
 What a lit world shares with the tasks that solve light: each loaded level-0 chunk's light and what its neighbours' solves read of it, its occupancy and emissive voxels. Tasks read it off the main thread, the way chunk tasks read published chunks.
@@ -181,3 +201,15 @@ _Avoid_: page, atlas entry
 **Tag**:
 The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level.
 _Avoid_: mesh tag (the Bevy component that carries it), light index
+
+**Shell**:
+The layer one voxel deep around a chunk's voxels in its slot, holding copies of its face neighbours' border planes, so a face on the chunk's boundary reads the light in front of it. It's only for display and never feeds back into light.
+_Avoid_: padding (the voxels a chunk's data holds past its faces)
+
+**Look**:
+How light shows on chunk faces: the falloffs, the sun gate, smoothing, the glow of emissive voxels, ambient occlusion and brightness. A change to it shows on the next frame, with no relight.
+_Avoid_: style, light settings (which include what relights)
+
+**Sun gate**:
+Where Bevy's directional lights shine on a lit world's chunks. By default only on direct sky, because Bevy's shadow map holds only spawned chunks and would let the sun into caves through rock that hasn't spawned.
+_Avoid_: sun mask, shadow gate

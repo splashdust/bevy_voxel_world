@@ -222,6 +222,12 @@ impl Default for FillField {
 }
 
 impl FillField {
+    /// The field of [`SkyFill::Paths`](crate::prelude::SkyFill::Paths) with
+    /// `fill`'s settings.
+    pub fn paths(fill: PathFill) -> Self {
+        Self(SkyFillField::new(&SkyFill::Paths(fill)))
+    }
+
     /// The field of [`SkyFill::Openness`](crate::prelude::SkyFill::Openness)
     /// with its defaults.
     pub fn openness() -> Self {

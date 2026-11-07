@@ -7,8 +7,8 @@
 //!   does nothing.
 //! - **Relights on change:** every chunk with a solid near its open voxels
 //!   works its light out again. Old light shows until new light lands,
-//!   nearest the camera first, and the world settles in about 1 to 2 s on
-//!   native.
+//!   nearest the camera first, and the world settles within a few frames
+//!   on native.
 //! - **Replaces the texture on change:** as a relight, and the world's light
 //!   texture is made again in the new format.
 //! - **Shows on the next frame:** only the shader reads it.
@@ -60,14 +60,17 @@ use bevy::reflect::Reflect;
 /// cost no work per chunk. Out-of-range values set at runtime are clamped, as
 /// at plugin build.
 ///
-/// A change that relights works out again the light of every chunk with an
-/// open voxel touching a solid, counting the solids just past its faces: on
-/// native, a change of reach or shape takes about 1 to 2 s to settle, with a
-/// brief seam between old and new light, nearest the camera first. Relights
-/// for a settings change start after chunk tasks, so streaming goes on at
-/// its usual pace. A chunk of air with no solid beside it keeps its light,
-/// which `light_at` can read a setting behind. A chunk above LOD level 0
-/// takes the new settings only when its chunk task runs again.
+/// A change that relights works out again the light of every chunk with an open
+/// voxel touching a solid, counting the solids just past its faces: on native,
+/// a change of reach, shape, sky fill or the sky rule settles in about 0.1 s, 5
+/// to 7 frames at 60 frames a second, in the `light_tuning` example's world of
+/// about 320 chunks, with a brief seam between old and new light, nearest the
+/// camera first. On a streamed world of about 4,000 chunks, 553 of them relit
+/// in about 25 frames. Relights for a settings change start after chunk tasks,
+/// so streaming goes on at its usual pace. A chunk of air with no solid beside
+/// it keeps its light, which `light_at` can read a setting behind. A chunk
+/// above LOD level 0 takes the new settings only when its chunk task runs
+/// again.
 /// [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
 /// is false until every relight has landed.
 ///
@@ -88,9 +91,11 @@ use bevy::reflect::Reflect;
 /// edit where no light is, such as in a dark cave, relights nothing.
 ///
 /// Every edit set in one frame is worked out together as one change, and has
-/// no such limit: it costs about 0.2 to 0.9 µs per voxel on the main thread,
-/// plus the falling sky light below each column it opens to the sky. The
-/// light it calls for lands over as many frames as it needs.
+/// no such limit: it costs about 0.5 to 1.1 µs per voxel on the main thread,
+/// plus the falling sky light below each column it opens to the sky. Digging
+/// a ball of 2,109 voxels out of a hillside in one frame took 2.4 ms of the
+/// main thread, and filling it in again 1.1 ms, each landing in 2 frames.
+/// The light it calls for lands over as many frames as it needs.
 ///
 /// # WASM
 ///
@@ -121,6 +126,61 @@ use bevy::reflect::Reflect;
 ///   reaches, a face is exactly black, which Bevy's default tonemapper maps to
 ///   1/255, with dither noise of up to 1/255.
 ///
+/// Propagated light scales Bevy's ambient light down in shade, so a lit world
+/// wants a [`GlobalAmbientLight`](bevy::light::GlobalAmbientLight) of about
+/// 600, where an unlit one looks right nearer 100. Caves stay black at any
+/// value.
+///
+/// Propagated light shades chunks only. Other entities keep Bevy's lighting,
+/// so a character walking into a dark cave stays fully lit unless the game
+/// dims it: read the light at its position with
+/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) and scale
+/// its colour by the look's curves, as [`LevelCurve::at`] describes. The
+/// `light_tuning` example does this.
+///
+/// # Limits
+///
+/// - **Sky light falls straight down.** It has no direction and doesn't
+///   follow the sun. So under [`SkyFill::Paths`], a floating solid shows a
+///   straight-down shade on the ground below it as well as its sun shadow.
+///   [`SkyFill::Openness`] removes that shade where a place sees most of the
+///   sky. Bevy's shadow cascades stop 150 voxels from the camera by default,
+///   and past them the sun casts no shadow at all.
+/// - **A shadow ends about the sky clearance below what casts it,** in a
+///   flat line on a chunk boundary, and a sealed space taller than the
+///   clearance lights up on its floor: see [`Sky::Clearance`].
+/// - **Lookups must be deterministic.** With sky light on, the world's voxel
+///   lookup must return the same voxel for a position every time. After
+///   changing what lookups return, call
+///   [`VoxelWorld::reset_light`](crate::prelude::VoxelWorld::reset_light).
+/// - **A chunk's light can change after it appears.** Its first light reads
+///   the chunks around it that aren't loaded yet as solid, so it gets
+///   brighter as they arrive; a face on its boundary shows the light in
+///   front of it only once the neighbour's light has landed; and a column
+///   nothing has proved blocked shows direct sky until a sky probe proves
+///   otherwise, so a cave can show sky light for a moment before going dark.
+///   Most of these last a frame or two, sky probes longer after a stream, and
+///   [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
+///   says when they're over. Light beside a chunk that isn't loaded can be
+///   darker than the truth, never brighter.
+/// - **The end of the loaded world shows in a cave.** Past the spawning
+///   distance nothing is drawn, so a gap at the end of a dark cave shows
+///   whatever the camera draws behind the world, often a bright clear colour.
+///   A larger spawning distance, or LOD levels, move that edge further away.
+///   Fog, the clear colour and any skybox belong to the application, which
+///   can tie them to `light_at` at the camera, at the cost of black sky when
+///   looking out of a cave mouth or from shade.
+/// - **Sky fill has limits of its own**, such as a cave behind a narrow
+///   opening staying black past its pool of light: see [`SkyFill`].
+/// - **Slots are capped per world.** A chunk that loses its slot looks flat
+///   and its lamps lose their glow: see [`slot_capacity`](Self::slot_capacity).
+/// - **`light_at` reads what has landed,** and coarse chunks plausibly rather
+///   than exactly: see
+///   [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at).
+/// - **Light comes from voxels, not meshes,** so a custom mesh must use the
+///   chunk's padded local coordinates: see
+///   [`VoxelWorldBindings`](crate::rendering::VoxelWorldBindings).
+///
 /// ```
 /// use bevy::prelude::*;
 /// use bevy_voxel_world::prelude::*;
@@ -147,19 +207,25 @@ use bevy::reflect::Reflect;
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub struct LightPropagation {
     /// Whether chunks are drawn with propagated light. With `false`, light is
-    /// worked out and can be read, but chunks keep Bevy's lighting.
+    /// worked out and can be read, but chunks keep Bevy's lighting, and the
+    /// world holds no light texture, slots or tags.
     ///
     /// Read once at plugin build. Defaults to `true`.
     pub shown: bool,
 
     /// Where sky light enters the world.
     ///
-    /// Relights on change. Each loaded chunk works out which of its columns
-    /// sky light enters again from the sky record, which is kept, and from
-    /// fill hints; columns those don't settle show direct sky until sky
-    /// probes look up the voxels above them, as after streaming in. Turning
-    /// sky light on after [`Sky::Off`] starts with an empty record, so caves
-    /// can flash bright briefly while their columns are disproved.
+    /// Relights on change. Each loaded chunk works out which of its columns sky
+    /// light enters again from the sky record, which is kept, and from fill
+    /// hints; columns those don't settle show direct sky until sky probes look
+    /// up the voxels above them, as after streaming in. Turning sky light on
+    /// after [`Sky::Off`] starts with an empty record, so caves can flash
+    /// bright briefly while their columns are disproved: on a streamed world of
+    /// about 4,000 chunks it took 5,000 sky probes over about 2,300 frames to
+    /// settle, where a change from the default clearance to a ceiling settled
+    /// in about 25. Raising the clearance past what the record has seen sends
+    /// sky probes up the chunk positions it adds: from 16 chunks to 32 took 9 s
+    /// to settle in the `light_tuning` example's world.
     ///
     /// Defaults to [`Sky::Clearance`] of 16 chunks.
     pub sky: Sky,
@@ -168,7 +234,7 @@ pub struct LightPropagation {
     /// from 1 to 32.
     ///
     /// Relights on change, costing a solve of every chunk with a solid near
-    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// its open voxels on the task pool, and about 0.1 s to settle on
     /// native. With sky light off it relights nothing. Defaults to 30.
     pub sky_reach: u8,
 
@@ -176,14 +242,14 @@ pub struct LightPropagation {
     /// from 1 to 32.
     ///
     /// Relights on change, costing a solve of every chunk with a solid near
-    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// its open voxels on the task pool, and about 0.1 s to settle on
     /// native. Defaults to 14, which loses one level per voxel.
     pub voxel_reach: u8,
 
     /// The shape light spreads in, for both kinds of light.
     ///
     /// Relights on change, costing a solve of every chunk with a solid near
-    /// its open voxels on the task pool, and about 1 to 2 s to settle on
+    /// its open voxels on the task pool, and about 0.1 s to settle on
     /// native. Defaults to [`LightShape::Round`].
     pub shape: LightShape,
 
@@ -203,6 +269,11 @@ pub struct LightPropagation {
     /// world keeps no fill and runs no fill probes. With
     /// [`Sky::Off`] it does nothing.
     ///
+    /// Under paths, keeping the field current costs about 1.3 to 2.2 µs of
+    /// the main thread per chunk streamed in, and the field counts against
+    /// [`sky_record_cap`](Self::sky_record_cap). See [`SkyFill`] for what sky
+    /// openness costs instead.
+    ///
     /// Relights on change. Defaults to [`SkyFill::Paths`] with its defaults.
     pub sky_fill: Option<SkyFill>,
 
@@ -219,8 +290,9 @@ pub struct LightPropagation {
     /// Replaces the texture on change: every chunk with a slot drops to one
     /// level per channel, the old texture is released, every loaded chunk
     /// relights, and the new texture is made when a chunk next needs a slot.
-    /// Chunks look flat for about 1 to 2 s on native while their light lands
-    /// again. Defaults to [`LightPrecision::Steps16`].
+    /// Chunks look flat while their light lands again: for about 0.2 s, 11
+    /// frames, in the `light_tuning` example's world of about 320 chunks.
+    /// Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
 
     /// How many chunks the world's light texture holds at once, at least 1.
@@ -244,9 +316,9 @@ pub struct LightPropagation {
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
     /// level per channel, the old texture is released, the settings relight
-    /// runs, and the new texture is made when a chunk next needs a slot.
-    /// Chunks look flat for about 1 to 2 s on native while they take slots
-    /// again. Defaults to 1,024.
+    /// runs, and the new texture is made when a chunk next needs a slot. Chunks
+    /// look flat while they take slots again: for about 0.1 s, 5 frames, in the
+    /// `light_tuning` example's world of about 320 chunks. Defaults to 1,024.
     pub slot_capacity: u32,
 
     /// How light looks on chunk faces.
@@ -467,8 +539,9 @@ impl Default for SkyFill {
 /// see the sky gets light from it.
 ///
 /// A world wanting brighter caves should lower [`opening_power`](Self::opening_power)
-/// first. Lowering [`whole_face_loss`](Self::whole_face_loss) lets light go
-/// further, but makes keeping the levels current about 10 times dearer at 1.
+/// first: it costs no more. Lowering [`whole_face_loss`](Self::whole_face_loss)
+/// lets light go further, but every change then reaches more positions, up to
+/// about 8 times as many at 1.
 ///
 /// Two limits come with the default settings. A cave behind an opening
 /// narrower than the cave itself is black past the pool of light around its
@@ -479,14 +552,26 @@ impl Default for SkyFill {
 pub struct PathFill {
     /// The light level of open space beside the open sky, from 0 to 15.
     /// Defaults to 12.
+    ///
+    /// Costs nothing per frame. Relights on change.
     pub beside_open_sky: f32,
     /// The levels lost passing through a whole open face of 8-voxel cells, at
     /// least 0. Defaults to 2.
+    ///
+    /// A lower loss carries light through more positions, and every change of
+    /// a position's cells reaches that many more: about 14 positions each way
+    /// at 1 against 7 at 2, so up to about 8 times as many positions in a big
+    /// open world. On the crate's benchmark scene, with 134 shaded positions,
+    /// an edit's update took 2.0 µs at 1 against 1.7 µs at 2. Relights on
+    /// change.
     pub whole_face_loss: f32,
     /// How much more a narrower opening loses, at least 0. Passing through an
     /// opening loses `whole_face_loss × (16 / f) ^ opening_power` levels, where
     /// `f`, from 1 to 16, is how many cells of the receiving space's widest
     /// cross-section the opening fills. Defaults to 2.
+    ///
+    /// Costs nothing per frame, and a lower power costs no more to keep
+    /// current. Relights on change.
     pub opening_power: f32,
 }
 

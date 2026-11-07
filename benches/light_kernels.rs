@@ -26,7 +26,8 @@
 //! chunks of random materials, with emissive lists of several lengths.
 //!
 //! Sky fill's field is built under both models over the floating island, the
-//! mesa and the ground around them, and worked out again after an edit there.
+//! mesa and the ground around them, and worked out again after an edit there,
+//! and under paths once more with a whole-face loss of 1.
 //! Sky openness is held against the 46–59 µs of CPU per shaded position its
 //! probe took.
 
@@ -41,7 +42,7 @@ use bevy::prelude::*;
 use bevy_voxel_world::light_bench::{
     emissive_scan, FillField, KernelBox, SeedBox, SlotBox,
 };
-use bevy_voxel_world::prelude::{LightShape, WorldVoxel};
+use bevy_voxel_world::prelude::{LightShape, PathFill, WorldVoxel};
 
 const AB_ROUNDS: usize = 3;
 const REPEATS: usize = 5;
@@ -444,9 +445,13 @@ fn field_metrics(metrics: &mut Metrics) {
         .unwrap();
     // The lowest open cell that isn't direct sky.
     let cell = (open & !direct).trailing_zeros();
-    for name in ["paths", "openness"] {
+    for name in ["paths", "paths_loss_1", "openness"] {
         let model = || match name {
             "paths" => FillField::default(),
+            "paths_loss_1" => FillField::paths(PathFill {
+                whole_face_loss: 1.0,
+                ..PathFill::default()
+            }),
             _ => FillField::openness(),
         };
         let mut build = f64::INFINITY;
