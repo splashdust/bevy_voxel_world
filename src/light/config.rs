@@ -17,9 +17,11 @@
 //! Out-of-range values are clamped, with a warning logged once, where the crate
 //! reads them. The value the world returns is never rewritten.
 
+use std::fmt::Display;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use bevy::log::warn_once;
+use bevy::log::{warn, warn_once};
 use bevy::reflect::Reflect;
 
 /// Light propagation for one world.
@@ -384,8 +386,8 @@ impl LightPropagation {
     /// once for each kind of value clamped.
     pub(crate) fn clamped(&self) -> Self {
         let mut config = self.clone();
-        config.sky_reach = clamp_reach(config.sky_reach, "sky_reach");
-        config.voxel_reach = clamp_reach(config.voxel_reach, "voxel_reach");
+        config.sky_reach = clamp_setting(config.sky_reach, 1, 32, "sky_reach");
+        config.voxel_reach = clamp_setting(config.voxel_reach, 1, 32, "voxel_reach");
         if config.slot_capacity == 0 {
             warn_once!("light propagation: slot_capacity 0 is below 1, using 1");
             config.slot_capacity = 1;
@@ -432,43 +434,37 @@ fn clamp_relight_budget(budget: Duration) -> Duration {
     clamped
 }
 
-fn clamp_reach(reach: u8, name: &str) -> u8 {
-    if (1..=32).contains(&reach) {
-        return reach;
-    }
-    let clamped = reach.clamp(1, 32);
-    warn_once!("light propagation: {name} {reach} is outside 1 to 32, using {clamped}");
-    clamped
-}
-
-/// `value` kept within `min..=max`, logging a warning once if it wasn't. NaN
-/// becomes `min`.
-fn clamp_f32(value: f32, min: f32, max: f32, name: &str) -> f32 {
+/// `value` kept within `min..=max`, logging a warning the first time a value
+/// named `name` is out of range. NaN becomes `min`.
+fn clamp_setting<T: PartialOrd + Display + Copy>(
+    value: T,
+    min: T,
+    max: T,
+    name: &str,
+) -> T {
     if value >= min && value <= max {
         return value;
     }
     let clamped = if value > max { max } else { min };
-    warn_once!(
-        "light propagation: {name} {value} is outside {min} to {max}, using {clamped}"
-    );
+    if first_warning_for(name) {
+        warn!("light propagation: {name} {value} is outside {min} to {max}, using {clamped}");
+    }
     clamped
 }
 
-/// The longest reach of [`OpenFill`], warning once if `reach` is longer.
-fn max_reach(reach: u32) -> u32 {
-    const MAX: u32 = 512;
-    if reach > MAX {
-        warn_once!("light propagation: reach {reach} is above {MAX}, using {MAX}");
+/// Whether no warning about the setting named `name` was logged yet, noting
+/// that one is now.
+///
+/// `warn_once!` warns once per call site, and one call site clamps many
+/// settings, so each setting is noted by name instead.
+fn first_warning_for(name: &str) -> bool {
+    static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    if warned.iter().any(|warned| warned == name) {
+        return false;
     }
-    MAX
-}
-
-fn at_least_one(value: u32, name: &str) -> u32 {
-    if value >= 1 {
-        return value;
-    }
-    warn_once!("light propagation: {name} 0 is below 1, using 1");
-    1
+    warned.push(name.to_owned());
+    true
 }
 
 /// Where sky light enters the world.
@@ -588,19 +584,24 @@ impl Default for PathFill {
 impl PathFill {
     fn clamped(self) -> Self {
         Self {
-            beside_open_sky: clamp_f32(
+            beside_open_sky: clamp_setting(
                 self.beside_open_sky,
                 0.0,
                 15.0,
                 "beside_open_sky",
             ),
-            whole_face_loss: clamp_f32(
+            whole_face_loss: clamp_setting(
                 self.whole_face_loss,
                 0.0,
                 f32::MAX,
                 "whole_face_loss",
             ),
-            opening_power: clamp_f32(self.opening_power, 0.0, f32::MAX, "opening_power"),
+            opening_power: clamp_setting(
+                self.opening_power,
+                0.0,
+                f32::MAX,
+                "opening_power",
+            ),
         }
     }
 }
@@ -663,10 +664,10 @@ impl Default for OpenFill {
 impl OpenFill {
     fn clamped(self) -> Self {
         Self {
-            sun_at: clamp_f32(self.sun_at, 0.0, 1.0, "sun_at"),
-            gain: clamp_f32(self.gain, 0.0, f32::MAX, "gain"),
-            rays: at_least_one(self.rays, "rays"),
-            reach: at_least_one(self.reach, "reach").min(max_reach(self.reach)),
+            sun_at: clamp_setting(self.sun_at, 0.0, 1.0, "sun_at"),
+            gain: clamp_setting(self.gain, 0.0, f32::MAX, "gain"),
+            rays: clamp_setting(self.rays, 1, u32::MAX, "rays"),
+            reach: clamp_setting(self.reach, 1, 512, "reach"),
         }
     }
 }
@@ -766,14 +767,19 @@ impl LightLook {
     /// once for each kind of value clamped.
     pub(crate) fn clamped(self) -> Self {
         Self {
-            voxel_brightness: clamp_f32(
+            voxel_brightness: clamp_setting(
                 self.voxel_brightness,
                 0.0,
                 f32::MAX,
                 "voxel_brightness",
             ),
-            emissive_glow: clamp_f32(self.emissive_glow, 0.0, f32::MAX, "emissive_glow"),
-            minimum_brightness: clamp_f32(
+            emissive_glow: clamp_setting(
+                self.emissive_glow,
+                0.0,
+                f32::MAX,
+                "emissive_glow",
+            ),
+            minimum_brightness: clamp_setting(
                 self.minimum_brightness,
                 0.0,
                 f32::MAX,
@@ -890,7 +896,7 @@ impl LevelCurve {
         Self {
             brightness: self
                 .brightness
-                .map(|entry| clamp_f32(entry, min, max, name)),
+                .map(|entry| clamp_setting(entry, min, max, name)),
         }
     }
 }
@@ -961,7 +967,19 @@ impl Emission {
     /// if it wasn't.
     pub(crate) fn clamped(self) -> Self {
         Self {
-            level: clamp_f32(self.level, 0.0, 15.0, "emission level"),
+            level: clamp_setting(self.level, 0.0, 15.0, "emission level"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_setting_warns_the_first_time_it_is_out_of_range() {
+        assert!(first_warning_for("a test setting"));
+        assert!(first_warning_for("another test setting"));
+        assert!(!first_warning_for("a test setting"));
     }
 }
