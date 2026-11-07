@@ -93,6 +93,9 @@ pub(crate) struct SkyFillWork<C> {
     /// Positions the record forgot to stay within its cap since anything
     /// else changed, which fill probes don't read.
     evicted: HashSet<IVec3>,
+    /// Whether anything changed since fill probes last looked for positions
+    /// to read. With nothing changed, they find none they didn't find then.
+    recheck: bool,
     _world: PhantomData<C>,
 }
 
@@ -112,6 +115,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             probing: HashSet::new(),
             wanted: 0,
             evicted: HashSet::new(),
+            recheck: true,
             _world: PhantomData,
         }
     }
@@ -323,6 +327,8 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         for position in record.take_noted() {
             fill.note_with_below(position, rule);
         }
+        fill.recheck |=
+            finished > 0 || !fill.dirty.is_empty() || fill.field.has_pending();
         fill.work_out_dirty(
             &settings.view,
             &mut record,
@@ -377,6 +383,12 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         world: Res<C>,
     ) {
         let fill = fill.as_mut();
+        // Looking costs a scan of the chunks around every position the field
+        // wants, so at rest it isn't repeated every frame.
+        if !fill.recheck && fill.wanted == 0 {
+            return;
+        }
+        fill.recheck = false;
         if fill.field.wanted_probes().next().is_none() {
             fill.wanted = 0;
             return;
