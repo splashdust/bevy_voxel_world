@@ -15,6 +15,7 @@
 //! the crate's own extension ([`material`]), and gets its light to the shader
 //! through a texture of slots and a tag on each chunk ([`route`]).
 
+mod census;
 mod coarse;
 pub(crate) mod config;
 mod edit;

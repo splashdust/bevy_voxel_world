@@ -42,6 +42,13 @@ use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 
+#[cfg(feature = "light_propagation")]
+#[path = "common/light_scene.rs"]
+mod light_scene;
+
+#[cfg(feature = "light_propagation")]
+use light_scene::{SceneTable, SCENE_TOP};
+
 /// Pool sizes are pinned so the machine's core count can't skew comparisons, and
 /// kept, with the main thread, below the M1 Max's 8 performance cores so
 /// background work has room to run beside the benchmark rather than on top of it.
@@ -62,6 +69,10 @@ const MAX_FRAMES: u32 = 5000;
 /// For scenarios whose run-to-run spread sits close to the gates.
 const MANY_RUNS: usize = 9;
 const RUNS: usize = 5;
+/// `caves` samples its scene once per process and streams thousands of
+/// chunks at sky reach 30 each run.
+#[cfg(feature = "light_propagation")]
+const CAVE_RUNS: usize = 3;
 const IDLE_FRAMES: usize = 2000;
 /// Frames a lit world is left at rest to check that its light starts no work.
 #[cfg(feature = "light_propagation")]
@@ -408,6 +419,212 @@ impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
     }
 }
 
+/// The light reference scene around the foot of its deep shaft, lit with the
+/// default light settings: caves, shafts and a deep cavern under hills, with
+/// emissive voxels on one in 32 exposed floors and on the floors of its torch
+/// columns. Its voxels are read from [`cave_table`].
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct CaveWorld;
+
+/// Where `caves` starts its camera: at the foot of the reference scene's
+/// deep shaft, in the deep cavern, looking at the shaft.
+#[cfg(feature = "light_propagation")]
+const CAVE_CAMERA: CameraStart = CameraStart {
+    at: Vec3::new(34.0, -196.0, 34.0),
+    target: Vec3::new(0.5, -210.0, 0.5),
+};
+
+/// The reference scene sampled around `CAVE_CAMERA`: every chunk within
+/// `SPAWNING_DISTANCE` of the camera's chunk and the voxels padding them,
+/// from below the lowest up to the height above which the scene is air, so
+/// the columns walks and sky probes read are in it too. Sampled once per
+/// process, before the first `caves` run.
+#[cfg(feature = "light_propagation")]
+fn cave_table() -> Arc<SceneTable> {
+    static TABLE: std::sync::OnceLock<Arc<SceneTable>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let started = Instant::now();
+            let camera = (CAVE_CAMERA.at / 32.0).floor().as_ivec3();
+            let reach = IVec3::splat(SPAWNING_DISTANCE + 1);
+            let min = (camera - reach) * 32;
+            let max = ((camera + reach + IVec3::ONE) * 32).with_y(SCENE_TOP);
+            let table = SceneTable::new(min, max, 8);
+            eprintln!(
+                "sampled the reference scene from {min} to {max} in {:.1?}",
+                started.elapsed()
+            );
+            Arc::new(table)
+        })
+        .clone()
+}
+
+#[cfg(feature = "light_propagation")]
+impl VoxelWorldConfig for CaveWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let table = cave_table();
+        Box::new(move |_, _, _| {
+            let table = table.clone();
+            Box::new(move |pos: IVec3, _| {
+                if table.open(pos) {
+                    WorldVoxel::Air
+                } else if table.emissive(pos) {
+                    WorldVoxel::Solid(LAMP)
+                } else {
+                    WorldVoxel::Solid(1)
+                }
+            })
+        })
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        vec![(LAMP, Emission::level(15.0))]
+    }
+}
+
+/// The world of the `noise_terrain_lod` example: a noise terrain streamed
+/// out to 500 chunks in six levels of detail, with fill hints for the rock
+/// below it and the air above it, lit with the default light settings when
+/// `LIT`. Its camera starts where the example's does and stays there.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone)]
+struct TerrainLodWorld<const LIT: bool> {
+    noise: Arc<noise::HybridMulti<noise::Perlin>>,
+}
+
+#[cfg(feature = "light_propagation")]
+impl<const LIT: bool> Default for TerrainLodWorld<LIT> {
+    fn default() -> Self {
+        let mut noise = noise::HybridMulti::<noise::Perlin>::new(1234);
+        noise.octaves = 5;
+        noise.frequency = 1.1;
+        noise.lacunarity = 2.8;
+        noise.persistence = 0.4;
+        Self {
+            noise: Arc::new(noise),
+        }
+    }
+}
+
+/// The camera of the `noise_terrain_lod` example.
+#[cfg(feature = "light_propagation")]
+const TERRAIN_LOD_CAMERA: CameraStart = CameraStart {
+    at: Vec3::new(-200.0, 260.0, -200.0),
+    target: Vec3::new(0.0, 170.0, 0.0),
+};
+
+/// What fills the chunk at `key` of `TerrainLodWorld` when no terrain
+/// crosses it, as in the `noise_terrain_lod` example.
+#[cfg(feature = "light_propagation")]
+fn terrain_lod_fill(key: ChunkKey) -> FillHint<u8> {
+    if key.position.y + key.extent() <= -1 {
+        FillHint::Uniform(WorldVoxel::Solid(3))
+    } else if key.position.y > 5 {
+        FillHint::Uniform(WorldVoxel::Air)
+    } else {
+        FillHint::Unknown
+    }
+}
+
+#[cfg(feature = "light_propagation")]
+impl<const LIT: bool> VoxelWorldConfig for TerrainLodWorld<LIT> {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        500
+    }
+
+    fn min_despawn_distance(&self) -> u32 {
+        1
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        use noise::NoiseFn;
+
+        let chunk_noise = Arc::clone(&self.noise);
+        Box::new(move |chunk_pos, lod_level, _| {
+            if let FillHint::Uniform(voxel) =
+                terrain_lod_fill(ChunkKey::new(chunk_pos, lod_level))
+            {
+                return Box::new(move |_, _| voxel);
+            }
+            let chunk_min = chunk_pos * 32;
+            let chunk_max = chunk_min + IVec3::splat(32 << lod_level);
+            let skirt_enabled = lod_level == 1;
+            let noise = Arc::clone(&chunk_noise);
+            let mut cache = HashMap::<(i32, i32), f64>::new();
+            Box::new(move |pos: IVec3, _| {
+                if skirt_enabled
+                    && (pos.cmplt(chunk_min).any() || pos.cmpge(chunk_max).any())
+                {
+                    return WorldVoxel::Unset;
+                }
+                if pos.y < 0 {
+                    return WorldVoxel::Solid(3);
+                }
+                let sample = *cache.entry((pos.x, pos.z)).or_insert_with(|| {
+                    noise.get([pos.x as f64 / 1000.0, pos.z as f64 / 1000.0]) * 50.0
+                });
+                if (pos.y as f64) < sample {
+                    WorldVoxel::Solid(0)
+                } else {
+                    WorldVoxel::Air
+                }
+            })
+        })
+    }
+
+    fn chunk_lod(
+        &self,
+        chunk_position: IVec3,
+        _previous_lod: Option<LodLevel>,
+        camera_position: Vec3,
+    ) -> LodLevel {
+        let camera_chunk = (camera_position / 32.0).floor();
+        match chunk_position.as_vec3().distance(camera_chunk) {
+            distance if distance < 30.0 => 0,
+            distance if distance < 70.0 => 1,
+            distance if distance < 150.0 => 2,
+            distance if distance < 200.0 => 3,
+            distance if distance < 300.0 => 4,
+            _ => 5,
+        }
+    }
+
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        terrain_lod_fill(key)
+    }
+
+    fn attach_chunks_to_root(&self) -> bool {
+        false
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        LIT.then(LightPropagation::default)
+    }
+}
+
 // --- Lifecycle observation -------------------------------------------------
 
 /// The message that marks a chunk's voxel data as published.
@@ -582,10 +799,28 @@ fn add_profiling(app: &mut App) {
 #[cfg(not(feature = "trace_tracy"))]
 fn add_profiling(_: &mut App) {}
 
-fn spawn_camera<C: VoxelWorldConfig>(mut commands: Commands) {
+/// Where a scenario's camera starts and what it looks at, in place of
+/// `CAMERA_START` looking along the diagonal of the sine terrain.
+#[derive(Resource, Clone, Copy)]
+struct CameraStart {
+    at: Vec3,
+    target: Vec3,
+}
+
+fn spawn_camera<C: VoxelWorldConfig>(
+    mut commands: Commands,
+    start: Option<Res<CameraStart>>,
+) {
     // Positive coordinates throughout, so chunk rounding conventions agree.
-    let transform = Transform::from_translation(CAMERA_START)
-        .looking_at(Vec3::new(116.0, 0.0, 116.0), Vec3::Y);
+    let start = start.map_or(
+        CameraStart {
+            at: CAMERA_START,
+            target: Vec3::new(116.0, 0.0, 116.0),
+        },
+        |start| *start,
+    );
+    let transform =
+        Transform::from_translation(start.at).looking_at(start.target, Vec3::Y);
     let projection = PerspectiveProjection {
         aspect_ratio: 1280.0 / 720.0,
         ..default()
@@ -793,6 +1028,101 @@ fn settle_light<C: VoxelWorldConfig>(app: &mut App) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// How a stream into a lit world went, up to its light settling.
+#[cfg(feature = "light_propagation")]
+struct LitStreamIn {
+    /// As `stream_in`'s.
+    stream: StreamIn,
+    /// Time until the chunk lifecycle was quiet and light settled, whichever
+    /// came later.
+    settled_ms: f64,
+    /// Time until the lifecycle was quiet and no relight was queued, running
+    /// or waiting to land, whichever came later: `settled_ms` without the
+    /// sky probes and fill probes that run on after the stream.
+    relit_ms: f64,
+    /// Whether the wall-clock cap ended the run before light settled.
+    capped: bool,
+}
+
+/// Runs frames until the lifecycle has been quiet and light settled for
+/// `SETTLE_FRAMES`, or for at most `cap` of wall-clock time. Relights and
+/// sky and fill probes count, and so do the remeshes they cause.
+///
+/// Calls `at_quiet` once, on the first frame the lifecycle has been quiet for
+/// `SETTLE_FRAMES`, where `stream_in` would have stopped.
+#[cfg(feature = "light_propagation")]
+fn stream_in_settled<C: VoxelWorldConfig>(
+    app: &mut App,
+    cap: std::time::Duration,
+    mut at_quiet: impl FnMut(&mut App),
+) -> LitStreamIn {
+    let start = Instant::now();
+    let near = near_offsets();
+    let mut settled_state = SystemState::<VoxelWorld<C>>::new(app.world_mut());
+    let mut near_time_ms = None;
+    let mut frame_times = Vec::new();
+    let mut last_count = chunk_count::<C>(app);
+    let mut last_change = (0, 0.0);
+    // The frame light last settled on, and the time at its end.
+    let mut settled_at: Option<(u32, f64)> = None;
+    let mut relit_at: Option<f64> = None;
+    let mut frame = 0;
+    let mut was_quiet = false;
+    let capped = loop {
+        frame += 1;
+        let frame_start = Instant::now();
+        app.update();
+        frame_times.push(frame_start.elapsed().as_secs_f64() * 1000.0);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        if near_time_ms.is_none() && coverage::<C>(app, &near) >= 1.0 {
+            near_time_ms = Some(elapsed_ms);
+        }
+        let count = chunk_count::<C>(app);
+        let tracker = app.world().resource::<Tracker>();
+        if count != last_count || tracker.last_change == tracker.frame {
+            last_change = (frame, elapsed_ms);
+        }
+        last_count = count;
+        let settled = settled_state.get(app.world()).unwrap().light_is_settled();
+        let relit = bevy_voxel_world::light_bench::relights_are_settled::<C>(app.world());
+        relit_at = match (relit, relit_at) {
+            (false, _) => None,
+            (true, None) => Some(elapsed_ms),
+            (true, at) => at,
+        };
+        settled_at = match (settled, settled_at) {
+            (false, _) => None,
+            (true, None) => Some((frame, elapsed_ms)),
+            (true, at) => at,
+        };
+        let quiet = count > 0 && frame - last_change.0 >= SETTLE_FRAMES;
+        if quiet && !was_quiet {
+            was_quiet = true;
+            at_quiet(app);
+        }
+        if quiet && settled_at.is_some_and(|(at, _)| frame - at >= SETTLE_FRAMES) {
+            break false;
+        }
+        if start.elapsed() >= cap {
+            break true;
+        }
+    };
+    let settled_ms = settled_at.map_or(f64::NAN, |(_, ms)| ms.max(last_change.1));
+    let last_frame = last_change.0.max(settled_at.map_or(frame, |(at, _)| at));
+    frame_times.truncate(last_frame as usize);
+    LitStreamIn {
+        stream: StreamIn {
+            frames: last_frame,
+            time_ms: last_change.1,
+            near_time_ms: near_time_ms.unwrap_or(last_change.1),
+            frame_times,
+        },
+        settled_ms,
+        relit_ms: relit_at.map_or(f64::NAN, |ms| ms.max(last_change.1)),
+        capped,
+    }
+}
+
 /// `stream_in` on a lit world, with what working out its direct sky and
 /// solving its light cost in chunk tasks, what sky fill cost, and how long
 /// sky probes and fill probes take to bring its light to rest after the
@@ -804,9 +1134,15 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     use bevy_voxel_world::light_bench::light_stats;
 
     let mut app = build_app(C::default());
-    let result = stream_in::<C>(&mut app);
-    let streamed = light_stats::<C>(app.world()).expect("a lit world");
-    let rest_ms = settle_light::<C>(&mut app);
+    let mut streamed = None;
+    let lit =
+        stream_in_settled::<C>(&mut app, std::time::Duration::from_secs(120), |app| {
+            streamed = light_stats::<C>(app.world());
+        });
+    let result = &lit.stream;
+    let streamed = streamed.expect("a lit world");
+    settle_light::<C>(&mut app);
+    let rest_ms = (lit.settled_ms - result.time_ms).max(0.0);
     let stats = light_stats::<C>(app.world()).expect("a lit world");
     for _ in 0..IDLE_LIGHT_FRAMES {
         app.update();
@@ -837,6 +1173,8 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
         (idle.relights - stats.relights) as f64,
     );
     metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
+    metrics.insert(format!("{prefix}.settled_ms"), lit.settled_ms);
+    metrics.insert(format!("{prefix}.relit_ms"), lit.relit_ms);
     metrics.insert(format!("{prefix}.near_time_ms"), result.near_time_ms);
     metrics.insert(format!("{prefix}.frames"), result.frames as f64);
     let solves = stats.solves.max(1) as f64;
@@ -956,6 +1294,278 @@ fn scenario_stream_in_lod<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
         stats.coarse_copy_bytes as f64 / (1024.0 * 1024.0),
     );
     frame_metrics(prefix, &result.frame_times, &mut metrics);
+    metrics
+}
+
+/// The wall-clock cap on one run of `caves`.
+#[cfg(feature = "light_propagation")]
+const CAVE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The bytes of GPU a slot takes: 34³ voxels of one byte.
+#[cfg(feature = "light_propagation")]
+const SLOT_BYTES: f64 = 39_304.0;
+
+/// The thresholds of `caves`, set from its first runs in real chunk tasks;
+/// see `scenario_caves`. Each is the most a metric may reach.
+#[cfg(feature = "light_propagation")]
+const CAVE_GATES: [(&str, f64); 4] = [
+    ("solves_per_arrival", CAVE_SOLVES_PER_ARRIVAL),
+    ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
+    ("pool_solve_us_per_chunk", CAVE_SOLVE_US),
+    ("relight_us_per_relight", CAVE_RELIGHT_US),
+];
+#[cfg(feature = "light_propagation")]
+const CAVE_SOLVES_PER_ARRIVAL: f64 = f64::INFINITY;
+#[cfg(feature = "light_propagation")]
+const CAVE_VISIBLE_PER_SHOWN: f64 = f64::INFINITY;
+#[cfg(feature = "light_propagation")]
+const CAVE_SOLVE_US: f64 = f64::INFINITY;
+#[cfg(feature = "light_propagation")]
+const CAVE_RELIGHT_US: f64 = f64::INFINITY;
+
+/// A stream into the reference scene's caves at the default light settings,
+/// sky reach 30 with round spread, ending once light is settled. Reports how
+/// often light changes after chunks first show it, and why:
+///
+/// - `solves_per_arrival`: solves in chunk tasks and relights, per chunk
+///   whose light landed;
+/// - `changed_batches_per_arrival`: frames after a chunk's arrival in which
+///   its light changed, per arrival;
+/// - `visible_per_shown`: frames after a chunk's arrival in which a relight
+///   changed light its own faces show, per chunk with any such voxel, as the
+///   probes counted them; `visible_with_shells_per_shown` also counts frames
+///   in which only light in front of its faces from a neighbour changed;
+/// - `visible_from_*_per_shown`: the frames of either, by cause: a
+///   neighbour arriving, a column found out by sky probes, a shell filling
+///   in in front of the chunk's solid voxels, and anything else. A frame
+///   with changes of several causes counts for the first.
+///
+/// It also reports what the solves cost in chunk tasks, emissive scan
+/// included, and the slots and memory light took at their peak.
+///
+/// Thresholds, checked here and reported as `gate_failures`, are in
+/// `CAVE_GATES`.
+#[cfg(feature = "light_propagation")]
+fn scenario_caves() -> Metrics {
+    use bevy_voxel_world::light_bench::{change_counts, count_changes, light_stats};
+
+    type World = CaveWorld;
+    let prefix = "caves";
+    cave_table();
+    let mut app = build_app(CaveWorld);
+    app.insert_resource(CAVE_CAMERA);
+    count_changes::<World>(app.world_mut());
+    let result = stream_in_settled::<World>(&mut app, CAVE_CAP, |_| {});
+    let stats = light_stats::<World>(app.world()).expect("a lit world");
+    let counts = change_counts::<World>(app.world()).expect("counted");
+    for _ in 0..IDLE_LIGHT_FRAMES {
+        app.update();
+    }
+    let idle = light_stats::<World>(app.world()).expect("a lit world");
+
+    let mut metrics = Metrics::new();
+    let mut put = |name: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}"), value);
+    };
+    let arrivals = counts.arrivals.max(1) as f64;
+    let shown = counts.shown.max(1) as f64;
+    put("time_ms", result.stream.time_ms);
+    put("settled_ms", result.settled_ms);
+    put("relit_ms", result.relit_ms);
+    put(
+        "rest_ms",
+        (result.settled_ms - result.stream.time_ms).max(0.0),
+    );
+    put("capped", result.capped as u8 as f64);
+    put("arrivals", counts.arrivals as f64);
+    put("shown", counts.shown as f64);
+    put("solves", stats.solves as f64);
+    put("relights", stats.relights as f64);
+    // Every solve, a chunk task's or a relight's; relights stopped before
+    // solving aren't solves.
+    put("solves_per_arrival", stats.solves as f64 / arrivals);
+    put("changed_relights", counts.changed_relights as f64);
+    put(
+        "changed_batches_per_arrival",
+        counts.changed_batches as f64 / arrivals,
+    );
+    // A chunk's own relights, which the probes counted, and the same with
+    // its shell filling in.
+    let visible = counts.visible_from_arrival
+        + counts.visible_from_column
+        + counts.visible_from_other;
+    put("visible_per_shown", visible as f64 / shown);
+    put(
+        "visible_with_shells_per_shown",
+        counts.visible_with_shells as f64 / shown,
+    );
+    put(
+        "visible_from_arrival_per_shown",
+        counts.visible_from_arrival as f64 / shown,
+    );
+    put(
+        "visible_from_column_per_shown",
+        counts.visible_from_column as f64 / shown,
+    );
+    put(
+        "visible_from_shell_per_shown",
+        counts.visible_from_shell as f64 / shown,
+    );
+    put(
+        "visible_from_other_per_shown",
+        counts.visible_from_other as f64 / shown,
+    );
+    put("emissive_scans", stats.emissive_scans as f64);
+    put(
+        "pool_solve_us_per_chunk",
+        stats.solve_ms * 1000.0 / stats.solves.max(1) as f64,
+    );
+    put(
+        "relight_us_per_relight",
+        stats.relight_ms * 1000.0 / stats.relights.max(1) as f64,
+    );
+    put("main_thread_total_ms", stats.main_thread_ms);
+    put("main_thread_max_frame_ms", stats.max_frame_ms);
+    put("probes", stats.probes as f64);
+    put("fill_seeded", stats.fill_seeded as f64);
+    put("fill_relights", stats.fill_relights as f64);
+    put("fill_probes", stats.fill_probes as f64);
+    put("idle_relights", (idle.relights - stats.relights) as f64);
+    put("idle_probes", (idle.probes - stats.probes) as f64);
+    put(
+        "idle_fill_probes",
+        (idle.fill_probes - stats.fill_probes) as f64,
+    );
+    put("slot_allocations", stats.slot_allocations as f64);
+    put("peak_slots", stats.peak_slots as f64);
+    put("evictions", stats.evictions as f64);
+    put("starved", stats.starved as f64);
+    put(
+        "gpu_light_mib_at_peak",
+        stats.peak_slots as f64 * SLOT_BYTES / (1024.0 * 1024.0),
+    );
+    put(
+        "cpu_light_mib",
+        stats.light_bytes as f64 / (1024.0 * 1024.0),
+    );
+    put(
+        "cpu_light_bytes_per_mixed_voxel",
+        stats.light_bytes as f64 / (stats.mixed_chunks.max(1) as f64 * 32768.0),
+    );
+    put("record_kib", stats.record_bytes as f64 / 1024.0);
+    frame_metrics(prefix, &result.stream.frame_times, &mut metrics);
+
+    let failures: Vec<String> = CAVE_GATES
+        .iter()
+        .filter(|(name, most)| metrics[&format!("{prefix}.{name}")] > *most)
+        .map(|(name, most)| format!("{name} > {most}"))
+        .collect();
+    if !failures.is_empty() || result.capped {
+        eprintln!(
+            "{prefix}: missed its thresholds: {failures:?}{}",
+            if result.capped { " (capped)" } else { "" }
+        );
+    }
+    metrics.insert(
+        format!("{prefix}.gate_failures"),
+        (failures.len() + result.capped as usize) as f64,
+    );
+    metrics
+}
+
+/// How many frames `lod_scale` times at rest.
+#[cfg(feature = "light_propagation")]
+const SCALE_REST_FRAMES: usize = 300;
+
+/// The world of the `noise_terrain_lod` example, streamed from the
+/// example's camera, unlit and then lit at the default light settings.
+/// Reports the chunks streamed, what coarse chunks' solves cost, and frame
+/// times at rest for both, so light's cost per frame at rest shows as the
+/// difference, with the relights, probes and main thread light took at rest.
+///
+/// It runs only when named, as it streams tens of thousands of chunks.
+#[cfg(feature = "light_propagation")]
+fn scenario_lod_scale() -> Metrics {
+    use bevy_voxel_world::light_bench::light_stats;
+
+    let prefix = "lod_scale";
+    let cap = std::time::Duration::from_secs(600);
+    let mut metrics = Metrics::new();
+
+    let mut unlit = build_app(TerrainLodWorld::<false>::default());
+    unlit.insert_resource(TERRAIN_LOD_CAMERA);
+    let streamed = stream_in_settled::<TerrainLodWorld<false>>(&mut unlit, cap, |_| {});
+    metrics.insert(format!("{prefix}.unlit_time_ms"), streamed.stream.time_ms);
+    metrics.insert(
+        format!("{prefix}.unlit_chunks"),
+        chunk_count::<TerrainLodWorld<false>>(&mut unlit) as f64,
+    );
+    let times = timed_frames(&mut unlit, SCALE_REST_FRAMES, |_| {});
+    frame_metrics(&format!("{prefix}.unlit_rest"), &times, &mut metrics);
+    drop(unlit);
+
+    type Lit = TerrainLodWorld<true>;
+    let mut lit = build_app(Lit::default());
+    lit.insert_resource(TERRAIN_LOD_CAMERA);
+    let result = stream_in_settled::<Lit>(&mut lit, cap, |_| {});
+    let stats = light_stats::<Lit>(lit.world()).expect("a lit world");
+    let mut frame_ms = Vec::with_capacity(SCALE_REST_FRAMES);
+    let mut last = stats.main_thread_ms;
+    let times = timed_frames(&mut lit, SCALE_REST_FRAMES, |app| {
+        let now = light_stats::<Lit>(app.world()).unwrap().main_thread_ms;
+        frame_ms.push(now - last);
+        last = now;
+    });
+    let idle = light_stats::<Lit>(lit.world()).expect("a lit world");
+    let mut put = |name: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}"), value);
+    };
+    put("lit_time_ms", result.stream.time_ms);
+    put("lit_settled_ms", result.settled_ms);
+    put("lit_capped", result.capped as u8 as f64);
+    put("lit_chunks", chunk_count::<Lit>(&mut lit) as f64);
+    put("solves", stats.solves as f64);
+    put("coarse_solves", stats.coarse_solves as f64);
+    put(
+        "coarse_solve_us_per_chunk",
+        stats.coarse_solve_ms * 1000.0 / stats.coarse_solves.max(1) as f64,
+    );
+    put(
+        "coarse_lookups_per_chunk",
+        stats.coarse_lookups as f64 / stats.coarse_solves.max(1) as f64,
+    );
+    put(
+        "pool_solve_us_per_chunk",
+        stats.solve_ms * 1000.0 / stats.solves.max(1) as f64,
+    );
+    put("relights", stats.relights as f64);
+    put("slot_allocations", stats.slot_allocations as f64);
+    put("peak_slots", stats.peak_slots as f64);
+    put("evictions", stats.evictions as f64);
+    put("starved", stats.starved as f64);
+    put(
+        "coarse_copy_mib",
+        stats.coarse_copy_bytes as f64 / (1024.0 * 1024.0),
+    );
+    put(
+        "cpu_light_mib",
+        stats.light_bytes as f64 / (1024.0 * 1024.0),
+    );
+    put(
+        "gpu_light_mib_at_peak",
+        stats.peak_slots as f64 * SLOT_BYTES / (1024.0 * 1024.0),
+    );
+    put("rest_relights", (idle.relights - stats.relights) as f64);
+    put("rest_probes", (idle.probes - stats.probes) as f64);
+    put(
+        "rest_fill_probes",
+        (idle.fill_probes - stats.fill_probes) as f64,
+    );
+    put(
+        "rest_light_main_thread_us_per_frame",
+        frame_ms.iter().sum::<f64>() * 1000.0 / frame_ms.len() as f64,
+    );
+    frame_metrics(&format!("{prefix}.lit_rest"), &times, &mut metrics);
     metrics
 }
 
@@ -1351,7 +1961,9 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
         match key.rsplit('.').next().unwrap() {
-            "time_ms" | "near_time_ms" => percentile(values, 0.0),
+            "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
+                percentile(values, 0.0)
+            }
             "chunks_per_s" => percentile(values, 1.0),
             _ => percentile(values, 0.5),
         }
@@ -1452,6 +2064,12 @@ fn run_all(only: Option<&str>) -> Metrics {
         scenario_stream_in_lod::<LodWorld<true>>("stream_in_lod_hinted")
     });
     #[cfg(feature = "light_propagation")]
+    step("caves", CAVE_RUNS, &scenario_caves);
+    #[cfg(feature = "light_propagation")]
+    if only.is_some_and(|only| only.split(',').any(|s| s == "lod_scale")) {
+        step("lod_scale", 1, &scenario_lod_scale);
+    }
+    #[cfg(feature = "light_propagation")]
     step("edits_lit", RUNS, &scenario_edits_lit);
     #[cfg(feature = "light_propagation")]
     step("settings_lit", RUNS, &scenario_settings_lit);
@@ -1482,6 +2100,8 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_islands")
         || key.starts_with("edits_lit")
         || key.starts_with("settings_lit")
+        || key.starts_with("caves")
+        || key.starts_with("lod_scale")
     {
         return Gate::ReportOnly;
     }
@@ -1528,8 +2148,39 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
             change * 100.0
         );
     }
+    for (unlit, lit) in ON_GATE {
+        let (Some(b), Some(a)) = (before.get(unlit), after.get(lit)) else {
+            continue;
+        };
+        let change = (a - b) / b;
+        let verdict = if change > ON_GATE_LIMIT || a.is_nan() {
+            "REGRESSED"
+        } else {
+            "ok"
+        };
+        ok &= verdict != "REGRESSED";
+        println!(
+            "{:<38} {b:>12.3} {a:>12.3} {:>+8.1}%  on gate {verdict}",
+            format!("{lit} vs {unlit}"),
+            change * 100.0
+        );
+    }
     ok
 }
+
+/// The on gate: a lit stream, ended once light settles, against the same
+/// stream unlit in the before build, `light-baseline` for the gate. Each
+/// world is checked twice: until `light_is_settled`, sky probes and fill
+/// probes running on after the stream included, and until relights alone
+/// have settled.
+const ON_GATE: [(&str, &str); 4] = [
+    ("stream_in.time_ms", "stream_in_lit.settled_ms"),
+    ("stream_in_flat.time_ms", "stream_in_flat_lit.settled_ms"),
+    ("stream_in.time_ms", "stream_in_lit.relit_ms"),
+    ("stream_in_flat.time_ms", "stream_in_flat_lit.relit_ms"),
+];
+/// How much longer the on gate lets a lit stream take.
+const ON_GATE_LIMIT: f64 = 0.25;
 
 // --- Storage ---------------------------------------------------------------
 

@@ -791,9 +791,9 @@ mod tests {
             check::<u64>(5, 40, precision);
             check::<u64>(14, 40, precision);
             check::<u64>(16, 40, precision);
-            check::<u128>(17, 40, precision);
-            check::<u128>(30, 40, precision);
-            check::<u128>(32, 40, precision);
+            check::<crate::light::kernel::TwoWords>(17, 40, precision);
+            check::<crate::light::kernel::TwoWords>(30, 40, precision);
+            check::<crate::light::kernel::TwoWords>(32, 40, precision);
         }
     }
 }

@@ -404,3 +404,38 @@ fn light_is_settled_goes_true_once_arrivals_have_landed() {
     });
     assert_eq!(light_at(&mut app, lit).unwrap().voxel, 12.0);
 }
+
+#[test]
+fn changes_a_late_neighbour_brings_count_as_its_arrivals_and_shells() {
+    use crate::light_bench::{change_counts, count_changes};
+
+    let _holding = Hold::exclusive();
+    let (world, hold) = caves_world(14, Some(IVec3::X));
+    let mut app = app(world);
+    count_changes::<LampWorld>(app.world_mut());
+    update_until(&mut app, "all but the held chunk to settle", |app| {
+        settled_but(app, Some(IVec3::X))
+    });
+    let before = change_counts::<LampWorld>(app.world()).unwrap();
+    assert_eq!(before.arrivals as usize, spawned(&mut app).len() - 1);
+    assert!(before.shown > 0 && before.shown <= before.arrivals);
+
+    hold.unwrap().release();
+    update_until(&mut app, "the held chunk to settle", |app| {
+        settled_but(app, None)
+    });
+    let after = change_counts::<LampWorld>(app.world()).unwrap();
+    assert_eq!(after.arrivals, before.arrivals + 1);
+    assert!(after.changed_relights > before.changed_relights);
+    assert!(
+        after.visible_from_arrival > before.visible_from_arrival,
+        "no chunk's own faces showed the held chunk's light"
+    );
+    assert!(
+        after.visible_from_shell > before.visible_from_shell,
+        "no shell showed the held chunk's light"
+    );
+    // Sky light is off and nothing else changes.
+    assert_eq!(after.visible_from_column, 0);
+    assert_eq!(after.visible_from_other, 0);
+}

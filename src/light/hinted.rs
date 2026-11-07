@@ -25,7 +25,7 @@
 //!
 //! Hinted air holding no light entry has no light of its own to compare, so
 //! relights that would stop there pass on through it instead: see
-//! [`LightWork::pass_on`](super::relight::LightWork::pass_on).
+//! `LightWork::pass_on`.
 
 use std::sync::Arc;
 

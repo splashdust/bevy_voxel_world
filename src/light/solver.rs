@@ -38,7 +38,7 @@ use super::faces::{could_reach_sooner, Face, FaceHashes};
 use super::fill::seed::{CellsAround, FillSeeds, Seeding};
 use super::fill::FillCells;
 use super::inputs::{LightInputs, Occupancy, Rescan};
-use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
@@ -512,7 +512,7 @@ thread_local! {
     /// Each thread's boxes, one per row width, kept between solves so a solve
     /// allocates no box.
     static ONE_WORD_BOX: RefCell<Option<LightBox<u64>>> = const { RefCell::new(None) };
-    static TWO_WORD_BOX: RefCell<Option<LightBox<u128>>> = const { RefCell::new(None) };
+    static TWO_WORD_BOX: RefCell<Option<LightBox<TwoWords>>> = const { RefCell::new(None) };
 }
 
 /// Solves voxel light for the chunk at the centre of `neighbours`. Returns it

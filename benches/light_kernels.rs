@@ -23,7 +23,7 @@
 //! terrain and on
 //! chunks of random materials, with emissive lists of several lengths.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,170 +35,14 @@ use bevy_voxel_world::light_bench::{
     emissive_scan, FillField, KernelBox, SeedBox, SlotBox,
 };
 use bevy_voxel_world::prelude::{LightShape, WorldVoxel};
-use noise::{NoiseFn, Perlin};
 
 const AB_ROUNDS: usize = 3;
 const REPEATS: usize = 5;
 
-// --- The reference scene -----------------------------------------------------
+#[path = "common/light_scene.rs"]
+mod light_scene;
 
-const CAVE_FLOOR: i32 = -480;
-
-/// A box, minimum inclusive and maximum exclusive.
-#[derive(Clone, Copy)]
-struct Bounds([i32; 3], [i32; 3]);
-
-impl Bounds {
-    fn contains(&self, p: IVec3) -> bool {
-        (0..3).all(|axis| p[axis] >= self.0[axis] && p[axis] < self.1[axis])
-    }
-}
-
-struct Ellipsoid([f64; 3], [f64; 3]);
-
-impl Ellipsoid {
-    fn contains(&self, p: IVec3) -> bool {
-        (0..3)
-            .map(|axis| ((p[axis] as f64 + 0.5 - self.0[axis]) / self.1[axis]).powi(2))
-            .sum::<f64>()
-            < 1.0
-    }
-}
-
-/// A disc of ground forced to one height: x, z, flat radius, blend radius,
-/// height.
-type Plateau = (f64, f64, f64, f64, f64);
-
-const PLATEAUS: [Plateau; 6] = [
-    (0.5, 0.5, 24.0, 190.0, 160.0),
-    (-319.5, 0.5, 20.0, 120.0, 120.0),
-    (320.5, 0.5, 64.0, 150.0, 40.0),
-    (0.0, 360.0, 90.0, 170.0, 32.0),
-    (-340.0, 360.0, 90.0, 170.0, 30.0),
-    (-320.0, 128.0, 16.0, 56.0, 48.0),
-];
-const DEEP_CAVERN: Ellipsoid = Ellipsoid([0.5, -176.0, 0.5], [110.0, 36.0, 110.0]);
-const REF_CAVERN: Ellipsoid = Ellipsoid([-319.5, -10.0, 0.5], [70.0, 30.0, 70.0]);
-const POCKET: Bounds = Bounds([-326, 40, 122], [-314, 46, 134]);
-const TORCH_ROOM: Bounds = Bounds([300, -40, -340], [340, -20, -300]);
-const MESA: Bounds = Bounds([-48, 32, 290], [48, 84, 340]);
-const SLAB: Bounds = Bounds([-48, 72, 340], [48, 84, 404]);
-const ISLAND: Bounds = Bounds([-390, 150, 310], [-290, 176, 410]);
-const QUIET: [Bounds; 7] = [
-    Bounds([-126, -228, -126], [126, -124, 126]),
-    Bounds([-16, -140, -16], [16, 168, 16]),
-    Bounds([-406, -56, -86], [-234, 36, 86]),
-    Bounds([-336, 20, -16], [-304, 128, 16]),
-    Bounds([-342, 24, 112], [-298, 60, 144]),
-    Bounds([256, -304, -64], [384, 48, 64]),
-    Bounds([284, -56, -356], [356, -4, -284]),
-];
-const TORCH_COLUMNS: [(i32, i32); 5] =
-    [(70, 0), (-70, 0), (0, 70), (0, -70), (320, -320)];
-
-/// The light reference scene, with an emissive voxel on one in 32 exposed
-/// floor voxels.
-struct Scene {
-    hills: Perlin,
-    region: Perlin,
-    big: Perlin,
-    worm_a: Perlin,
-    worm_b: Perlin,
-    surfaces: HashMap<(i32, i32), i32>,
-}
-
-impl Scene {
-    fn new() -> Self {
-        Self {
-            hills: Perlin::new(11),
-            region: Perlin::new(19),
-            big: Perlin::new(23),
-            worm_a: Perlin::new(37),
-            worm_b: Perlin::new(41),
-            surfaces: HashMap::new(),
-        }
-    }
-
-    fn surface(&mut self, x: i32, z: i32) -> i32 {
-        if let Some(height) = self.surfaces.get(&(x, z)) {
-            return *height;
-        }
-        let (fx, fz) = (x as f64, z as f64);
-        let mut height = 32.0
-            + self.hills.get([fx / 160.0, fz / 160.0]) * 18.0
-            + self.hills.get([fx / 47.0, fz / 47.0]) * 4.0;
-        for (px, pz, flat, blend, level) in PLATEAUS {
-            let t = (((fx - px).hypot(fz - pz) - flat) / (blend - flat)).clamp(0.0, 1.0);
-            let t = t * t * (3.0 - 2.0 * t);
-            height = level + (height - level) * t;
-        }
-        let height = height.floor() as i32;
-        self.surfaces.insert((x, z), height);
-        height
-    }
-
-    fn noise_cave(&self, p: IVec3) -> bool {
-        let (x, y, z) = (p.x as f64, p.y as f64, p.z as f64);
-        if self.region.get([x / 220.0, y / 160.0, z / 220.0]) < -0.05 {
-            return false;
-        }
-        if self.big.get([x / 72.0, y / 48.0, z / 72.0]) > 0.42 {
-            return true;
-        }
-        let at = [x / 36.0, y / 28.0, z / 36.0];
-        self.worm_a.get(at).abs() < 0.04 && self.worm_b.get(at).abs() < 0.04
-    }
-
-    fn placed_hollow(&self, p: IVec3) -> bool {
-        (p.x == 0 && p.z == 0 && p.y >= -141)
-            || (p.x == -320 && p.z == 0 && p.y >= 19)
-            || (p.x == 320 && p.z == 0 && p.y >= 32)
-            || DEEP_CAVERN.contains(p)
-            || REF_CAVERN.contains(p)
-            || POCKET.contains(p)
-            || TORCH_ROOM.contains(p)
-            || (p.y >= -288 && p.y < 32 && (p.x - 320).pow(2) + p.z.pow(2) < 48 * 48)
-    }
-
-    fn floating_solid(&self, p: IVec3) -> bool {
-        if MESA.contains(p) || SLAB.contains(p) {
-            return true;
-        }
-        ISLAND.contains(p)
-            && p.y as f64
-                >= 160.0 + 8.0 * self.hills.get([p.x as f64 / 16.0, p.z as f64 / 16.0])
-    }
-
-    fn open(&mut self, p: IVec3) -> bool {
-        let surface = self.surface(p.x, p.z);
-        if p.y >= surface {
-            return !self.floating_solid(p);
-        }
-        self.placed_hollow(p)
-            || (p.y >= CAVE_FLOOR
-                && !QUIET.iter().any(|quiet| quiet.contains(p))
-                && self.noise_cave(p))
-    }
-
-    /// Whether the voxel at `p`, which must be solid, is emissive.
-    fn emissive(&mut self, p: IVec3) -> bool {
-        if !self.open(p + IVec3::Y) {
-            return false;
-        }
-        TORCH_COLUMNS.contains(&(p.x, p.z))
-            || (hash3(p).is_multiple_of(32)
-                && !QUIET.iter().any(|quiet| quiet.contains(p)))
-    }
-}
-
-fn hash3(p: IVec3) -> u32 {
-    let mut h = (p.x as u32).wrapping_mul(0x8da6_b343)
-        ^ (p.y as u32).wrapping_mul(0xd816_3841)
-        ^ (p.z as u32).wrapping_mul(0xcb1a_b31f);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x5bd1_e995);
-    h ^ (h >> 15)
-}
+use light_scene::{Scene, SCENE_TOP};
 
 /// The scene's voxels, emissive voxels and voxels with direct sky around a
 /// chunk, out to 32 voxels past its faces, enough for any reach the kernel
@@ -215,8 +59,6 @@ const DUMP_SIDE: i32 = 32 + 2 * DUMP_REACH;
 /// How many chunks above a chunk a column must be clear in to have direct
 /// sky, the default sky clearance.
 const SKY_CLEARANCE: i32 = 16;
-/// Above this height the scene holds no solid voxel.
-const SCENE_TOP: i32 = 200;
 
 impl Dump {
     fn of(scene: &mut Scene, chunk: IVec3) -> Self {

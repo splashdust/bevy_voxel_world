@@ -114,6 +114,105 @@ impl Row for u128 {
     }
 }
 
+/// A row of two `u64`s, low word first, for boxes past reach 16.
+///
+/// Its words sit side by side in one 16-byte value, so a step of the
+/// kernel works on both at once in one SIMD register, where a `u128` is
+/// two scalar registers and its shifts need several instructions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(C, align(16))]
+pub(crate) struct Wide([u64; 2]);
+
+/// The kernel's rows past reach 16.
+pub(crate) type TwoWords = Wide;
+
+impl BitOr for Wide {
+    type Output = Self;
+    #[inline(always)]
+    fn bitor(self, other: Self) -> Self {
+        Wide([self.0[0] | other.0[0], self.0[1] | other.0[1]])
+    }
+}
+
+impl BitOrAssign for Wide {
+    #[inline(always)]
+    fn bitor_assign(&mut self, other: Self) {
+        *self = *self | other;
+    }
+}
+
+impl BitAnd for Wide {
+    type Output = Self;
+    #[inline(always)]
+    fn bitand(self, other: Self) -> Self {
+        Wide([self.0[0] & other.0[0], self.0[1] & other.0[1]])
+    }
+}
+
+impl BitAndAssign for Wide {
+    #[inline(always)]
+    fn bitand_assign(&mut self, other: Self) {
+        *self = *self & other;
+    }
+}
+
+impl Not for Wide {
+    type Output = Self;
+    #[inline(always)]
+    fn not(self) -> Self {
+        Wide([!self.0[0], !self.0[1]])
+    }
+}
+
+impl Shl<usize> for Wide {
+    type Output = Self;
+    #[inline(always)]
+    fn shl(self, n: usize) -> Self {
+        let [low, high] = self.0;
+        match n {
+            0 => self,
+            1..=63 => Wide([low << n, high << n | low >> (64 - n)]),
+            64..=127 => Wide([0, low << (n - 64)]),
+            _ => Wide([0, 0]),
+        }
+    }
+}
+
+impl Shr<usize> for Wide {
+    type Output = Self;
+    #[inline(always)]
+    fn shr(self, n: usize) -> Self {
+        let [low, high] = self.0;
+        match n {
+            0 => self,
+            1..=63 => Wide([low >> n | high << (64 - n), high >> n]),
+            64..=127 => Wide([high >> (n - 64), 0]),
+            _ => Wide([0, 0]),
+        }
+    }
+}
+
+impl Row for Wide {
+    const BITS: usize = 128;
+    const ZERO: Self = Wide([0, 0]);
+    const ONE: Self = Wide([1, 0]);
+
+    #[inline]
+    fn low_u32(self) -> u32 {
+        self.0[0] as u32
+    }
+
+    #[inline]
+    fn from_u32(column: u32) -> Self {
+        Wide([column as u64, 0])
+    }
+
+    #[inline]
+    fn from_u64(column: u64) -> Self {
+        Wide([column, 0])
+    }
+}
+
 /// A source of light in a box: the voxel at `x`, `y` and `z` of the box, and
 /// how many steps from a source at the top level its light starts at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -629,4 +728,113 @@ fn ones<R: Row>(low: usize, count: usize) -> R {
         !(!R::ZERO << count)
     };
     bits << low
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prelude::LightPrecision;
+
+    /// A xorshift generator, so the cases are the same every run.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    fn wide(value: u128) -> Wide {
+        Wide([value as u64, (value >> 64) as u64])
+    }
+
+    #[test]
+    fn a_wide_row_computes_as_a_u128_does() {
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..1000 {
+            let a = (random.next() as u128) << 64 | random.next() as u128;
+            let b = (random.next() as u128) << 64 | random.next() as u128;
+            assert_eq!(wide(a | b), wide(a) | wide(b));
+            assert_eq!(wide(a & b), wide(a) & wide(b));
+            assert_eq!(wide(!a), !wide(a));
+            for shift in 0..=128 {
+                let expected = |value: Option<u128>| wide(value.unwrap_or(0));
+                assert_eq!(wide(a) << shift, expected(a.checked_shl(shift as u32)));
+                assert_eq!(wide(a) >> shift, expected(a.checked_shr(shift as u32)));
+            }
+        }
+    }
+
+    /// Spreads light of `reach` in `shape` through a box whose open voxels,
+    /// lit voxels and seeds come from the generator seeded with `random`, in
+    /// rows of `R`. Returns the levels and face hashes it wrote.
+    fn spread_random<R: Row>(
+        reach: u32,
+        shape: LightShape,
+        random: u64,
+    ) -> (Vec<Plane>, [u64; 6]) {
+        let mut random = Random(random);
+        let mut light_box = LightBox::<R>::new(reach);
+        let side = 32 + 2 * reach as usize;
+        let mut lit_rows = Vec::new();
+        for row in light_box.open_rows_mut() {
+            let mut open = R::ZERO;
+            let mut lit = R::ZERO;
+            for z in 0..side {
+                // Mostly open, so light gets far.
+                if !random.next().is_multiple_of(8) {
+                    open |= R::ONE << z;
+                    if random.next().is_multiple_of(512) {
+                        lit |= R::ONE << z;
+                    }
+                }
+            }
+            *row = open;
+            lit_rows.push(lit);
+        }
+        light_box.lit_rows_mut().copy_from_slice(&lit_rows);
+        let mut seeds: Vec<Seed> = (0..20)
+            .map(|_| Seed {
+                x: (random.next() % side as u64) as u8,
+                y: (random.next() % side as u64) as u8,
+                z: (random.next() % side as u64) as u8,
+                start: (random.next() % 4) as u8,
+            })
+            .collect();
+        seeds.sort_by_key(|seed| seed.start);
+        let mut planes = [[0; CHUNK * CHUNK]; 4];
+        let mut faces = [0; 6];
+        light_box.spread(
+            &seeds,
+            true,
+            &[],
+            shape,
+            &LevelScale::new(reach, LightPrecision::Steps16),
+            &mut planes,
+            &mut faces,
+        );
+        (planes.to_vec(), faces)
+    }
+
+    #[test]
+    fn boxes_of_wide_rows_spread_as_boxes_of_u128_rows_do() {
+        for (reach, shape) in [
+            (17, LightShape::Round),
+            (30, LightShape::Round),
+            (30, LightShape::Diamond),
+            (32, LightShape::Round),
+        ] {
+            for case in 0..3 {
+                let random = 0x2545_f491_4f6c_dd1d ^ (case << 8 | reach as u64);
+                assert!(
+                    spread_random::<u128>(reach, shape, random)
+                        == spread_random::<Wide>(reach, shape, random),
+                    "reach {reach}, {shape:?}, case {case}"
+                );
+            }
+        }
+    }
 }

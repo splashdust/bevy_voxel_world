@@ -10,6 +10,7 @@ use std::sync::Arc;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+pub use super::census::ChangeCounts;
 use super::config::{LightPrecision, PathFill};
 use super::faces::{Face, FaceHashes};
 use super::fill::paths::PathField;
@@ -17,8 +18,9 @@ use super::fill::seed::{CellsAround, Seeding};
 use super::fill::PositionCells;
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
-use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
+use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
@@ -35,7 +37,7 @@ const CHUNK: usize = CHUNK_SIZE_U as usize;
 /// A box of one row width.
 enum Rows {
     OneWord(LightBox<u64>),
-    TwoWord(LightBox<u128>),
+    TwoWord(LightBox<TwoWords>),
 }
 
 /// A kernel box filled once, which can be spread again and again.
@@ -100,7 +102,7 @@ impl KernelBox {
             copy_rows(&open, light_box.open_rows_mut());
             Rows::OneWord(light_box)
         } else {
-            let mut light_box = LightBox::<u128>::new(reach);
+            let mut light_box = LightBox::<TwoWords>::new(reach);
             copy_rows(&open, light_box.open_rows_mut());
             Rows::TwoWord(light_box)
         };
@@ -238,7 +240,7 @@ impl FillField {
 /// The open rows of a sky light box, at one row width.
 enum OpenRows {
     OneWord(Vec<u64>),
-    TwoWord(Vec<u128>),
+    TwoWord(Vec<TwoWords>),
 }
 
 /// What a solve seeds sky fill from: the cells of the 27 positions around a
@@ -271,7 +273,9 @@ impl SeedBox {
             copy_rows(&open, &mut one_word);
             OpenRows::OneWord(one_word)
         } else {
-            OpenRows::TwoWord(open)
+            let mut two_words = vec![TwoWords::ZERO; side * side];
+            copy_rows(&open, &mut two_words);
+            OpenRows::TwoWord(two_words)
         };
         Self {
             around,
@@ -471,6 +475,15 @@ pub struct LightStats {
     pub entry_bytes: u64,
     /// Hinted air holding no light entry that the world view keeps now.
     pub air_positions: u64,
+    /// The most slots chunks held at once.
+    pub peak_slots: u64,
+    /// Chunks needing a slot that have none now.
+    pub starved: u64,
+    /// What level-0 chunks' light keeps on the CPU now: each channel's bit
+    /// planes where it isn't one level.
+    pub light_bytes: u64,
+    /// Level-0 chunks in the world view now with both open and solid voxels.
+    pub mixed_chunks: u64,
     /// Walks `light_at` ran on request, where nothing renders.
     pub request_walks: u64,
     /// Voxel lookups those walks made.
@@ -508,6 +521,21 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
             }
         }
         (entries, bytes as u64, view.air.len() as u64)
+    };
+    let (light_bytes, mixed_chunks) = {
+        let view = settings.view.read();
+        let mut bytes = 0;
+        let mut mixed = 0;
+        for chunk in view.values().filter(|chunk| !chunk.is_entry()) {
+            let light = &chunk.light;
+            for channel in [&light.sky, &light.voxel] {
+                if let ChannelLight::Planes(planes) = channel {
+                    bytes += size_of_val(&**planes);
+                }
+            }
+            mixed += matches!(light.inputs.occupancy, Occupancy::Mixed(_)) as u64;
+        }
+        (bytes as u64, mixed)
     };
     Some(LightStats {
         slot_allocations: slots.allocations,
@@ -552,10 +580,39 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         entries,
         entry_bytes,
         air_positions,
+        peak_slots: slots.peak_held,
+        starved: route.map_or(0, |route| route.starved_count() as u64),
+        light_bytes,
+        mixed_chunks,
         request_walks: counters.requests.walks.load(Ordering::Relaxed),
         request_lookups: counters.requests.lookups.load(Ordering::Relaxed),
         walk_cache_bytes: settings.walks.lock().unwrap().bytes() as u64,
     })
+}
+
+/// Whether world `C` has no relight queued, running or waiting to land.
+/// Unlike `VoxelWorld::light_is_settled`, sky probes and fill probes may
+/// still run. True in a world with no light.
+pub fn relights_are_settled<C: VoxelWorldConfig>(world: &World) -> bool {
+    world
+        .get_resource::<LightWork<C>>()
+        .is_none_or(|work| work.is_settled())
+}
+
+/// Turns on counting how often world `C`'s shown light changes after chunks
+/// first show it, and why: see [`change_counts`]. Does nothing in a world
+/// with no light.
+pub fn count_changes<C: VoxelWorldConfig>(world: &mut World) {
+    if let Some(mut work) = world.get_resource_mut::<LightWork<C>>() {
+        work.census.get_or_insert_with(Default::default);
+    }
+}
+
+/// The changes to world `C`'s shown light counted since
+/// [`count_changes`] turned counting on.
+pub fn change_counts<C: VoxelWorldConfig>(world: &World) -> Option<ChangeCounts> {
+    let work = world.get_resource::<LightWork<C>>()?;
+    work.census.as_ref().map(|census| census.counts)
 }
 
 /// Solves sky light and voxel light again for every level-0 chunk of world `C` with light,

@@ -42,7 +42,7 @@ use bevy::prelude::*;
 
 use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
-use super::kernel::{LightBox, Plane, Row, Seed, MAX_ONE_WORD_REACH};
+use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::sky::{Columns, Hinted, SkyRule, WALK_BUDGET};
 use super::slot::{
@@ -481,7 +481,7 @@ thread_local! {
     /// Each thread's boxes for coarse chunks, one per row width and reach,
     /// kept apart from level 0's so neither replaces the other's.
     static ONE_WORD_BOXES: RefCell<Vec<LightBox<u64>>> = const { RefCell::new(Vec::new()) };
-    static TWO_WORD_BOXES: RefCell<Vec<LightBox<u128>>> = const { RefCell::new(Vec::new()) };
+    static TWO_WORD_BOXES: RefCell<Vec<LightBox<TwoWords>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Spreads one channel through the `open` cells, from the `lit` cells and

@@ -169,6 +169,8 @@ pub(crate) struct SlotCounters {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
+    /// The most slots held at once.
+    pub peak_held: u64,
 }
 
 /// What the render world writes into a slot.
@@ -715,6 +717,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
+    /// How many chunks need a slot and have none.
+    pub fn starved_count(&self) -> usize {
+        self.starved.len()
+    }
+
     /// Whether a chunk needing a slot waits for one that is free.
     pub fn wants_refill(&self) -> bool {
         !self.starved.is_empty() && self.has_free_slot()
@@ -888,6 +895,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         };
         self.holders.insert(slot, entity);
         self.counters.allocations += 1;
+        self.counters.peak_held = self.counters.peak_held.max(self.holders.len() as u64);
         Some(slot)
     }
 

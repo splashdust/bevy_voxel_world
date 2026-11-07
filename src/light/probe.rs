@@ -569,7 +569,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             }
         }
         for position in probes.take_relights() {
-            work.trigger(position);
+            work.trigger_column(position);
         }
         budget.set_finished_last_frame(JobKind::SkyProbe, finished);
         budget.set_running(JobKind::SkyProbe, probes.running.len());
