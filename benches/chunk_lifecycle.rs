@@ -1390,8 +1390,10 @@ const CAVE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(feature = "light_propagation")]
 const SLOT_BYTES: f64 = 39_304.0;
 
-/// The thresholds of `caves`, set from its first runs in real chunk tasks;
-/// see `scenario_caves`. Each is the most a metric may reach.
+/// The thresholds of `caves`; see `scenario_caves`. Each is the most a metric
+/// may reach. The two counts sit about 20% above a run on an idle machine
+/// (4.55 solves per arrival, 1.93 visible changes per shown chunk); the costs
+/// have no threshold.
 #[cfg(feature = "light_propagation")]
 const CAVE_GATES: [(&str, f64); 4] = [
     ("solves_per_arrival", CAVE_SOLVES_PER_ARRIVAL),
@@ -1400,9 +1402,9 @@ const CAVE_GATES: [(&str, f64); 4] = [
     ("relight_us_per_relight", CAVE_RELIGHT_US),
 ];
 #[cfg(feature = "light_propagation")]
-const CAVE_SOLVES_PER_ARRIVAL: f64 = f64::INFINITY;
+const CAVE_SOLVES_PER_ARRIVAL: f64 = 5.5;
 #[cfg(feature = "light_propagation")]
-const CAVE_VISIBLE_PER_SHOWN: f64 = f64::INFINITY;
+const CAVE_VISIBLE_PER_SHOWN: f64 = 2.4;
 #[cfg(feature = "light_propagation")]
 const CAVE_SOLVE_US: f64 = f64::INFINITY;
 #[cfg(feature = "light_propagation")]
@@ -2297,12 +2299,14 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
             change * 100.0
         );
     }
-    for (unlit, lit) in ON_GATE {
+    for (unlit, lit, gated) in ON_GATE {
         let (Some(b), Some(a)) = (before.get(unlit), after.get(lit)) else {
             continue;
         };
         let change = (a - b) / b;
-        let verdict = if change > ON_GATE_LIMIT || a.is_nan() {
+        let verdict = if !gated {
+            "report"
+        } else if change > ON_GATE_LIMIT || a.is_nan() {
             "REGRESSED"
         } else {
             "ok"
@@ -2317,16 +2321,24 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
     ok
 }
 
-/// The on gate: a lit stream, ended once light settles, against the same
-/// stream unlit in the before build, `light-baseline` for the gate. Each
-/// world is checked twice: until `light_is_settled`, sky probes and fill
-/// probes running on after the stream included, and until relights alone
-/// have settled.
-const ON_GATE: [(&str, &str); 4] = [
-    ("stream_in.time_ms", "stream_in_lit.settled_ms"),
-    ("stream_in_flat.time_ms", "stream_in_flat_lit.settled_ms"),
-    ("stream_in.time_ms", "stream_in_lit.relit_ms"),
-    ("stream_in_flat.time_ms", "stream_in_flat_lit.relit_ms"),
+/// The on gate: a lit stream against the same stream unlit in the before
+/// build, `light-baseline` for the gate, as (unlit, lit, gated). The gate
+/// binds the time until relights alone have settled. The time until
+/// `light_is_settled`, which adds the sky probes and fill probes running on
+/// after the stream, is only reported.
+const ON_GATE: [(&str, &str, bool); 4] = [
+    ("stream_in.time_ms", "stream_in_lit.relit_ms", true),
+    (
+        "stream_in_flat.time_ms",
+        "stream_in_flat_lit.relit_ms",
+        true,
+    ),
+    ("stream_in.time_ms", "stream_in_lit.settled_ms", false),
+    (
+        "stream_in_flat.time_ms",
+        "stream_in_flat_lit.settled_ms",
+        false,
+    ),
 ];
 /// How much longer the on gate lets a lit stream take.
 const ON_GATE_LIMIT: f64 = 0.25;
