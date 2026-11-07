@@ -205,6 +205,13 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 .all(|(position, chunk)| chunk.next(*position, &none).is_none())
     }
 
+    /// Whether every running probe's task has finished, for its read to be
+    /// collected on the next frame.
+    #[cfg(test)]
+    pub(crate) fn tasks_finished(&self) -> bool {
+        self.running.iter().all(|probe| probe.task.is_finished())
+    }
+
     /// Checks the column answer of a chunk task's `solved` light for the chunk
     /// `entity` at `position` against the sky record before it lands, and
     /// records the chunk's own mask.

@@ -119,6 +119,13 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             && self.wanted == 0
     }
 
+    /// Whether every running fill probe's task has finished, for its read to
+    /// be collected on the next frame.
+    #[cfg(test)]
+    pub(crate) fn tasks_finished(&self) -> bool {
+        self.running.iter().all(|probe| probe.task.is_finished())
+    }
+
     /// Starts again from an empty field of `field`, as after `reset_light`.
     pub fn reset(&mut self, field: SkyFillField) {
         *self = Self::new(field, self.cells.clone());

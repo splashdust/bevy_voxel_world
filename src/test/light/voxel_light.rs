@@ -623,9 +623,11 @@ fn no_reading_is_brighter_than_the_reference() {
                 assert!(level <= truth, "{level} at {p} is brighter than {truth}");
             }
         }
+        // A Ready chunk's light can still be waiting to land, behind the
+        // landing budget of a slow frame.
         let all_ready = checked.iter().all(|chunk| {
             chunk_status::<LampWorld>(&mut app, *chunk) == Some(ChunkStatus::Ready)
-        });
+        }) && super::sky_light::light_is_settled(&mut app);
         ready_frames = if all_ready { ready_frames + 1 } else { 0 };
     }
     for chunk in &checked {

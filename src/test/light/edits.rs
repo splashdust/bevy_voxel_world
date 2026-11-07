@@ -266,12 +266,50 @@ pub(super) fn paced_update(app: &mut App) {
     app.update();
 }
 
+/// Whether every chunk task, relight and probe running in `app` has finished.
+fn tasks_finished(app: &mut App) -> bool {
+    use crate::chunk_lifecycle::{ChunkState, ChunkStateOf};
+    use crate::light::{fill::driver::SkyFillWork, probe::SkyProbes, relight::LightWork};
+
+    let world = app.world_mut();
+    let chunks_finished =
+        world
+            .query::<&ChunkStateOf<LampWorld>>()
+            .iter(world)
+            .all(|state| match state {
+                ChunkState::Generating { task, .. } => task.is_finished(),
+                _ => true,
+            });
+    chunks_finished
+        && world.resource::<LightWork<LampWorld>>().tasks_finished()
+        && world
+            .get_resource::<SkyProbes<LampWorld>>()
+            .is_none_or(|probes| probes.tasks_finished())
+        && world
+            .get_resource::<SkyFillWork<LampWorld>>()
+            .is_none_or(|fill| fill.tasks_finished())
+}
+
+/// One app update, once every task running has finished, as a frame long
+/// enough for the tasks started on the frame before.
+///
+/// The task pool is shared by every test in the process, so a fixed wait can
+/// end before a task even starts.
+pub(super) fn framed_update(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !tasks_finished(app) {
+        assert!(Instant::now() < deadline, "timed out waiting for tasks");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    app.update();
+}
+
 #[test]
 fn a_single_voxel_edits_light_lands_within_2_frames() {
     let mut app = app(world());
     settle(&mut app, "the world to stream in");
     for _ in 0..5 {
-        paced_update(&mut app);
+        framed_update(&mut app);
     }
     let edit = [place(IVec3::new(9, 4, 8))];
     set_voxels(&mut app, &edit);
@@ -281,7 +319,7 @@ fn a_single_voxel_edits_light_lands_within_2_frames() {
     while !settled_but(&mut app, None) {
         frames += 1;
         assert!(frames <= 2, "the edit's light hasn't landed by frame 2");
-        paced_update(&mut app);
+        framed_update(&mut app);
     }
     assert_matches(
         &mut app,

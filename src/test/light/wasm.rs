@@ -8,7 +8,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use super::edits::{
-    assert_matches, dig, edited, paced_update, place, reference, set_voxels, settle,
+    assert_matches, dig, edited, framed_update, place, reference, set_voxels, settle,
     world,
 };
 use super::sky_light::{settled_but, sky_light};
@@ -38,7 +38,7 @@ fn a_single_voxel_edits_light_lands_within_2_frames() {
     let mut app = main_thread_app(world());
     settle(&mut app, "the world to stream in");
     for _ in 0..5 {
-        paced_update(&mut app);
+        framed_update(&mut app);
     }
     let edit = [place(IVec3::new(9, 4, 8))];
     set_voxels(&mut app, &edit);
@@ -48,7 +48,7 @@ fn a_single_voxel_edits_light_lands_within_2_frames() {
     while !settled_but(&mut app, None) {
         frames += 1;
         assert!(frames <= 2, "the edit's light hasn't landed by frame 2");
-        paced_update(&mut app);
+        framed_update(&mut app);
     }
     assert_matches(
         &mut app,

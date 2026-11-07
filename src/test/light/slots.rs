@@ -140,9 +140,26 @@ fn the_slot_rule_counts_voxels_that_touch_a_solid_only_at_an_edge_or_corner() {
         light: Some(lit(LightShape::Diamond)),
         ..default()
     };
+    // Every path from the lamp to the solid's corner crosses chunks of the
+    // 2×2×2 block between them, which read as solid until they load.
+    let block: Vec<IVec3> = (0..8)
+        .map(|i| IVec3::new(i & 1, (i >> 1) & 1, (i >> 2) & 1))
+        .collect();
+    let run_until_lit = |app: &mut App| {
+        run_until(
+            app,
+            "the block between the lamp and the solid to load",
+            |app| {
+                block.iter().all(|position| {
+                    chunk_status::<LampWorld>(app, *position) == Some(ChunkStatus::Ready)
+                })
+            },
+        );
+        run_until_shown(app, &[IVec3::ZERO, IVec3::ONE]);
+    };
     let in_reach = IVec3::new(33, 33, 35);
     let mut near = app(one_voxel(in_reach));
-    run_until_shown(&mut near, &[IVec3::ZERO, IVec3::ONE]);
+    run_until_lit(&mut near);
     assert_eq!(light_at(&mut near, corner).unwrap().voxel, 1.0);
     assert_eq!(
         light_at(&mut near, solid + IVec3::new(1, 1, 0))
@@ -156,7 +173,7 @@ fn the_slot_rule_counts_voxels_that_touch_a_solid_only_at_an_edge_or_corner() {
     // One voxel farther, the lamp lights none of them, so every voxel touching
     // the solid sees one level, though the chunk's light varies elsewhere.
     let mut farther = app(one_voxel(in_reach + IVec3::Z));
-    run_until_shown(&mut farther, &[IVec3::ZERO, IVec3::ONE]);
+    run_until_lit(&mut farther);
     assert_eq!(light_at(&mut farther, corner).unwrap().voxel, 0.0);
     assert!(light_at(&mut farther, IVec3::splat(31)).unwrap().voxel > 0.0);
     assert_eq!(tag_of(&mut farther, IVec3::ZERO), Some(0));
