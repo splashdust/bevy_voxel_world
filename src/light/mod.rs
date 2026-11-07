@@ -28,6 +28,7 @@ pub(crate) mod material;
 pub(crate) mod probe;
 pub(crate) mod record;
 pub(crate) mod relight;
+mod request;
 pub(crate) mod route;
 pub(crate) mod sky;
 pub(crate) mod slot;
@@ -98,6 +99,8 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     /// columns the sky probes have yet to take on: see
     /// [`hinted::follow`].
     pub new_air: Mutex<Vec<IVec3>>,
+    /// The answers of `light_at`'s walks on request.
+    pub walks: Mutex<request::WalkCache>,
     _world: PhantomData<C>,
 }
 
@@ -217,35 +220,211 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     }
 
     /// The light at the voxel at `position`, from the finest published chunk
-    /// covering it whose light has landed, or `None` if none has. Where no
-    /// chunk's has, a light entry holding the voxel gives its light.
+    /// covering it whose light has landed. Where no chunk's has, a light
+    /// entry holding the voxel gives its light, and otherwise the fill hint
+    /// of its level-0 chunk. `None` if nothing says what is there.
     ///
     /// A level-0 chunk reads its light in the world view and its published
-    /// voxels. A coarse chunk reads the cell holding the voxel in the copy of
-    /// its slot it keeps in `route`, or else the levels its tag holds, from
-    /// `work`.
+    /// voxels. A chunk of air with no solid in its padding takes no sky
+    /// fill, so its stored light can miss what the field's cell knows: it
+    /// reads the larger of the two.
+    ///
+    /// A coarse chunk reads the cell holding the voxel in the copy of its
+    /// slot it keeps in `route`, or else the levels its tag holds, from
+    /// `work`. A solid cell reads the brightest of its six neighbours. A
+    /// coarse chunk with no voxels to mesh, and hinted air holding no light
+    /// entry, walk the column above the voxel on request: see [`request`].
+    #[allow(clippy::too_many_arguments)]
     pub fn light_at(
         &self,
         chunk_map: &ChunkMapData<C::MaterialIndex>,
         work: &LightWork<C>,
         route: Option<&route::LightRoute<C>>,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
         position: IVec3,
     ) -> Option<LightLevels> {
-        let found = chunk_map.covering(position).find_map(|chunk| {
+        for chunk in chunk_map.covering(position) {
             let key = chunk.key;
-            if !takes_coarse_path(key, chunk.data_shape) {
-                let light = self.view.read().get(&key.position)?.light.clone();
-                let voxel = chunk.get_voxel_at_world_position(position)?;
-                let local = (position - key.min_voxel()).as_uvec3();
-                return Some(light.levels_at(local, voxel, &self.task.emission));
+            let found = if takes_coarse_path(key, chunk.data_shape) {
+                self.coarse_light_at(chunk, work, route, world, edits, position)
+            } else {
+                self.level_0_light_at(chunk, position)
+            };
+            if found.is_some() {
+                return found;
             }
-            let width = 1 << key.lod_level;
-            let cell = ((position - key.min_voxel()) / width + 1).as_uvec3();
-            route
-                .and_then(|route| route.coarse_cell(chunk.entity, cell))
-                .or_else(|| work.coarse_levels(chunk.entity))
+        }
+        self.entry_light_at(position)
+            .or_else(|| self.hinted_light_at(position, world, edits))
+    }
+
+    /// The light the level-0 `chunk` holds at the voxel at `position`, once
+    /// its light has landed.
+    fn level_0_light_at(
+        &self,
+        chunk: &crate::chunk::ChunkData<C::MaterialIndex>,
+        position: IVec3,
+    ) -> Option<LightLevels> {
+        let key = chunk.key;
+        let light = self.view.read().get(&key.position)?.light.clone();
+        let voxel = chunk.get_voxel_at_world_position(position)?;
+        let local = (position - key.min_voxel()).as_uvec3();
+        let levels = light.levels_at(local, voxel, &self.task.emission);
+        // A chunk of air whose open voxels all have direct sky reads 15
+        // anyway, so the larger of the two needs no check for it.
+        let inputs = &light.inputs;
+        if matches!(inputs.occupancy, Occupancy::Open) && !inputs.ring {
+            return Some(brighter(levels, self.fill_cell_at(position)));
+        }
+        Some(levels)
+    }
+
+    /// The light the coarse `chunk` shows at the voxel at `position`, once its
+    /// light has landed. A chunk with no voxels to mesh needs nothing landed.
+    fn coarse_light_at(
+        &self,
+        chunk: &crate::chunk::ChunkData<C::MaterialIndex>,
+        work: &LightWork<C>,
+        route: Option<&route::LightRoute<C>>,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+        position: IVec3,
+    ) -> Option<LightLevels> {
+        let key = chunk.key;
+        let width = 1u32 << key.lod_level;
+        match chunk.fill_type {
+            FillType::Uniform(_) => return Some(LightLevels::new(0, 0)),
+            FillType::Empty => {
+                let top = key.min_voxel().y + key.voxel_extent();
+                return Some(self.sky_on_request(position, width, top, world, edits));
+            }
+            FillType::Mixed => {}
+        }
+        let cell = ((position - key.min_voxel()) / width as i32 + 1).as_uvec3();
+        let copy =
+            |cell: UVec3| route.and_then(|route| route.coarse_cell(chunk.entity, cell));
+        let tag = work.coarse_levels(chunk.entity);
+        let levels = copy(cell).or(tag)?;
+        if coarse::cell_is_open(chunk, cell) {
+            return Some(levels);
+        }
+        // A solid cell's own texel holds light only for a lamp.
+        if copy(cell).is_some_and(|levels| levels.voxel > 0.0) {
+            return Some(levels);
+        }
+        let mut brightest = LightLevels::new(0, 0);
+        for offset in [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ] {
+            let neighbour = (cell.as_ivec3() + offset).as_uvec3();
+            if coarse::cell_is_open(chunk, neighbour) {
+                let levels = copy(neighbour).or(tag).unwrap_or_default();
+                brightest = brighter(brightest, levels);
+            }
+        }
+        Some(brightest)
+    }
+
+    /// The light at the voxel at `position` in hinted air holding no light
+    /// entry: the larger of the walk on request and the field's cell. A
+    /// solid fill hint reads 0. `None` where the hint says nothing.
+    fn hinted_light_at(
+        &self,
+        position: IVec3,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+    ) -> Option<LightLevels> {
+        let own = edits.reader().get(position);
+        let open = match own {
+            Some(voxel) => !voxel.is_solid(),
+            None => {
+                let chunk = crate::chunk::chunk_containing(position);
+                match world.chunk_fill_hint(ChunkKey::new(chunk, 0)) {
+                    crate::configuration::FillHint::Uniform(voxel) => !voxel.is_solid(),
+                    crate::configuration::FillHint::Unknown => return None,
+                }
+            }
+        };
+        if !open {
+            let level = match own {
+                Some(crate::voxel::WorldVoxel::Solid(material)) => self
+                    .task
+                    .emission
+                    .iter()
+                    .find(|(emissive, _)| *emissive == material)
+                    .map_or(0, |(_, level)| *level),
+                _ => 0,
+            };
+            return Some(LightLevels::new(0, level));
+        }
+        let chunk = crate::chunk::chunk_containing(position);
+        let top = (chunk.y + 1) * crate::chunk::CHUNK_SIZE_I;
+        let walked = self.sky_on_request(position, 1, top, world, edits);
+        Some(brighter(walked, self.fill_cell_at(position)))
+    }
+
+    /// Sky light 15 if the column above the voxel at `position` is open, as a
+    /// walk on request with rows `width` voxels apart finds, and 0 if not or
+    /// with sky light off. `top` is the height just above the chunk holding
+    /// the voxel.
+    ///
+    /// The answer is kept in the walk cache, unless voxel edits are waiting
+    /// to commit, which empties it.
+    fn sky_on_request(
+        &self,
+        position: IVec3,
+        width: u32,
+        top: i32,
+        world: &C,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+    ) -> LightLevels {
+        let Some(rule) = self.sky_rule else {
+            return LightLevels::new(0, 0);
+        };
+        let cached = !edits.has_pending();
+        let known = cached
+            .then(|| self.walks.lock().unwrap().get(position, width))
+            .flatten();
+        let open = known.unwrap_or_else(|| {
+            let open = request::column_is_open(
+                position,
+                width,
+                top,
+                rule,
+                world,
+                &edits.reader(),
+                &self.counters().requests,
+            );
+            if cached {
+                self.walks.lock().unwrap().insert(position, width, open);
+            }
+            open
         });
-        found.or_else(|| self.entry_light_at(position))
+        LightLevels::new(if open { 15 } else { 0 }, 0)
+    }
+
+    /// The sky light the sky fill field's cell holding the voxel at
+    /// `position` has, or 0 where the field has none.
+    fn fill_cell_at(&self, position: IVec3) -> LightLevels {
+        let chunk = crate::chunk::chunk_containing(position);
+        let local = (position - chunk * crate::chunk::CHUNK_SIZE_I).as_uvec3()
+            / fill::CELL as u32;
+        let bit = fill::cell_bit(local.x as usize, local.y as usize, local.z as usize);
+        let cells = self.fill_cells.read();
+        let level = cells
+            .get(&chunk)
+            .filter(|fill| fill.open & bit != 0)
+            .map_or(0, |fill| {
+                let sixteenths = fill.levels[bit.trailing_zeros() as usize] as u32;
+                ((sixteenths + 8) / 16).min(15) as u8
+            });
+        LightLevels::new(level, 0)
     }
 
     /// The light a light entry holds at the voxel at `position`.
@@ -276,6 +455,14 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             light.voxel.at(x, y, z),
             light.precision,
         ))
+    }
+}
+
+/// The brighter of `a` and `b` in each channel.
+fn brighter(a: LightLevels, b: LightLevels) -> LightLevels {
+    LightLevels {
+        sky: a.sky.max(b.sky),
+        voxel: a.voxel.max(b.voxel),
     }
 }
 
@@ -352,6 +539,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         reset: AtomicBool::new(false),
         edit_frame: AtomicU64::new(0),
         new_air: Mutex::new(Vec::new()),
+        walks: Mutex::default(),
         _world: PhantomData,
     })
     .insert_resource(work)
@@ -484,6 +672,7 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     if !relights {
         return;
     }
+    settings.walks.lock().unwrap().clear();
     let settings = settings.as_mut();
     settings.config.sky = config.sky.clone();
     settings.config.sky_reach = config.sky_reach;

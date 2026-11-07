@@ -544,17 +544,34 @@ fn a_light_entry_is_made_where_a_loaded_solid_touches_hinted_air_and_dropped_whe
         Some(LightLevels::new(15, 0)),
         "beside the wall"
     );
-    // Hinted air no loaded solid touches holds no light entry.
-    assert_eq!(light_at(&mut app, BESIDE_WALL - IVec3::X * 32), None);
+    // Hinted air no loaded solid touches holds no light entry, and reads
+    // the walk on request.
+    assert!(!holds_entry(&app, WEST_OF_WALL - IVec3::X));
+    assert_eq!(
+        light_at(&mut app, BESIDE_WALL - IVec3::X * 32),
+        Some(LightLevels::new(15, 0))
+    );
 
     camera_at(&mut app, IVec3::new(8, 0, 0));
     settle(&mut app, "the wall to retire");
     assert!(!spawned_at(&mut app, WALL));
+    assert!(!holds_entry(&app, WEST_OF_WALL), "with the wall retired");
     assert_eq!(
         light_at(&mut app, BESIDE_WALL),
-        None,
+        Some(LightLevels::new(15, 0)),
         "with the wall retired"
     );
+}
+
+/// Whether the world view holds a light entry at the chunk position
+/// `position`.
+fn holds_entry(app: &App, position: IVec3) -> bool {
+    app.world()
+        .resource::<crate::light::LightSettings<LampWorld>>()
+        .view
+        .read()
+        .get(&position)
+        .is_some_and(|chunk| chunk.is_entry())
 }
 
 #[test]

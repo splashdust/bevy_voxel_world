@@ -260,10 +260,35 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
     /// renders, which is plausible rather than exact: the cell holding the
     /// voxel while the chunk holds a slot in the world's light texture, and
-    /// otherwise the one level per channel its tag shows.
+    /// otherwise the one level per channel its tag shows. A solid cell reads
+    /// the brightest of its six neighbours, or 0 if all six are solid.
+    ///
+    /// Where nothing renders, in such a chunk with no voxels to mesh or in air
+    /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,
+    /// it walks up the column above the voxel and reads sky light 15 if
+    /// nothing solid is found within the world's
+    /// [sky rule](crate::prelude::Sky),
+    /// and 0 otherwise. **The first reading of such a voxel can run the
+    /// world's voxel lookups on the caller's thread**: under the default sky
+    /// rule, up to about 50 lookups and a lookup closure for each of up to 17
+    /// level-0 chunks the column passes through. The
+    /// answer is kept until the next voxel edit or
+    /// [`VoxelWorld::reset_light`]. A chunk of solid voxels reads 0 with no
+    /// walk.
+    ///
+    /// These readings are plausible, not exact:
+    ///
+    /// - In a chunk of air with no solid voxel beside it, which no face reads,
+    ///   the reading takes the larger of its own light and the sky fill
+    ///   level around it, and can be a level or two off.
+    /// - In air a fill hint kept from spawning with no solid voxel beside it,
+    ///   the reading misses the light beside a 1×1 shaft or a lamp, by up to
+    ///   14 levels, as in the middle of a hinted cavern.
+    /// - The walk's rows step further apart higher up, so it can step past a
+    ///   thin roof far above.
     ///
     /// Returns `None` when the world has no light propagation, or no published
-    /// chunk holding the voxel has light yet.
+    /// chunk or fill hint says what is at the voxel.
     #[cfg(feature = "light_propagation")]
     pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
         let light = self.light.as_ref()?;
@@ -271,6 +296,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             &self.chunk_map.get_read_lock(),
             self.light_work.as_ref()?,
             self.light_route.as_deref(),
+            self.configuration.0.as_ref(),
+            &self.voxel_edits,
             position,
         )
     }
@@ -338,6 +365,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     #[cfg(feature = "light_propagation")]
     pub fn reset_light(&mut self) {
         if let Some(light) = self.light.as_ref() {
+            light.walks.lock().unwrap().clear();
             light
                 .reset
                 .store(true, std::sync::atomic::Ordering::Release);

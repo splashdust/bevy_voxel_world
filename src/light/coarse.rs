@@ -430,6 +430,32 @@ impl CellRange {
     }
 }
 
+/// Whether the padded cell `cell` of the coarse `chunk` is open, as its
+/// chunk task saw it: a cell is open if any data voxel in it is.
+pub(crate) fn cell_is_open<I: Copy + PartialEq>(
+    chunk: &ChunkData<I>,
+    cell: UVec3,
+) -> bool {
+    let voxels = match (&chunk.fill_type, &chunk.voxels) {
+        (FillType::Empty, _) => return true,
+        (FillType::Uniform(voxel), _) => return !voxel.is_solid(),
+        (FillType::Mixed, Some(voxels)) => voxels,
+        (FillType::Mixed, None) => unreachable!("a mixed chunk stores its voxels"),
+    };
+    let shape = chunk.data_shape;
+    let [rx, ry, rz] = std::array::from_fn(|axis| {
+        CellRange::of(cell[axis] as usize, shape[axis], chunk.key.lod_level)
+    });
+    let (row, slab) = (shape.x as usize, (shape.x * shape.y) as usize);
+    (rz.low..=rz.high).any(|z| {
+        (ry.low..=ry.high).any(|y| {
+            (rx.low..=rx.high).any(|x| {
+                !voxels[x as usize + y as usize * row + z as usize * slab].is_solid()
+            })
+        })
+    })
+}
+
 /// The level `top` in the `lit` cells and 0 elsewhere, in slot order.
 fn lit_levels(lit: &[u64], top: u8) -> Vec<u8> {
     let mut levels = vec![0; SLOT_TEXELS];

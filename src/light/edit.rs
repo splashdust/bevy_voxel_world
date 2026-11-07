@@ -85,6 +85,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let _span = bevy::log::info_span!("relight_edits").entered();
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
+    settings.walks.lock().unwrap().clear();
     let quiet = work.is_settled();
     let reader = edits.reader();
     let voxel = |p: IVec3| reader.get(p).unwrap_or(WorldVoxel::Unset);

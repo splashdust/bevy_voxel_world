@@ -11,7 +11,9 @@ use bevy::prelude::*;
 
 use super::super::spawn_camera;
 use super::edits::settle;
-use super::reference::{fill_reference, fill_reference_in_steps, Reference};
+use super::reference::{
+    fill_reference, fill_reference_everywhere, fill_reference_in_steps, Reference,
+};
 use super::sky_light::{
     chunk_light, levels, light_is_settled, settled_but, shaft_world, spawned,
 };
@@ -506,4 +508,169 @@ fn with_sky_fill_off_the_world_keeps_no_field_and_no_cells() {
     assert!(settings.record.lock().unwrap().all_cells().is_empty());
     assert!(settings.fill_cells.read().is_empty());
     let _ = levels(&mut app, IVec3::ZERO);
+}
+
+// --- light_at where no face reads -------------------------------------------
+
+/// The sky light `light_at` reads at every voxel of the chunk positions
+/// `chunks`.
+fn sky_read(app: &mut App, chunks: &[IVec3]) -> Vec<(IVec3, f32)> {
+    let chunks = chunks.to_vec();
+    app.world_mut()
+        .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
+            chunks
+                .iter()
+                .flat_map(|chunk| {
+                    super::voxel_light::origin_voxels()
+                        .map(move |local| *chunk * 32 + local)
+                })
+                .map(|p| {
+                    let levels = voxel_world
+                        .light_at(p)
+                        .unwrap_or_else(|| panic!("no light at {p}"));
+                    (p, levels.sky)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap()
+}
+
+/// The most `read` differs in `chunks` from the reference's sky light with
+/// every chunk taking fill, with `known` known to sky fill.
+fn worst_difference(
+    read: &[(IVec3, f32)],
+    chunks: &[IVec3],
+    known: &[IVec3],
+    scene: impl Fn(IVec3) -> WorldVoxel,
+    light: &LightPropagation,
+) -> f32 {
+    let Some(SkyFill::Paths(paths)) = &light.sky_fill else {
+        panic!("sky fill isn't on paths");
+    };
+    let reference = fill_reference_everywhere(
+        chunks,
+        known,
+        light.sky_reach as u32,
+        light.shape,
+        &light.sky,
+        paths,
+        scene,
+    );
+    read.iter()
+        .map(|(p, sky)| (sky - reference[p] as f32).abs())
+        .fold(0.0, f32::max)
+}
+
+/// Stone below y = 0 and a slab 8 voxels thick at y = 104, over the chunk of
+/// air at (0, 1, 0), which no solid in its padding touches.
+fn high_slab(p: IVec3) -> WorldVoxel {
+    slab_at(104)(p)
+}
+
+const HIGH_SLAB_AIR: IVec3 = IVec3::Y;
+
+fn high_slab_light() -> LightPropagation {
+    LightPropagation {
+        sky: Sky::Ceiling { y: 140 },
+        ..default()
+    }
+}
+
+fn high_slab_world(hints: Option<super::voxel_light::Hints>) -> LampWorld {
+    LampWorld {
+        scene: Arc::new(high_slab),
+        light: Some(high_slab_light()),
+        spawning_distance: 3,
+        hints,
+        ..default()
+    }
+}
+
+/// Moves the camera into the middle of the chunk position `chunk`.
+fn camera_at(app: &mut App, chunk: IVec3) {
+    app.update();
+    let middle = (chunk * 32 + 16).as_vec3();
+    super::super::move_cameras::<LampWorld>(
+        app,
+        Transform::from_translation(middle).looking_at(middle + Vec3::NEG_Z, Vec3::Y),
+    );
+}
+
+#[test]
+fn a_chunk_of_air_taking_no_sky_fill_reads_close_to_the_reference_through_changes_of_reach_and_fill(
+) {
+    let mut light = high_slab_light();
+    let mut app = app(high_slab_world(None));
+    camera_at(&mut app, HIGH_SLAB_AIR);
+    settle(&mut app, "the world to settle");
+    assert!(spawned(&mut app).contains(&HIGH_SLAB_AIR));
+    let chunks = [HIGH_SLAB_AIR];
+    let check = |app: &mut App, light: &LightPropagation, when: &str| {
+        let read = sky_read(app, &chunks);
+        let known = spawned(app);
+        let worst = worst_difference(&read, &chunks, &known, high_slab, light);
+        assert!(worst <= 2.0, "off by {worst} {when}");
+        assert!(
+            read.iter().any(|(_, sky)| *sky > 0.0 && *sky < 15.0),
+            "some of the chunk is shaded {when}"
+        );
+    };
+    check(&mut app, &light, "after streaming");
+
+    light.sky_reach = 16;
+    set_light(&mut app, light.clone());
+    settle(&mut app, "light to settle after a change of sky reach");
+    check(&mut app, &light, "at sky reach 16");
+
+    light.sky_fill = Some(SkyFill::Paths(PathFill {
+        opening_power: 1.0,
+        beside_open_sky: 10.0,
+        ..default()
+    }));
+    set_light(&mut app, light.clone());
+    settle(&mut app, "light to settle after a change of sky fill");
+    check(&mut app, &light, "after the change of fill");
+}
+
+#[test]
+fn hinted_air_holding_no_light_entry_reads_close_to_the_reference() {
+    let hints: super::voxel_light::Hints = Arc::new(|position: IVec3| {
+        if position.y >= 0 && position.y != 3 {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else {
+            FillHint::Unknown
+        }
+    });
+    // The camera starts two chunks away, so the hinted air under the slab
+    // never spawns.
+    let mut app = super::super::meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(high_slab_world(Some(hints))))
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn((
+                Camera3d::default(),
+                Transform::from_xyz(80.0, 48.0, 16.0),
+                VoxelWorldCamera::<LampWorld>::default(),
+            ));
+        });
+    settle(&mut app, "the world to settle");
+    assert!(!spawned(&mut app).contains(&HIGH_SLAB_AIR));
+    let entry = app
+        .world()
+        .resource::<LightSettings<LampWorld>>()
+        .view
+        .read()
+        .contains_key(&HIGH_SLAB_AIR);
+    assert!(!entry, "no light entry under the slab");
+
+    let chunks = [HIGH_SLAB_AIR];
+    let read = sky_read(&mut app, &chunks);
+    let known: Vec<IVec3> = spawned(&mut app)
+        .into_iter()
+        .chain((-1..=1).flat_map(|x| {
+            (-1..=1).flat_map(move |z| (0..3).map(move |y| IVec3::new(x, y, z)))
+        }))
+        .collect();
+    let worst = worst_difference(&read, &chunks, &known, high_slab, &high_slab_light());
+    assert!(worst <= 2.0, "off by {worst}");
+    assert!(read.iter().any(|(_, sky)| *sky > 0.0 && *sky < 15.0));
 }

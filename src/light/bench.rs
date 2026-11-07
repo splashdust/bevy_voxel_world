@@ -466,6 +466,12 @@ pub struct LightStats {
     pub entry_bytes: u64,
     /// Hinted air holding no light entry that the world view keeps now.
     pub air_positions: u64,
+    /// Walks `light_at` ran on request, where nothing renders.
+    pub request_walks: u64,
+    /// Voxel lookups those walks made.
+    pub request_lookups: u64,
+    /// The bytes the cache of those walks' answers holds now.
+    pub walk_cache_bytes: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -539,6 +545,9 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         entries,
         entry_bytes,
         air_positions,
+        request_walks: counters.requests.walks.load(Ordering::Relaxed),
+        request_lookups: counters.requests.lookups.load(Ordering::Relaxed),
+        walk_cache_bytes: settings.walks.lock().unwrap().bytes() as u64,
     })
 }
 

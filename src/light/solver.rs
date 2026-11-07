@@ -207,6 +207,8 @@ pub(crate) struct LightCounters {
     pub fill_probes: AtomicU64,
     /// Voxel lookups fill probes made.
     pub fill_probe_lookups: AtomicU64,
+    /// Walks `light_at` ran on request, where nothing renders.
+    pub requests: super::request::RequestCounters,
 }
 
 /// The 3×3×3 chunk positions around a chunk, at

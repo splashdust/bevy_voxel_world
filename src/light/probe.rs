@@ -665,6 +665,7 @@ pub(crate) fn reset_light<C: VoxelWorldConfig>(
     if !settings.reset.swap(false, Ordering::AcqRel) {
         return;
     }
+    settings.walks.lock().unwrap().clear();
     if let (Some(mut fill), Some(field)) = (fill, field_of(&settings.config)) {
         fill.reset(field);
     }

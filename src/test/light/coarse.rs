@@ -1,7 +1,9 @@
 //! Tests of light in coarse chunks: chunks above LOD level 0, and level-0
 //! chunks with a data shape other than the default.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshTag;
@@ -25,7 +27,11 @@ struct CoarseWorld {
     scene: Scene,
     near: i32,
     data: u32,
+    hints: Option<KeyHints>,
 }
+
+/// A world's fill hint for each chunk key, at every level.
+type KeyHints = Arc<dyn Fn(ChunkKey) -> FillHint + Send + Sync>;
 
 impl Default for CoarseWorld {
     fn default() -> Self {
@@ -33,6 +39,7 @@ impl Default for CoarseWorld {
             scene: Arc::new(slab_and_shaft),
             near: 2,
             data: 32,
+            hints: None,
         }
     }
 }
@@ -59,6 +66,12 @@ impl VoxelWorldConfig for CoarseWorld {
             let scene = scene.clone();
             Box::new(move |position, _| scene(position))
         })
+    }
+
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
+        self.hints
+            .as_ref()
+            .map_or(FillHint::Unknown, |hints| hints(key))
     }
 
     fn chunk_lod(
@@ -127,6 +140,7 @@ fn app(scene: Scene, data: u32) -> App {
         scene,
         near: 2,
         data,
+        hints: None,
     }))
     .add_systems(Startup, spawn_camera::<CoarseWorld>);
     app
@@ -319,4 +333,238 @@ fn level_0_chunks_with_other_data_shapes_get_plausible_light() {
             "{data} data voxels: under the roof, lit from its side, read {shaded}"
         );
     }
+}
+
+// --- Where a coarse cell is solid, or nothing renders --------------------------
+
+#[test]
+fn a_solid_coarse_cell_reads_its_brightest_open_neighbour_or_0_when_buried() {
+    let mut app = slab_app();
+    // The slab's top cell, a level-1 cell 2 voxels wide, under open sky.
+    let in_slab = IVec3::new(80, 10, 30);
+    let mut brightest = LightLevels::new(0, 0);
+    for offset in [
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ] {
+        let neighbour = in_slab + offset * 2;
+        if slab_and_shaft(neighbour).is_solid() {
+            continue;
+        }
+        let levels = light_at(&mut app, neighbour).unwrap();
+        brightest.sky = brightest.sky.max(levels.sky);
+        brightest.voxel = brightest.voxel.max(levels.voxel);
+    }
+    assert_eq!(brightest.sky, 15.0, "the cell above the slab sees the sky");
+    assert_eq!(light_at(&mut app, in_slab), Some(brightest));
+
+    // Deep in the ground every neighbour is solid.
+    assert_eq!(
+        light_at(&mut app, IVec3::new(80, -40, 40)),
+        Some(LightLevels::new(0, 0))
+    );
+}
+
+/// Ground below y = -64, and a roof 8 voxels thick at y = 80 over x 64..96,
+/// z 0..32, far above the level-1 chunk at (2, 0, 0), which holds air alone.
+fn high_roof(p: IVec3) -> WorldVoxel {
+    let roof =
+        (64..96).contains(&p.x) && (80..88).contains(&p.y) && (0..32).contains(&p.z);
+    if roof || p.y < -64 {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+/// Air hints for every chunk of [`high_roof`] holding air alone, at every
+/// level.
+fn high_roof_hints(key: ChunkKey) -> FillHint {
+    let (min, max) = (key.min_voxel(), key.min_voxel() + key.voxel_extent());
+    let misses_roof = max.x <= 64
+        || min.x >= 96
+        || max.y <= 80
+        || min.y >= 88
+        || max.z <= 0
+        || min.z >= 32;
+    if min.y >= -64 && misses_roof {
+        FillHint::Uniform(WorldVoxel::Air)
+    } else {
+        FillHint::Unknown
+    }
+}
+
+const UNDER_ROOF: IVec3 = IVec3::new(80, 30, 16);
+const OPEN_COLUMN: IVec3 = IVec3::new(80, 30, 48);
+
+fn high_roof_app(hints: Option<KeyHints>) -> App {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(CoarseWorld {
+        scene: Arc::new(high_roof),
+        hints,
+        ..default()
+    }))
+    .add_systems(Startup, spawn_camera::<CoarseWorld>);
+    app
+}
+
+fn request_walks(app: &App) -> u64 {
+    crate::light::bench::light_stats::<CoarseWorld>(app.world())
+        .unwrap()
+        .request_walks
+}
+
+#[test]
+fn a_coarse_chunk_with_no_mesh_walks_the_column_once() {
+    let mut app = high_roof_app(None);
+    let empty = ChunkKey::new(IVec3::new(2, 0, 0), 1);
+    update_until(&mut app, "the empty coarse chunk to publish", |app| {
+        app.world_mut()
+            .run_system_once(move |voxel_world: VoxelWorld<CoarseWorld>| {
+                voxel_world.get_chunk_data(empty).is_some()
+            })
+            .unwrap()
+    });
+
+    let walks = request_walks(&app);
+    assert_eq!(light_at(&mut app, UNDER_ROOF), Some(LightLevels::new(0, 0)));
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(15, 0))
+    );
+    assert_eq!(request_walks(&app), walks + 2);
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(15, 0))
+    );
+    assert_eq!(request_walks(&app), walks + 2, "the answer is kept");
+}
+
+#[test]
+fn a_coarse_chunk_of_solid_reads_0_with_no_walk() {
+    // Level-0 chunks of 16 data voxels a side take the coarse path, and the
+    // one below the origin is solid through its padding.
+    let mut app = app(
+        Arc::new(|p: IVec3| {
+            if p.y < 2 {
+                WorldVoxel::Solid(STONE)
+            } else {
+                WorldVoxel::Air
+            }
+        }),
+        16,
+    );
+    let buried = IVec3::new(5, -10, 5);
+    update_until(&mut app, "the solid chunk to publish", |app| {
+        light_at(app, buried).is_some()
+    });
+    let walks = request_walks(&app);
+    assert_eq!(light_at(&mut app, buried), Some(LightLevels::new(0, 0)));
+    assert_eq!(request_walks(&app), walks);
+}
+
+#[test]
+fn hinted_air_of_a_lod_world_walks_the_column_and_follows_an_edit_above() {
+    let mut app = high_roof_app(Some(Arc::new(high_roof_hints)));
+    for _ in 0..10 {
+        app.update();
+    }
+    let spawned = super::super::chunk_keys::<CoarseWorld>(&mut app);
+    for position in [UNDER_ROOF, OPEN_COLUMN] {
+        assert!(
+            spawned
+                .iter()
+                .all(|key| ChunkKey::containing(position, key.lod_level) != *key),
+            "no chunk spawned at {position}"
+        );
+    }
+    assert_eq!(light_at(&mut app, UNDER_ROOF), Some(LightLevels::new(0, 0)));
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(15, 0))
+    );
+
+    // A voxel set in the hinted air above a column already read.
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<CoarseWorld>| {
+            voxel_world.set_voxel(OPEN_COLUMN + IVec3::Y * 40, WorldVoxel::Solid(STONE));
+        })
+        .unwrap();
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(0, 0))
+    );
+    app.update();
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(0, 0))
+    );
+
+    // Below the ground's hints nothing says what is there.
+    assert_eq!(light_at(&mut app, IVec3::new(80, -1000, 16)), None);
+}
+
+#[test]
+fn a_walk_on_request_in_a_world_with_slow_lookups_runs_once_per_voxel() {
+    // Lookups take 20 µs each once the world has streamed in.
+    static SLOW: AtomicBool = AtomicBool::new(false);
+    let scene: Scene = Arc::new(|p| {
+        if SLOW.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_micros(20));
+        }
+        high_roof(p)
+    });
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(CoarseWorld {
+        scene,
+        ..default()
+    }))
+    .add_systems(Startup, spawn_camera::<CoarseWorld>);
+    let empty = ChunkKey::new(IVec3::new(2, 0, 0), 1);
+    update_until(&mut app, "the empty coarse chunk to publish", |app| {
+        app.world_mut()
+            .run_system_once(move |voxel_world: VoxelWorld<CoarseWorld>| {
+                voxel_world.get_chunk_data(empty).is_some()
+            })
+            .unwrap()
+    });
+    SLOW.store(true, Ordering::Relaxed);
+
+    let lookups = |app: &App| {
+        crate::light::bench::light_stats::<CoarseWorld>(app.world())
+            .unwrap()
+            .request_lookups
+    };
+    let before = lookups(&app);
+    let started = Instant::now();
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(15, 0))
+    );
+    let first = started.elapsed();
+    let made = lookups(&app) - before;
+    let started = Instant::now();
+    assert_eq!(
+        light_at(&mut app, OPEN_COLUMN),
+        Some(LightLevels::new(15, 0))
+    );
+    let again = started.elapsed();
+    SLOW.store(false, Ordering::Relaxed);
+
+    let stats = crate::light::bench::light_stats::<CoarseWorld>(app.world()).unwrap();
+    println!(
+        "walk on request at level 1, lookups of 20 µs: {made} lookups, first reading \
+         {first:?}, again {again:?}, walk cache {} B",
+        stats.walk_cache_bytes
+    );
+    assert!(made > 0 && made <= 64, "{made} lookups");
+    assert_eq!(
+        lookups(&app),
+        before + made,
+        "the second reading walks nothing"
+    );
 }

@@ -154,7 +154,7 @@ pub(in crate::test::light) fn fill_reference<I: Copy + PartialEq>(
     fill: &PathFill,
     voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
 ) -> HashMap<IVec3, u8> {
-    fill_reference_in_steps(15, chunks, known, reach, shape, sky, fill, voxel_at)
+    reference_of(15, chunks, known, reach, shape, sky, fill, voxel_at, false)
 }
 
 /// [`fill_reference`] with levels in steps up to `steps`: 15 at 16 levels,
@@ -169,6 +169,37 @@ pub(in crate::test::light) fn fill_reference_in_steps<I: Copy + PartialEq>(
     sky: &Sky,
     fill: &PathFill,
     voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+) -> HashMap<IVec3, u8> {
+    reference_of(
+        steps, chunks, known, reach, shape, sky, fill, voxel_at, false,
+    )
+}
+
+/// [`fill_reference`] with every chunk taking fill, as if a face read every
+/// open voxel: the light `light_at` approximates where no face reads.
+pub(in crate::test::light) fn fill_reference_everywhere<I: Copy + PartialEq>(
+    chunks: &[IVec3],
+    known: &[IVec3],
+    reach: u32,
+    shape: LightShape,
+    sky: &Sky,
+    fill: &PathFill,
+    voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+) -> HashMap<IVec3, u8> {
+    reference_of(15, chunks, known, reach, shape, sky, fill, voxel_at, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reference_of<I: Copy + PartialEq>(
+    steps: u32,
+    chunks: &[IVec3],
+    known: &[IVec3],
+    reach: u32,
+    shape: LightShape,
+    sky: &Sky,
+    fill: &PathFill,
+    voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+    every_chunk_takes_fill: bool,
 ) -> HashMap<IVec3, u8> {
     let loss = |f: f32| -> i32 {
         let levels = fill.whole_face_loss * (16.0 / f).powf(fill.opening_power);
@@ -269,7 +300,7 @@ pub(in crate::test::light) fn fill_reference_in_steps<I: Copy + PartialEq>(
                 all_direct &= direct[i];
             }
         }
-        let takes = any_open && any_solid && !all_direct;
+        let takes = any_open && (any_solid || every_chunk_takes_fill) && !all_direct;
 
         let mut seeds: Vec<Option<u32>> = vec![None; box_light.open.len()];
         if takes {
