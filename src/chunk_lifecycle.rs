@@ -640,7 +640,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 if let (Some(work), Some(solved)) =
                     (light_work.as_mut(), chunk_task.solved_light.take())
                 {
-                    work.arrive(chunk.key.position, entity, solved);
+                    work.arrive(chunk.key, entity, solved);
                 }
                 chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
             }

@@ -45,6 +45,7 @@ use bevy::render::renderer::RenderDevice;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
 
+use super::coarse::CoarseSolved;
 use super::faces::{could_reach_sooner, Face};
 use super::levels::LevelScale;
 use super::probe::{face_neighbours, SkyProbes};
@@ -52,8 +53,8 @@ use super::route::LightRoute;
 use super::slot::FacesSee;
 use super::solver::{relight, ChunkLight, Solved};
 use super::view::{LightView, ViewChunk};
-use super::LightSettings;
-use crate::chunk::CHUNK_SIZE_F;
+use super::{LightSettings, SolvedLight};
+use crate::chunk::{ChunkKey, CHUNK_SIZE_F};
 use crate::chunk_lifecycle::{ChunkState, ChunkStateOf};
 use crate::configuration::VoxelWorldConfig;
 use crate::pool_budget::{first_in_start_order, JobKind, PoolBudget};
@@ -125,6 +126,11 @@ pub(crate) struct LightWork<C> {
     queue: HashSet<IVec3>,
     running: Vec<Running>,
     landing: VecDeque<Landing>,
+    /// The light coarse chunk tasks solved, waiting to land.
+    coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved)>,
+    /// The levels each coarse chunk's tag holds without a slot, as in a
+    /// texel.
+    coarse: HashMap<Entity, u8>,
     /// The version the next light to land gets.
     clock: u64,
     /// Main-thread time spent this frame, in nanoseconds.
@@ -140,6 +146,8 @@ impl<C> Default for LightWork<C> {
             queue: HashSet::new(),
             running: Vec::new(),
             landing: VecDeque::new(),
+            coarse_landing: Vec::new(),
+            coarse: HashMap::new(),
             clock: 0,
             frame_nanos: 0,
             _world: PhantomData,
@@ -153,10 +161,28 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.queue.is_empty() && self.running.is_empty() && self.landing.is_empty()
     }
 
-    /// Queues the light a chunk task solved for the chunk `entity` at
-    /// `position`, to land with the chunk's voxels. It replaces any light a
-    /// chunk task solved for the chunk that hasn't landed yet.
-    pub fn arrive(&mut self, position: IVec3, entity: Entity, solved: Solved) {
+    /// Queues the light a chunk task solved for the chunk `entity` with
+    /// `key`, to land with the chunk's voxels. It replaces any light a chunk
+    /// task solved for the chunk that hasn't landed yet.
+    pub fn arrive(&mut self, key: ChunkKey, entity: Entity, solved: SolvedLight) {
+        match solved {
+            SolvedLight::Level0(solved) => {
+                self.arrive_level_0(key.position, entity, solved)
+            }
+            SolvedLight::Coarse(solved) => {
+                self.coarse_landing.retain(|(_, held, _)| *held != entity);
+                self.coarse_landing.push((key, entity, solved));
+            }
+        }
+    }
+
+    /// The levels the coarse chunk `entity`'s tag holds without a slot, as in
+    /// a texel, once its light has landed.
+    pub fn coarse_levels(&self, entity: Entity) -> Option<u8> {
+        self.coarse.get(&entity).copied()
+    }
+
+    fn arrive_level_0(&mut self, position: IVec3, entity: Entity, solved: Solved) {
         let held = self.landing.iter_mut().find(|landing| {
             landing.entity == entity && landing.source == Source::ChunkTask
         });
@@ -339,6 +365,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// where the chunk was, if it had light.
     fn forget(&mut self, entity: Entity, view: &LightView) -> Option<IVec3> {
         self.landing.retain(|landing| landing.entity != entity);
+        self.coarse_landing.retain(|(_, held, _)| *held != entity);
+        self.coarse.remove(&entity);
         let position = self.positions.remove(&entity)?;
         if self
             .chunks
@@ -448,7 +476,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         configuration: Res<C>,
     ) {
         let refill = route.as_ref().is_some_and(|route| route.wants_refill());
-        if work.landing.is_empty() && !refill {
+        if work.landing.is_empty() && work.coarse_landing.is_empty() && !refill {
             return;
         }
         #[cfg(feature = "trace")]
@@ -457,6 +485,17 @@ impl<C: VoxelWorldConfig> Relights<C> {
         if let Some(route) = route.as_mut() {
             route.set_cameras(cameras.iter().map(|camera| camera.translation()));
             route.set_device(device.as_deref());
+        }
+        // Coarse chunks' light lands whole every frame: it relights nothing
+        // and costs a few map writes.
+        for (key, entity, solved) in std::mem::take(&mut work.coarse_landing) {
+            if !chunks.contains(entity) {
+                continue;
+            }
+            work.coarse.insert(entity, solved.levels);
+            if let Some(route) = route.as_mut() {
+                route.coarse_landed(entity, key, solved.levels, solved.bytes);
+            }
         }
         let scales = (&settings.task.voxel_scale, settings.task.sky_scale.as_ref());
         let mut record = probes.is_some().then(|| settings.record.lock().unwrap());

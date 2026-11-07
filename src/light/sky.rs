@@ -142,8 +142,7 @@ pub(crate) enum Hinted {
 }
 
 impl Hinted {
-    /// What `hint` says, or `Unknown` for a position holding voxel edits,
-    /// whose voxels the hint doesn't account for.
+    /// What `hint` says, or `Unknown` for a chunk position voxel edits reach.
     pub fn of<I: Copy + PartialEq>(hint: FillHint<I>, edited: bool) -> Self {
         match hint {
             _ if edited => Hinted::Unknown,

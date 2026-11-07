@@ -24,7 +24,16 @@ impl<I> ChunkMapData<I> {
     /// The published data of the finest chunk that covers the voxel at
     /// `voxel_position`, if any chunk does.
     pub fn finest_covering(&self, voxel_position: IVec3) -> Option<&chunk::ChunkData<I>> {
-        self.levels.in_use().find_map(|lod_level| {
+        self.covering(voxel_position).next()
+    }
+
+    /// The published data of every chunk that covers the voxel at
+    /// `voxel_position`, finest first.
+    pub fn covering(
+        &self,
+        voxel_position: IVec3,
+    ) -> impl Iterator<Item = &chunk::ChunkData<I>> + '_ {
+        self.levels.in_use().filter_map(move |lod_level| {
             self.data
                 .get(&ChunkKey::containing(voxel_position, lod_level))
         })

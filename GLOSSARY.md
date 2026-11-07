@@ -18,7 +18,7 @@ How coarsely a chunk samples the voxel world. Level 0 samples every voxel; each 
 _Avoid_: stride, resolution, detail level
 
 **Coarse chunk**:
-A chunk above LOD level 0. Its light is plausible rather than exact, and changes only when its chunk task reruns.
+A chunk above LOD level 0. Its light is plausible rather than exact, and changes only when its chunk task reruns. A level-0 chunk with a non-default `chunk_data_shape` takes the same light path.
 
 **Chunk lifecycle**:
 The sequence of states a chunk moves through from being requested to being despawned, and the rules for moving between them.

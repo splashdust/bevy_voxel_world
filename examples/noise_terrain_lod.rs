@@ -5,6 +5,10 @@
 //! rock from spawning, and level-1 chunks return `WorldVoxel::Unset` in their padding
 //! to hide cracks between levels. The frame rate shows in the corner.
 //!
+//! With the `light_propagation` feature the world is lit, and its far chunks
+//! show the light their coarse cells work out:
+//! `cargo run --release --example noise_terrain_lod --features light_propagation`.
+//!
 //! Controls:
 //!   - Left click to dig a hole where the cursor points
 //!   - Shift + left click to add a mound
@@ -186,6 +190,11 @@ impl VoxelWorldConfig for MainWorld {
     fn attach_chunks_to_root(&self) -> bool {
         false
     }
+
+    #[cfg(feature = "light_propagation")]
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
 }
 
 fn main() {
@@ -240,7 +249,11 @@ fn setup(mut commands: Commands) {
     // Ambient light, same color as sun
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
-        brightness: 100.0,
+        brightness: if cfg!(feature = "light_propagation") {
+            600.0
+        } else {
+            100.0
+        },
         affects_lightmapped_meshes: true,
     });
 

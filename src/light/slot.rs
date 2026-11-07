@@ -36,7 +36,7 @@ pub(crate) const PLANE_BYTES: usize = CHUNK * CHUNK;
 pub(crate) type ShellPlane = [u8; PLANE_BYTES];
 
 /// A lamp's own cell holds this in its voxel half.
-const LAMP_MARKER: u8 = 15 << 4;
+pub(crate) const LAMP_MARKER: u8 = 15 << 4;
 
 /// For each byte, a `u64` with bit `i` of the byte moved to bit 0 of byte `i`.
 const SPREAD: [u64; 256] = {

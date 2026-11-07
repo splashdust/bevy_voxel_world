@@ -318,6 +318,15 @@ pub struct LightStats {
     pub record_bytes: u64,
     /// Positions the sky record forgot to stay within its cap.
     pub record_evictions: u64,
+    /// Coarse chunks solved in their chunk tasks.
+    pub coarse_solves: u64,
+    /// Time coarse chunk tasks spent solving light, walks included, summed
+    /// over them, in milliseconds.
+    pub coarse_solve_ms: f64,
+    /// Voxel lookups coarse chunks' walks made.
+    pub coarse_lookups: u64,
+    /// The bytes coarse chunks keep now as copies of their slots.
+    pub coarse_copy_bytes: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -329,10 +338,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         (record.len() as u64, record.bytes() as u64, record.evictions)
     };
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
-    let slots = world
-        .get_resource::<LightRoute<C>>()
-        .map(|route| route.counters)
-        .unwrap_or_default();
+    let route = world.get_resource::<LightRoute<C>>();
+    let slots = route.map(|route| route.counters).unwrap_or_default();
     Some(LightStats {
         slot_allocations: slots.allocations,
         late_allocations: slots.late_allocations,
@@ -356,6 +363,10 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         record_entries,
         record_bytes,
         record_evictions,
+        coarse_solves: counters.coarse_solves.load(Ordering::Relaxed),
+        coarse_solve_ms: ms(&counters.coarse_nanos),
+        coarse_lookups: counters.coarse_lookups.load(Ordering::Relaxed),
+        coarse_copy_bytes: route.map_or(0, |route| route.coarse_copy_bytes() as u64),
     })
 }
 

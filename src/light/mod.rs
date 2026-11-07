@@ -4,12 +4,14 @@
 //! Each level-0 chunk's light is worked out by the [`solver`] in the chunk's
 //! own task, after its voxels are generated, and lands in the world's
 //! [world view](view) on the main thread. Chunks arriving later around it
-//! [relight](relight) it.
+//! [relight](relight) it. A chunk above LOD level 0 works out its light from
+//! its own cells alone and never relights: see [`coarse`].
 //!
 //! A world that shows its light draws its chunks with its material wrapped in
 //! the crate's own extension ([`material`]), and gets its light to the shader
 //! through a texture of slots and a tag on each chunk ([`route`]).
 
+mod coarse;
 pub(crate) mod config;
 mod faces;
 mod inputs;
@@ -34,12 +36,13 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 
-use crate::chunk::{ChunkKey, PADDED_CHUNK_SIZE};
+use crate::chunk::ChunkKey;
 use crate::chunk_lifecycle::ChunkLifecycle;
 use crate::chunk_map::ChunkMapData;
 use crate::configuration::{VoxelLookupDelegate, VoxelWorldConfig};
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::VoxelWorldSet;
+use coarse::{takes_coarse_path, CoarseSolved, CoarseTask, CoarseWalk};
 use config::{Emission, LightPropagation, Sky};
 use levels::LevelScale;
 pub use levels::LightLevels;
@@ -47,7 +50,7 @@ use probe::SkyProbes;
 use record::SkyRecord;
 use relight::{LightWork, Relights};
 use sky::{Above, SkyFound, SkyRule, SkyWalk};
-use solver::{LightCounters, LightTask, LightTaskSettings};
+use solver::{LightCounters, LightTask, LightTaskSettings, Solved};
 use view::LightView;
 
 /// The light settings world `C` returned at plugin build, with out-of-range
@@ -75,9 +78,9 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         &self.task.counters
     }
 
-    /// What the task of the chunk with `key` needs to solve its light. `None`
-    /// for a chunk that doesn't get light: one above level 0, or with another
-    /// data shape.
+    /// What the task of the chunk with `key` needs to solve its light: a
+    /// level-0 chunk's solve, or a coarse chunk's for one above level 0 or
+    /// with another data shape.
     ///
     /// With sky light on, the task gets the world's lookup `delegate` to walk
     /// the chunk positions above the chunk, and the fill hints and voxel edits
@@ -89,9 +92,14 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         world: &C,
         edits: &VoxelEdits<C, C::MaterialIndex>,
         delegate: VoxelLookupDelegate<C::MaterialIndex>,
-    ) -> Option<LightTask<C::MaterialIndex>> {
-        if key.lod_level != 0 || data_shape != UVec3::splat(PADDED_CHUNK_SIZE) {
-            return None;
+    ) -> Option<TaskLight<C::MaterialIndex>> {
+        if takes_coarse_path(key, data_shape) {
+            return Some(TaskLight::Coarse(CoarseTask {
+                settings: self.task.clone(),
+                walk: self
+                    .sky_rule
+                    .map(|rule| CoarseWalk::new(key, rule, world, edits, delegate)),
+            }));
         }
         let walk = self.sky_rule.map(|rule| {
             let window = rule.window(key.position.y);
@@ -127,28 +135,68 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 },
             }
         });
-        Some(LightTask {
+        Some(TaskLight::Level0(LightTask {
             settings: self.task.clone(),
             view: self.view.clone(),
             walk,
-        })
+        }))
     }
 
-    /// The light at the voxel at `position`, from the light landed for the
-    /// level-0 chunk holding it and that chunk's published voxels, or `None`
-    /// if it has no light.
+    /// The light at the voxel at `position`, from the finest published chunk
+    /// covering it whose light has landed, or `None` if none has.
+    ///
+    /// A level-0 chunk reads its light in the world view and its published
+    /// voxels. A coarse chunk reads the cell holding the voxel in the copy of
+    /// its slot it keeps in `route`, or else the levels its tag holds, from
+    /// `work`.
     pub fn light_at(
         &self,
         chunk_map: &ChunkMapData<C::MaterialIndex>,
+        work: &LightWork<C>,
+        route: Option<&route::LightRoute<C>>,
         position: IVec3,
     ) -> Option<LightLevels> {
-        let key = ChunkKey::containing(position, 0);
-        let chunk = chunk_map.get(&key)?;
-        let light = self.view.read().get(&key.position)?.light.clone();
-        let voxel = chunk.get_voxel_at_world_position(position)?;
-        let local = (position - chunk.key.min_voxel()).as_uvec3();
-        Some(light.levels_at(local, voxel, &self.task.emission))
+        chunk_map.covering(position).find_map(|chunk| {
+            let key = chunk.key;
+            if !takes_coarse_path(key, chunk.data_shape) {
+                let light = self.view.read().get(&key.position)?.light.clone();
+                let voxel = chunk.get_voxel_at_world_position(position)?;
+                let local = (position - key.min_voxel()).as_uvec3();
+                return Some(light.levels_at(local, voxel, &self.task.emission));
+            }
+            let width = 1 << key.lod_level;
+            let cell = ((position - key.min_voxel()) / width + 1).as_uvec3();
+            let texel = route
+                .and_then(|route| route.coarse_cell(chunk.entity, cell))
+                .or_else(|| work.coarse_levels(chunk.entity))?;
+            Some(LightLevels::of_texel(texel))
+        })
     }
+}
+
+/// What a chunk task needs to solve its chunk's light.
+pub(crate) enum TaskLight<I> {
+    Level0(LightTask<I>),
+    Coarse(CoarseTask<I>),
+}
+
+impl<I: Copy + PartialEq> TaskLight<I> {
+    pub fn solve(self, chunk: &crate::chunk::ChunkData<I>) -> SolvedLight {
+        match self {
+            TaskLight::Level0(task) => SolvedLight::Level0(task.solve(chunk)),
+            TaskLight::Coarse(task) => SolvedLight::Coarse(task.solve(chunk)),
+        }
+    }
+}
+
+/// The light a chunk task solved.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per chunk task, moved twice on its way to landing"
+)]
+pub(crate) enum SolvedLight {
+    Level0(Solved),
+    Coarse(CoarseSolved),
 }
 
 /// Reads world `C`'s light settings into a [`LightSettings`]. A world returning
