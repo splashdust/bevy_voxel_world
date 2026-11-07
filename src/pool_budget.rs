@@ -27,6 +27,9 @@ pub(crate) enum JobKind {
     /// A sky probe, in a world with light propagation.
     #[cfg(feature = "light_propagation")]
     SkyProbe,
+    /// A fill probe, in a world with sky fill.
+    #[cfg(feature = "light_propagation")]
+    FillProbe,
     Chunk,
     /// A stand-in for a second kind of job, in tests.
     #[cfg(test)]
@@ -35,7 +38,7 @@ pub(crate) enum JobKind {
 
 impl JobKind {
     const COUNT: usize =
-        1 + 2 * cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
+        1 + 3 * cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
 
     fn index(self) -> usize {
         self as usize

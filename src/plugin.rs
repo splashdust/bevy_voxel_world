@@ -206,6 +206,15 @@ where
             material: StandardMaterial::default(),
         }
     }
+
+    /// [`minimal`](Self::minimal) with `config` in place of the default.
+    #[cfg(all(test, feature = "light_propagation"))]
+    pub(crate) fn minimal_with_config(config: C) -> Self {
+        Self {
+            config,
+            ..Self::minimal()
+        }
+    }
 }
 
 impl<C, M> VoxelWorldPlugin<C, M>

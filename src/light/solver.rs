@@ -32,6 +32,8 @@ use bevy::prelude::*;
 
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
+use super::fill::seed::{CellsAround, FillSeeds};
+use super::fill::FillCells;
 use super::inputs::{LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
@@ -123,6 +125,9 @@ pub(crate) struct LightTaskSettings<I> {
     /// The `generation` of the last change to the emissive list. A chunk's
     /// emissive voxels found before it are stale.
     pub emission_generation: u64,
+    /// The cells of the world's sky fill field, with sky light and sky fill
+    /// on.
+    pub fill: Option<FillCells>,
 }
 
 /// Counts of light work in a world, for tests and benchmarks.
@@ -162,6 +167,22 @@ pub(crate) struct LightCounters {
     pub coarse_nanos: AtomicU64,
     /// Voxel lookups coarse chunks' walks made.
     pub coarse_lookups: AtomicU64,
+    /// Solves that seeded sky fill.
+    pub fill_seeded: AtomicU64,
+    /// Time solves spent seeding sky fill, from reading the cells to the
+    /// end of the 7-voxel run, in nanoseconds.
+    pub fill_seed_nanos: AtomicU64,
+    /// Relights started because a sky fill cell changed.
+    pub fill_relights: AtomicU64,
+    /// Main-thread time spent updating the sky fill field, in nanoseconds.
+    pub fill_update_nanos: AtomicU64,
+    /// Main-thread time spent on sky fill in all, from collecting fill
+    /// probes to marking chunks to relight, in nanoseconds.
+    pub fill_main_thread_nanos: AtomicU64,
+    /// Fill probes started.
+    pub fill_probes: AtomicU64,
+    /// Voxel lookups fill probes made.
+    pub fill_probe_lookups: AtomicU64,
 }
 
 /// The 3×3×3 chunk positions around a chunk, at
@@ -359,8 +380,19 @@ fn solve<I>(
 ) -> Solved {
     snapshot.neighbours[neighbour_index(IVec3::ZERO)] = Some(inputs.clone());
     let started = Instant::now();
+    let fill = settings
+        .fill
+        .as_ref()
+        .filter(|_| inputs.touches_solid())
+        .map(|cells| read_cells(cells, snapshot.position));
     let (sky, sky_faces) = match &settings.sky_scale {
-        Some(scale) => solve_sky(&snapshot.neighbours, scale, settings.shape),
+        Some(scale) => solve_sky(
+            &snapshot.neighbours,
+            scale,
+            settings.shape,
+            fill.as_ref(),
+            &settings.counters,
+        ),
         None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
     };
     let (voxel, voxel_faces) =
@@ -435,20 +467,33 @@ pub(crate) fn solve_voxel(
     if seeds.is_empty() {
         return unlit;
     }
-    let (planes, faces) = spread(neighbours, scale, shape, &seeds, None);
+    let (planes, faces) = spread(neighbours, scale, shape, &seeds, None, None);
     (channel_light(planes, &centre.occupancy), faces)
 }
 
+/// The sky fill cells of the 27 positions around `position`.
+fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
+    let cells = cells.read();
+    std::array::from_fn(|index| {
+        let index = index as i32;
+        let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
+        cells.get(&(position + offset)).cloned()
+    })
+}
+
 /// Solves sky light for the chunk at the centre of `neighbours`, from the
-/// voxels with direct sky around it. Returns it with its face hashes, indexed
-/// by [`Face`].
+/// voxels with direct sky around it and, for a chunk that takes sky fill,
+/// the sky fill cells `fill` around it. Returns it with its face hashes,
+/// indexed by [`Face`].
 ///
 /// Direct sky holds level 15 and doesn't fade. A chunk whose open voxels all
-/// have direct sky needs no spreading.
+/// have direct sky needs no spreading, and takes no sky fill.
 pub(crate) fn solve_sky(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
     shape: LightShape,
+    fill: Option<&CellsAround>,
+    counters: &LightCounters,
 ) -> (ChannelLight, [u64; 6]) {
     let centre = centre(neighbours);
     let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
@@ -472,10 +517,19 @@ pub(crate) fn solve_sky(
             return (ChannelLight::Uniform(15), FaceHashes::uniform(15));
         }
     }
-    if direct.iter().all(Option::is_none) {
+    let seeding = Instant::now();
+    let seeds = fill.and_then(|around| FillSeeds::of(around, scale.reach() as usize));
+    if direct.iter().all(Option::is_none) && seeds.is_none() {
         return unlit;
     }
-    let (mut planes, faces) = spread(neighbours, scale, shape, &[], Some(&direct));
+    let (mut planes, faces) = spread(
+        neighbours,
+        scale,
+        shape,
+        &[],
+        Some(&direct),
+        seeds.as_ref().map(|seeds| (seeds, seeding, counters)),
+    );
     if let Some(own) = own {
         for plane in planes.iter_mut() {
             for (column, direct) in plane.iter_mut().zip(own.iter()) {
@@ -500,20 +554,26 @@ fn channel_light(
         .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
 }
 
+/// Sky fill's seeds for a solve, when it started seeding, and where to count
+/// the time seeding took.
+type Filling<'a> = (&'a FillSeeds, Instant, &'a LightCounters);
+
 /// Spreads light through the box around the chunk at the centre of
-/// `neighbours`, from `seeds` and from the voxels set in `lit`, a plane per
-/// chunk of the neighbourhood. Returns the chunk's levels and face hashes.
+/// `neighbours`, from `seeds`, from the voxels set in `lit`, a plane per
+/// chunk of the neighbourhood, and from sky fill's seeds in `fill`. Returns
+/// the chunk's levels and face hashes.
 fn spread(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
     shape: LightShape,
     seeds: &[Seed],
     lit: Option<&[Option<Box<Plane>>; 27]>,
+    fill: Option<Filling<'_>>,
 ) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
     if scale.reach() <= MAX_ONE_WORD_REACH {
-        spread_in(&ONE_WORD_BOX, neighbours, scale, shape, seeds, lit)
+        spread_in(&ONE_WORD_BOX, neighbours, scale, shape, seeds, lit, fill)
     } else {
-        spread_in(&TWO_WORD_BOX, neighbours, scale, shape, seeds, lit)
+        spread_in(&TWO_WORD_BOX, neighbours, scale, shape, seeds, lit, fill)
     }
 }
 
@@ -524,6 +584,7 @@ fn spread_in<R: Row>(
     shape: LightShape,
     seeds: &[Seed],
     lit: Option<&[Option<Box<Plane>>; 27]>,
+    fill: Option<Filling<'_>>,
 ) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
     cached.with_borrow_mut(|light_box| {
         let light_box = match light_box {
@@ -540,10 +601,29 @@ fn spread_in<R: Row>(
                 Some(lit[index].as_ref()?[x + y * CHUNK])
             });
         }
+        let fill_rows = match fill {
+            Some((seeds, started, counters)) => {
+                let rows = seeds.rows(light_box.open_rows_mut(), reach, scale);
+                counters.fill_seeded.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .fill_seed_nanos
+                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                rows
+            }
+            None => Vec::new(),
+        };
         let mut planes: Box<[Plane; LEVEL_BITS]> =
             Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]);
         let mut faces = [0; 6];
-        light_box.spread(seeds, lit.is_some(), shape, scale, &mut planes, &mut faces);
+        light_box.spread(
+            seeds,
+            lit.is_some(),
+            &fill_rows,
+            shape,
+            scale,
+            &mut planes,
+            &mut faces,
+        );
         (planes, faces)
     })
 }

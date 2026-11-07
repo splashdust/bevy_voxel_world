@@ -47,6 +47,8 @@ impl LightView {
 /// What a solve read of the chunks around it: their inputs for the solver, and
 /// the light of its face neighbours for comparing with its own.
 pub(crate) struct Snapshot {
+    /// The position of the chunk the snapshot is for.
+    pub position: IVec3,
     pub neighbours: Neighbourhood,
     /// Each face neighbour's light and its version, by [`Face`].
     pub faces: [Option<(Arc<ChunkLight>, u64)>; 6],
@@ -69,6 +71,10 @@ impl Snapshot {
             Some((chunk.light.clone(), chunk.version))
         });
         debug_assert!(neighbours[neighbour_index(IVec3::ZERO)].is_none());
-        Self { neighbours, faces }
+        Self {
+            position,
+            neighbours,
+            faces,
+        }
     }
 }

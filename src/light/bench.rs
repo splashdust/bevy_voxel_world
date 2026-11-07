@@ -162,7 +162,7 @@ fn spread_rows<R: Row>(
     if let Some(lit) = lit {
         copy_rows(lit, light_box.lit_rows_mut());
     }
-    light_box.spread(seeds, lit.is_some(), shape, scale, planes, faces);
+    light_box.spread(seeds, lit.is_some(), &[], shape, scale, planes, faces);
 }
 
 /// The rows of a box `side` voxels on a side, at `x + y × side`, with bit `z`
@@ -223,6 +223,7 @@ impl SlotBox {
                     occupancy: Occupancy::Mixed(solid),
                     emissive: Vec::<EmissiveVoxel>::new(),
                     columns: ColumnAnswer::none(),
+                    ring: true,
                 }),
                 sky: ChannelLight::Uniform(15),
                 voxel: ChannelLight::Planes(kernel_box.planes.clone()),
@@ -327,6 +328,20 @@ pub struct LightStats {
     pub coarse_lookups: u64,
     /// The bytes coarse chunks keep now as copies of their slots.
     pub coarse_copy_bytes: u64,
+    /// Solves that seeded sky fill.
+    pub fill_seeded: u64,
+    /// Time solves spent seeding sky fill, in milliseconds.
+    pub fill_seed_ms: f64,
+    /// Relights started because a sky fill cell changed.
+    pub fill_relights: u64,
+    /// Main-thread time the sky fill field spent updating, in milliseconds.
+    pub fill_update_ms: f64,
+    /// Main-thread time spent on sky fill in all, in milliseconds.
+    pub fill_main_thread_ms: f64,
+    /// Fill probes started.
+    pub fill_probes: u64,
+    /// Voxel lookups fill probes made.
+    pub fill_probe_lookups: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -367,6 +382,13 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         coarse_solve_ms: ms(&counters.coarse_nanos),
         coarse_lookups: counters.coarse_lookups.load(Ordering::Relaxed),
         coarse_copy_bytes: route.map_or(0, |route| route.coarse_copy_bytes() as u64),
+        fill_seeded: counters.fill_seeded.load(Ordering::Relaxed),
+        fill_seed_ms: ms(&counters.fill_seed_nanos),
+        fill_relights: counters.fill_relights.load(Ordering::Relaxed),
+        fill_update_ms: ms(&counters.fill_update_nanos),
+        fill_main_thread_ms: ms(&counters.fill_main_thread_nanos),
+        fill_probes: counters.fill_probes.load(Ordering::Relaxed),
+        fill_probe_lookups: counters.fill_probe_lookups.load(Ordering::Relaxed),
     })
 }
 
@@ -389,7 +411,13 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
     let start = Instant::now();
     for neighbours in &boxes {
         if let Some(sky_scale) = &task.sky_scale {
-            black_box(solve_sky(neighbours, sky_scale, task.shape));
+            black_box(solve_sky(
+                neighbours,
+                sky_scale,
+                task.shape,
+                None,
+                &task.counters,
+            ));
         }
         black_box(solve_voxel(neighbours, &task.voxel_scale, task.shape));
     }

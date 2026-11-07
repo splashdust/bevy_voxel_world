@@ -225,6 +225,53 @@ impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
     }
 }
 
+/// The sine terrain with floating islands over it, lit with the default
+/// light settings: slabs of stone 8 voxels thick and 64 wide, from y = 64 to
+/// 72, every 128 voxels along x and z. The ground under them gets its light
+/// from sky fill, which neither bench world shows.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct IslandWorld;
+
+#[cfg(feature = "light_propagation")]
+impl VoxelWorldConfig for IslandWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let terrain = SineWorld::default().voxel_lookup_delegate();
+        Box::new(move |position, lod, previous| {
+            let mut terrain = terrain(position, lod, previous);
+            Box::new(move |pos: IVec3, previous| {
+                let island = (64..72).contains(&pos.y)
+                    && pos.x.rem_euclid(128) < 64
+                    && pos.z.rem_euclid(128) < 64;
+                if island {
+                    WorldVoxel::Solid(1)
+                } else {
+                    terrain(pos, previous)
+                }
+            })
+        })
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+}
+
 /// The world of `stream_in`, lit, with light settings that `settings_lit`
 /// changes while it runs.
 #[cfg(feature = "light_propagation")]
@@ -694,12 +741,12 @@ fn light_is_settled<C: VoxelWorldConfig>(app: &mut App) -> bool {
     state.get(app.world()).unwrap().light_is_settled()
 }
 
-/// Runs frames after a stream until the world's light is settled. Returns how
-/// long that took, in milliseconds.
+/// Runs frames after a stream until the world's light is settled, for at
+/// most a minute. Returns how long that took, in milliseconds.
 #[cfg(feature = "light_propagation")]
 fn settle_light<C: VoxelWorldConfig>(app: &mut App) -> f64 {
     let start = Instant::now();
-    for _ in 0..MAX_FRAMES {
+    while start.elapsed() < std::time::Duration::from_secs(60) {
         if light_is_settled::<C>(app) {
             break;
         }
@@ -710,8 +757,9 @@ fn settle_light<C: VoxelWorldConfig>(app: &mut App) -> f64 {
 }
 
 /// `stream_in` on a lit world, with what working out its direct sky and
-/// solving its light cost in chunk tasks, and how long sky probes take to
-/// bring its light to rest after the stream. Light at rest starts no work.
+/// solving its light cost in chunk tasks, what sky fill cost, and how long
+/// sky probes and fill probes take to bring its light to rest after the
+/// stream. Light at rest starts no work.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,
@@ -770,6 +818,32 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics.insert(
         format!("{prefix}.main_thread_total_ms"),
         stats.main_thread_ms,
+    );
+    // Sky fill's gates on the bench's worlds: no seeded solves, no relights
+    // from fill, and field updates of at most 2 µs per chunk during the
+    // stream. Checked by hand; nothing compares them.
+    let chunks = app.world().resource::<Tracker>().publishes.max(1) as f64;
+    metrics.insert(format!("{prefix}.fill_seeded"), stats.fill_seeded as f64);
+    metrics.insert(
+        format!("{prefix}.fill_seed_us_per_seeded"),
+        stats.fill_seed_ms * 1000.0 / stats.fill_seeded.max(1) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.fill_relights"),
+        stats.fill_relights as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.fill_update_us_per_chunk_in_stream"),
+        streamed.fill_update_ms * 1000.0 / chunks,
+    );
+    metrics.insert(
+        format!("{prefix}.fill_main_thread_us_per_chunk_in_stream"),
+        streamed.fill_main_thread_ms * 1000.0 / chunks,
+    );
+    metrics.insert(format!("{prefix}.fill_probes"), stats.fill_probes as f64);
+    metrics.insert(
+        format!("{prefix}.idle_fill_probes"),
+        (idle.fill_probes - stats.fill_probes) as f64,
     );
     metrics
 }
@@ -1292,6 +1366,10 @@ fn run_all(only: Option<&str>) -> Metrics {
         scenario_stream_in_lit::<LitBenchWorld<FLAT>>("stream_in_flat_lit")
     });
     #[cfg(feature = "light_propagation")]
+    step("stream_in_islands", RUNS, &|| {
+        scenario_stream_in_lit::<IslandWorld>("stream_in_islands")
+    });
+    #[cfg(feature = "light_propagation")]
     step("stream_in_lod", RUNS, &|| {
         scenario_stream_in_lod::<LodWorld<false>>("stream_in_lod")
     });
@@ -1327,6 +1405,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_lamps")
         || key.starts_with("stream_in_lit")
         || key.starts_with("stream_in_flat_lit")
+        || key.starts_with("stream_in_islands")
         || key.starts_with("edits_lit")
         || key.starts_with("settings_lit")
     {

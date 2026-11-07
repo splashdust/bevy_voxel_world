@@ -552,7 +552,15 @@ fn run<R: Row>(
         let mut planes: Box<[Plane; LEVEL_BITS]> =
             Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]);
         let mut faces = [0; 6];
-        light_box.spread(&seeds, lit.is_some(), shape, scale, &mut planes, &mut faces);
+        light_box.spread(
+            &seeds,
+            lit.is_some(),
+            &[],
+            shape,
+            scale,
+            &mut planes,
+            &mut faces,
+        );
         let shell = Box::new(*light_box.shell_levels().expect("the shell is captured"));
         (planes, shell)
     })

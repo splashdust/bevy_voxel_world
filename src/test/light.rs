@@ -26,6 +26,8 @@ mod route;
 #[cfg(feature = "light_propagation")]
 mod settings;
 #[cfg(feature = "light_propagation")]
+mod sky_fill;
+#[cfg(feature = "light_propagation")]
 mod sky_light;
 #[cfg(feature = "light_propagation")]
 mod sky_record;

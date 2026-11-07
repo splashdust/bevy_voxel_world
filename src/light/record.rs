@@ -12,6 +12,10 @@
 //! positions first. Forgetting costs only time: a forgotten position is
 //! probed again when a chunk below it needs it, and gives the same mask.
 //!
+//! With sky fill on, each entry also holds the position's cells for sky fill:
+//! which of its 8-voxel cells are open and which have direct sky. A
+//! world's sky fill field is counted against the record's cap too.
+//!
 //! Each mask notes the edit count of its position when its voxels were read.
 //! A mask whose position has been edited since reads as missing, so a voxel
 //! edit never leaves a stale mask behind.
@@ -21,6 +25,7 @@ use std::collections::VecDeque;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use super::fill::PositionCells;
 use super::sky::Columns;
 
 const CHUNK: usize = crate::chunk::CHUNK_SIZE_U as usize;
@@ -31,6 +36,9 @@ const ENTRY_BYTES: usize = 64;
 
 /// The bytes of a mask of a mixed position.
 const MASK_BYTES: usize = std::mem::size_of::<Columns>();
+
+/// The bytes of an entry's cells for sky fill.
+const CELL_BYTES: usize = std::mem::size_of::<PositionCells>();
 
 /// The smallest cap a world can set, so the record can hold a sky clearance's
 /// worth of mixed positions.
@@ -75,6 +83,8 @@ impl Mask {
 
 struct Entry {
     mask: Mask,
+    /// With sky fill on, the position's cells.
+    cells: Option<PositionCells>,
     /// The position's edit count when its voxels were read.
     edits: u64,
     /// When it was last read or written, on the record's clock.
@@ -95,6 +105,15 @@ pub(crate) struct SkyRecord {
     generation: u64,
     /// Entries forgotten to stay within the cap.
     pub evictions: u64,
+    /// Whether entries keep their cells for sky fill.
+    keeps_cells: bool,
+    /// The bytes of the world's sky fill field, counted against the cap.
+    field_bytes: usize,
+    /// With sky fill on, the positions whose cells were recorded since
+    /// [`take_noted`](Self::take_noted), and those forgotten since
+    /// [`take_forgotten`](Self::take_forgotten).
+    noted: Vec<IVec3>,
+    forgotten: Vec<IVec3>,
 }
 
 impl SkyRecord {
@@ -108,7 +127,80 @@ impl SkyRecord {
             cap,
             generation: 0,
             evictions: 0,
+            keeps_cells: false,
+            field_bytes: 0,
+            noted: Vec::new(),
+            forgotten: Vec::new(),
         }
+    }
+
+    /// Whether entries keep their cells for sky fill.
+    pub fn keeps_cells(&self) -> bool {
+        self.keeps_cells
+    }
+
+    /// Makes entries keep their cells for sky fill from now on, or drops
+    /// every entry's cells.
+    pub fn set_keeps_cells(&mut self, keeps: bool) {
+        self.keeps_cells = keeps;
+        if !keeps {
+            for entry in self.entries.values_mut() {
+                if entry.cells.take().is_some() {
+                    self.bytes -= CELL_BYTES;
+                }
+            }
+            self.noted.clear();
+            self.forgotten.clear();
+            self.field_bytes = 0;
+        }
+    }
+
+    /// Counts `bytes` of the world's sky fill field against the cap,
+    /// forgetting the least recently used positions past it.
+    pub fn set_field_bytes(&mut self, bytes: usize) {
+        self.field_bytes = bytes;
+        self.evict_past_cap();
+    }
+
+    /// The cells of `position`, if the record holds them, made at edit count
+    /// `edits`.
+    pub fn cells(&mut self, position: IVec3, edits: u64) -> Option<PositionCells> {
+        let entry = self.entries.get(&position)?;
+        if entry.edits != edits {
+            self.remove(position);
+            return None;
+        }
+        entry.cells
+    }
+
+    /// Records which cells of `position` have direct sky, if the record holds
+    /// its cells.
+    pub fn set_direct(&mut self, position: IVec3, direct: u64) {
+        if let Some(cells) = self
+            .entries
+            .get_mut(&position)
+            .and_then(|entry| entry.cells.as_mut())
+        {
+            cells.direct = direct;
+        }
+    }
+
+    /// The positions whose cells the record holds, with those cells.
+    pub fn all_cells(&self) -> Vec<(IVec3, PositionCells)> {
+        self.entries
+            .iter()
+            .filter_map(|(position, entry)| Some((*position, entry.cells?)))
+            .collect()
+    }
+
+    /// The positions whose cells were recorded since this was last called.
+    pub fn take_noted(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.noted)
+    }
+
+    /// The positions whose entries were forgotten since this was last called.
+    pub fn take_forgotten(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.forgotten)
     }
 
     pub fn generation(&self) -> u64 {
@@ -135,15 +227,33 @@ impl SkyRecord {
     /// Records the columns holding a solid at `position`, read at edit count
     /// `edits`, forgetting the least recently used positions if the record
     /// grows past its cap.
-    pub fn insert(&mut self, position: IVec3, columns: &Columns, edits: u64) {
+    ///
+    /// With sky fill on, `open` holds the position's open cells, if known.
+    /// Their direct sky is recorded later, with
+    /// [`set_direct`](Self::set_direct).
+    pub fn insert(
+        &mut self,
+        position: IVec3,
+        columns: &Columns,
+        open: Option<u64>,
+        edits: u64,
+    ) {
         self.remove(position);
         let mask = Mask::of(columns);
         self.clock += 1;
         self.bytes += mask.bytes();
+        let cells = open
+            .filter(|_| self.keeps_cells)
+            .map(|open| PositionCells { open, direct: 0 });
+        if cells.is_some() {
+            self.bytes += CELL_BYTES;
+            self.noted.push(position);
+        }
         self.entries.insert(
             position,
             Entry {
                 mask,
+                cells,
                 edits,
                 used: self.clock,
             },
@@ -160,7 +270,7 @@ impl SkyRecord {
     }
 
     fn evict_past_cap(&mut self) {
-        while self.bytes > self.cap {
+        while self.bytes + self.field_bytes > self.cap {
             let Some((oldest, used)) = self.order.pop_front() else {
                 break;
             };
@@ -179,6 +289,9 @@ impl SkyRecord {
     /// Forgets every position, as evicting all of them would.
     #[cfg(test)]
     pub fn forget_all(&mut self) {
+        if self.keeps_cells {
+            self.forgotten.extend(self.entries.keys().copied());
+        }
         self.entries.clear();
         self.order.clear();
         self.bytes = 0;
@@ -204,6 +317,10 @@ impl SkyRecord {
     fn remove(&mut self, position: IVec3) {
         if let Some(entry) = self.entries.remove(&position) {
             self.bytes -= entry.mask.bytes();
+            if entry.cells.is_some() {
+                self.bytes -= CELL_BYTES;
+                self.forgotten.push(position);
+            }
         }
     }
 

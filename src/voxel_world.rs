@@ -209,6 +209,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     sky_probes: Option<Res<'w, crate::light::probe::SkyProbes<C>>>,
     #[cfg(feature = "light_propagation")]
     light_route: Option<Res<'w, crate::light::route::LightRoute<C>>>,
+    #[cfg(feature = "light_propagation")]
+    sky_fill: Option<Res<'w, crate::light::fill::driver::SkyFillWork<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -290,6 +292,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// stream: until they finish, such chunks show direct sky in columns
     /// nothing has proved open yet.
     ///
+    /// With sky fill on, it is also false while the sky fill field has work
+    /// left, a change of fill waits for its relight, which comes at most every
+    /// 500 ms, or a fill probe runs or waits to start.
+    ///
     /// Chunk tasks still running aren't counted, though their light may start
     /// relights once it lands. Chunks above LOD level 0 have no relights to
     /// wait for. Settled doesn't mean exact: light beside a chunk that isn't
@@ -312,6 +318,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
                 .sky_probes
                 .as_ref()
                 .is_none_or(|probes| probes.is_settled())
+            && self.sky_fill.as_ref().is_none_or(|fill| fill.is_settled())
     }
 
     /// Forgets what the world's light knows about the voxels it looked up,

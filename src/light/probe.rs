@@ -36,6 +36,8 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
 
 use super::faces::Face;
+use super::fill::driver::{field_of, SkyFillWork};
+use super::fill::open_cells;
 use super::record::SkyRecord;
 use super::relight::LightWork;
 use super::sky::{
@@ -97,7 +99,62 @@ struct Probe {
     edits: u64,
     /// The sky record's generation when the probe started.
     generation: u64,
-    task: Task<(Columns, u64)>,
+    task: Task<ProbeRead>,
+}
+
+/// What a probe read of a position.
+pub(crate) struct ProbeRead {
+    /// The columns holding a solid.
+    pub solid: Columns,
+    /// The cells holding no solid, when asked for.
+    pub open: Option<u64>,
+    pub lookups: u64,
+}
+
+/// Reads the voxels of `position` through `lookup`, voxel edits first, for
+/// which of its columns hold a solid and, with `cells`, which of its cells
+/// hold none.
+///
+/// Each column is read upward to its first solid. With `cells`, a column goes
+/// on past it, skipping only voxels whose cell already holds a solid.
+pub(crate) fn probe_position<I: Copy + PartialEq>(
+    position: IVec3,
+    mut lookup: impl FnMut(IVec3) -> crate::voxel::WorldVoxel<I>,
+    edits: Option<&HashMap<IVec3, crate::voxel::WorldVoxel<I>>>,
+    cells: bool,
+) -> ProbeRead {
+    let min = position * CHUNK_SIZE_I;
+    let mut solid = [0; CHUNK];
+    let mut closed = 0u64;
+    let mut lookups = 0;
+    for z in 0..CHUNK {
+        for (x, solid) in solid.iter_mut().enumerate() {
+            for y in 0..CHUNK {
+                let cell = crate::light::fill::cell_bit(x / 8, y / 8, z / 8);
+                let column_blocked = *solid >> z & 1 == 1;
+                if column_blocked && (!cells || closed & cell != 0) {
+                    if !cells {
+                        break;
+                    }
+                    continue;
+                }
+                let at = min + IVec3::new(x as i32, y as i32, z as i32);
+                lookups += 1;
+                let voxel = edits
+                    .and_then(|edits| edits.get(&at).copied())
+                    .unwrap_or_else(|| lookup(at));
+                if voxel.is_solid() {
+                    *solid |= 1 << z;
+                    closed |= cell;
+                }
+            }
+        }
+    }
+    ProbeRead {
+        solid,
+        open: cells.then_some(!closed),
+        lookups,
+    }
 }
 
 /// The sky probes of world `C`: the chunks waiting for their columns to
@@ -114,6 +171,12 @@ pub(crate) struct SkyProbes<C> {
     probing: HashSet<IVec3>,
     /// Chunks whose direct sky changed, to relight.
     relight: Vec<IVec3>,
+    /// Chunks that started or stopped waiting, so whether their columns are
+    /// proved changed, for sky fill.
+    touched: Vec<IVec3>,
+    /// Whether probes also read which cells of a position hold no solid, for
+    /// sky fill.
+    pub reads_cells: bool,
     _world: PhantomData<C>,
 }
 
@@ -126,6 +189,8 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             running: Vec::new(),
             probing: HashSet::new(),
             relight: Vec::new(),
+            touched: Vec::new(),
+            reads_cells: false,
             _world: PhantomData,
         }
     }
@@ -192,7 +257,8 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
 
         if fresh && edits.edit_count(position) == found.own_edits {
             let mask = inputs.occupancy.solid_columns();
-            record.insert(position, &mask, found.own_edits);
+            let open = record.keeps_cells().then(|| open_cells(&inputs.occupancy));
+            record.insert(position, &mask, open, found.own_edits);
             self.learned(position, &mask, view);
         }
     }
@@ -260,6 +326,9 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         };
         let answer = chunk.answer();
         self.waiting.insert(position, chunk);
+        if self.reads_cells {
+            self.touched.push(position);
+        }
         self.columns
             .entry(position.xz())
             .or_default()
@@ -280,6 +349,16 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         }
         self.remove(position);
         true
+    }
+
+    /// Whether the chunk at `position` waits for its columns to be proved.
+    pub fn is_waiting(&self, position: IVec3) -> bool {
+        self.waiting.contains_key(&position)
+    }
+
+    /// The chunks that started or stopped waiting since this was last called.
+    pub fn take_touched(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.touched)
     }
 
     /// The chunks whose direct sky changed since this was last called.
@@ -323,6 +402,9 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         let answer = chunk.answer();
         if answer.provisional.iter().any(|column| *column != 0) {
             self.waiting.insert(position, chunk);
+            if self.reads_cells {
+                self.touched.push(position);
+            }
             self.columns
                 .entry(position.xz())
                 .or_default()
@@ -334,7 +416,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     /// Takes the mask of `position`, the columns holding a solid there, into
     /// every waiting chunk below it. A chunk whose direct sky changes gets its
     /// new answer in the world view and is queued to relight.
-    fn learned(&mut self, position: IVec3, mask: &Columns, view: &LightView) {
+    pub fn learned(&mut self, position: IVec3, mask: &Columns, view: &LightView) {
         let Some(heights) = self.columns.get(&position.xz()) else {
             return;
         };
@@ -369,6 +451,9 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     fn remove(&mut self, position: IVec3) {
         if self.waiting.remove(&position).is_none() {
             return;
+        }
+        if self.reads_cells {
+            self.touched.push(position);
         }
         if let Some(heights) = self.columns.get_mut(&position.xz()) {
             heights.retain(|y| *y != position.y);
@@ -406,6 +491,9 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
 
     /// Forgets every waiting chunk and drops the running probes.
     fn clear(&mut self) {
+        if self.reads_cells {
+            self.touched.extend(self.waiting.keys().copied());
+        }
         self.waiting.clear();
         self.columns.clear();
         self.running.clear();
@@ -432,8 +520,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             let mut index = 0;
             while index < probes.running.len() {
                 let probe = &mut probes.running[index];
-                let Some((mask, lookups)) =
-                    future::block_on(future::poll_once(&mut probe.task))
+                let Some(read) = future::block_on(future::poll_once(&mut probe.task))
                 else {
                     index += 1;
                     continue;
@@ -441,15 +528,17 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 finished += 1;
                 let probe = probes.running.swap_remove(index);
                 probes.probing.remove(&probe.position);
-                counters.probe_lookups.fetch_add(lookups, Ordering::Relaxed);
+                counters
+                    .probe_lookups
+                    .fetch_add(read.lookups, Ordering::Relaxed);
                 if probe.generation != record.generation()
                     || edits.edit_count(probe.position) != probe.edits
                 {
                     counters.probes_discarded.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                record.insert(probe.position, &mask, probe.edits);
-                probes.learned(probe.position, &mask, &settings.view);
+                record.insert(probe.position, &read.solid, read.open, probe.edits);
+                probes.learned(probe.position, &read.solid, &settings.view);
             }
         }
         for position in probes.take_relights() {
@@ -514,29 +603,11 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         for position in targets {
             let mut lookup = delegate(position, 0, None);
             let bucket = edits.buckets(std::iter::once(position)).pop().flatten();
+            let cells = probes.reads_cells;
             let task = thread_pool.spawn(async move {
                 #[cfg(feature = "trace")]
                 let _span = bevy::log::info_span!("sky_probe").entered();
-                let min = position * CHUNK_SIZE_I;
-                let mut solid = [0; CHUNK];
-                let mut lookups = 0;
-                for z in 0..CHUNK {
-                    for (x, solid) in solid.iter_mut().enumerate() {
-                        for y in 0..CHUNK {
-                            let at = min + IVec3::new(x as i32, y as i32, z as i32);
-                            lookups += 1;
-                            let voxel = bucket
-                                .as_ref()
-                                .and_then(|edits| edits.get(&at).copied())
-                                .unwrap_or_else(|| lookup(at, None));
-                            if voxel.is_solid() {
-                                *solid |= 1 << z;
-                                break;
-                            }
-                        }
-                    }
-                }
-                (solid, lookups)
+                probe_position(position, |at| lookup(at, None), bucket.as_deref(), cells)
             });
             probes.probing.insert(position);
             probes.running.push(Probe {
@@ -551,19 +622,24 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     }
 }
 
-/// Picks up a `reset_light` call: forgets the sky record, works every loaded
+/// Picks up a `reset_light` call: forgets the sky record and the sky fill
+/// field, works every loaded
 /// chunk's column answer out again from its padding row, the fill hints and
 /// the loaded chunks' own voxels, and relights every chunk.
 pub(crate) fn reset_light<C: VoxelWorldConfig>(
     settings: Res<LightSettings<C>>,
     mut work: ResMut<LightWork<C>>,
     probes: Option<ResMut<SkyProbes<C>>>,
+    fill: Option<ResMut<SkyFillWork<C>>>,
     chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
     configuration: Res<C>,
 ) {
     if !settings.reset.swap(false, Ordering::AcqRel) {
         return;
+    }
+    if let (Some(mut fill), Some(field)) = (fill, field_of(&settings.config)) {
+        fill.reset(field);
     }
     if let Some(mut probes) = probes {
         let mut record = settings.record.lock().unwrap();
@@ -598,8 +674,14 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
     let loaded: Vec<(IVec3, Entity, ColumnAnswer)> = {
         let view = view.read();
         for (position, chunk) in view.iter() {
-            let mask = chunk.light.inputs.occupancy.solid_columns();
-            record.insert(*position, &mask, edits.edit_count(*position));
+            let occupancy = &chunk.light.inputs.occupancy;
+            let open = record.keeps_cells().then(|| open_cells(occupancy));
+            record.insert(
+                *position,
+                &occupancy.solid_columns(),
+                open,
+                edits.edit_count(*position),
+            );
         }
         view.iter()
             .map(|(position, chunk)| {

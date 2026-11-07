@@ -13,6 +13,10 @@ use bevy::prelude::*;
 
 use crate::prelude::{LightShape, Sky, WorldVoxel};
 
+mod fill;
+
+pub(super) use fill::fill_reference;
+
 /// Not reached by any source.
 const UNREACHED: u32 = u32::MAX;
 

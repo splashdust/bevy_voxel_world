@@ -119,6 +119,10 @@ pub(crate) struct LightInputs {
     /// [`SkyProbes`](super::probe::SkyProbes), which don't replace a chunk's
     /// inputs when only that changes.
     pub columns: ColumnAnswer,
+    /// Whether a voxel in the chunk's padding, the layer of voxels just
+    /// outside its faces, is solid, as its voxels were generated. A voxel
+    /// edit can turn it on but never off.
+    pub ring: bool,
 }
 
 impl LightInputs {
@@ -140,6 +144,7 @@ impl LightInputs {
                         occupancy: Occupancy::Open,
                         emissive: Vec::new(),
                         columns,
+                        ring: false,
                     },
                     false,
                 )
@@ -159,6 +164,7 @@ impl LightInputs {
                         occupancy,
                         emissive,
                         columns,
+                        ring: voxel.is_solid(),
                     },
                     scanned,
                 );
@@ -195,6 +201,7 @@ impl LightInputs {
                 occupancy,
                 emissive,
                 columns,
+                ring: true,
             },
             scanned,
         )
@@ -238,6 +245,7 @@ impl LightInputs {
             occupancy: self.occupancy.clone(),
             emissive,
             columns: self.columns.clone(),
+            ring: self.ring,
         }
     }
 
@@ -247,7 +255,34 @@ impl LightInputs {
             occupancy: self.occupancy.clone(),
             emissive: self.emissive.clone(),
             columns,
+            ring: self.ring,
         }
+    }
+
+    /// Whether the chunk takes sky fill: it has an open voxel touching a
+    /// solid by a face, an edge or a corner, counting the solids in its
+    /// padding. The solver also leaves out a chunk whose open voxels all have
+    /// direct sky.
+    ///
+    /// A chunk with both open and solid voxels always has one, and a chunk of
+    /// air has one exactly when its padding holds a solid.
+    pub fn touches_solid(&self) -> bool {
+        match self.occupancy {
+            Occupancy::Mixed(_) => true,
+            Occupancy::Open => self.ring,
+            Occupancy::Solid => false,
+        }
+    }
+
+    /// Whether every open voxel of the chunk has direct sky. False for a
+    /// chunk with no open voxel.
+    pub fn all_open_direct(&self) -> bool {
+        let Some(direct) = self.direct_sky() else {
+            return false;
+        };
+        (0..CHUNK * CHUNK).all(|column| {
+            direct[column] == !self.occupancy.solid_column(column % CHUNK, column / CHUNK)
+        })
     }
 
     /// The chunk's voxels with direct sky, as a [`Plane`]: in each column its

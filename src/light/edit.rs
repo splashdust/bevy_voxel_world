@@ -31,6 +31,7 @@ use std::time::Instant;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
+use super::fill::{cell_bit, open_cells, CELL};
 use super::inputs::LightInputs;
 use super::probe::SkyProbes;
 use super::relight::LightWork;
@@ -49,6 +50,9 @@ const CHUNK: usize = CHUNK_SIZE_U as usize;
 /// How many chunk positions below an edit a sky ceiling's window is followed
 /// down, looking for loaded chunks whose direct sky changed.
 const CEILING_DEPTH: i32 = 64;
+
+/// How far from an edit, in voxels, chunks relight for sky fill.
+const FILL_RUN_REACH: i32 = 8;
 
 /// The six steps to a voxel's face neighbours.
 const STEPS: [IVec3; 6] = [
@@ -106,6 +110,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let mut view = settings.view.write();
 
     // Which edits touch light, read before any input changes.
+    let fill = settings.task.fill.is_some();
     for p in &requests.edited {
         if quiet {
             if touches_light(&view, *p, voxel(*p).is_solid()) {
@@ -113,6 +118,39 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             }
         } else {
             relight.extend(within_reach(*p, reach));
+        }
+        // Sky fill's seeds run up to 7 voxels from their cell, so a change
+        // can move them in the chunks within 8 voxels.
+        if fill {
+            relight.extend(within_reach(*p, FILL_RUN_REACH));
+        }
+    }
+
+    // A solid placed in the padding of a chunk of air makes it take sky fill.
+    if fill {
+        for p in requests.edited.iter().filter(|p| voxel(**p).is_solid()) {
+            let own = chunk_containing(*p);
+            for position in within_reach(*p, 1).filter(|position| *position != own) {
+                let Some(chunk) = view.get_mut(&position) else {
+                    continue;
+                };
+                let inputs = &chunk.light.inputs;
+                if inputs.ring
+                    || !matches!(inputs.occupancy, super::inputs::Occupancy::Open)
+                {
+                    continue;
+                }
+                let inputs = LightInputs {
+                    ring: true,
+                    ..inputs.with_columns(inputs.columns.clone())
+                };
+                chunk.light = std::sync::Arc::new(ChunkLight {
+                    inputs: std::sync::Arc::new(inputs),
+                    sky: chunk.light.sky.clone(),
+                    voxel: chunk.light.voxel.clone(),
+                });
+                relight.insert(position);
+            }
         }
     }
 
@@ -169,6 +207,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             occupancy,
             emissive,
             columns: old.columns.clone(),
+            ring: old.ring,
         };
         chunk.light = std::sync::Arc::new(ChunkLight {
             inputs: std::sync::Arc::new(inputs),
@@ -232,10 +271,28 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         for (position, mask) in &masks {
             let count = edits.edit_count(*position);
             if current.contains(position) {
-                let solid = view[position].light.inputs.occupancy.solid_columns();
-                record.insert(*position, &solid, count);
+                let occupancy = &view[position].light.inputs.occupancy;
+                let open = record.keeps_cells().then(|| open_cells(occupancy));
+                record.insert(*position, &occupancy.solid_columns(), open, count);
             } else if let Some(mask) = mask {
-                record.insert(*position, mask, count);
+                // A placed solid closes its cell. A dug voxel may open its
+                // cell, which only reading the rest of the cell can tell, so
+                // its cells are left unknown.
+                let voxels = &by_chunk[position];
+                let before = count - voxels.len() as u64;
+                let open = record.cells(*position, before).and_then(|cells| {
+                    voxels.iter().try_fold(cells.open, |open, p| {
+                        let local = local(*p);
+                        voxel(*p).is_solid().then(|| {
+                            open & !cell_bit(
+                                local.x / CELL,
+                                local.y / CELL,
+                                local.z / CELL,
+                            )
+                        })
+                    })
+                });
+                record.insert(*position, mask, open, count);
             }
         }
         drop(record);
@@ -314,6 +371,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     sky: light.sky.clone(),
                     voxel: light.voxel.clone(),
                 });
+                work.fill_touch(below);
                 if quiet {
                     relight.insert(below);
                 } else {

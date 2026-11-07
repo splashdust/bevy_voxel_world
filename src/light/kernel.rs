@@ -218,14 +218,20 @@ impl<R: Row> LightBox<R> {
     /// [`lit_rows_mut`](Self::lit_rows_mut), each a source at distance 0 whose
     /// own voxel isn't written either. Without it, the lit rows are ignored.
     ///
+    /// `fill` holds sky fill's seeds: rows of the box, each joining the light
+    /// at the end of its round, so its own voxels hold that round's level.
+    /// It must be sorted by round.
+    ///
     /// It also writes into `faces` a hash per face, indexed by [`Face`], of
     /// the round and pass in which light reached each of the chunk's voxels on
     /// that face, lit voxels counting as round 0. A face no light reaches
     /// hashes to 0.
+    #[allow(clippy::too_many_arguments)]
     pub fn spread(
         &mut self,
         seeds: &[Seed],
         lit: bool,
+        fill: &[(usize, Vec<R>)],
         shape: LightShape,
         scale: &LevelScale,
         planes: &mut [Plane; LEVEL_BITS],
@@ -249,6 +255,7 @@ impl<R: Row> LightBox<R> {
             self.reached.fill(R::ZERO);
         }
         let mut next_seed = 0;
+        let mut next_fill = 0;
 
         for round in 1..=reach {
             // Seeds starting at the step before this round join the light, and
@@ -267,11 +274,15 @@ impl<R: Row> LightBox<R> {
             let low = round;
             let high = side - round;
             let z_mask = ones::<R>(low, high - low);
-            let changed = if shape == LightShape::Round && round % 2 == 0 {
+            let mut changed = if shape == LightShape::Round && round % 2 == 0 {
                 self.three_passes(low, high, z_mask, round, faces)
             } else {
                 self.face_step(low, high, z_mask)
             };
+            while next_fill < fill.len() && fill[next_fill].0 == round {
+                changed |= self.join(&fill[next_fill].1, low, high, z_mask);
+                next_fill += 1;
+            }
 
             for seed in round_seeds {
                 let row = seed.x as usize + seed.y as usize * side;
@@ -296,10 +307,32 @@ impl<R: Row> LightBox<R> {
                 self.capture_shell_round(level);
             }
             std::mem::swap(&mut self.reached, &mut self.next);
-            if changed == R::ZERO && next_seed == seeds.len() {
+            if changed == R::ZERO && next_seed == seeds.len() && next_fill == fill.len() {
                 break;
             }
         }
+    }
+
+    /// Adds the open voxels of `rows` to the voxels this round reached, over
+    /// rows `low..high` along x and y. Returns the bits newly reached.
+    fn join(&mut self, rows: &[R], low: usize, high: usize, z_mask: R) -> R {
+        let side = self.side;
+        let mut changed = R::ZERO;
+        for y in low..high {
+            let i = low + y * side;
+            let width = high - low;
+            for (((next, &seed), &open), &old) in self.next[i..i + width]
+                .iter_mut()
+                .zip(&rows[i..i + width])
+                .zip(&self.open[i..i + width])
+                .zip(&self.reached[i..i + width])
+            {
+                let added = seed & open & z_mask;
+                *next |= added;
+                changed |= added & !old;
+            }
+        }
+        changed
     }
 
     /// One face step from every reached voxel, over rows `low..high` along x

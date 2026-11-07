@@ -62,6 +62,7 @@ use futures_lite::future;
 
 use super::coarse::CoarseSolved;
 use super::faces::{could_reach_sooner, Face};
+use super::fill::open_cells;
 use super::inputs::Rescan;
 use super::levels::LevelScale;
 use super::probe::{face_neighbours, SkyProbes};
@@ -159,6 +160,15 @@ pub(crate) struct LightWork<C> {
     /// The dirty chunks a settings change marked, waiting for a relight to
     /// start after chunk tasks have started. A chunk is in one queue at most.
     settings_queue: HashSet<IVec3>,
+    /// The dirty chunks a sky fill cell's change marked, waiting for a
+    /// relight to start after chunk tasks and before the settings queue. A
+    /// chunk is in one queue at most.
+    fill_queue: HashSet<IVec3>,
+    /// Chunks that landed or retired since sky fill last looked, whose cells
+    /// sky fill works out again.
+    fill_touched: Vec<IVec3>,
+    /// Whether the world has sky fill, so `fill_touched` is kept.
+    pub tracks_fill: bool,
     running: Vec<Running>,
     landing: VecDeque<Landing>,
     /// Relit light of chunks being re-meshed, held until their new mesh
@@ -192,6 +202,9 @@ impl<C> Default for LightWork<C> {
             positions: HashMap::new(),
             queue: HashSet::new(),
             settings_queue: HashSet::new(),
+            fill_queue: HashSet::new(),
+            fill_touched: Vec::new(),
+            tracks_fill: false,
             running: Vec::new(),
             landing: VecDeque::new(),
             held: HashMap::new(),
@@ -212,6 +225,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     pub fn is_settled(&self) -> bool {
         self.queue.is_empty()
             && self.settings_queue.is_empty()
+            && self.fill_queue.is_empty()
             && self.running.is_empty()
             && self.landing.is_empty()
             && self.held.is_empty()
@@ -301,6 +315,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         chunk.state = match chunk.state {
             LightState::Clean | LightState::Dirty => {
                 self.settings_queue.remove(&position);
+                self.fill_queue.remove(&position);
                 self.queue.insert(position);
                 LightState::Dirty
             }
@@ -321,6 +336,40 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             chunk.state = LightState::Dirty;
             self.settings_queue.insert(position);
         }
+    }
+
+    /// Marks the chunk at `position` for a relight because a sky fill cell it
+    /// reads changed, if it has light. The relight starts after chunk tasks,
+    /// unless something else triggers it meanwhile. A chunk already dirty
+    /// needs nothing more, and a chunk relighting is marked to relight again.
+    pub fn trigger_fill(&mut self, position: IVec3) {
+        let Some(chunk) = self.chunks.get_mut(&position) else {
+            return;
+        };
+        match chunk.state {
+            LightState::Clean => {
+                chunk.state = LightState::Dirty;
+                self.fill_queue.insert(position);
+            }
+            LightState::Dirty => {}
+            LightState::Relighting { .. } => {
+                chunk.state = LightState::Relighting { dirty: true };
+            }
+        }
+    }
+
+    /// Notes that the chunk at `position` landed, retired or had its column
+    /// answer changed, for sky fill to work out its cells again.
+    pub fn fill_touch(&mut self, position: IVec3) {
+        if self.tracks_fill {
+            self.fill_touched.push(position);
+        }
+    }
+
+    /// The chunks noted with [`fill_touch`](Self::fill_touch) since this was
+    /// last called.
+    pub fn take_fill_touched(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.fill_touched)
     }
 
     /// Ends the chunk's relight, starting another if one was triggered
@@ -486,6 +535,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     self.positions.remove(&chunk.entity);
                     self.queue.remove(&position);
                     self.settings_queue.remove(&position);
+                    self.fill_queue.remove(&position);
                     self.chunks.remove(&position);
                 } else if let LightState::Relighting { .. } = chunk.state {
                     // The running relight read the old inputs, so it is
@@ -499,6 +549,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 urgent: false,
             });
             self.positions.insert(entity, position);
+            self.fill_touch(position);
         }
         for position in triggers {
             self.trigger_as(position, urgent);
@@ -617,7 +668,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             self.chunks.remove(&position);
             self.queue.remove(&position);
             self.settings_queue.remove(&position);
+            self.fill_queue.remove(&position);
         }
+        self.fill_touch(position);
         let mut view = view.write();
         if view
             .get(&position)
@@ -643,6 +696,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     ) {
         let positions = match queue {
             Queue::Arrivals => &self.queue,
+            Queue::Fill => &self.fill_queue,
             Queue::Settings => &self.settings_queue,
         };
         if positions.is_empty() {
@@ -699,6 +753,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     ) {
         self.queue.remove(&position);
         self.settings_queue.remove(&position);
+        self.fill_queue.remove(&position);
         let chunk = self.chunks.get_mut(&position).unwrap();
         chunk.state = LightState::Relighting { dirty: false };
         let urgent = std::mem::take(&mut chunk.urgent);
@@ -935,10 +990,13 @@ impl<C: VoxelWorldConfig> Relights<C> {
                         (Some(probes), Some(record)) => {
                             let own = landing.solved.own_edits;
                             if edits.edit_count(position) == own {
-                                let inputs = &landing.solved.light.inputs;
+                                let occupancy = &landing.solved.light.inputs.occupancy;
+                                let open =
+                                    record.keeps_cells().then(|| open_cells(occupancy));
                                 record.insert(
                                     position,
-                                    &inputs.occupancy.solid_columns(),
+                                    &occupancy.solid_columns(),
+                                    open,
                                     own,
                                 );
                             }
@@ -1057,6 +1115,49 @@ impl<C: VoxelWorldConfig> Relights<C> {
         work.add_frame_time(started);
     }
 
+    /// Starts relights for the chunks whose sky fill cells changed, nearest
+    /// a camera first, with the room in the world's [`PoolBudget`] that chunk
+    /// tasks leave.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_fill(
+        mut work: ResMut<LightWork<C>>,
+        mut budget: ResMut<PoolBudget<C>>,
+        settings: Res<LightSettings<C>>,
+        states: Query<&ChunkStateOf<C>>,
+        cameras: Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
+        configuration: Res<C>,
+        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+    ) {
+        if work.fill_queue.is_empty() {
+            return;
+        }
+        #[cfg(feature = "trace")]
+        let _span = bevy::log::info_span!("start_fill_relights").entered();
+        let started = Instant::now();
+        let rescans = Rescans {
+            chunk_map: &chunk_map,
+            edits: &edits,
+        };
+        let cap = configuration.max_active_chunk_threads();
+        let before = settings.counters().relights.load(Ordering::Relaxed);
+        work.start_nearest(
+            Queue::Fill,
+            &settings,
+            &mut budget,
+            cap,
+            &rescans,
+            &states,
+            &cameras,
+        );
+        let started_now = settings.counters().relights.load(Ordering::Relaxed) - before;
+        settings
+            .counters()
+            .fill_relights
+            .fetch_add(started_now, Ordering::Relaxed);
+        work.add_frame_time(started);
+    }
+
     /// Starts relights for the chunks a settings change marked, nearest a
     /// camera first, with the room in the world's [`PoolBudget`] that chunk
     /// tasks leave. Then counts this frame's main-thread time.
@@ -1108,6 +1209,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
 enum Queue {
     /// Chunks triggered by light arriving, by voxel edits and by sky probes.
     Arrivals,
+    /// Chunks whose sky fill cells changed.
+    Fill,
     /// Chunks a settings change marked.
     Settings,
 }

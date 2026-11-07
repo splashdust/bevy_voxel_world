@@ -56,7 +56,7 @@ fn shaft_and_caves(p: IVec3) -> WorldVoxel {
 }
 
 /// The world of [`shaft_and_caves`] with `light`.
-fn shaft_world(light: LightPropagation) -> LampWorld {
+pub(super) fn shaft_world(light: LightPropagation) -> LampWorld {
     LampWorld {
         scene: Arc::new(shaft_and_caves),
         light: Some(light),

@@ -173,10 +173,20 @@ pub struct LightPropagation {
     pub shape: LightShape,
 
     /// How sky light reaches past where it falls and spreads, such as under a
-    /// high overhang. `None` turns it off.
+    /// high floating island or into a cave behind a wide opening. `None`
+    /// turns it off, so sky light comes only from direct sky and spreads
+    /// `sky_reach` voxels from it: the ground under a high island is then
+    /// black in its middle, as under a low slab.
     ///
-    /// Sky fill isn't built yet, so this has no effect: sky light comes only
-    /// from direct sky and spreads `sky_reach` voxels from it.
+    /// Sky fill works out a level for every 8-voxel cell from which cells of
+    /// the chunk positions the world has seen are open, kept in the sky
+    /// record, and seeds those levels into the light of each chunk with an
+    /// open voxel beside a solid. It reads only columns proved clear as sky,
+    /// and positions it hasn't seen as blocked, so it is exact at rest and
+    /// darker than the truth before, never brighter. A change of fill
+    /// relights the chunks around it at most every 500 ms. With it off, a
+    /// world keeps no fill and runs no fill probes. With
+    /// [`Sky::Off`] it does nothing.
     ///
     /// Relights on change. Defaults to [`SkyFill::Paths`] with its defaults.
     pub sky_fill: Option<SkyFill>,
@@ -223,8 +233,10 @@ pub struct LightPropagation {
     /// forgotten position is looked up again when a chunk needs it.
     ///
     /// A mixed position takes about 192 bytes, and a position that is all air
-    /// or has a solid in every column about 64. Values below 3 KiB are
-    /// raised to it with a warning.
+    /// or has a solid in every column about 64. With sky fill on, each
+    /// position takes 16 bytes more for its cells, and the sky fill field
+    /// counts against the cap too, at roughly 200 bytes per position it
+    /// knows. Values below 3 KiB are raised to it with a warning.
     ///
     /// A limit, applied at once on change. Defaults to 16 MiB.
     pub sky_record_cap: usize,
@@ -353,6 +365,9 @@ pub enum SkyFill {
     /// them, losing more through narrower openings.
     Paths(PathFill),
     /// Each cell is lit by how much of the sky it sees.
+    ///
+    /// Not built yet: a world choosing it gets no sky fill, with a warning
+    /// logged once.
     Openness(OpenFill),
 }
 
@@ -363,6 +378,22 @@ impl Default for SkyFill {
 }
 
 /// The settings of [`SkyFill::Paths`].
+///
+/// Each chunk position's open 8-voxel cells split into regions of cells
+/// joined by faces, and each region gets a level. A region passes light to a
+/// region beside it through the cells they share, losing more the less of the
+/// receiving region's width the opening fills, and a region whose top cells
+/// see the sky gets light from it.
+///
+/// A world wanting brighter caves should lower [`opening_power`](Self::opening_power)
+/// first. Lowering [`whole_face_loss`](Self::whole_face_loss) lets light go
+/// further, but makes keeping the levels current about 10 times dearer at 1.
+///
+/// Two limits come with the default settings. A cave behind an opening
+/// narrower than the cave itself is black past the pool of light around its
+/// opening. And a sky full of small floating things gets no fill: an 8×8
+/// patch of the sky rarely has all its columns clear, so no region sees the
+/// sky.
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub struct PathFill {
     /// The light level of open space beside the open sky, from 0 to 15.
