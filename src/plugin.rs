@@ -290,7 +290,9 @@ where
         app.init_resource::<C>()
             .insert_resource(ConfigCopy(Arc::new(self.config.clone())))
             .add_systems(First, ConfigCopy::<C>::follow.run_if(resource_changed::<C>))
-            .add_systems(PreStartup, Internals::<C>::setup)
+            // A config inserted after the plugin replaces the one it was built
+            // with, so the copy follows it before any startup system runs.
+            .add_systems(PreStartup, (ConfigCopy::<C>::follow, Internals::<C>::setup))
             .insert_resource(SpawnMeshes::<C>::new(self.spawn_meshes))
             .add_systems(
                 PreUpdate,

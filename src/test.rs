@@ -279,6 +279,44 @@ fn a_system_can_hold_res_mut_of_the_config_and_voxel_world_together() {
     });
 }
 
+/// A world with no chunks, whose every chunk is hinted to hold `hinted`.
+#[derive(Resource, Clone, Default)]
+struct HintOnlyWorld {
+    hinted: u8,
+}
+
+impl VoxelWorldConfig for HintOnlyWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn chunk_fill_hint(&self, _key: ChunkKey) -> FillHint<Self::MaterialIndex> {
+        FillHint::Uniform(WorldVoxel::Solid(self.hinted))
+    }
+}
+
+#[test]
+fn a_startup_system_reads_a_config_inserted_after_the_plugin() {
+    #[derive(Resource)]
+    struct ReadAtStartup(WorldVoxel);
+
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<HintOnlyWorld>::minimal()))
+        .insert_resource(HintOnlyWorld { hinted: 7 })
+        .add_systems(
+            Startup,
+            |voxel_world: VoxelWorld<HintOnlyWorld>, mut commands: Commands| {
+                commands
+                    .insert_resource(ReadAtStartup(voxel_world.get_voxel(IVec3::ZERO)));
+            },
+        );
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<ReadAtStartup>().0,
+        WorldVoxel::Solid(7)
+    );
+}
+
 #[derive(Resource, Default)]
 struct Published(Vec<IVec3>);
 

@@ -36,9 +36,11 @@ impl<C> Default for VoxelWorldCamera<C> {
 /// of the config resource itself, so a system can take both `ResMut<C>` and
 /// `VoxelWorld<C>`.
 ///
-/// It follows the config resource at the start of each frame where the config
-/// changed, so a system that changes the config sees the change through
-/// `VoxelWorld` from the next frame on.
+/// It follows the config resource before the startup systems run, and at the
+/// start of each frame where the config changed. So a config inserted after
+/// the plugin shows from the first startup system on, but a change made
+/// during a frame shows through `VoxelWorld` only from the next frame: a
+/// copy can't follow a `ResMut<C>` that a system holds.
 #[derive(Resource)]
 pub(crate) struct ConfigCopy<C>(pub Arc<C>);
 
@@ -194,6 +196,10 @@ impl<I> VoxelRaycastResult<I> {
 }
 
 /// Grants access to the VoxelWorld in systems
+///
+/// It reads the world's config as it was at the start of the frame, so a
+/// system can hold it beside `ResMut` of the config. A change to the config
+/// made during a frame shows through it from the next frame.
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,

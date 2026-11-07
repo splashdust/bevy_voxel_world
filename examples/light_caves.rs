@@ -1204,9 +1204,7 @@ fn lit_share(
     ))
 }
 
-/// Gives the world the look the current check wants. It runs apart from
-/// `run_checks`, since writing the world's config takes `ResMut<CaveWorld>`,
-/// which `VoxelWorld<CaveWorld>` can't share a system with.
+/// Gives the world the look the current check wants.
 fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
     if world.look != plan.look {
         world.look = plan.look.clone();
