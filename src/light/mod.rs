@@ -16,6 +16,8 @@ mod inputs;
 mod kernel;
 mod levels;
 pub(crate) mod material;
+pub(crate) mod probe;
+pub(crate) mod record;
 pub(crate) mod relight;
 pub(crate) mod route;
 pub(crate) mod sky;
@@ -27,7 +29,8 @@ pub(crate) mod view;
 pub mod bench;
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 
@@ -40,8 +43,10 @@ use crate::voxel_world::VoxelWorldSet;
 use config::{Emission, LightPropagation, Sky};
 use levels::LevelScale;
 pub use levels::LightLevels;
+use probe::SkyProbes;
+use record::SkyRecord;
 use relight::{LightWork, Relights};
-use sky::{Above, SkyRule, SkyWalk};
+use sky::{Above, SkyFound, SkyRule, SkyWalk};
 use solver::{LightCounters, LightTask, LightTaskSettings};
 use view::LightView;
 
@@ -58,6 +63,10 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     /// Where sky light enters, or `None` with sky light off.
     pub sky_rule: Option<SkyRule>,
     pub view: LightView,
+    /// The world's sky record, used only with sky light on.
+    pub record: Mutex<SkyRecord>,
+    /// Set by `reset_light` until the light work picks it up.
+    pub reset: AtomicBool,
     _world: PhantomData<C>,
 }
 
@@ -88,11 +97,21 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             let window = rule.window(key.position.y);
             let positions =
                 (1..=sky::walkable(window) as i32).map(|y| key.position + IVec3::Y * y);
+            let counts: Vec<u64> = positions
+                .clone()
+                .map(|position| edits.edit_count(position))
+                .collect();
+            let mut record = self.record.lock().unwrap();
             let above = positions
                 .clone()
                 .zip(edits.buckets(positions))
-                .map(|(position, edits)| {
-                    Above::new(world.chunk_fill_hint(ChunkKey::new(position, 0)), edits)
+                .zip(&counts)
+                .map(|((position, edits), count)| {
+                    Above::new(
+                        world.chunk_fill_hint(ChunkKey::new(position, 0)),
+                        record.get(position, *count),
+                        edits,
+                    )
                 })
                 .collect();
             SkyWalk {
@@ -100,6 +119,12 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 window,
                 above,
                 delegate,
+                found: SkyFound {
+                    edits: counts,
+                    own_edits: edits.edit_count(key.position),
+                    generation: record.generation(),
+                    ..default()
+                },
             }
         });
         Some(LightTask {
@@ -140,12 +165,19 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         .collect();
     let routed = app.world().contains_resource::<route::LightRoute<C>>();
     let task = Arc::new(task_settings::<C>(&config, &emissive_materials, routed));
+    let sky_rule = SkyRule::of(&config.sky);
+    if let Some(rule) = sky_rule {
+        app.insert_resource(SkyProbes::<C>::new(rule));
+    }
+    let record = Mutex::new(SkyRecord::new(config.sky_record_cap));
     app.insert_resource(LightSettings::<C> {
-        sky_rule: SkyRule::of(&config.sky),
+        sky_rule,
         config,
         emissive_materials,
         task,
         view: LightView::default(),
+        record,
+        reset: AtomicBool::new(false),
         _world: PhantomData,
     })
     .init_resource::<LightWork<C>>()
@@ -155,6 +187,8 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             (
                 Relights::<C>::forget_despawned,
                 Relights::<C>::collect,
+                SkyProbes::<C>::collect.run_if(resource_exists::<SkyProbes<C>>),
+                probe::reset_light::<C>,
                 Relights::<C>::land,
             )
                 .chain()
@@ -165,6 +199,10 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             Relights::<C>::start
                 .after(ChunkLifecycle::<C>::apply_requests)
                 .before(ChunkLifecycle::<C>::start_chunk_tasks),
+            // Sky probes get the room chunk tasks leave.
+            SkyProbes::<C>::start
+                .run_if(resource_exists::<SkyProbes<C>>)
+                .after(ChunkLifecycle::<C>::start_chunk_tasks),
         )
             .in_set(VoxelWorldSet::<C>::default()),
     );

@@ -42,6 +42,10 @@ pub struct VoxelEdits<C, I> {
     /// is set while a reader holds it.
     pending: Mutex<Arc<Voxels<I>>>,
     committed: Committed<I>,
+    /// How many times each level-0 chunk position's committed edits have
+    /// changed, for positions with edits.
+    #[cfg(feature = "light_propagation")]
+    counts: RwLock<HashMap<IVec3, u64>>,
     _marker: PhantomData<C>,
 }
 
@@ -50,6 +54,8 @@ impl<C, I> Default for VoxelEdits<C, I> {
         Self {
             pending: Mutex::default(),
             committed: Arc::default(),
+            #[cfg(feature = "light_propagation")]
+            counts: RwLock::default(),
             _marker: PhantomData,
         }
     }
@@ -103,6 +109,13 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             }
             Arc::make_mut(bucket).insert(position, voxel);
             changed.push(position);
+        }
+        #[cfg(feature = "light_propagation")]
+        if !changed.is_empty() {
+            let mut counts = self.counts.write().unwrap();
+            for position in &changed {
+                *counts.entry(chunk_containing(*position)).or_default() += 1;
+            }
         }
         match Arc::get_mut(&mut pending) {
             Some(voxels) => voxels.clear(),
@@ -158,6 +171,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         positions
             .map(|position| buckets.get(&position).cloned())
             .collect()
+    }
+
+    /// How many times the committed edits of the level-0 chunk at `position`
+    /// have changed: 0 for a position with no edits. Work that reads the
+    /// position's voxels notes it when it starts, and its result is stale if
+    /// it has moved since.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn edit_count(&self, position: IVec3) -> u64 {
+        let counts = self.counts.read().unwrap();
+        if counts.is_empty() {
+            return 0;
+        }
+        counts.get(&position).copied().unwrap_or(0)
     }
 
     /// The committed edits, read once for a frame.

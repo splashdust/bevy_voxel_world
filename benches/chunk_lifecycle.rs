@@ -63,6 +63,9 @@ const MAX_FRAMES: u32 = 5000;
 const MANY_RUNS: usize = 9;
 const RUNS: usize = 5;
 const IDLE_FRAMES: usize = 2000;
+/// Frames a lit world is left at rest to check that its light starts no work.
+#[cfg(feature = "light_propagation")]
+const IDLE_LIGHT_FRAMES: usize = 200;
 const FLY_FRAMES: usize = 1200;
 /// Camera speed in voxels per second of wall-clock time, just under the speed
 /// `stream_in` can keep up with.
@@ -586,12 +589,30 @@ fn scenario_stream_in<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics
 }
 
-/// `stream_in` on the world with lamps, lit, with what solving its light
-/// cost: in chunk tasks and relight tasks on the pool, against the same chunks
-/// solved one after another on one thread, and on the main thread landing
-/// light and starting relights.
+#[cfg(feature = "light_propagation")]
+fn light_is_settled<C: VoxelWorldConfig>(app: &mut App) -> bool {
+    let mut state = SystemState::<VoxelWorld<C>>::new(app.world_mut());
+    state.get(app.world()).unwrap().light_is_settled()
+}
+
+/// Runs frames after a stream until the world's light is settled. Returns how
+/// long that took, in milliseconds.
+#[cfg(feature = "light_propagation")]
+fn settle_light<C: VoxelWorldConfig>(app: &mut App) -> f64 {
+    let start = Instant::now();
+    for _ in 0..MAX_FRAMES {
+        if light_is_settled::<C>(app) {
+            break;
+        }
+        app.update();
+    }
+    assert!(light_is_settled::<C>(app), "light didn't settle");
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 /// `stream_in` on a lit world, with what working out its direct sky and
-/// solving its light cost in chunk tasks.
+/// solving its light cost in chunk tasks, and how long sky probes take to
+/// bring its light to rest after the stream. Light at rest starts no work.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,
@@ -600,8 +621,37 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 
     let mut app = build_app(C::default());
     let result = stream_in::<C>(&mut app);
+    let streamed = light_stats::<C>(app.world()).expect("a lit world");
+    let rest_ms = settle_light::<C>(&mut app);
     let stats = light_stats::<C>(app.world()).expect("a lit world");
+    for _ in 0..IDLE_LIGHT_FRAMES {
+        app.update();
+    }
+    let idle = light_stats::<C>(app.world()).expect("a lit world");
     let mut metrics = Metrics::new();
+    metrics.insert(format!("{prefix}.rest_ms"), rest_ms);
+    metrics.insert(format!("{prefix}.probes_in_stream"), streamed.probes as f64);
+    metrics.insert(format!("{prefix}.probes"), stats.probes as f64);
+    metrics.insert(
+        format!("{prefix}.probe_lookups"),
+        stats.probe_lookups as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.probes_discarded"),
+        stats.probes_discarded as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.record_kib"),
+        stats.record_bytes as f64 / 1024.0,
+    );
+    metrics.insert(
+        format!("{prefix}.idle_probes"),
+        (idle.probes - stats.probes) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.idle_relights"),
+        (idle.relights - stats.relights) as f64,
+    );
     metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
     metrics.insert(format!("{prefix}.near_time_ms"), result.near_time_ms);
     metrics.insert(format!("{prefix}.frames"), result.frames as f64);
@@ -625,6 +675,10 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics
 }
 
+/// `stream_in` on the world with lamps, lit, with what solving its light
+/// cost: in chunk tasks and relight tasks on the pool, against the same chunks
+/// solved one after another on one thread, and on the main thread landing
+/// light and starting relights.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lamps() -> Metrics {
     use bevy_voxel_world::light_bench::{light_stats, solve_published_serially};
@@ -634,6 +688,8 @@ fn scenario_stream_in_lamps() -> Metrics {
     let mut metrics = scenario_stream_in::<Lit>(prefix);
     let mut app = build_app(Lit::default());
     stream_in::<Lit>(&mut app);
+    let rest_ms = settle_light::<Lit>(&mut app);
+    metrics.insert(format!("{prefix}.rest_ms"), rest_ms);
     let stats = light_stats::<Lit>(app.world()).expect("a lit world");
     let (serial_solves, serial_ms) = solve_published_serially::<Lit>(app.world());
     metrics.insert(format!("{prefix}.solves"), stats.solves as f64);

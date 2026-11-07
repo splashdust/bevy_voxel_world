@@ -306,11 +306,28 @@ pub struct LightStats {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
+    /// Sky probes started.
+    pub probes: u64,
+    /// Voxel lookups sky probes made.
+    pub probe_lookups: u64,
+    /// Sky probes whose mask was thrown away.
+    pub probes_discarded: u64,
+    /// Chunk positions in the sky record.
+    pub record_entries: u64,
+    /// Bytes the sky record counts against its cap.
+    pub record_bytes: u64,
+    /// Positions the sky record forgot to stay within its cap.
+    pub record_evictions: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
 pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
-    let counters = world.get_resource::<LightSettings<C>>()?.counters();
+    let settings = world.get_resource::<LightSettings<C>>()?;
+    let counters = settings.counters();
+    let (record_entries, record_bytes, record_evictions) = {
+        let record = settings.record.lock().unwrap();
+        (record.len() as u64, record.bytes() as u64, record.evictions)
+    };
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
     let slots = world
         .get_resource::<LightRoute<C>>()
@@ -333,6 +350,12 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         column_ms: ms(&counters.column_nanos),
         walks: counters.walks.walks.load(Ordering::Relaxed),
         walk_lookups: counters.walks.lookups.load(Ordering::Relaxed),
+        probes: counters.probes.load(Ordering::Relaxed),
+        probe_lookups: counters.probe_lookups.load(Ordering::Relaxed),
+        probes_discarded: counters.probes_discarded.load(Ordering::Relaxed),
+        record_entries,
+        record_bytes,
+        record_evictions,
     })
 }
 

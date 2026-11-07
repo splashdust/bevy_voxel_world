@@ -20,6 +20,8 @@ mod route;
 #[cfg(feature = "light_propagation")]
 mod sky_light;
 #[cfg(feature = "light_propagation")]
+mod sky_record;
+#[cfg(feature = "light_propagation")]
 mod slots;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;

@@ -188,6 +188,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
     #[cfg(feature = "light_propagation")]
     light_work: Option<Res<'w, crate::light::relight::LightWork<C>>>,
+    #[cfg(feature = "light_propagation")]
+    sky_probes: Option<Res<'w, crate::light::probe::SkyProbes<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -241,17 +243,57 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     }
 
     /// Whether the world's light has caught up with its chunks: no relight is
-    /// waiting to start or running, and no solved light is waiting to land.
-    /// A loading screen can wait on it.
+    /// waiting to start or running, no solved light is waiting to land, and
+    /// no sky probe is waiting or running. A loading screen can wait on it.
+    ///
+    /// Sky probes look up the voxels above chunks whose own tasks couldn't
+    /// tell whether sky light reaches them, which takes a while after a
+    /// stream: until they finish, such chunks show direct sky in columns
+    /// nothing has proved open yet.
     ///
     /// Chunk tasks still running aren't counted, though their light may start
     /// relights once it lands. Chunks above LOD level 0 have no relights to
-    /// wait for. A world without light propagation is always settled.
+    /// wait for. Settled doesn't mean exact: light beside a chunk that isn't
+    /// loaded can be darker than the truth. A world without light propagation
+    /// is always settled.
     #[cfg(feature = "light_propagation")]
     pub fn light_is_settled(&self) -> bool {
-        self.light_work
+        let reset = self
+            .light
             .as_ref()
-            .is_none_or(|work| work.is_settled())
+            .is_some_and(|light| light.reset.load(std::sync::atomic::Ordering::Acquire));
+        !reset
+            && self
+                .light_work
+                .as_ref()
+                .is_none_or(|work| work.is_settled())
+            && self
+                .sky_probes
+                .as_ref()
+                .is_none_or(|probes| probes.is_settled())
+    }
+
+    /// Forgets what the world's light knows about the voxels it looked up,
+    /// and relights every chunk.
+    ///
+    /// Call it after changing what the world's voxel lookups return, for
+    /// example after loading another save into the same world. Sky light
+    /// remembers which columns of the chunk positions it has seen hold a
+    /// solid voxel, and assumes lookups return the same voxels every time, so
+    /// without this, chunks would go on reading the old voxels' shadows.
+    ///
+    /// Spawned chunks keep the voxels they have, and their light follows
+    /// those voxels; chunks spawned later read the new lookups. Light settles
+    /// again over the next frames, as [`VoxelWorld::light_is_settled`] tells.
+    /// Voxel edits need no reset: they relight on their own. Does nothing in
+    /// a world without light propagation.
+    #[cfg(feature = "light_propagation")]
+    pub fn reset_light(&mut self) {
+        if let Some(light) = self.light.as_ref() {
+            light
+                .reset
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Set the voxel at the given position. It replaces the generated voxel there for
