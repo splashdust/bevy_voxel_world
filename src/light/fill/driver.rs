@@ -21,7 +21,10 @@
 //! Fill probes read the positions the field asks for that could raise a
 //! level of a position whose 3×3×3 holds a chunk taking sky fill, with
 //! whatever room the task pool has left after everything else, and nothing
-//! at rest.
+//! at rest. A position the record forgot to stay within its cap isn't read
+//! again until a chunk lands or retires, a voxel edit changes a column, or
+//! sky probes start or stop waiting: a record too small for what the field
+//! asks for would otherwise forget one position for each it reads, for ever.
 
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
@@ -87,6 +90,9 @@ pub(crate) struct SkyFillWork<C> {
     probing: HashSet<IVec3>,
     /// How many positions fill probes have yet to read.
     wanted: usize,
+    /// Positions the record forgot to stay within its cap since anything
+    /// else changed, which fill probes don't read.
+    evicted: HashSet<IVec3>,
     _world: PhantomData<C>,
 }
 
@@ -105,6 +111,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             running: Vec::new(),
             probing: HashSet::new(),
             wanted: 0,
+            evicted: HashSet::new(),
             _world: PhantomData,
         }
     }
@@ -295,16 +302,27 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         budget.set_finished_last_frame(JobKind::FillProbe, finished);
         budget.set_running(JobKind::FillProbe, fill.running.len());
 
+        let touched: Vec<IVec3> = probes
+            .as_mut()
+            .map(|probes| probes.take_touched())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(work.take_fill_touched())
+            .collect();
+        if !touched.is_empty() {
+            fill.evicted.clear();
+        }
+        fill.dirty.extend(touched);
         for position in record.take_forgotten() {
+            // A position replaced in the record is held again.
+            if record.cells(position, edits.edit_count(position)).is_none() {
+                fill.evicted.insert(position);
+            }
             fill.note_with_below(position, rule);
         }
         for position in record.take_noted() {
             fill.note_with_below(position, rule);
         }
-        if let Some(probes) = probes.as_mut() {
-            fill.dirty.extend(probes.take_touched());
-        }
-        fill.dirty.extend(work.take_fill_touched());
         fill.work_out_dirty(
             &settings.view,
             &mut record,
@@ -367,7 +385,10 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             let view = settings.view.read();
             let mut candidates = HashSet::new();
             for (position, raises) in fill.field.wanted_probes() {
-                if candidates.contains(&position) || fill.probing.contains(&position) {
+                if candidates.contains(&position)
+                    || fill.probing.contains(&position)
+                    || fill.evicted.contains(&position)
+                {
                     continue;
                 }
                 let matters = around(raises).any(|around| {

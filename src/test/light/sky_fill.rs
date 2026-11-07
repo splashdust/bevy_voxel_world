@@ -95,6 +95,31 @@ fn the_ground_under_a_high_floating_island_stays_lit() {
 }
 
 #[test]
+fn a_sky_record_too_small_for_what_fill_wants_runs_no_fill_probe_at_rest() {
+    let mut app = settled(LampWorld {
+        light: Some(LightPropagation {
+            sky_record_cap: 0,
+            ..filled()
+        }),
+        ..slab_world(72)
+    });
+    let probes = |app: &App| {
+        app.world()
+            .resource::<LightSettings<LampWorld>>()
+            .counters()
+            .fill_probes
+            .load(Ordering::Relaxed)
+    };
+    let before = probes(&app);
+    assert!(before > 0, "the slab reaches past the loaded chunks");
+    for _ in 0..60 {
+        app.update();
+        assert!(light_is_settled(&mut app), "light left rest");
+    }
+    assert_eq!(probes(&app), before, "fill probes ran at rest");
+}
+
+#[test]
 fn the_ground_under_a_low_slab_goes_dark_in_the_middle() {
     let mut app = settled(slab_world(8));
 
