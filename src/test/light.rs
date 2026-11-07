@@ -10,6 +10,8 @@ use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, Floor
 use crate::prelude::*;
 
 #[cfg(feature = "light_propagation")]
+mod look;
+#[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
 mod relights;

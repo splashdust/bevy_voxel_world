@@ -28,7 +28,7 @@
 use std::marker::PhantomData;
 
 use bevy::{
-    asset::uuid_handle,
+    asset::{uuid_handle, AssetEventSystems},
     mesh::MeshVertexBufferLayoutRef,
     pbr::{
         ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
@@ -46,6 +46,7 @@ use super::config::{
     LevelCurve, LightAo, LightPrecision, LightPropagation, LightSmoothing, SunGate,
 };
 use super::route::{self, LightRoute};
+use super::LightSettings;
 use crate::configuration::VoxelWorldConfig;
 use crate::plugin::{add_material_path, WorldMaterial};
 
@@ -65,6 +66,14 @@ pub struct VoxelWorldBindings<M: Material> {
     #[uniform(201)]
     look: LookUniform,
     _material: PhantomData<fn() -> M>,
+}
+
+impl<M: Material> VoxelWorldBindings<M> {
+    /// The look the shader reads.
+    #[cfg(test)]
+    pub(crate) fn look(&self) -> &LookUniform {
+        &self.look
+    }
 }
 
 impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
@@ -96,7 +105,7 @@ impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
 ///
 /// Each curve is 16 levels as 4 `vec4`s, with level 0 forced to 0, so a
 /// face with no light stays black whatever the curve says.
-#[derive(Clone, Copy, Debug, ShaderType)]
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub(crate) struct LookUniform {
     pub sky_falloff: [Vec4; 4],
     pub voxel_falloff: [Vec4; 4],
@@ -225,11 +234,47 @@ pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
     add_material_path::<C, VoxelWorldMaterial<M>>(app, Some(handle));
     app.add_systems(
         PostUpdate,
-        make_texture::<C, M>.run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+        (
+            make_texture::<C, M>
+                .run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+            apply_look::<C, M>
+                .run_if(resource_changed::<C>)
+                .after(super::follow_config::<C>)
+                .before(AssetEventSystems),
+        ),
     );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
         .insert_chunk_components = route::tag_chunk::<C>;
+}
+
+/// Writes world `C`'s look into its material's uniform, if the look the world
+/// last applied differs from the material's.
+///
+/// It runs only on frames where the world's config changed, and writes the
+/// material only when the look changed, since a write makes Bevy prepare the
+/// material's bind group again. It runs before Bevy sends this frame's asset
+/// events, so the frame renders the new look.
+fn apply_look<C: VoxelWorldConfig, M: Material>(
+    settings: Res<LightSettings<C>>,
+    world_material: Res<WorldMaterial<C, VoxelWorldMaterial<M>>>,
+    mut materials: ResMut<Assets<VoxelWorldMaterial<M>>>,
+) where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let Some(handle) = &world_material.handle else {
+        return;
+    };
+    let look = LookUniform::new(&settings.config);
+    if materials
+        .get(handle)
+        .is_some_and(|material| material.extension.look != look)
+    {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.extension.look = look;
+        }
+    }
 }
 
 /// Makes world `C`'s light texture, once a chunk first takes a slot, and

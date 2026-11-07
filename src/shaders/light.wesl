@@ -51,6 +51,10 @@ const HAS_SLOT: u32 = 0x80000000u;
 const SLOT_SIDE: u32 = 34u;
 const TOP_LEVEL: u32 = 15u;
 
+// The look's `ao`, as `LightAo`: 0 is `IndirectLight`.
+const AO_BASE_COLOR: u32 = 1u;
+const AO_OFF: u32 = 2u;
+
 const SKY_TABLE: u32 = 0u;
 const VOXEL_TABLE: u32 = 1u;
 const SUN_TABLE: u32 = 2u;
@@ -234,9 +238,22 @@ fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
 // `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light
 // and a lamp's glow add through the
 // emissive channel, in the forward pass only, so no other pass counts them
-// twice. `ao` is the face's ambient occlusion, from 0 to 1: it darkens ambient
-// light and voxel light, and leaves the base colour and the sun alone.
-fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, ao: f32) {
+// twice.
+//
+// `ao` is the face's ambient occlusion, from 0 to 1, applied as the look's
+// `ao` says: by default it darkens ambient light and voxel light, and leaves
+// the base colour and the sun alone. With `AO_BASE_COLOR` it darkens the base
+// colour instead, and with `AO_OFF` it's ignored. A lamp's glow is never
+// darkened.
+fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, face_ao: f32) {
+    var ao = face_ao;
+    if light_look.ao == AO_BASE_COLOR {
+        let base = (*pbr_input).material.base_color;
+        (*pbr_input).material.base_color = vec4<f32>(base.rgb * face_ao, base.a);
+        ao = 1.0;
+    } else if light_look.ao == AO_OFF {
+        ao = 1.0;
+    }
     let sky = sky_brightness(levels.sky);
     (*pbr_input).diffuse_occlusion *= sky * ao;
     (*pbr_input).specular_occlusion *= sky * ao;
