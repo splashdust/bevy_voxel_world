@@ -117,6 +117,9 @@ pub struct LightPropagation {
     /// How sky light reaches past where it falls and spreads, such as under a
     /// high overhang. `None` turns it off.
     ///
+    /// Sky fill isn't built yet, so this has no effect: sky light comes only
+    /// from direct sky and spreads `sky_reach` voxels from it.
+    ///
     /// Relights on change. Defaults to [`SkyFill::Paths`] with its defaults.
     pub sky_fill: Option<SkyFill>,
 
@@ -479,6 +482,14 @@ impl Default for LevelCurve {
 pub enum SunGate {
     /// Only where a voxel has direct sky, so the sun never shines through rock
     /// that hasn't spawned.
+    ///
+    /// Bevy's shadow map holds only the chunks that have spawned, and by
+    /// default chunks spawn around the camera and in view, so rock out of view
+    /// casts no shadow and the shadow map would let the sun into caves. Direct
+    /// sky is worked out from the world's voxels instead. Since sky light falls
+    /// straight down, the sun stops at an overhang's drip line, however the
+    /// sun is tilted, and ground under the overhang gets only spreading sky
+    /// light.
     #[default]
     DirectSkyOnly,
     /// Scaled by the sky light level, through this curve.

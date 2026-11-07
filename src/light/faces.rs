@@ -101,35 +101,41 @@ impl FaceHashes {
 /// `to`, sooner than `to`'s levels say light got there, so the neighbour must
 /// relight.
 ///
-/// It holds when, at some pair of touching open voxels, the first distance
-/// from a source that holds `from`'s level is less than the last distance
-/// that holds `to`'s, with level 0 counting as `reach + 1`. Only voxel light is
-/// compared: sky light is one level everywhere until direct sky is worked out.
+/// It holds when, in either channel, at some pair of touching open voxels, the
+/// first distance from a source that holds `from`'s level is less than the
+/// last distance that holds `to`'s, with level 0 counting as `reach + 1`.
+/// Direct sky, at level 15, is a source itself, so a neighbour beside it is
+/// one step from a source. `sky_scale` is `None` with sky light off.
 pub(crate) fn could_reach_sooner(
     from: &ChunkLight,
     to: &ChunkLight,
     face: Face,
-    scale: &LevelScale,
+    voxel_scale: &LevelScale,
+    sky_scale: Option<&LevelScale>,
 ) -> bool {
-    if let ChannelLight::Uniform(0) = from.voxel {
-        return false;
-    }
-    let back = face.opposite();
-    for u in 0..CHUNK {
-        for v in 0..CHUNK {
-            let (fx, fy, fz) = face.voxel(u, v);
-            let (tx, ty, tz) = back.voxel(u, v);
-            if from.inputs.occupancy.is_solid(fx, fy, fz)
-                || to.inputs.occupancy.is_solid(tx, ty, tz)
-            {
-                continue;
-            }
-            let first = scale.first_distance(from.voxel.at(fx, fy, fz));
-            let last = scale.last_distance(to.voxel.at(tx, ty, tz));
-            if first < last {
-                return true;
+    let channel_reaches = |scale: &LevelScale, of: fn(&ChunkLight) -> &ChannelLight| {
+        if let ChannelLight::Uniform(0) = of(from) {
+            return false;
+        }
+        let back = face.opposite();
+        for u in 0..CHUNK {
+            for v in 0..CHUNK {
+                let (fx, fy, fz) = face.voxel(u, v);
+                let (tx, ty, tz) = back.voxel(u, v);
+                if from.inputs.occupancy.is_solid(fx, fy, fz)
+                    || to.inputs.occupancy.is_solid(tx, ty, tz)
+                {
+                    continue;
+                }
+                let first = scale.first_distance(of(from).at(fx, fy, fz));
+                let last = scale.last_distance(of(to).at(tx, ty, tz));
+                if first < last {
+                    return true;
+                }
             }
         }
-    }
-    false
+        false
+    };
+    channel_reaches(voxel_scale, |light| &light.voxel)
+        || sky_scale.is_some_and(|scale| channel_reaches(scale, |light| &light.sky))
 }

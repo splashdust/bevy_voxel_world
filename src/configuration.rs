@@ -217,6 +217,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The delegate will be called every time a new chunk needs to be computed. The delegate should
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
+    ///
+    /// With sky light on, a lookup must return the same voxel for a position every
+    /// time: see `Sky` in the `light_propagation` feature.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(|_, _, _| Box::new(|_, _| WorldVoxel::Unset))
     }

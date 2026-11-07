@@ -105,7 +105,7 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
     };
     let touching = touching_open(solid);
     FacesSee {
-        sky: seen_over(&ChannelLight::Uniform(light.sky), &touching),
+        sky: seen_over(&light.sky, &touching),
         voxel: seen_over(&light.voxel, &touching),
         lamp: light
             .inputs
@@ -192,7 +192,6 @@ fn seen_over(channel: &ChannelLight, voxels: &Plane) -> Seen {
 /// lamp marker, 15, in its voxel half and its level in its sky half.
 pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
     let mut bytes = vec![0u8; SLOT_BYTES].into_boxed_slice();
-    let sky = light.sky as u64;
     for y in 0..CHUNK {
         for x in 0..CHUNK {
             let column = x + y * CHUNK;
@@ -200,18 +199,8 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
             let row = 1 + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
             for shift in (0..CHUNK).step_by(8) {
                 let open_byte = (open >> shift) as usize & 0xFF;
-                let mut texels = SPREAD[open_byte] * sky;
-                match &light.voxel {
-                    ChannelLight::Uniform(level) => {
-                        texels |= SPREAD[open_byte] * ((*level as u64) << 4);
-                    }
-                    ChannelLight::Planes(planes) => {
-                        for (bit, plane) in planes.iter().enumerate() {
-                            let levels = (plane[column] >> shift) as usize & open_byte;
-                            texels |= SPREAD[levels] << (4 + bit);
-                        }
-                    }
-                }
+                let texels = nibbles(&light.sky, column, shift, open_byte)
+                    | nibbles(&light.voxel, column, shift, open_byte) << 4;
                 bytes[row + shift..row + shift + 8]
                     .copy_from_slice(&texels.to_le_bytes());
             }
@@ -223,6 +212,23 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
             LAMP_MARKER | lamp.level;
     }
     bytes
+}
+
+/// The levels of one channel at 8 voxels of a column from `shift` up, one in
+/// the low nibble of each byte. Only the voxels set in `open` get a level.
+#[inline]
+fn nibbles(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
+    match channel {
+        ChannelLight::Uniform(level) => SPREAD[open] * *level as u64,
+        ChannelLight::Planes(planes) => {
+            let mut texels = 0;
+            for (bit, plane) in planes.iter().enumerate() {
+                let levels = (plane[column] >> shift) as usize & open;
+                texels |= SPREAD[levels] << bit;
+            }
+            texels
+        }
+    }
 }
 
 /// The cell of a slot's shell in front of the chunk's voxel `face.voxel(u,
@@ -263,7 +269,8 @@ pub(crate) fn border_plane(light: &ChunkLight, face: Face) -> Box<ShellPlane> {
         for u in 0..CHUNK {
             let (x, y, z) = face.voxel(u, v);
             if !occupancy.is_solid(x, y, z) {
-                plane[u + v * CHUNK] = light.sky | light.voxel.at(x, y, z) << 4;
+                plane[u + v * CHUNK] =
+                    light.sky.at(x, y, z) | light.voxel.at(x, y, z) << 4;
             }
         }
     }
@@ -302,7 +309,7 @@ pub(crate) fn across(own: &LightInputs, face: Face, neighbour: &ChunkLight) -> F
             let u = cells.trailing_zeros() as usize;
             cells &= cells - 1;
             let (x, y, z) = back.voxel(u, v);
-            seen.sky = seen.sky.join(Seen::One(neighbour.sky));
+            seen.sky = seen.sky.join(Seen::One(neighbour.sky.at(x, y, z)));
             seen.voxel = seen.voxel.join(Seen::One(neighbour.voxel.at(x, y, z)));
             // Once the chunk needs a slot, the levels its faces see no longer
             // matter.
@@ -317,25 +324,31 @@ pub(crate) fn across(own: &LightInputs, face: Face, neighbour: &ChunkLight) -> F
 /// The most common level per channel among the open voxels touching a solid
 /// voxel of the chunk lit by `light`, as sky and voxel light.
 pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
-    let voxel = match (&light.voxel, &light.inputs.occupancy) {
+    let touching = match &light.inputs.occupancy {
+        Occupancy::Mixed(solid) => Some(touching_open(solid)),
+        _ => None,
+    };
+    let most_common_level = |channel: &ChannelLight| match (channel, &touching) {
         (ChannelLight::Uniform(level), _) => *level,
-        (ChannelLight::Planes(_), Occupancy::Mixed(solid)) => {
-            let touching = touching_open(solid);
+        (ChannelLight::Planes(_), Some(touching)) => {
             let mut counts = [0u32; 16];
             for (column, &these) in touching.iter().enumerate() {
                 let mut voxels = these;
                 while voxels != 0 {
                     let z = voxels.trailing_zeros() as usize;
                     voxels &= voxels - 1;
-                    let level = light.voxel.at(column % CHUNK, column / CHUNK, z);
+                    let level = channel.at(column % CHUNK, column / CHUNK, z);
                     counts[level as usize] += 1;
                 }
             }
             (0..16).max_by_key(|level| counts[*level]).unwrap_or(0) as u8
         }
-        (ChannelLight::Planes(_), _) => 0,
+        (ChannelLight::Planes(_), None) => 0,
     };
-    (light.sky, voxel)
+    (
+        most_common_level(&light.sky),
+        most_common_level(&light.voxel),
+    )
 }
 
 /// A layer of a chunk's voxels as 32 rows of bits: bit `u` of row `v`.

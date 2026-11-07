@@ -775,11 +775,9 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         let previous_chunk_data =
             ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map)
                 .filter(|data| data.entity == entity);
-        let voxel_data_fn = (self.configuration.voxel_lookup_delegate())(
-            key.position,
-            key.lod_level,
-            previous_chunk_data.clone(),
-        );
+        let lookup_delegate = self.configuration.voxel_lookup_delegate();
+        let voxel_data_fn =
+            lookup_delegate(key.position, key.lod_level, previous_chunk_data.clone());
         let data_shape = chunk.data_shape;
         let mesh_shape = chunk.mesh_shape;
         let chunk_meshing_fn = (self
@@ -806,7 +804,13 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
 
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light {
-            chunk_task.light = light.task_for(key, data_shape);
+            chunk_task.light = light.task_for(
+                key,
+                data_shape,
+                self.configuration,
+                self.voxel_edits,
+                lookup_delegate,
+            );
         }
 
         let mesh_map = self.mesh_cache.get_mesh_map();

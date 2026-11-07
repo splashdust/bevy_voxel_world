@@ -645,16 +645,12 @@ impl RouteChunk {
 /// The tag of a chunk with no slot whose faces see `sees`. A channel no face
 /// reads takes the chunk's own level, if it has one.
 fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> u32 {
-    let sky = match sees.sky {
-        Seen::One(level) => level,
-        _ => light.sky,
-    };
-    let voxel = match (sees.voxel, &light.voxel) {
+    let level = |seen: Seen, channel: &ChannelLight| match (seen, channel) {
         (Seen::One(level), _) => level,
         (_, ChannelLight::Uniform(level)) => *level,
         _ => 0,
     };
-    tag_levels(sky, voxel) as u32
+    tag_levels(level(sees.sky, &light.sky), level(sees.voxel, &light.voxel)) as u32
 }
 
 /// Sets the tag of a chunk of world `C` as its mesh is shown, and queues its

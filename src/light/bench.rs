@@ -13,11 +13,12 @@ use bevy::prelude::*;
 use super::faces::Face;
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
-use super::kernel::{LightBox, Plane, Seed, LEVEL_BITS};
+use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::route::LightRoute;
+use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
-use super::solver::{neighbour_index, solve_channel};
+use super::solver::{neighbour_index, solve_sky, solve_voxel};
 use super::solver::{ChannelLight, ChunkLight};
 use super::view::Snapshot;
 use super::LightSettings;
@@ -27,39 +28,34 @@ use crate::prelude::{LightShape, WorldVoxel};
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
+/// A box of one row width.
+enum Rows {
+    OneWord(LightBox<u64>),
+    TwoWord(LightBox<u128>),
+}
+
 /// A kernel box filled once, which can be spread again and again.
 pub struct KernelBox {
-    light_box: LightBox,
+    rows: Rows,
     seeds: Vec<Seed>,
+    /// The lit rows, copied into the box before each spread, if it starts lit.
+    lit: Option<Vec<u128>>,
     scale: LevelScale,
     planes: Box<[Plane; LEVEL_BITS]>,
     faces: [u64; 6],
 }
 
 impl KernelBox {
-    /// A box for light of `reach`, from 1 to 16. `open` says whether light
-    /// passes the voxel at a position in the box, from 0 to `32 + 2 × reach`
-    /// on each axis. Each source is a position in the box and its level.
+    /// A box for voxel light of `reach`, from 1 to 32. `open` says whether
+    /// light passes the voxel at a position in the box, from 0 to
+    /// `32 + 2 × reach` on each axis. Each source is a position in the box and
+    /// its level.
     pub fn new(
         reach: u32,
         open: impl Fn(IVec3) -> bool,
         sources: &[(IVec3, u8)],
     ) -> Self {
         let scale = LevelScale::new(reach);
-        let mut light_box = LightBox::new(reach);
-        let side = light_box.side();
-        let rows = light_box.open_rows_mut();
-        for y in 0..side {
-            for x in 0..side {
-                let mut row = 0u64;
-                for z in 0..side {
-                    if open(IVec3::new(x as i32, y as i32, z as i32)) {
-                        row |= 1 << z;
-                    }
-                }
-                rows[x + y * side] = row;
-            }
-        }
         let mut seeds: Vec<Seed> = sources
             .iter()
             .filter_map(|&(position, level)| {
@@ -72,10 +68,43 @@ impl KernelBox {
             })
             .collect();
         seeds.sort_by_key(|seed| seed.start);
+        Self::filled(reach, open, seeds, None)
+    }
+
+    /// A box for sky light of `reach`, from 1 to 32, spreading from the open
+    /// voxels where `direct` says a position in the box has direct sky.
+    pub fn with_direct_sky(
+        reach: u32,
+        open: impl Fn(IVec3) -> bool,
+        direct: impl Fn(IVec3) -> bool,
+    ) -> Self {
+        let side = 32 + 2 * reach as usize;
+        let lit = rows(side, |p| open(p) && direct(p));
+        Self::filled(reach, open, Vec::new(), Some(lit))
+    }
+
+    fn filled(
+        reach: u32,
+        open: impl Fn(IVec3) -> bool,
+        seeds: Vec<Seed>,
+        lit: Option<Vec<u128>>,
+    ) -> Self {
+        let side = 32 + 2 * reach as usize;
+        let open = rows(side, open);
+        let rows = if reach <= MAX_ONE_WORD_REACH {
+            let mut light_box = LightBox::<u64>::new(reach);
+            copy_rows(&open, light_box.open_rows_mut());
+            Rows::OneWord(light_box)
+        } else {
+            let mut light_box = LightBox::<u128>::new(reach);
+            copy_rows(&open, light_box.open_rows_mut());
+            Rows::TwoWord(light_box)
+        };
         Self {
-            light_box,
+            rows,
             seeds,
-            scale,
+            lit,
+            scale: LevelScale::new(reach),
             planes: Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]),
             faces: [0; 6],
         }
@@ -84,13 +113,26 @@ impl KernelBox {
     /// Spreads light through the box in `shape`, hashing the chunk's faces
     /// as every solve does.
     pub fn spread(&mut self, shape: LightShape) {
-        self.light_box.spread(
-            &self.seeds,
-            shape,
-            &self.scale,
-            &mut self.planes,
-            &mut self.faces,
-        );
+        match &mut self.rows {
+            Rows::OneWord(light_box) => spread_rows(
+                light_box,
+                &self.seeds,
+                self.lit.as_deref(),
+                shape,
+                &self.scale,
+                &mut self.planes,
+                &mut self.faces,
+            ),
+            Rows::TwoWord(light_box) => spread_rows(
+                light_box,
+                &self.seeds,
+                self.lit.as_deref(),
+                shape,
+                &self.scale,
+                &mut self.planes,
+                &mut self.faces,
+            ),
+        }
     }
 
     /// The face hashes the last spread left, one per face of the chunk.
@@ -98,12 +140,57 @@ impl KernelBox {
         self.faces
     }
 
-    /// The level the last spread left at the chunk's voxel `local`.
+    /// The level the last spread left at the chunk's voxel `local`. A voxel
+    /// with direct sky reads 0, as the kernel leaves it.
     pub fn level(&self, local: UVec3) -> u8 {
         let column = local.x as usize + local.y as usize * CHUNK;
         (0..LEVEL_BITS)
             .map(|bit| ((self.planes[bit][column] >> local.z & 1) as u8) << bit)
             .sum()
+    }
+}
+
+fn spread_rows<R: Row>(
+    light_box: &mut LightBox<R>,
+    seeds: &[Seed],
+    lit: Option<&[u128]>,
+    shape: LightShape,
+    scale: &LevelScale,
+    planes: &mut [Plane; LEVEL_BITS],
+    faces: &mut [u64; 6],
+) {
+    if let Some(lit) = lit {
+        copy_rows(lit, light_box.lit_rows_mut());
+    }
+    light_box.spread(seeds, lit.is_some(), shape, scale, planes, faces);
+}
+
+/// The rows of a box `side` voxels on a side, at `x + y × side`, with bit `z`
+/// set where `set` holds.
+fn rows(side: usize, set: impl Fn(IVec3) -> bool) -> Vec<u128> {
+    let mut rows = vec![0; side * side];
+    for y in 0..side {
+        for x in 0..side {
+            for z in 0..side {
+                if set(IVec3::new(x as i32, y as i32, z as i32)) {
+                    rows[x + y * side] |= 1 << z;
+                }
+            }
+        }
+    }
+    rows
+}
+
+fn copy_rows<R: Row>(from: &[u128], to: &mut [R]) {
+    for (to, from) in to.iter_mut().zip(from) {
+        *to = R::from_u32(*from as u32)
+            | R::from_u32((*from >> 32) as u32) << 32
+            | if R::BITS > 64 {
+                R::from_u32((*from >> 64) as u32) << 64
+                    | R::from_u32((*from >> 96) as u32) << 96
+            } else {
+                R::ZERO
+            };
     }
 }
 
@@ -135,8 +222,9 @@ impl SlotBox {
                 inputs: Arc::new(LightInputs {
                     occupancy: Occupancy::Mixed(solid),
                     emissive: Vec::<EmissiveVoxel>::new(),
+                    columns: ColumnAnswer::none(),
                 }),
-                sky: 15,
+                sky: ChannelLight::Uniform(15),
                 voxel: ChannelLight::Planes(kernel_box.planes.clone()),
             }
         };
@@ -172,7 +260,10 @@ pub fn emissive_scan<I: Copy + PartialEq + std::hash::Hash>(
     let mut chunk = ChunkData::new();
     chunk.fill_type = FillType::Mixed;
     chunk.voxels = Some(voxels.clone());
-    LightInputs::of(&chunk, emission).0.emissive.len()
+    LightInputs::of(&chunk, emission, ColumnAnswer::none())
+        .0
+        .emissive
+        .len()
 }
 
 /// Counts of a lit world's light work so far.
@@ -194,6 +285,13 @@ pub struct LightStats {
     /// The most main-thread time spent landing light and starting relights
     /// in one frame, in milliseconds.
     pub max_frame_ms: f64,
+    /// Time chunk tasks spent working out their column answers, summed over
+    /// them, in milliseconds.
+    pub column_ms: f64,
+    /// Chunk tasks that walked the columns above them.
+    pub walks: u64,
+    /// Voxel lookups those walks made.
+    pub walk_lookups: u64,
     /// In a world showing its light, slots given to chunks, counting late ones
     /// and evictions.
     pub slot_allocations: u64,
@@ -232,10 +330,13 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         relights: counters.relights.load(Ordering::Relaxed),
         main_thread_ms: ms(&counters.main_thread_nanos),
         max_frame_ms: ms(&counters.max_frame_nanos),
+        column_ms: ms(&counters.column_nanos),
+        walks: counters.walks.walks.load(Ordering::Relaxed),
+        walk_lookups: counters.walks.lookups.load(Ordering::Relaxed),
     })
 }
 
-/// Solves voxel light again for every level-0 chunk of world `C` with light,
+/// Solves sky light and voxel light again for every level-0 chunk of world `C` with light,
 /// one after another on this thread, from the world view as it is now.
 /// Returns how many it solved and the time it took in milliseconds.
 pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f64) {
@@ -253,7 +354,10 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
     let task = &settings.task;
     let start = Instant::now();
     for neighbours in &boxes {
-        black_box(solve_channel(neighbours, &task.voxel_scale, task.shape));
+        if let Some(sky_scale) = &task.sky_scale {
+            black_box(solve_sky(neighbours, sky_scale, task.shape));
+        }
+        black_box(solve_voxel(neighbours, &task.voxel_scale, task.shape));
     }
     (boxes.len(), start.elapsed().as_secs_f64() * 1000.0)
 }

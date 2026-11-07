@@ -1,16 +1,21 @@
 //! The solver: works out a chunk's light from what is within light reach of
 //! it.
 //!
-//! A chunk's light is a pure function of the occupancy and emissive voxels of
-//! the 3×3×3 chunks around it, read into a box that reaches `reach` voxels past
-//! each of its faces. It never reads a neighbour's light, so the order chunks
-//! arrive in can't change a chunk's light, and no light outlives what made it.
+//! A chunk's light is a pure function of the occupancy, direct sky and emissive
+//! voxels of the 3×3×3 chunks around it, read into a box per channel that
+//! reaches that channel's reach past each of the chunk's faces. It never reads
+//! a neighbour's light, so the order chunks arrive in can't change a chunk's
+//! light, and no light outlives what made it.
+//!
+//! Sky light spreads from voxels with direct sky, each from its own chunk's
+//! column answer (see [`sky`](super::sky)). Voxel light spreads from emissive
+//! voxels. A channel with no source in its box does no work.
 //!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
-//! and it holds no emissive voxels. Nothing is kept for chunks that have
-//! retired, so light beside a chunk that isn't loaded, whether it hasn't
-//! arrived yet or has retired, can be darker than the truth, never brighter.
-//! It is exact for a chunk whose whole box is loaded.
+//! and it holds no sources. Nothing is kept for chunks that have retired, so
+//! light beside a chunk that isn't loaded, whether it hasn't arrived yet or has
+//! retired, can be darker than the truth, never brighter. It is exact for a
+//! chunk whose whole box is loaded.
 //!
 //! A chunk's first solve runs in its chunk task, reading its neighbours from
 //! the [world view](super::view) as the task finds it. Neighbours arriving
@@ -20,6 +25,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::LocalKey;
 use std::time::Instant;
 
 use bevy::prelude::*;
@@ -27,8 +33,9 @@ use bevy::prelude::*;
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, Face, FaceHashes};
 use super::inputs::{LightInputs, Occupancy};
-use super::kernel::{LightBox, Plane, Seed, LEVEL_BITS};
+use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
+use super::sky::{ColumnAnswer, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
 use super::view::{LightView, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -62,8 +69,7 @@ impl ChannelLight {
 #[derive(Debug)]
 pub(crate) struct ChunkLight {
     pub inputs: Arc<LightInputs>,
-    /// One level for every open voxel until sky light is worked out.
-    pub sky: u8,
+    pub sky: ChannelLight,
     pub voxel: ChannelLight,
 }
 
@@ -91,7 +97,7 @@ impl ChunkLight {
             }
             _ => {
                 let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
-                LightLevels::new(self.sky, self.voxel.at(x, y, z))
+                LightLevels::new(self.sky.at(x, y, z), self.voxel.at(x, y, z))
             }
         }
     }
@@ -100,9 +106,9 @@ impl ChunkLight {
 /// What a world's chunk tasks need to solve light, shared by all of them.
 pub(crate) struct LightTaskSettings<I> {
     pub voxel_scale: LevelScale,
+    /// The levels of sky light, or `None` with sky light off.
+    pub sky_scale: Option<LevelScale>,
     pub shape: LightShape,
-    /// The level of sky light in every open voxel, until sky light is solved.
-    pub sky: u8,
     /// Whether the world's chunks show their light, so a solve turns a
     /// chunk's light into the bytes of its slot.
     pub routed: bool,
@@ -130,6 +136,10 @@ pub(crate) struct LightCounters {
     /// The most main-thread time spent landing light and starting relights
     /// in one frame, in nanoseconds.
     pub max_frame_nanos: AtomicU64,
+    /// Time chunk tasks spent working out their column answers, in
+    /// nanoseconds.
+    pub column_nanos: AtomicU64,
+    pub walks: WalkCounters,
 }
 
 /// The 3×3×3 chunk positions around a chunk, at
@@ -158,20 +168,33 @@ pub(crate) struct Solved {
     pub bytes: Option<Box<[u8]>>,
 }
 
-/// A chunk task's part in solving light: the world's settings and its world
-/// view.
+/// A chunk task's part in solving light: the world's settings, its world view
+/// and, with sky light on, what the chunk needs to work out its direct sky.
 pub(crate) struct LightTask<I> {
     pub settings: Arc<LightTaskSettings<I>>,
     pub view: LightView,
+    pub walk: Option<SkyWalk<I>>,
 }
 
 impl<I: Copy + PartialEq> LightTask<I> {
-    /// Scans the chunk's voxels and solves its light, reading the chunks around
-    /// it from the world view. `chunk` must be a level-0 chunk with the default
-    /// data shape.
+    /// Works out the chunk's column answer, scans its voxels and solves its
+    /// light, reading the chunks around it from the world view. `chunk` must be
+    /// a level-0 chunk with the default data shape.
     pub fn solve(self, chunk: &ChunkData<I>) -> Solved {
         let settings = &self.settings;
-        let (inputs, scanned) = LightInputs::of(chunk, &settings.emission);
+        let columns = match self.walk {
+            Some(walk) => {
+                let started = Instant::now();
+                let columns = walk.answer(chunk, &settings.counters.walks);
+                settings
+                    .counters
+                    .column_nanos
+                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                columns
+            }
+            None => ColumnAnswer::none(),
+        };
+        let (inputs, scanned) = LightInputs::of(chunk, &settings.emission, columns);
         if scanned {
             settings
                 .counters
@@ -219,21 +242,21 @@ fn solve<I>(
 ) -> Solved {
     snapshot.neighbours[neighbour_index(IVec3::ZERO)] = Some(inputs.clone());
     let started = Instant::now();
+    let (sky, sky_faces) = match &settings.sky_scale {
+        Some(scale) => solve_sky(&snapshot.neighbours, scale, settings.shape),
+        None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
+    };
     let (voxel, voxel_faces) =
-        solve_channel(&snapshot.neighbours, &settings.voxel_scale, settings.shape);
+        solve_voxel(&snapshot.neighbours, &settings.voxel_scale, settings.shape);
     let counters = &settings.counters;
     counters.solves.fetch_add(1, Ordering::Relaxed);
     counters
         .solve_nanos
         .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    let light = Arc::new(ChunkLight {
-        inputs,
-        sky: settings.sky,
-        voxel,
-    });
+    let light = Arc::new(ChunkLight { inputs, sky, voxel });
     let faces = FaceHashes {
-        sky: FaceHashes::uniform(settings.sky),
+        sky: sky_faces,
         voxel: voxel_faces,
     };
     let mut seen = [None; 6];
@@ -241,8 +264,13 @@ fn solve<I>(
     for face in Face::ALL {
         if let Some((neighbour, version)) = &snapshot.faces[face as usize] {
             seen[face as usize] = Some(*version);
-            reaches[face as usize] =
-                could_reach_sooner(&light, neighbour, face, &settings.voxel_scale);
+            reaches[face as usize] = could_reach_sooner(
+                &light,
+                neighbour,
+                face,
+                &settings.voxel_scale,
+                settings.sky_scale.as_ref(),
+            );
         }
     }
     let own = if settings.routed {
@@ -262,20 +290,20 @@ fn solve<I>(
 }
 
 thread_local! {
-    /// Each thread's box, kept between solves so a solve allocates nothing.
-    static LIGHT_BOX: RefCell<Option<LightBox>> = const { RefCell::new(None) };
+    /// Each thread's boxes, one per row width, kept between solves so a solve
+    /// allocates no box.
+    static ONE_WORD_BOX: RefCell<Option<LightBox<u64>>> = const { RefCell::new(None) };
+    static TWO_WORD_BOX: RefCell<Option<LightBox<u128>>> = const { RefCell::new(None) };
 }
 
 /// Solves voxel light for the chunk at the centre of `neighbours`. Returns it
 /// with its face hashes, indexed by [`Face`].
-pub(crate) fn solve_channel(
+pub(crate) fn solve_voxel(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
     shape: LightShape,
 ) -> (ChannelLight, [u64; 6]) {
-    let centre = neighbours[neighbour_index(IVec3::ZERO)]
-        .as_ref()
-        .expect("the chunk's own inputs");
+    let centre = centre(neighbours);
     let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
@@ -284,20 +312,116 @@ pub(crate) fn solve_channel(
     if seeds.is_empty() {
         return unlit;
     }
+    let (planes, faces) = spread(neighbours, scale, shape, &seeds, None);
+    (channel_light(planes, &centre.occupancy), faces)
+}
 
-    LIGHT_BOX.with_borrow_mut(|light_box| {
+/// Solves sky light for the chunk at the centre of `neighbours`, from the
+/// voxels with direct sky around it. Returns it with its face hashes, indexed
+/// by [`Face`].
+///
+/// Direct sky holds level 15 and doesn't fade. A chunk whose open voxels all
+/// have direct sky needs no spreading.
+pub(crate) fn solve_sky(
+    neighbours: &Neighbourhood,
+    scale: &LevelScale,
+    shape: LightShape,
+) -> (ChannelLight, [u64; 6]) {
+    let centre = centre(neighbours);
+    let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
+    if !centre.occupancy.has_open_voxel() {
+        return unlit;
+    }
+    let direct: [Option<Box<Plane>>; 27] = std::array::from_fn(|index| {
+        neighbours[index]
+            .as_ref()
+            .and_then(|inputs| inputs.direct_sky())
+    });
+    let own = direct[neighbour_index(IVec3::ZERO)].as_deref();
+    if let Some(own) = own {
+        let all_direct = (0..CHUNK * CHUNK).all(|column| {
+            own[column]
+                == !centre
+                    .occupancy
+                    .solid_column(column % CHUNK, column / CHUNK)
+        });
+        if all_direct {
+            return (ChannelLight::Uniform(15), FaceHashes::uniform(15));
+        }
+    }
+    if direct.iter().all(Option::is_none) {
+        return unlit;
+    }
+    let (mut planes, faces) = spread(neighbours, scale, shape, &[], Some(&direct));
+    if let Some(own) = own {
+        for plane in planes.iter_mut() {
+            for (column, direct) in plane.iter_mut().zip(own.iter()) {
+                *column |= direct;
+            }
+        }
+    }
+    (channel_light(planes, &centre.occupancy), faces)
+}
+
+fn centre(neighbours: &Neighbourhood) -> &LightInputs {
+    neighbours[neighbour_index(IVec3::ZERO)]
+        .as_ref()
+        .expect("the chunk's own inputs")
+}
+
+fn channel_light(
+    planes: Box<[Plane; LEVEL_BITS]>,
+    occupancy: &Occupancy,
+) -> ChannelLight {
+    one_level(&planes, occupancy)
+        .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
+}
+
+/// Spreads light through the box around the chunk at the centre of
+/// `neighbours`, from `seeds` and from the voxels set in `lit`, a plane per
+/// chunk of the neighbourhood. Returns the chunk's levels and face hashes.
+fn spread(
+    neighbours: &Neighbourhood,
+    scale: &LevelScale,
+    shape: LightShape,
+    seeds: &[Seed],
+    lit: Option<&[Option<Box<Plane>>; 27]>,
+) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
+    if scale.reach() <= MAX_ONE_WORD_REACH {
+        spread_in(&ONE_WORD_BOX, neighbours, scale, shape, seeds, lit)
+    } else {
+        spread_in(&TWO_WORD_BOX, neighbours, scale, shape, seeds, lit)
+    }
+}
+
+fn spread_in<R: Row>(
+    cached: &'static LocalKey<RefCell<Option<LightBox<R>>>>,
+    neighbours: &Neighbourhood,
+    scale: &LevelScale,
+    shape: LightShape,
+    seeds: &[Seed],
+    lit: Option<&[Option<Box<Plane>>; 27]>,
+) -> (Box<[Plane; LEVEL_BITS]>, [u64; 6]) {
+    cached.with_borrow_mut(|light_box| {
         let light_box = match light_box {
             Some(light_box) if light_box.reach() == scale.reach() as usize => light_box,
             _ => light_box.insert(LightBox::new(scale.reach())),
         };
-        fill_open_rows(light_box, neighbours);
+        let reach = light_box.reach();
+        fill_rows(light_box.open_rows_mut(), reach, |index, x, y| {
+            let inputs = neighbours[index].as_ref()?;
+            Some(!inputs.occupancy.solid_column(x, y))
+        });
+        if let Some(lit) = lit {
+            fill_rows(light_box.lit_rows_mut(), reach, |index, x, y| {
+                Some(lit[index].as_ref()?[x + y * CHUNK])
+            });
+        }
         let mut planes: Box<[Plane; LEVEL_BITS]> =
             Box::new([[0; CHUNK * CHUNK]; LEVEL_BITS]);
         let mut faces = [0; 6];
-        light_box.spread(&seeds, shape, scale, &mut planes, &mut faces);
-        let light = one_level(&planes, &centre.occupancy)
-            .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform);
-        (light, faces)
+        light_box.spread(seeds, lit.is_some(), shape, scale, &mut planes, &mut faces);
+        (planes, faces)
     })
 }
 
@@ -345,13 +469,22 @@ fn seeds(neighbours: &Neighbourhood, scale: &LevelScale) -> Vec<Seed> {
     seeds
 }
 
-/// Fills the box's open rows from the occupancy of the chunks around it. A
-/// chunk that isn't loaded is solid.
-fn fill_open_rows(light_box: &mut LightBox, neighbours: &Neighbourhood) {
-    let reach = light_box.reach() as i32;
-    let side = light_box.side();
-    let side_mask = if side >= 64 { !0 } else { (1u64 << side) - 1 };
-    let rows = light_box.open_rows_mut();
+/// Fills a box's `rows`, at `x + y × side`, from a `u32` column along z of
+/// each chunk around the box's chunk. `column` gives the column of the chunk
+/// at neighbour index `index` at its voxel `x` and `y`, or `None` for a chunk
+/// that isn't loaded, whose bits stay clear.
+fn fill_rows<R: Row>(
+    rows: &mut [R],
+    reach: usize,
+    column: impl Fn(usize, usize, usize) -> Option<u32>,
+) {
+    let side = CHUNK + 2 * reach;
+    let side_mask = if side >= R::BITS {
+        !R::ZERO
+    } else {
+        !(!R::ZERO << side)
+    };
+    let reach = reach as i32;
     for by in 0..side {
         let wy = by as i32 - reach;
         let (cy, ly) = (
@@ -364,18 +497,18 @@ fn fill_open_rows(light_box: &mut LightBox, neighbours: &Neighbourhood) {
                 wx.div_euclid(CHUNK_SIZE_I),
                 wx.rem_euclid(CHUNK_SIZE_I) as usize,
             );
-            let mut row = 0u64;
+            let mut row = R::ZERO;
             for cz in -1..=1 {
                 let index = neighbour_index(IVec3::new(cx, cy, cz));
-                let Some(inputs) = &neighbours[index] else {
+                let Some(bits) = column(index, lx, ly) else {
                     continue;
                 };
-                let open = !inputs.occupancy.solid_column(lx, ly) as u64;
+                let bits = R::from_u32(bits);
                 let shift = cz * CHUNK_SIZE_I + reach;
                 row |= if shift >= 0 {
-                    open << shift
+                    bits << shift as usize
                 } else {
-                    open >> -shift
+                    bits >> (-shift) as usize
                 };
             }
             rows[bx + by * side] = row & side_mask;

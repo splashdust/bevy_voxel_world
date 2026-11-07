@@ -8,6 +8,8 @@ import bevy_pbr::render::{
 
 @if(VOXEL_LIGHT)
 import bevy_voxel_world::light::{sample_light, apply_voxel_light};
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+import bevy_voxel_world::light::remove_unshadowed_sun;
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::{
@@ -113,6 +115,8 @@ fn fragment(
     var out: FragmentOutput;
 @if(!PREPASS_PIPELINE)
     out.color = apply_pbr_lighting(pbr_input);
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+    out.color = remove_unshadowed_sun(pbr_input, out.color);
 @if(!PREPASS_PIPELINE)
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 

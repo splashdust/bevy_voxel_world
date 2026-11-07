@@ -20,8 +20,11 @@ pub(super) const DIM_LAMP: u8 = 3;
 
 pub(super) type Scene = Arc<dyn Fn(IVec3) -> WorldVoxel + Send + Sync>;
 
-/// Holds back the chunk task of one chunk position: its voxel lookups wait
-/// until the hold is released.
+/// A world's fill hint for each level-0 chunk position.
+pub(super) type Hints = Arc<dyn Fn(IVec3) -> FillHint + Send + Sync>;
+
+/// Holds back the chunk task of one chunk position: its lookups of voxels
+/// outside the chunk, in its padding, wait until the hold is released.
 ///
 /// A held task blocks a thread of the async compute pool, which every test in
 /// the process shares and which may have only two threads, so tests take
@@ -70,6 +73,7 @@ pub(super) struct LampWorld {
     pub emissive: Vec<(u8, Emission)>,
     pub hold: Option<Arc<Hold>>,
     pub spawning_distance: u32,
+    pub hints: Option<Hints>,
 }
 
 impl Default for LampWorld {
@@ -83,6 +87,7 @@ impl Default for LampWorld {
             ],
             hold: None,
             spawning_distance: 2,
+            hints: None,
         }
     }
 }
@@ -103,6 +108,13 @@ impl VoxelWorldConfig for LampWorld {
         ChunkDespawnStrategy::FarAway
     }
 
+    fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
+        match (&self.hints, key.lod_level) {
+            (Some(hints), 0) => hints(key.position),
+            _ => FillHint::Unknown,
+        }
+    }
+
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let scene = self.scene.clone();
         let hold = self.hold.clone();
@@ -110,7 +122,11 @@ impl VoxelWorldConfig for LampWorld {
             let scene = scene.clone();
             let hold = hold.clone().filter(|hold| hold.chunk == chunk);
             Box::new(move |position, _| {
-                if let Some(hold) = &hold {
+                // A chunk task generates its padding first, while a walk of a
+                // chunk below reads only voxels inside the chunks above it, so
+                // holding back the padding holds back the chunk's task alone.
+                let inside = position.div_euclid(IVec3::splat(32)) == chunk;
+                if let (Some(hold), false) = (&hold, inside) {
                     hold.wait();
                 }
                 scene(position)

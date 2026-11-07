@@ -5,7 +5,8 @@
 // including one without the crate's texture index, such as a marching cubes
 // mesh. It outputs Bevy's usual values and, at locations 9-11, what the
 // `bevy_voxel_world::light` module reads. The fragment shader is Bevy's
-// forward PBR with one call to `apply_voxel_light`. Vertex colours tint the
+// forward PBR with `apply_voxel_light` before Bevy's lighting and
+// `remove_unshadowed_sun` after it. Vertex colours tint the
 // base colour as in Bevy's own shader. They belong to the mesher, so they are
 // not read as ambient occlusion, and the look's AO setting doesn't apply.
 //
@@ -19,7 +20,7 @@ import bevy_pbr::render::{
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
 };
-import bevy_voxel_world::light::{sample_light, apply_voxel_light};
+import bevy_voxel_world::light::{sample_light, apply_voxel_light, remove_unshadowed_sun};
 
 struct LitVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -110,6 +111,7 @@ fn fragment(
             1.0,
         );
         out.color = apply_pbr_lighting(pbr_input);
+        out.color = remove_unshadowed_sun(pbr_input, out.color);
     } else {
         out.color = pbr_input.material.base_color;
     }

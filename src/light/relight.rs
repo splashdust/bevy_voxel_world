@@ -199,7 +199,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     }
 
     /// Lands one result: writes its light into the world view and triggers
-    /// the relights it calls for.
+    /// the relights it calls for. `scales` are the levels of voxel light and,
+    /// with sky light on, of sky light.
     ///
     /// Returns the chunk's light if it changed, with the bytes of its slot,
     /// for the shader.
@@ -207,7 +208,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         &mut self,
         landing: Landing,
         view: &LightView,
-        scale: &LevelScale,
+        scales: (&LevelScale, Option<&LevelScale>),
     ) -> Option<LandedLight> {
         let Landing {
             position,
@@ -277,7 +278,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                                 &neighbour.light,
                                 &solved.light,
                                 face.opposite(),
-                                scale,
+                                scales.0,
+                                scales.1,
                             ) {
                                 triggers.push(position);
                             }
@@ -285,7 +287,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                                 &solved.light,
                                 &neighbour.light,
                                 face,
-                                scale,
+                                scales.0,
+                                scales.1,
                             )
                         };
                         let rippled = old
@@ -426,12 +429,12 @@ impl<C: VoxelWorldConfig> Relights<C> {
             route.set_cameras(cameras.iter().map(|camera| camera.translation()));
             route.set_device(device.as_deref());
         }
-        let scale = &settings.task.voxel_scale;
+        let scales = (&settings.task.voxel_scale, settings.task.sky_scale.as_ref());
         while let Some(landing) = work.landing.pop_front() {
             let (position, entity, source) =
                 (landing.position, landing.entity, landing.source);
             if chunks.contains(entity) {
-                let landed = work.land(landing, &settings.view, scale);
+                let landed = work.land(landing, &settings.view, scales);
                 if let (Some(route), Some(landed)) = (route.as_mut(), landed) {
                     route.light_landed(
                         landed.position,

@@ -24,7 +24,11 @@
 import bevy_pbr::render::{
     pbr_types::PbrInput,
     mesh_view_bindings as view_bindings,
-    pbr_functions::calculate_diffuse_color,
+    mesh_view_types,
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    pbr_functions::{calculate_diffuse_color, calculate_F0_dielectric},
+    pbr_lighting as lighting,
+    pbr_lighting::{LAYER_BASE, LAYER_CLEARCOAT},
 };
 
 // How light looks, from the world's `LightLook`. Each table is the brightness
@@ -33,6 +37,9 @@ struct LightLook {
     sky_falloff: array<vec4<f32>, 4>,
     voxel_falloff: array<vec4<f32>, 4>,
     sun_falloff: array<vec4<f32>, 4>,
+    // Above 0, the sun shines fully from this sky level up and not below it,
+    // in place of `sun_falloff`.
+    sun_step: f32,
     voxel_brightness: f32,
     emissive_glow: f32,
     minimum_brightness: f32,
@@ -298,6 +305,16 @@ fn voxel_falloff(levels: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// How much of Bevy's directional lights reaches a face at sky light `level`,
+// from 0 to 1. By default only direct sky gets the sun: the face's level must
+// reach the step halfway between direct sky and the level beside it.
+fn sun_brightness(level: f32) -> f32 {
+    if light_look.sun_step > 0.0 {
+        return select(0.0, 1.0, level >= light_look.sun_step);
+    }
+    return falloff(SUN_TABLE, level);
+}
+
 // How much of Bevy's ambient light reaches a face at sky light `level`, from 0
 // to 1.
 fn sky_brightness(level: f32) -> f32 {
@@ -318,7 +335,10 @@ fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
 //
 // Sky light scales Bevy's ambient light and environment map through the
 // occlusion terms, and its directional lights through
-// `directional_shadow_factor`. Voxel light and a lamp's glow add through the
+// `directional_shadow_factor`. Bevy applies that factor only to a directional
+// light with a shadow map, so a shader calling this must also call
+// `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light
+// and a lamp's glow add through the
 // emissive channel, in the forward pass only, so no other pass counts them
 // twice. `ao` is the face's ambient occlusion, from 0 to 1: it darkens ambient
 // light and voxel light, and leaves the base colour and the sun alone.
@@ -326,7 +346,7 @@ fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, ao
     let sky = sky_brightness(levels.sky);
     (*pbr_input).diffuse_occlusion *= sky * ao;
     (*pbr_input).specular_occlusion *= sky * ao;
-    (*pbr_input).directional_shadow_factor *= falloff(SUN_TABLE, levels.sky);
+    (*pbr_input).directional_shadow_factor *= sun_brightness(levels.sky);
 
     @if(!PREPASS_PIPELINE) {
         let material = (*pbr_input).material;
@@ -345,4 +365,89 @@ fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, ao
         let weight = mix(1.0, exposure, material.emissive.a);
         (*pbr_input).material.emissive += vec4<f32>(light * diffuse / weight, 0.0);
     }
+}
+
+// Removes from `color`, the colour Bevy's lighting returned for `pbr_input`,
+// the part of each directional light that `directional_shadow_factor` should
+// have dimmed and Bevy didn't. Call it on the result of `apply_pbr_lighting`
+// after `apply_voxel_light`.
+//
+// It exists because Bevy multiplies a directional light by
+// `directional_shadow_factor` only for a light with a shadow map, on a mesh
+// that receives shadows. Without it, a sun with no shadow map would light
+// sealed caves that the sun gate keeps dark. For each other directional light
+// it subtracts `(1 - factor) × exposure × directional_light(..)`, the light
+// Bevy added and the factor would have taken away.
+//
+// It rebuilds Bevy's lighting input as `apply_pbr_lighting` in Bevy's
+// `pbr_functions` builds it, so it has to follow that function through Bevy
+// upgrades. A one-line fix upstream, applying the factor to every directional
+// light, would retire it.
+@if(!PREPASS_PIPELINE)
+fn remove_unshadowed_sun(pbr_input: PbrInput, color: vec4<f32>) -> vec4<f32> {
+    let factor = pbr_input.directional_shadow_factor;
+    let n_directional_lights = view_bindings::lights.n_directional_lights;
+    if factor >= 1.0 || n_directional_lights == 0u {
+        return color;
+    }
+    let receives_shadows = (pbr_input.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
+
+    let material = pbr_input.material;
+    let base_color = material.base_color.rgb;
+    let perceptual_roughness = material.perceptual_roughness;
+    let NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
+    var input: lighting::LightingInput;
+    input.layers[LAYER_BASE].NdotV = NdotV;
+    input.layers[LAYER_BASE].N = pbr_input.N;
+    input.layers[LAYER_BASE].R = reflect(-pbr_input.V, pbr_input.N);
+    input.layers[LAYER_BASE].perceptual_roughness = perceptual_roughness;
+    input.layers[LAYER_BASE].roughness =
+        lighting::perceptualRoughnessToRoughness(perceptual_roughness);
+    input.P = pbr_input.world_position.xyz;
+    input.V = pbr_input.V;
+    input.diffuse_color = calculate_diffuse_color(
+        base_color,
+        material.metallic,
+        material.specular_transmission,
+        material.diffuse_transmission,
+    );
+    input.metallic = material.metallic;
+    input.F0_dielectric = calculate_F0_dielectric(material.reflectance);
+    input.F0_metallic = base_color;
+    input.F_ab = lighting::F_AB(perceptual_roughness, NdotV);
+    @if(STANDARD_MATERIAL_CLEARCOAT) {
+        let clearcoat_N = pbr_input.clearcoat_N;
+        let clearcoat_NdotV = max(dot(clearcoat_N, pbr_input.V), 0.0001);
+        let clearcoat_roughness = material.clearcoat_perceptual_roughness;
+        input.layers[LAYER_CLEARCOAT].NdotV = clearcoat_NdotV;
+        input.layers[LAYER_CLEARCOAT].N = clearcoat_N;
+        input.layers[LAYER_CLEARCOAT].R = reflect(-pbr_input.V, clearcoat_N);
+        input.layers[LAYER_CLEARCOAT].perceptual_roughness = clearcoat_roughness;
+        input.layers[LAYER_CLEARCOAT].roughness =
+            lighting::perceptualRoughnessToRoughness(clearcoat_roughness);
+        input.clearcoat_strength = material.clearcoat;
+    }
+    @if(STANDARD_MATERIAL_ANISOTROPY) {
+        input.anisotropy = pbr_input.anisotropy_strength;
+        input.Ta = pbr_input.anisotropy_T;
+        input.Ba = pbr_input.anisotropy_B;
+    }
+
+    var added = vec3<f32>(0.0);
+    for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
+        let flags = view_bindings::lights.directional_lights[i].flags;
+        let has_shadow_map =
+            (flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        if receives_shadows && has_shadow_map {
+            continue;
+        }
+        @if(LIGHTMAP)
+        let enable_diffuse = (flags
+            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT) != 0u;
+        @else
+        let enable_diffuse = true;
+        added += lighting::directional_light(i, &input, enable_diffuse);
+    }
+    let removed = (1.0 - factor) * view_bindings::view.exposure * added;
+    return vec4<f32>(max(color.rgb - removed, vec3<f32>(0.0)), color.a);
 }

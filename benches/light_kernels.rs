@@ -15,8 +15,12 @@
 //!
 //! The kernel runs on boxes cut from the light reference scene: caves, shafts,
 //! a sealed room and a floating island, with emissive voxels scattered on
-//! exposed floors. Filling a slot turns the kernel's result on those boxes
-//! into bytes and copies six neighbours' border planes. The emissive scan runs on a chunk of layered terrain and on
+//! exposed floors. It spreads voxel light from those, and sky light from the
+//! voxels with direct sky under the default sky clearance, at reaches that
+//! take one-`u64` rows and two-`u64` rows, in both shapes. Filling a slot
+//! turns the kernel's result on those boxes into bytes and copies six
+//! neighbours' border planes. The emissive scan runs on a chunk of layered
+//! terrain and on
 //! chunks of random materials, with emissive lists of several lengths.
 
 use std::collections::{BTreeMap, HashMap};
@@ -194,20 +198,29 @@ fn hash3(p: IVec3) -> u32 {
     h ^ (h >> 15)
 }
 
-/// The scene's voxels and emissive voxels around a chunk, out to 16 voxels
-/// past its faces, enough for any reach a one-`u64` box holds.
+/// The scene's voxels, emissive voxels and voxels with direct sky around a
+/// chunk, out to 32 voxels past its faces, enough for any reach the kernel
+/// takes.
 struct Dump {
     open: Vec<bool>,
     lamps: Vec<IVec3>,
+    direct: Vec<bool>,
 }
 
-const DUMP_REACH: i32 = 16;
+const DUMP_REACH: i32 = 32;
 const DUMP_SIDE: i32 = 32 + 2 * DUMP_REACH;
+
+/// How many chunks above a chunk a column must be clear in to have direct
+/// sky, the default sky clearance.
+const SKY_CLEARANCE: i32 = 16;
+/// Above this height the scene holds no solid voxel.
+const SCENE_TOP: i32 = 200;
 
 impl Dump {
     fn of(scene: &mut Scene, chunk: IVec3) -> Self {
         let origin = chunk * 32 - IVec3::splat(DUMP_REACH);
-        let mut open = Vec::with_capacity((DUMP_SIDE * DUMP_SIDE * DUMP_SIDE) as usize);
+        let count = (DUMP_SIDE * DUMP_SIDE * DUMP_SIDE) as usize;
+        let mut open = Vec::with_capacity(count);
         let mut lamps = Vec::new();
         for z in 0..DUMP_SIDE {
             for y in 0..DUMP_SIDE {
@@ -221,7 +234,48 @@ impl Dump {
                 }
             }
         }
-        Self { open, lamps }
+        // A voxel has direct sky when its column holds no solid up to the
+        // top of the chunks its sky clearance covers.
+        let mut direct = vec![false; count];
+        for z in 0..DUMP_SIDE {
+            for x in 0..DUMP_SIDE {
+                let mut solid_from = i32::MAX;
+                for y in (origin.y..SCENE_TOP.max(origin.y + DUMP_SIDE)).rev() {
+                    let p = IVec3::new(origin.x + x, y, origin.z + z);
+                    let local = p - origin;
+                    let inside = local.y < DUMP_SIDE;
+                    let index =
+                        (local.x + local.y * DUMP_SIDE + local.z * DUMP_SIDE * DUMP_SIDE)
+                            as usize;
+                    let is_open = if inside { open[index] } else { scene.open(p) };
+                    if !is_open {
+                        solid_from = y;
+                    } else if inside {
+                        let top = (y.div_euclid(32) + 1 + SKY_CLEARANCE) * 32 - 1;
+                        direct[index] = solid_from > top;
+                    }
+                }
+            }
+        }
+        Self {
+            open,
+            lamps,
+            direct,
+        }
+    }
+
+    fn index(p: IVec3) -> usize {
+        (p.x + p.y * DUMP_SIDE + p.z * DUMP_SIDE * DUMP_SIDE) as usize
+    }
+
+    /// The kernel box of sky light of `reach` around the chunk.
+    fn sky_box(&self, reach: u32) -> KernelBox {
+        let offset = IVec3::splat(DUMP_REACH - reach as i32);
+        KernelBox::with_direct_sky(
+            reach,
+            |p| self.open[Self::index(p + offset)],
+            |p| self.direct[Self::index(p + offset)],
+        )
     }
 
     /// The kernel box of `reach` around the chunk.
@@ -299,10 +353,23 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
+/// Cuts a kernel box of a reach from a dump.
+type MakeBox = fn(&Dump, u32) -> KernelBox;
+
 fn kernel_metrics(dumps: &[Dump], metrics: &mut Metrics) {
-    for reach in [14, 16] {
+    // Voxel light at the default reach and the most a one-`u64` row holds,
+    // and at 30 on two-`u64` rows; sky light at the default reach of 30 and
+    // at 16.
+    let runs: [(&str, u32, MakeBox); 5] = [
+        ("kernel", 14, Dump::kernel_box),
+        ("kernel", 16, Dump::kernel_box),
+        ("kernel", 30, Dump::kernel_box),
+        ("sky", 16, Dump::sky_box),
+        ("sky", 30, Dump::sky_box),
+    ];
+    for (kind, reach, make) in runs {
         let mut boxes: Vec<KernelBox> =
-            dumps.iter().map(|dump| dump.kernel_box(reach)).collect();
+            dumps.iter().map(|dump| make(dump, reach)).collect();
         for (shape, name) in [
             (LightShape::Diamond, "diamond"),
             (LightShape::Round, "round"),
@@ -317,7 +384,7 @@ fn kernel_metrics(dumps: &[Dump], metrics: &mut Metrics) {
                 })
                 .collect();
             metrics.insert(
-                format!("kernel.reach{reach}.{name}.p50_us"),
+                format!("{kind}.reach{reach}.{name}.p50_us"),
                 median(&mut times),
             );
         }
