@@ -77,7 +77,7 @@ use super::census::{Cause, ChangeCensus};
 use super::coarse::CoarseSolved;
 use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
-use super::hinted::{self, passes_into_air};
+use super::hinted::{self, changed_across_air, passes_into_air};
 use super::inputs::Rescan;
 use super::levels::LevelScale;
 use super::levels::LightLevels;
@@ -797,6 +797,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         }
                     }
                     view.air.remove(&position);
+                    if changed_across_air(&view, position, &solved.read) {
+                        triggers.push(position);
+                    }
                     for face in Face::ALL {
                         let beside = position + face.offset();
                         if view.is_air(beside) {

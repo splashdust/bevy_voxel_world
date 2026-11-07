@@ -263,6 +263,9 @@ pub(crate) struct Solved {
     /// The hash of the sky fill seeds it was solved from, for a chunk that
     /// takes sky fill: see [`Seeding`].
     pub fill_seeds: Option<u64>,
+    /// The inputs of the chunks and hinted air around the chunk as the solve
+    /// read them, its own included.
+    pub read: Box<Neighbourhood>,
 }
 
 impl Solved {
@@ -505,6 +508,7 @@ fn solve<I>(
         emission: settings.emission_generation,
         rescanned: None,
         fill_seeds,
+        read: Box::new(snapshot.neighbours),
     }
 }
 

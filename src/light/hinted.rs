@@ -25,7 +25,10 @@
 //!
 //! Hinted air holding no light entry has no light of its own to compare, so
 //! relights that would stop there pass on through it instead: see
-//! `LightWork::pass_on`.
+//! `LightWork::pass_on`. A relight passed on while a chunk's task runs misses
+//! that chunk, so a chunk task's light landing beside such air relights its
+//! chunk again if anything it read through the air changed meanwhile: see
+//! [`changed_across_air`].
 
 use std::sync::Arc;
 
@@ -40,7 +43,7 @@ use super::record::SkyRecord;
 use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::{ColumnAnswer, SkyRule};
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{neighbour_index, ChannelLight, ChunkLight, Neighbourhood};
 use super::view::{AirInputs, ViewChunk, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -383,6 +386,49 @@ fn make_entry<C: VoxelWorldConfig>(
         },
     );
     work.add_entry(position);
+}
+
+/// Whether the inputs of a chunk, light entry or hinted air that the chunk at
+/// `position` reaches through hinted air holding no light entry, within the
+/// 3×3×3 around it, are other than those its solve `read`.
+///
+/// A face neighbour's change shows in the light versions a solve compares
+/// against, but one beyond hinted air changes no face neighbour's light, and
+/// a relight passed on through the air while the chunk's task ran found no
+/// chunk there to relight.
+pub(crate) fn changed_across_air(
+    view: &ViewMaps,
+    position: IVec3,
+    read: &Neighbourhood,
+) -> bool {
+    let within = |at: IVec3| (at - position).abs().max_element() <= 1;
+    let mut next: Vec<IVec3> = Face::ALL
+        .iter()
+        .map(|face| position + face.offset())
+        .filter(|beside| view.is_air(*beside))
+        .collect();
+    let mut seen: HashSet<IVec3> = next.iter().copied().collect();
+    seen.insert(position);
+    let mut checked = next.clone();
+    while let Some(air) = next.pop() {
+        for face in Face::ALL {
+            let beside = air + face.offset();
+            if !within(beside) || !seen.insert(beside) {
+                continue;
+            }
+            checked.push(beside);
+            if view.is_air(beside) {
+                next.push(beside);
+            }
+        }
+    }
+    checked.into_iter().any(|at| {
+        let was = &read[neighbour_index(at - position)];
+        match (view.inputs(at), was) {
+            (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
+            (now, was) => now.is_some() != was.is_some(),
+        }
+    })
 }
 
 /// Whether the arriving light `light` of a chunk passes on into the hinted

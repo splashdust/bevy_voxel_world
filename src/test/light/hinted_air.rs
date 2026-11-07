@@ -477,6 +477,142 @@ fn a_column_disproved_in_hinted_air_relights_the_light_around_it() {
     );
 }
 
+// --- Passing on through hinted air -----------------------------------------
+
+/// The chunk position holding the lamp of [`lamp_past_air`].
+const LAMP_CHUNK: IVec3 = IVec3::new(2, 0, 0);
+
+/// The chunk position whose light comes from the lamp of [`lamp_past_air`]
+/// only across hinted air: it touches [`LAMP_CHUNK`] at an edge alone.
+const PAST_AIR: IVec3 = IVec3::new(3, 1, 0);
+
+/// Near the corner of [`LAMP_CHUNK`] toward [`PAST_AIR`], touching no other
+/// chunk position.
+const LAMP_PAST_AIR: IVec3 = IVec3::new(92, 28, 16);
+
+/// Air, with a lamp at [`LAMP_PAST_AIR`].
+fn lamp_past_air(p: IVec3) -> WorldVoxel {
+    if p == LAMP_PAST_AIR {
+        WorldVoxel::Solid(LAMP)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+/// A world of voxel light whose every chunk position is hinted air but
+/// [`LAMP_CHUNK`] and [`PAST_AIR`], so no chunk position beside them spawns
+/// outside the camera's protected radius around the origin, and none holds
+/// a light entry, since only the lamp is solid.
+fn past_air_world() -> LampWorld {
+    LampWorld {
+        scene: Arc::new(lamp_past_air),
+        hints: Some(Arc::new(|position: IVec3| {
+            if position == LAMP_CHUNK || position == PAST_AIR {
+                FillHint::Unknown
+            } else {
+                FillHint::Uniform(WorldVoxel::Air)
+            }
+        })),
+        spawning_distance: 4,
+        ..default()
+    }
+}
+
+/// The voxel light of [`lamp_past_air`] with `edits` over it, around both
+/// chunk positions.
+fn past_air_reference(edits: &[(IVec3, WorldVoxel)]) -> Reference {
+    let edits: HashMap<IVec3, WorldVoxel> = edits.iter().copied().collect();
+    let margin = IVec3::splat(31);
+    Reference::voxel_light(
+        LAMP_CHUNK * 32 - margin,
+        (PAST_AIR + 1) * 32 + margin,
+        14,
+        LightShape::Round,
+        |p| edits.get(&p).copied().unwrap_or_else(|| lamp_past_air(p)),
+        |material| (material == LAMP).then_some(15.0),
+    )
+}
+
+/// The voxels of [`PAST_AIR`] whose voxel light isn't what `reference` says.
+fn wrong_past_air(app: &mut App, reference: &Reference) -> usize {
+    light_in(app, &[PAST_AIR])
+        .into_iter()
+        .filter(|(p, got)| {
+            got.map(|levels| levels.voxel) != Some(reference.voxel_at(*p) as f32)
+        })
+        .count()
+}
+
+#[test]
+fn a_ripple_into_hinted_air_passes_on_to_the_chunks_beyond_it() {
+    let mut app = app(past_air_world());
+    settle(&mut app, "the world to stream in");
+    assert!(spawned_at(&mut app, LAMP_CHUNK) && spawned_at(&mut app, PAST_AIR));
+    assert!(!spawned_at(&mut app, LAMP_CHUNK + IVec3::X));
+    let lit = past_air_reference(&[]);
+    assert_eq!(wrong_past_air(&mut app, &lit), 0, "with the lamp");
+
+    // Stone around the lamp, which relights the lamp's chunk alone. Its
+    // ripple into the air beside it is the only way the change reaches the
+    // chunk past that air.
+    let walled: Vec<(IVec3, WorldVoxel)> = [
+        IVec3::X,
+        IVec3::NEG_X,
+        IVec3::Y,
+        IVec3::NEG_Y,
+        IVec3::Z,
+        IVec3::NEG_Z,
+    ]
+    .map(|step| (LAMP_PAST_AIR + step, WorldVoxel::Solid(STONE)))
+    .to_vec();
+    let dark = past_air_reference(&walled);
+    assert!(
+        wrong_past_air(&mut app, &dark) > 0,
+        "the wall darkens the chunk"
+    );
+    set_voxels(&mut app, &walled);
+    settle(&mut app, "light to settle with the lamp walled in");
+    assert_eq!(
+        wrong_past_air(&mut app, &dark),
+        0,
+        "with the lamp walled in"
+    );
+
+    let open: Vec<(IVec3, WorldVoxel)> =
+        walled.iter().map(|(p, _)| (*p, WorldVoxel::Air)).collect();
+    set_voxels(&mut app, &open);
+    settle(&mut app, "light to settle with the wall gone");
+    assert_eq!(wrong_past_air(&mut app, &lit), 0, "with the wall gone");
+}
+
+#[test]
+fn an_arrival_beside_hinted_air_passes_on_to_the_chunks_beyond_it() {
+    let _holding = Hold::exclusive();
+    let hold = Hold::new(LAMP_CHUNK);
+    let mut app = app(LampWorld {
+        hold: Some(hold.clone()),
+        ..past_air_world()
+    });
+    let lit = past_air_reference(&[]);
+    // The chunk past the air lands first, before the lamp's chunk is loaded.
+    super::super::update_until(&mut app, "the chunk past the air to land", |app| {
+        super::sky_light::settled_but(app, Some(LAMP_CHUNK))
+            && light_in(app, &[PAST_AIR])[0].1.is_some()
+    });
+    assert!(
+        wrong_past_air(&mut app, &lit) > 0,
+        "before the lamp's chunk arrives"
+    );
+
+    hold.release();
+    settle(&mut app, "the lamp's chunk to arrive");
+    assert_eq!(
+        wrong_past_air(&mut app, &lit),
+        0,
+        "once the lamp's chunk arrived"
+    );
+}
+
 // --- Light entries ----------------------------------------------------------
 
 /// A wall of stone 4 voxels thick from x = 96, the west side of the chunk
