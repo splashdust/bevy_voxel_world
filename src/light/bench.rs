@@ -440,8 +440,11 @@ pub struct LightStats {
     pub probes_discarded: u64,
     /// Chunk positions in the sky record.
     pub record_entries: u64,
-    /// Bytes the sky record counts against its cap.
+    /// Bytes the sky record counts against its cap, leaving out the sky
+    /// fill field.
     pub record_bytes: u64,
+    /// Bytes the sky fill field counts against the sky record's cap.
+    pub field_bytes: u64,
     /// Positions the sky record forgot to stay within its cap.
     pub record_evictions: u64,
     /// Coarse chunks solved in their chunk tasks.
@@ -505,9 +508,14 @@ pub struct LightStats {
 pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
     let settings = world.get_resource::<LightSettings<C>>()?;
     let counters = settings.counters();
-    let (record_entries, record_bytes, record_evictions) = {
+    let (record_entries, record_bytes, field_bytes, record_evictions) = {
         let record = settings.record.lock().unwrap();
-        (record.len() as u64, record.bytes() as u64, record.evictions)
+        (
+            record.len() as u64,
+            record.bytes() as u64,
+            record.field_bytes() as u64,
+            record.evictions,
+        )
     };
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
     let route = world.get_resource::<LightRoute<C>>();
@@ -570,6 +578,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         probes_discarded: counters.probes_discarded.load(Ordering::Relaxed),
         record_entries,
         record_bytes,
+        field_bytes,
         record_evictions,
         coarse_solves: counters.coarse_solves.load(Ordering::Relaxed),
         coarse_solve_ms: ms(&counters.coarse_nanos),

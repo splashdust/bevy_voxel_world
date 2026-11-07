@@ -22,14 +22,15 @@ use super::voxel_light::{app, Hold, LampWorld, STONE};
 use crate::light::LightSettings;
 use crate::prelude::*;
 
-/// Sky light under a sky ceiling at y = 100, with sky fill on at its
-/// defaults, and voxel light at the default voxel reach.
+/// Sky light under a sky ceiling at y = 100, with sky fill on under paths
+/// at its defaults, and voxel light at the default voxel reach.
 ///
 /// The ceiling keeps the windows of the chunks above the ones spawned short,
 /// so their columns are proved by their own walks.
 fn filled() -> LightPropagation {
     LightPropagation {
         sky: Sky::Ceiling { y: 100 },
+        sky_fill: Some(paths()),
         ..default()
     }
 }
@@ -40,6 +41,11 @@ fn filled_with(fill: &SkyFill) -> LightPropagation {
         sky_fill: Some(fill.clone()),
         ..filled()
     }
+}
+
+/// Paths with its defaults.
+fn paths() -> SkyFill {
+    SkyFill::Paths(PathFill::default())
 }
 
 /// Sky openness with its defaults.
@@ -312,7 +318,7 @@ const UNDER_HIGH_ISLAND: IVec3 = IVec3::new(8, 0, 8);
 fn a_high_floating_island_under_sky_openness_leaves_no_straight_down_shade_where_most_of_the_sky_is_in_view(
 ) {
     // Paths leaves the ground straight under the island in shade.
-    let mut paths = settled(high_island_world(&SkyFill::default()));
+    let mut paths = settled(high_island_world(&paths()));
     assert!(levels(&mut paths, UNDER_HIGH_ISLAND).sky < 15.0);
 
     let mut open = settled(high_island_world(&openness()));
@@ -325,7 +331,7 @@ fn a_high_floating_island_under_sky_openness_leaves_no_straight_down_shade_where
 fn changing_sky_fill_from_paths_to_openness_at_runtime_settles_on_the_references_light_for_openness(
 ) {
     let chunks = [IVec3::ZERO, IVec3::Y];
-    let mut app = settled(high_island_world(&SkyFill::default()));
+    let mut app = settled(high_island_world(&paths()));
     let light = filled_with(&openness());
     set_light(&mut app, light.clone());
     settle(&mut app, "light to settle under openness");
@@ -674,7 +680,7 @@ fn with_sky_fill_off_the_world_keeps_no_field_and_no_cells() {
             sky_fill: None,
             ..filled()
         }),
-        ..island_world(&SkyFill::default())
+        ..island_world(&paths())
     });
     assert!(!app
         .world()
@@ -858,7 +864,7 @@ macro_rules! once_per_model {
             $(
                 #[test]
                 fn $test() {
-                    super::$test(crate::prelude::SkyFill::default());
+                    super::$test(super::paths());
                 }
             )*
         }

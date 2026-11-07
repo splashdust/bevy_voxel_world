@@ -49,6 +49,13 @@ mod light_scene;
 #[cfg(feature = "light_propagation")]
 use light_scene::{SceneTable, SCENE_TOP};
 
+#[cfg(feature = "light_propagation")]
+#[path = "common/fill_worlds.rs"]
+mod fill_worlds;
+
+#[cfg(feature = "light_propagation")]
+use fill_worlds::FILL_SCENES;
+
 /// Pool sizes are pinned so the machine's core count can't skew comparisons, and
 /// kept, with the main thread, below the M1 Max's 8 performance cores so
 /// background work has room to run beside the benchmark rather than on top of it.
@@ -73,6 +80,9 @@ const RUNS: usize = 5;
 /// chunks at sky reach 30 each run.
 #[cfg(feature = "light_propagation")]
 const CAVE_RUNS: usize = 3;
+/// Runs of each world for comparing the models of sky fill.
+#[cfg(feature = "light_propagation")]
+const FILL_RUNS: usize = 3;
 const IDLE_FRAMES: usize = 2000;
 /// Frames a lit world is left at rest to check that its light starts no work.
 #[cfg(feature = "light_propagation")]
@@ -317,6 +327,69 @@ impl<const HINTS: u8> VoxelWorldConfig for IslandWorld<HINTS> {
 
     fn light_propagation(&self) -> Option<LightPropagation> {
         Some(LightPropagation::default())
+    }
+}
+
+/// One of the worlds for comparing the models of sky fill, the one in
+/// `FILL_SCENES` at index `SCENE`, lit with the default light settings but
+/// with sky fill under paths when `MODEL` is [`PATHS`] and under sky openness
+/// when it's [`OPENNESS`], each at its defaults. With `CEILING`, sky light
+/// enters below a sky ceiling at y = 192, over every solid of the islands,
+/// in place of the sky clearance.
+#[cfg(feature = "light_propagation")]
+#[derive(Resource, Clone, Default)]
+struct FillWorld<const SCENE: usize, const MODEL: u8, const CEILING: bool = false>;
+
+#[cfg(feature = "light_propagation")]
+const PATHS: u8 = 0;
+#[cfg(feature = "light_propagation")]
+const OPENNESS: u8 = 1;
+
+#[cfg(feature = "light_propagation")]
+impl<const SCENE: usize, const MODEL: u8, const CEILING: bool> VoxelWorldConfig
+    for FillWorld<SCENE, MODEL, CEILING>
+{
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            Box::new(|pos: IVec3, _| {
+                if FILL_SCENES[SCENE].solid(pos) {
+                    WorldVoxel::Solid(1)
+                } else {
+                    WorldVoxel::Air
+                }
+            })
+        })
+    }
+
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        let fill = match MODEL {
+            PATHS => SkyFill::Paths(PathFill::default()),
+            _ => SkyFill::Openness(OpenFill::default()),
+        };
+        Some(LightPropagation {
+            sky: if CEILING {
+                Sky::Ceiling { y: 192 }
+            } else {
+                Sky::default()
+            },
+            sky_fill: Some(fill),
+            ..default()
+        })
     }
 }
 
@@ -896,6 +969,10 @@ fn offsets_within(r: i32) -> Vec<IVec3> {
 
 type Metrics = BTreeMap<String, f64>;
 
+/// A scenario that takes the prefix of its metrics' names.
+#[cfg(feature = "light_propagation")]
+type Scenario = fn(&str) -> Metrics;
+
 struct StreamIn {
     time_ms: f64,
     /// Time until every chunk within `NEAR_DISTANCE` of the camera was Ready, or
@@ -1165,6 +1242,10 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
         stats.record_bytes as f64 / 1024.0,
     );
     metrics.insert(
+        format!("{prefix}.field_kib"),
+        stats.field_bytes as f64 / 1024.0,
+    );
+    metrics.insert(
         format!("{prefix}.idle_probes"),
         (idle.probes - stats.probes) as f64,
     );
@@ -1235,6 +1316,10 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     metrics.insert(
         format!("{prefix}.fill_update_us_per_chunk_in_stream"),
         streamed.fill_update_ms * 1000.0 / chunks,
+    );
+    metrics.insert(
+        format!("{prefix}.fill_update_us_per_chunk"),
+        stats.fill_update_ms * 1000.0 / chunks,
     );
     metrics.insert(
         format!("{prefix}.fill_main_thread_us_per_chunk_in_stream"),
@@ -2002,8 +2087,16 @@ fn run_all(only: Option<&str>) -> Metrics {
     }
 
     let mut metrics = Metrics::new();
+    let named = |name: &str| only.is_some_and(|only| only.split(',').any(|s| s == name));
     let mut step = |name: &str, runs: usize, scenario: &dyn Fn() -> Metrics| {
-        if only.is_some_and(|only| !only.split(',').any(|s| s == name)) {
+        // The worlds for comparing the models of sky fill run only when
+        // named, alone or all together as `fill_worlds`.
+        let wanted = if name.starts_with("fill_") {
+            named(name) || named("fill_worlds")
+        } else {
+            only.is_none() || named(name)
+        };
+        if !wanted {
             return;
         }
         let runs = if profiling { 1 } else { runs };
@@ -2055,6 +2148,62 @@ fn run_all(only: Option<&str>) -> Metrics {
             "stream_in_islands_hinted_air",
         )
     });
+    #[cfg(feature = "light_propagation")]
+    {
+        let fill_worlds: [(&str, Scenario); 12] = [
+            (
+                "fill_islands_paths",
+                scenario_stream_in_lit::<FillWorld<0, PATHS>>,
+            ),
+            (
+                "fill_islands_openness",
+                scenario_stream_in_lit::<FillWorld<0, OPENNESS>>,
+            ),
+            (
+                "fill_islands_ceiling_paths",
+                scenario_stream_in_lit::<FillWorld<0, PATHS, true>>,
+            ),
+            (
+                "fill_islands_ceiling_openness",
+                scenario_stream_in_lit::<FillWorld<0, OPENNESS, true>>,
+            ),
+            (
+                "fill_arches_paths",
+                scenario_stream_in_lit::<FillWorld<1, PATHS>>,
+            ),
+            (
+                "fill_arches_openness",
+                scenario_stream_in_lit::<FillWorld<1, OPENNESS>>,
+            ),
+            (
+                "fill_caves_paths",
+                scenario_stream_in_lit::<FillWorld<2, PATHS>>,
+            ),
+            (
+                "fill_caves_openness",
+                scenario_stream_in_lit::<FillWorld<2, OPENNESS>>,
+            ),
+            (
+                "fill_pebbles_paths",
+                scenario_stream_in_lit::<FillWorld<3, PATHS>>,
+            ),
+            (
+                "fill_pebbles_openness",
+                scenario_stream_in_lit::<FillWorld<3, OPENNESS>>,
+            ),
+            (
+                "fill_interiors_paths",
+                scenario_stream_in_lit::<FillWorld<4, PATHS>>,
+            ),
+            (
+                "fill_interiors_openness",
+                scenario_stream_in_lit::<FillWorld<4, OPENNESS>>,
+            ),
+        ];
+        for (name, scenario) in fill_worlds {
+            step(name, FILL_RUNS, &|| scenario(name));
+        }
+    }
     #[cfg(feature = "light_propagation")]
     step("stream_in_lod", RUNS, &|| {
         scenario_stream_in_lod::<LodWorld<false>>("stream_in_lod")

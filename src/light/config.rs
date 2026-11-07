@@ -427,6 +427,21 @@ impl Default for Sky {
 
 /// How sky light is carried past where it falls and spreads, worked out per
 /// 8-voxel cell.
+///
+/// [`Paths`](Self::Paths) is the default. On worlds of floating islands,
+/// overhangs, caves, sparse floating voxels and buildings, its light comes
+/// to rest 10 to 400 times sooner than under [`Openness`](Self::Openness),
+/// its field updates take about 2 µs a chunk while chunks stream in against
+/// 30 to 300 µs, and it shades the ground under islands and overhangs with
+/// smooth gradients where sky openness draws rings and blotches stepped at
+/// 8-voxel cells.
+///
+/// Each model has limits. Under paths, a cave behind an opening narrower
+/// than the cave itself is black past the pool of light around its opening,
+/// and a sky full of small floating things gets no fill. Under sky openness,
+/// a cave is black past what its opening shows of the sky, every voxel edit
+/// casts again the rays of the cells within its reach, and a fresh stretch
+/// of world takes seconds to come to rest.
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub enum SkyFill {
     /// Light passes from open space to open space through the openings between

@@ -314,6 +314,11 @@ impl SkyRecord {
         self.bytes
     }
 
+    /// The bytes of the world's sky fill field it counts against its cap.
+    pub fn field_bytes(&self) -> usize {
+        self.field_bytes
+    }
+
     fn remove(&mut self, position: IVec3) {
         if let Some(entry) = self.entries.remove(&position) {
             self.bytes -= entry.mask.bytes();

@@ -26,6 +26,11 @@
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map, and still after a change to 256 levels at runtime.
 //!   It stays exactly black with sky fill on under sky openness.
+//! - In the worlds `chunk_lifecycle` compares the models of sky fill on,
+//!   under paths and then under sky openness, a shot under each floating
+//!   island height, at overhangs and an arch, into cave mouths and inside a
+//!   building is taken for a person to judge, and each shot of a cave or a
+//!   room sealed from the sky is exactly black.
 //! - Each change of the look shows on the frame after it's made, and the glow
 //!   still scales with each lamp's declared level.
 //! - A sealed pocket stays exactly black at minimum brightness 0 under every
@@ -45,8 +50,8 @@
 //! it also saves each picture there.
 //!
 //! In the browser, `check` can't start processes of its own, so each part
-//! runs from its own page load: `?check-sky-off`, `?check-sky-on` and
-//! `?check-sky-openness`. Each
+//! runs from its own page load: `?check-sky-off`, `?check-sky-on`,
+//! `?check-sky-openness`, `?check-fill-paths` and `?check-fill-openness`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -68,6 +73,11 @@ use bevy::{
 };
 use bevy_voxel_world::prelude::*;
 use noise::{NoiseFn, Perlin};
+
+#[path = "../benches/common/fill_worlds.rs"]
+mod fill_worlds;
+
+use fill_worlds::FILL_SCENES;
 
 /// Writes a line of the checks' output: to standard output on native, and to
 /// the browser's console on WASM.
@@ -290,6 +300,33 @@ impl Scene {
 
 // --- The world ---------------------------------------------------------------
 
+/// How far apart along x the sky fill worlds lie for their pixel checks.
+const FILL_WORLD_SPACING: i32 = 4096;
+
+/// Where the sky fill world `index` of `FILL_SCENES` puts its origin: in the
+/// middle of its stretch of x, so the worlds beside it are out of reach of
+/// its pixel checks' cameras.
+fn fill_world_at(index: usize) -> IVec3 {
+    IVec3::X * (index as i32 * FILL_WORLD_SPACING + FILL_WORLD_SPACING / 2)
+}
+
+/// The voxel at `position` in the sky fill worlds, laid out one after the
+/// other along x from 0, grass on top of stone.
+fn fill_world_voxel(position: IVec3) -> WorldVoxel {
+    let stretch = position.x.div_euclid(FILL_WORLD_SPACING);
+    let index = stretch.rem_euclid(FILL_SCENES.len() as i32) as usize;
+    let local =
+        position - IVec3::X * (stretch * FILL_WORLD_SPACING + FILL_WORLD_SPACING / 2);
+    let scene = FILL_SCENES[index];
+    if !scene.solid(local) {
+        WorldVoxel::Air
+    } else if scene.solid(local + IVec3::Y) {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Solid(GRASS)
+    }
+}
+
 #[derive(Resource, Clone)]
 struct CaveWorld {
     /// For the pixel checks: with sky light, but no sky fill, or with no sky
@@ -297,6 +334,10 @@ struct CaveWorld {
     check_sky: Option<bool>,
     /// For the pixel checks: with sky light and sky fill under sky openness.
     check_openness: bool,
+    /// For the pixel checks of the sky fill worlds: with sky light and sky
+    /// fill under this model, over the worlds laid out by [`fill_world_at`]
+    /// in place of the caves.
+    check_fill: Option<SkyFill>,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -310,6 +351,7 @@ impl Default for CaveWorld {
         Self {
             check_sky: None,
             check_openness: false,
+            check_fill: None,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -379,6 +421,11 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        if self.check_fill.is_some() {
+            return Box::new(|_, _, _| {
+                Box::new(|position, _| fill_world_voxel(position))
+            });
+        }
         Box::new(|_, _, _| {
             let scene = Scene::new();
             Box::new(move |position, _| scene.voxel(position))
@@ -404,6 +451,10 @@ impl VoxelWorldConfig for CaveWorld {
             ..default()
         };
         Some(match self.check_sky {
+            _ if self.check_fill.is_some() => LightPropagation {
+                sky_fill: self.check_fill.clone(),
+                ..light
+            },
             _ if self.check_openness => LightPropagation {
                 sky_fill: Some(SkyFill::Openness(OpenFill::default())),
                 ..light
@@ -492,6 +543,12 @@ fn main() {
         Some("check-sky-off") => return check_part(false, false),
         Some("check-sky-on") => return check_part(true, false),
         Some("check-sky-openness") => return check_part(true, true),
+        Some("check-fill-paths") => {
+            return check_fill_part("paths", SkyFill::Paths(PathFill::default()))
+        }
+        Some("check-fill-openness") => {
+            return check_fill_part("openness", SkyFill::Openness(OpenFill::default()))
+        }
         Some("budget") => return budget(),
         _ => {}
     }
@@ -1002,22 +1059,29 @@ struct CheckPlan {
 }
 
 /// Runs the checks with sky light off, then with it on, then with sky fill
-/// under sky openness, each in a page load of its own in the browser.
+/// under sky openness, then those of the sky fill worlds under each model,
+/// each in a page load of its own in the browser.
 #[cfg(target_arch = "wasm32")]
 fn check() {
     error!(
-        "in the browser, run ?check-sky-off, ?check-sky-on and ?check-sky-openness, \
-         each in a page load"
+        "in the browser, run ?check-sky-off, ?check-sky-on, ?check-sky-openness, \
+         ?check-fill-paths and ?check-fill-openness, each in a page load"
     );
 }
 
 /// Runs the checks with sky light off, then with it on, then with sky fill
-/// under sky openness, each in a process of its own, since a world's sky rule
-/// is read once.
+/// under sky openness, then those of the sky fill worlds under each model,
+/// each in a process of its own, since a world's sky rule is read once.
 #[cfg(not(target_arch = "wasm32"))]
 fn check() {
     let mut failed = false;
-    for sky in ["sky-off", "sky-on", "sky-openness"] {
+    for sky in [
+        "sky-off",
+        "sky-on",
+        "sky-openness",
+        "fill-paths",
+        "fill-openness",
+    ] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
             .args(std::env::args().skip(2))
@@ -1033,22 +1097,111 @@ fn check() {
 /// Runs the checks with sky light on or off, or those with sky fill under sky
 /// openness.
 fn check_part(sky: bool, openness: bool) {
-    App::new()
-        .add_plugins(plugins_without_window())
-        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld {
+    let checks: Vec<&'static Check> = if openness {
+        OPENNESS_CHECKS.iter().collect()
+    } else {
+        CHECKS.iter().filter(|check| check.sky == sky).collect()
+    };
+    run_check_app(
+        CaveWorld {
             check_sky: Some(sky),
             check_openness: openness,
             ..default()
-        }))
+        },
+        checks,
+    );
+}
+
+/// Runs the checks of the sky fill worlds with sky fill under `fill`, named
+/// `model` in the checks and their files.
+fn check_fill_part(model: &'static str, fill: SkyFill) {
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(true),
+            check_fill: Some(fill),
+            ..default()
+        },
+        fill_checks(model),
+    );
+}
+
+fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
+    App::new()
+        .add_plugins(plugins_without_window())
+        .add_plugins(VoxelWorldPlugin::with_config(world))
         .init_resource::<Pictures>()
         .add_systems(
             Startup,
             move |commands: Commands, images: ResMut<Assets<Image>>| {
-                setup_check(commands, images, sky, openness)
+                setup_check(commands, images, checks.clone())
             },
         )
         .add_systems(Update, (run_checks, follow_plan_look).chain())
         .run();
+}
+
+/// A check of each shot of each sky fill world under the model named
+/// `model`: one asserting exact black where the shot sees only a space
+/// sealed from the sky, and one taking the picture for a person to judge
+/// elsewhere.
+fn fill_checks(model: &'static str) -> Vec<&'static Check> {
+    let mut checks = Vec::new();
+    for (index, scene) in FILL_SCENES.into_iter().enumerate() {
+        let origin = fill_world_at(index).as_vec3();
+        for shot in scene.shots() {
+            let camera: &'static FixedCamera = Box::leak(Box::new(FixedCamera {
+                position: shot.at + origin,
+                look_at: shot.target + origin,
+            }));
+            let check = settled_check(
+                leak(format!(
+                    "{} {} under {model}{}",
+                    scene.name(),
+                    shot.name,
+                    if shot.sealed { " is exactly black" } else { "" }
+                )),
+                leak(format!("fill_{model}_{}_{}.png", scene.name(), shot.name)),
+                true,
+                camera,
+                true,
+                None,
+                if shot.sealed {
+                    pocket_is_black
+                } else {
+                    lit_share
+                },
+            );
+            checks.push(&*Box::leak(Box::new(check)));
+        }
+    }
+    checks
+}
+
+fn leak(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// Passes, noting how many of `image`'s pixels aren't black and the mean of
+/// their brightest channels, for a picture a person judges.
+fn lit_share(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pixels = data.as_chunks::<4>().0;
+    let brightest: Vec<u8> = pixels
+        .iter()
+        .map(|pixel| pixel[0].max(pixel[1]).max(pixel[2]))
+        .collect();
+    let lit = brightest.iter().filter(|level| **level > 0).count();
+    let mean =
+        brightest.iter().map(|level| *level as f64).sum::<f64>() / pixels.len() as f64;
+    Ok(format!(
+        "{lit} of {} pixels lit, mean brightest channel {mean:.1}",
+        pixels.len()
+    ))
 }
 
 /// Gives the world the look the current check wants. It runs apart from
@@ -1066,14 +1219,8 @@ fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
 fn setup_check(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    sky: bool,
-    openness: bool,
+    checks: Vec<&'static Check>,
 ) {
-    let checks: Vec<&'static Check> = if openness {
-        OPENNESS_CHECKS.iter().collect()
-    } else {
-        CHECKS.iter().filter(|check| check.sky == sky).collect()
-    };
     let mut image =
         Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
