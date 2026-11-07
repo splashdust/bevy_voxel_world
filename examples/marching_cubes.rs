@@ -7,6 +7,11 @@
 //!   - Drag with the right mouse button to orbit, scroll to zoom
 //!   - Left click to dig a hole where the cursor points
 //!   - Shift + left click to add a mound
+//!
+//! With the `light_propagation` feature the world is lit, and its plain
+//! `StandardMaterial` gets the crate's lit PBR shader, which reads light on a
+//! mesh that doesn't lie on the voxel grid:
+//! `cargo run --example marching_cubes --features light_propagation`.
 
 use std::sync::Arc;
 
@@ -63,6 +68,13 @@ impl VoxelWorldConfig for MainWorld {
     // chunk's voxels, and returns the chunk's mesh. See `custom_meshing.rs` for
     // the full shape of the delegate; this example doesn't use LOD, so the
     // shapes it receives are always the default padded chunk shape.
+    // Opting in is all a world with plain `StandardMaterial` needs to show
+    // light.
+    #[cfg(feature = "light_propagation")]
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {
@@ -294,10 +306,15 @@ fn setup(mut commands: Commands) {
         cascade_shadow_config,
     ));
 
-    // Ambient light, same color as sun
+    // Ambient light, same color as sun. Propagated light dims it in shade, so a
+    // lit world wants more of it.
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.98, 0.95, 0.82),
-        brightness: 100.0,
+        brightness: if cfg!(feature = "light_propagation") {
+            600.0
+        } else {
+            100.0
+        },
         affects_lightmapped_meshes: true,
     });
 }

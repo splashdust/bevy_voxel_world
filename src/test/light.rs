@@ -10,6 +10,8 @@ use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, Floor
 use crate::prelude::*;
 
 #[cfg(feature = "light_propagation")]
+mod materials;
+#[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
 mod relights;
@@ -122,6 +124,28 @@ fn a_worlds_chunks_carry_todays_material_and_no_tag() {
         .add_systems(Startup, spawn_camera::<FloorWorld>);
     update_until(&mut app, "the ground chunk to be shown", |app| {
         !super::chunk_materials::<FloorWorld, DefaultVoxelMaterial>(app).is_empty()
+    });
+
+    let tagged = app
+        .world_mut()
+        .query_filtered::<(), (With<Chunk<FloorWorld>>, With<bevy::mesh::MeshTag>)>()
+        .iter(app.world())
+        .count();
+    assert_eq!(tagged, 0);
+}
+
+#[cfg(not(feature = "light_propagation"))]
+#[test]
+fn a_custom_material_worlds_chunks_carry_its_material_unwrapped_and_no_tag() {
+    let mut app = meshing_app();
+    app.init_asset::<StandardMaterial>()
+        .add_plugins(
+            VoxelWorldPlugin::with_config(FloorWorld)
+                .with_material(StandardMaterial::default()),
+        )
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    update_until(&mut app, "the ground chunk to be shown", |app| {
+        !super::chunk_materials::<FloorWorld, StandardMaterial>(app).is_empty()
     });
 
     let tagged = app

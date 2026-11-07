@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+#[cfg(feature = "light_propagation")]
+use bevy::render::render_resource::AsBindGroup;
 use bevy::{asset::load_internal_asset, ecs::system::EntityCommands, prelude::*};
 
 use crate::{
@@ -22,6 +24,13 @@ use crate::{
 /// material and adds this handle for you to read. The chunks of that world keep
 /// the material created for them, and if several such worlds have material type
 /// `M`, this is the handle of the last plugin built.
+///
+/// With the `light_propagation` feature, a lit world that shows its light
+/// gives its chunks `VoxelWorldMaterial<M>`, its material wrapped in the
+/// crate's light bindings, and adds `VoxelWorldMaterialHandle` of that type,
+/// whose `.base` is the world's material. A lit world whose material is added
+/// by hand wraps a copy of the material named here and adds the copy's handle
+/// the same way, so later edits go through that handle.
 #[derive(Resource)]
 pub struct VoxelWorldMaterialHandle<M: Material> {
     pub handle: Handle<M>,
@@ -68,14 +77,16 @@ impl<C, M: Material> WorldMaterial<C, M> {
 
 /// Sets up giving the chunks of world `C` material `M`.
 ///
-/// With no `handle`, the chunks wait for `VoxelWorldMaterialHandle<M>` to be
-/// added, and the worlds that name the same handle share it.
+/// With no `handle`, the chunks wait for a handle: with `follow_hand_added`,
+/// the one `VoxelWorldMaterialHandle<M>` names, which worlds naming the same
+/// handle share; without it, one the caller sets on `WorldMaterial<C, M>`.
 pub(crate) fn add_material_path<C: VoxelWorldConfig, M: Material>(
     app: &mut App,
     handle: Option<Handle<M>>,
+    follow_hand_added: bool,
 ) {
     let assign_material = Internals::<C>::assign_material::<M>;
-    if handle.is_some() {
+    if handle.is_some() || !follow_hand_added {
         app.add_systems(Update, assign_material);
     } else {
         app.add_systems(
@@ -96,7 +107,11 @@ fn add_default_material_path<C: VoxelWorldConfig>(app: &mut App, config: &C) {
     let material = default_material::<C>(app, config);
     #[cfg(feature = "light_propagation")]
     if let Some(light) = config.light_propagation().filter(|light| light.shown) {
-        crate::light::material::add_lit_material_path::<C, _>(app, material, &light);
+        crate::light::material::add_lit_material_path::<C, _>(
+            app,
+            Some(material),
+            &light,
+        );
         return;
     }
     if app
@@ -109,7 +124,51 @@ fn add_default_material_path<C: VoxelWorldConfig>(app: &mut App, config: &C) {
         .world_mut()
         .resource_mut::<Assets<DefaultVoxelMaterial>>()
         .add(material);
-    add_material_path::<C, DefaultVoxelMaterial>(app, Some(handle));
+    add_material_path::<C, DefaultVoxelMaterial>(app, Some(handle), false);
+}
+
+/// Sets up giving the chunks of world `C` its custom material `material`.
+///
+/// A world that inits its custom material adds it and inserts its handle; any
+/// other waits for `VoxelWorldMaterialHandle<M>` to be added by hand.
+fn add_custom_material_path<C: VoxelWorldConfig, M: Material>(
+    app: &mut App,
+    config: &C,
+    material: &M,
+) {
+    let handle = config.init_custom_materials().then(|| {
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<M>>()
+            .add(material.clone());
+        app.insert_resource(VoxelWorldMaterialHandle {
+            handle: handle.clone(),
+        });
+        handle
+    });
+    add_material_path::<C, M>(app, handle, true);
+}
+
+/// [`add_custom_material_path`], wrapping the material in the crate's light
+/// bindings if the world shows its light.
+#[cfg(feature = "light_propagation")]
+fn add_custom_material_path_or_lit<C: VoxelWorldConfig, M: Material>(
+    app: &mut App,
+    config: &C,
+    material: &M,
+) where
+    <crate::light::material::VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let Some(light) = config.light_propagation().filter(|light| light.shown) else {
+        add_custom_material_path(app, config, material);
+        return;
+    };
+    let base = config.init_custom_materials().then(|| material.clone());
+    let handle = crate::light::material::add_lit_material_path::<C, M>(app, base, &light);
+    if let Some(handle) = handle {
+        app.insert_resource(VoxelWorldMaterialHandle { handle });
+    }
 }
 
 /// The main plugin for the voxel world. This plugin sets up the voxel world and its dependencies.
@@ -183,12 +242,41 @@ impl Default for VoxelWorldPlugin<DefaultWorld, StandardMaterial> {
     }
 }
 
+#[cfg(not(feature = "light_propagation"))]
 impl<C, M> Plugin for VoxelWorldPlugin<C, M>
 where
     C: VoxelWorldConfig,
     M: Material,
 {
     fn build(&self, app: &mut App) {
+        self.build_world(app, add_custom_material_path::<C, M>);
+    }
+}
+
+/// With light, a world's custom material `M` may be wrapped in the crate's
+/// light bindings, and the wrapped material's bind group data must be
+/// hashable like any material's. That holds when `M`'s is, and is `Copy`.
+#[cfg(feature = "light_propagation")]
+impl<C, M> Plugin for VoxelWorldPlugin<C, M>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+    <crate::light::material::VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    fn build(&self, app: &mut App) {
+        self.build_world(app, add_custom_material_path_or_lit::<C, M>);
+    }
+}
+
+impl<C, M> VoxelWorldPlugin<C, M>
+where
+    C: VoxelWorldConfig,
+    M: Material,
+{
+    /// Builds the world, setting up a custom material with
+    /// `add_custom_material_path` if it has one.
+    fn build_world(&self, app: &mut App, add_custom_material_path: fn(&mut App, &C, &M)) {
         app.init_resource::<C>()
             .add_systems(PreStartup, Internals::<C>::setup)
             .insert_resource(SpawnMeshes::<C>::new(self.spawn_meshes))
@@ -242,17 +330,7 @@ where
             add_shaders(&mut app.world_mut().resource_mut::<Assets<Shader>>());
 
             if self.use_custom_material {
-                let handle = self.config.init_custom_materials().then(|| {
-                    let handle = app
-                        .world_mut()
-                        .resource_mut::<Assets<M>>()
-                        .add(self.material.clone());
-                    app.insert_resource(VoxelWorldMaterialHandle {
-                        handle: handle.clone(),
-                    });
-                    handle
-                });
-                add_material_path::<C, M>(app, handle);
+                add_custom_material_path(app, &self.config, &self.material);
             } else {
                 add_default_material_path(app, &self.config);
             }
