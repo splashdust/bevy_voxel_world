@@ -259,18 +259,33 @@ fn curves() -> [(&'static str, LevelCurve); 5] {
     ]
 }
 
-/// The Rust that makes `curve`, which must be one of [`curves`].
-fn curve_rust(curve: &LevelCurve) -> &'static str {
-    curves()
-        .into_iter()
-        .find(|(_, preset)| preset == curve)
-        .map(|(rust, _)| rust)
-        .expect("every curve a dial picks is one of `curves()`")
+/// The index in [`curves`] of the preset `curve` matches, if one does.
+///
+/// Curves match when every level's brightness is within a millionth, not
+/// when they are equal: the same curve built in two places can differ in the
+/// last bit, since the compiler may work out `powf` at compile time in one
+/// and at run time in the other.
+fn preset_of(curve: &LevelCurve) -> Option<usize> {
+    curves().iter().position(|(_, preset)| {
+        (0..=15)
+            .all(|level| (preset.at(level as f32) - curve.at(level as f32)).abs() < 1e-6)
+    })
 }
 
+/// The Rust that makes `curve`, which must be one of [`curves`].
+fn curve_rust(curve: &LevelCurve) -> &'static str {
+    let index = preset_of(curve).expect("every curve a dial picks is one of `curves()`");
+    curves()[index].0
+}
+
+/// Turns `curve` `step` presets along [`curves`]. A curve that is no preset
+/// counts as the first.
 fn turn_curve(curve: &mut LevelCurve, step: i32) {
-    let presets = curves().map(|(_, curve)| curve);
-    *curve = pick(&presets, curve, step);
+    let presets = curves();
+    let at = preset_of(curve).unwrap_or(0) as i32;
+    *curve = presets[(at + step).clamp(0, presets.len() as i32 - 1) as usize]
+        .1
+        .clone();
 }
 
 fn suns() -> Vec<SunGate> {
@@ -1273,6 +1288,25 @@ mod tests {
 
     fn without_spaces(text: &str) -> String {
         text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn the_default_look_has_a_preset_for_every_curve_dial() {
+        let look = LightLook::default();
+        assert!(preset_of(&look.sky_falloff).is_some());
+        assert!(preset_of(&look.voxel_falloff).is_some());
+    }
+
+    #[test]
+    fn a_curve_a_last_bit_off_a_preset_reads_as_that_preset() {
+        let mut table = [0.0; 16];
+        for (level, entry) in table.iter_mut().enumerate() {
+            *entry = LevelCurve::gamma(2.2).at(level as f32) * (1.0 + f32::EPSILON);
+        }
+        assert_eq!(
+            curve_rust(&LevelCurve::from_table(table)),
+            "LevelCurve::gamma(2.2)"
+        );
     }
 
     #[test]

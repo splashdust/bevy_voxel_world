@@ -835,7 +835,11 @@ impl LevelCurve {
     /// `base^(15 - level)`: each level is `base` times as bright as the one
     /// above it, and level 15 is 1.
     pub fn exponential(base: f32) -> Self {
-        Self::from_fn(|level| base.powi(15 - level as i32))
+        // Repeated multiplication rather than `powi`, which the compiler may
+        // work out at compile time to different last bits than at run time:
+        // this way `exponential(0.7) == exponential(0.7)` wherever each is
+        // built.
+        Self::from_fn(|level| (level..15).fold(1.0, |brightness, _| brightness * base))
     }
 
     /// `(level / 15)^gamma`, so level 15 is 1. `gamma(2.2)` spreads the levels
