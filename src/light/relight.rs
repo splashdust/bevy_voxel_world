@@ -381,7 +381,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// urgent ones, so its light lands within 2 frames however many chunks
     /// the edit relights.
     pub fn trigger_edited(&mut self, position: IVec3) {
-        self.edited.insert(position);
+        // Only a chunk with light leaves `edited` when its relight starts.
+        if self.chunks.contains_key(&position) {
+            self.edited.insert(position);
+        }
         self.trigger_urgent(position);
     }
 
@@ -1719,4 +1722,19 @@ fn distance_to_nearest(position: IVec3, cameras: &[Vec3]) -> u32 {
         .map(|camera| camera.distance(middle))
         .fold(f32::INFINITY, f32::min)
         .min(u32::MAX as f32) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::DefaultWorld;
+
+    #[test]
+    fn an_edit_where_no_chunk_has_light_marks_nothing_edited() {
+        let mut work = LightWork::<DefaultWorld>::default();
+        work.trigger_edited(IVec3::new(3, -1, 2));
+
+        assert!(work.edited.is_empty());
+        assert!(work.is_settled());
+    }
 }
