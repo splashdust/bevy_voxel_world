@@ -35,9 +35,9 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::LocalKey;
-use std::time::Instant;
 
 use bevy::platform::collections::HashMap;
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::config::{LightPrecision, LightShape};

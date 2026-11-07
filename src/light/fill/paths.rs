@@ -30,9 +30,10 @@
 //! all 64 columns clear, so no region sees the sky.
 
 use std::collections::BinaryHeap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::platform::collections::{HashMap, HashSet};
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::{CellFill, PositionCells};

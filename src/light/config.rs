@@ -92,6 +92,21 @@ use bevy::reflect::Reflect;
 /// plus the falling sky light below each column it opens to the sky. The
 /// light it calls for lands over as many frames as it needs.
 ///
+/// # WASM
+///
+/// Light runs in the browser on WebGL2, with no compute shaders. With no
+/// threads to run tasks on, relights run on the main thread within
+/// [`wasm_relight_budget`](Self::wasm_relight_budget) each frame, and at most
+/// one sky probe starts per frame, so a big edit costs time instead of a
+/// hitch. A single voxel edit's light still lands within 2 frames.
+///
+/// A WASM application should choose a [`sky_reach`](Self::sky_reach) of 16,
+/// the last before the rows the solver spreads light along go from one
+/// 64-bit word to two, which makes every solve of sky light cheaper. WASM
+/// doesn't set any default: the defaults are chosen for native. The light
+/// texture is clamped to what the device holds, which on WebGL2 is at least
+/// 343 slots: see [`slot_capacity`](Self::slot_capacity).
+///
 /// # Showing light
 ///
 /// With [`shown`](Self::shown) on, the crate draws the world's chunks with its
@@ -258,8 +273,17 @@ pub struct LightPropagation {
     /// A limit, applied at once on change. Defaults to 16 MiB.
     pub sky_record_cap: usize,
 
-    /// The most main-thread time per frame spent relighting on WASM, where
-    /// relights don't run on other threads.
+    /// The most main-thread time per frame spent relighting on WASM, from
+    /// 100 µs to 100 ms. Ignored on native, where relights run on the task
+    /// pool.
+    ///
+    /// On WASM, tasks get no thread of their own, so relights run on the main
+    /// thread from the world's queue, the chunks holding edited voxels first,
+    /// until this much of the frame is spent. The last relight to start can
+    /// take the frame past it, since one relight can't be split. Each frame
+    /// that relights costs up to this much frame time: a bigger budget
+    /// settles light sooner after a big edit, a settings change or streaming,
+    /// and a smaller one spreads the same work over more frames.
     ///
     /// A limit. Defaults to 4 ms.
     pub wasm_relight_budget: Duration,
@@ -309,6 +333,7 @@ impl LightPropagation {
             );
             config.sky_record_cap = super::record::MIN_CAP;
         }
+        config.wasm_relight_budget = clamp_relight_budget(config.wasm_relight_budget);
         config.sky_fill = config.sky_fill.map(|fill| match fill {
             SkyFill::Paths(paths) => SkyFill::Paths(paths.clamped()),
             SkyFill::Openness(open) => SkyFill::Openness(open.clamped()),
@@ -316,6 +341,23 @@ impl LightPropagation {
         config.look = config.look.clamped();
         config
     }
+}
+
+/// The shortest and longest `wasm_relight_budget`.
+const RELIGHT_BUDGETS: (Duration, Duration) =
+    (Duration::from_micros(100), Duration::from_millis(100));
+
+fn clamp_relight_budget(budget: Duration) -> Duration {
+    let (min, max) = RELIGHT_BUDGETS;
+    if (min..=max).contains(&budget) {
+        return budget;
+    }
+    let clamped = budget.clamp(min, max);
+    warn_once!(
+        "light propagation: wasm_relight_budget {budget:?} is outside {min:?} to {max:?}, \
+         using {clamped:?}"
+    );
+    clamped
 }
 
 fn clamp_reach(reach: u8, name: &str) -> u8 {

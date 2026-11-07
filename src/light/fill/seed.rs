@@ -30,7 +30,9 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use bevy::platform::time::Instant;
 
 use super::{CellFill, CELL};
 use crate::light::kernel::Row;

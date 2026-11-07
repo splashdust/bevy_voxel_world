@@ -594,7 +594,12 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         // One probe always runs while any chunk waits, so streaming can't
         // starve them, but no more than one takes a thread chunk tasks want.
         let floor = probes.running.is_empty() as usize;
-        let count = budget.idle().max(floor);
+        let mut count = budget.idle().max(floor);
+        // On WASM tasks run between frames on the main thread, so one probe
+        // a frame is the most that can't make a frame hitch.
+        if settings.main_thread {
+            count = count.min(1);
+        }
         if count == 0 {
             return;
         }

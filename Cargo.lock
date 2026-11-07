@@ -1955,6 +1955,7 @@ dependencies = [
  "rand 0.10.3",
  "transvoxel",
  "weak-table",
+ "web-sys",
 ]
 
 [[package]]

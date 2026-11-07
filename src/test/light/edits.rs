@@ -47,12 +47,14 @@ fn in_pocket(p: IVec3) -> bool {
 }
 
 /// The voxels of [`cavern`] with `edits` set over them.
-fn edited(edits: &[(IVec3, WorldVoxel)]) -> impl Fn(IVec3) -> WorldVoxel + use<'_> {
+pub(super) fn edited(
+    edits: &[(IVec3, WorldVoxel)],
+) -> impl Fn(IVec3) -> WorldVoxel + use<'_> {
     let edits: HashMap<IVec3, WorldVoxel> = edits.iter().copied().collect();
     move |p| edits.get(&p).copied().unwrap_or_else(|| cavern(p))
 }
 
-fn world() -> LampWorld {
+pub(super) fn world() -> LampWorld {
     LampWorld {
         scene: Arc::new(cavern),
         light: Some(sky_light(Sky::default(), 30)),
@@ -62,7 +64,7 @@ fn world() -> LampWorld {
 
 /// The reference sky light and voxel light of `voxel_at`, in a box reaching
 /// far enough past `chunks` that light from outside it can't reach them.
-fn reference(
+pub(super) fn reference(
     chunks: &[IVec3],
     voxel_at: impl Fn(IVec3) -> WorldVoxel,
 ) -> (Reference, Reference) {
@@ -176,11 +178,11 @@ fn edit_and_undo(chunks: &[IVec3], edits: &[(IVec3, WorldVoxel)]) {
     assert_matches(&mut app, chunks, before, "after the undo");
 }
 
-fn place(p: IVec3) -> (IVec3, WorldVoxel) {
+pub(super) fn place(p: IVec3) -> (IVec3, WorldVoxel) {
     (p, WorldVoxel::Solid(STONE))
 }
 
-fn dig(p: IVec3) -> (IVec3, WorldVoxel) {
+pub(super) fn dig(p: IVec3) -> (IVec3, WorldVoxel) {
     (p, WorldVoxel::Air)
 }
 
@@ -259,7 +261,7 @@ pub(super) fn relights_started(app: &App) -> u64 {
 
 /// One app update, after waiting as long as a frame at 50 frames a second
 /// takes, so tasks started on the frame before have had time to finish.
-fn paced_update(app: &mut App) {
+pub(super) fn paced_update(app: &mut App) {
     std::thread::sleep(Duration::from_millis(20));
     app.update();
 }

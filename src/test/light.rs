@@ -37,6 +37,8 @@ mod sky_record;
 mod slots;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;
+#[cfg(feature = "light_propagation")]
+mod wasm;
 
 /// The types of the components on each chunk of world `C` that has a mesh
 /// shown.
@@ -239,8 +241,8 @@ mod with_feature {
         };
     }
 
-    /// A floor world with a light config whose reaches, slot capacity and
-    /// emission levels are out of range.
+    /// A floor world with a light config whose reaches, slot capacity, WASM
+    /// relight budget and emission levels are out of range.
     #[derive(Resource, Clone, Default)]
     struct OutOfRangeWorld;
 
@@ -261,6 +263,7 @@ mod with_feature {
                 sky_reach: 0,
                 voxel_reach: 200,
                 slot_capacity: 0,
+                wasm_relight_budget: Duration::ZERO,
                 ..default()
             })
         }
@@ -287,6 +290,10 @@ mod with_feature {
         assert_eq!(settings.config.sky_reach, 1);
         assert_eq!(settings.config.voxel_reach, 32);
         assert_eq!(settings.config.slot_capacity, 1);
+        assert_eq!(
+            settings.config.wasm_relight_budget,
+            Duration::from_micros(100)
+        );
         assert_eq!(
             settings.emissive_materials,
             vec![(1, Emission::level(15.0)), (2, Emission::level(0.0))]

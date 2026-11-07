@@ -41,6 +41,13 @@
 //! again from its published voxels and voxel edits, and the chunks around it
 //! relight if they changed.
 //!
+//! On WASM, where tasks get no thread of their own and would all run between
+//! two frames, relights run on the main thread as they start, in the same
+//! order from the same queues, until this frame's relights have taken the
+//! world's `wasm_relight_budget`. Urgent relights go first there too, those
+//! of chunks holding edited voxels before the rest, so an edit's own light
+//! still lands within 2 frames. The rest wait for the next frame.
+//!
 //! Light entries, the light of hinted air beside loaded solids, relight like
 //! chunks. A relight that would go on into hinted air holding no light entry
 //! passes on through it to the chunks beside it: see
@@ -56,10 +63,11 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::mesh::MeshTag;
 use bevy::platform::collections::{HashMap, HashSet};
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderDevice;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
@@ -135,13 +143,19 @@ struct Landing {
     version: u64,
 }
 
-struct Running {
+/// A relight that started.
+struct Started {
     position: IVec3,
     entity: Entity,
-    task: Task<Option<Solved>>,
     urgent: bool,
     edit_frame: u64,
     version: u64,
+}
+
+/// A relight running on the task pool.
+struct Running {
+    task: Task<Option<Solved>>,
+    relight: Started,
 }
 
 /// What a chunk retiring leaves for light at its position.
@@ -218,6 +232,11 @@ pub(crate) struct LightWork<C> {
     /// Light entries whose first solve hasn't landed. It changes no inputs,
     /// so it ripples to no neighbour.
     fresh: HashSet<IVec3>,
+    /// Chunks holding voxels edited since their last relight started. When
+    /// relights run on the main thread, theirs start first.
+    edited: HashSet<IVec3>,
+    /// Time relights ran on the main thread this frame.
+    relight_time: Duration,
     _world: PhantomData<C>,
 }
 
@@ -244,6 +263,8 @@ impl<C> Default for LightWork<C> {
             view: LightView::default(),
             hinted_touched: Vec::new(),
             fresh: HashSet::new(),
+            edited: HashSet::new(),
+            relight_time: Duration::ZERO,
             _world: PhantomData,
         }
     }
@@ -336,6 +357,16 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// relights its ripple triggers are urgent too.
     pub fn trigger_urgent(&mut self, position: IVec3) {
         self.trigger_as(position, true);
+    }
+
+    /// Marks the chunk at `position`, which holds edited voxels, for an
+    /// urgent relight, as [`trigger_urgent`](Self::trigger_urgent) does. When
+    /// relights run on the main thread, its relight starts before other
+    /// urgent ones, so its light lands within 2 frames however many chunks
+    /// the edit relights.
+    pub fn trigger_edited(&mut self, position: IVec3) {
+        self.edited.insert(position);
+        self.trigger_urgent(position);
     }
 
     fn trigger_as(&mut self, position: IVec3, urgent: bool) {
@@ -850,6 +881,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             self.queue.remove(&position);
             self.settings_queue.remove(&position);
             self.fill_queue.remove(&position);
+            self.edited.remove(&position);
         }
         self.fill_touch(position);
         self.hinted_touch(position);
@@ -914,8 +946,12 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         if positions.is_empty() {
             return;
         }
-        let slots = budget.slots(JobKind::Relight, cap);
-        if slots == 0 {
+        let slots = if settings.main_thread {
+            positions.len()
+        } else {
+            budget.slots(JobKind::Relight, cap)
+        };
+        if slots == 0 || !self.has_relight_time(settings) {
             return;
         }
         let cameras: Vec<Vec3> =
@@ -931,8 +967,49 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             .map(|position| (distance_to_nearest(*position, &cameras), *position))
             .collect();
         for position in first_in_start_order(candidates, slots) {
+            if !self.has_relight_time(settings) {
+                break;
+            }
             let fill_only = matches!(queue, Queue::Fill);
             self.start_relight(position, settings, budget, rescans, fill_only);
+        }
+    }
+
+    /// Whether another relight may start this frame: always when relights
+    /// run on the task pool, and while this frame's relights have taken less
+    /// than the world's `wasm_relight_budget` when they run on the main
+    /// thread. The last one to start may take the frame over the budget.
+    fn has_relight_time(&self, settings: &LightSettings<C>) -> bool {
+        !settings.main_thread || self.relight_time < settings.config.wasm_relight_budget
+    }
+
+    /// Queues the light of a relight that finished to land, urgent light
+    /// ahead of the rest, or ends the relight if it stopped before solving.
+    fn finished(&mut self, relight: Started, solved: Option<Solved>) {
+        let Started {
+            position,
+            entity,
+            urgent,
+            edit_frame,
+            version,
+        } = relight;
+        let Some(solved) = solved else {
+            self.relight_done(position, entity);
+            return;
+        };
+        let landing = Landing {
+            position,
+            entity,
+            source: Source::Relight,
+            solved,
+            urgent,
+            edit_frame,
+            version,
+        };
+        if urgent {
+            self.landing.push_front(landing);
+        } else {
+            self.landing.push_back(landing);
         }
     }
 
@@ -968,6 +1045,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.queue.remove(&position);
         self.settings_queue.remove(&position);
         self.fill_queue.remove(&position);
+        self.edited.remove(&position);
         let chunk = self.chunks.get_mut(&position).unwrap();
         chunk.state = LightState::Relighting { dirty: false };
         let urgent = std::mem::take(&mut chunk.urgent);
@@ -986,7 +1064,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             .flatten();
         let task_settings = settings.task.clone();
         let view = settings.view.clone();
-        let task = AsyncComputeTaskPool::get().spawn(async move {
+        let solve = move || {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("relight_task").entered();
             let started = Instant::now();
@@ -1000,17 +1078,34 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     .fetch_add(nanos, Ordering::Relaxed);
             }
             solved
-        });
-        self.running.push(Running {
+        };
+        let relight = Started {
             position,
             entity,
-            task,
             urgent,
             edit_frame,
             version,
-        });
-        budget.started(JobKind::Relight);
+        };
         settings.counters().relights.fetch_add(1, Ordering::Relaxed);
+        if settings.main_thread {
+            let started = Instant::now();
+            let solved = solve();
+            let took = started.elapsed();
+            self.relight_time += took;
+            self.frame_nanos += took.as_nanos() as u64;
+            let counters = settings.counters();
+            counters
+                .max_relight_nanos
+                .fetch_max(took.as_nanos() as u64, Ordering::Relaxed);
+            counters
+                .max_relight_frame_nanos
+                .fetch_max(self.relight_time.as_nanos() as u64, Ordering::Relaxed);
+            self.finished(relight, solved);
+        } else {
+            let task = AsyncComputeTaskPool::get().spawn(async move { solve() });
+            self.running.push(Running { task, relight });
+            budget.started(JobKind::Relight);
+        }
         if entity == ENTRY {
             settings
                 .counters()
@@ -1065,6 +1160,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         let _span = bevy::log::info_span!("collect_relights").entered();
         work.frame_nanos = 0;
         work.edit_nanos = 0;
+        work.relight_time = Duration::ZERO;
         let mut finished = 0;
         let mut index = 0;
         while index < work.running.len() {
@@ -1075,34 +1171,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 continue;
             };
             finished += 1;
-            let Running {
-                position,
-                entity,
-                urgent,
-                edit_frame,
-                version,
-                ..
-            } = work.running.swap_remove(index);
-            match solved {
-                Some(solved) => {
-                    let landing = Landing {
-                        position,
-                        entity,
-                        source: Source::Relight,
-                        solved,
-                        urgent,
-                        edit_frame,
-                        version,
-                    };
-                    // Urgent light lands ahead of the rest.
-                    if urgent {
-                        work.landing.push_front(landing);
-                    } else {
-                        work.landing.push_back(landing);
-                    }
-                }
-                None => work.relight_done(position, entity),
-            }
+            let Running { relight, .. } = work.running.swap_remove(index);
+            work.finished(relight, solved);
         }
         budget.set_finished_last_frame(JobKind::Relight, finished);
         budget.set_running(JobKind::Relight, work.running.len());
@@ -1358,14 +1428,28 @@ impl<C: VoxelWorldConfig> Relights<C> {
             chunk_map: &chunk_map,
             edits: &edits,
         };
-        // Urgent relights go straight to the pool.
-        let urgent: Vec<IVec3> = work
+        // Urgent relights go straight to the pool. On the main thread they
+        // start within the budget, edited chunks first, then nearest a camera
+        // first.
+        let camera_positions: Vec<Vec3> =
+            cameras.iter().map(|camera| camera.translation()).collect();
+        let mut urgent: Vec<(bool, u32, IVec3)> = work
             .queue
             .iter()
             .filter(|position| work.chunks[*position].urgent)
-            .copied()
+            .map(|position| {
+                let later = !work.edited.contains(position);
+                let distance = distance_to_nearest(*position, &camera_positions);
+                (later, distance, *position)
+            })
             .collect();
-        for position in urgent {
+        urgent.sort_unstable_by_key(|(later, distance, position)| {
+            (*later, *distance, position.to_array())
+        });
+        for (_, _, position) in urgent {
+            if !work.has_relight_time(&settings) {
+                break;
+            }
             work.start_relight(position, &settings, &mut budget, &rescans, false);
         }
         let cap = configuration.max_active_chunk_threads();

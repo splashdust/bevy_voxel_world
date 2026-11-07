@@ -26,9 +26,9 @@
 //! The light of a chunk being re-meshed waits for its new mesh to land.
 
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 use bevy::platform::collections::{HashMap, HashSet};
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::fill::{cell_bit, open_cells, CELL};
@@ -422,7 +422,11 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
 
     // Hinted air holding no light entry passes its relight on.
     for position in relight {
-        work.trigger_urgent(position);
+        if by_chunk.contains_key(&position) {
+            work.trigger_edited(position);
+        } else {
+            work.trigger_urgent(position);
+        }
     }
     work.add_edit_time(started);
 }

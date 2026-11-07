@@ -99,6 +99,11 @@ pub(crate) struct LightSettings<C: VoxelWorldConfig> {
     /// columns the sky probes have yet to take on: see
     /// [`hinted::follow`].
     pub new_air: Mutex<Vec<IVec3>>,
+    /// Whether relights run on the main thread, within the world's
+    /// `wasm_relight_budget` each frame, and at most one sky probe starts a
+    /// frame. True on WASM, where tasks get no thread of their own and run
+    /// between frames all at once.
+    pub main_thread: bool,
     /// The answers of `light_at`'s walks on request.
     pub walks: Mutex<request::WalkCache>,
     _world: PhantomData<C>,
@@ -539,6 +544,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         reset: AtomicBool::new(false),
         edit_frame: AtomicU64::new(0),
         new_air: Mutex::new(Vec::new()),
+        main_thread: cfg!(target_arch = "wasm32"),
         walks: Mutex::default(),
         _world: PhantomData,
     })

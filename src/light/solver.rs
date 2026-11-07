@@ -27,8 +27,9 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::LocalKey;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::config::LightPrecision;
@@ -169,6 +170,11 @@ pub(crate) struct LightCounters {
     /// The most main-thread time spent landing light and starting relights
     /// in one frame, in nanoseconds.
     pub max_frame_nanos: AtomicU64,
+    /// The most time relights ran on the main thread in one frame, in
+    /// nanoseconds. Relights run there only on WASM.
+    pub max_relight_frame_nanos: AtomicU64,
+    /// The longest relight run on the main thread, in nanoseconds.
+    pub max_relight_nanos: AtomicU64,
     /// Time chunk tasks spent working out their column answers, in
     /// nanoseconds.
     pub column_nanos: AtomicU64,

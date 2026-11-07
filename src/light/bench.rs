@@ -6,8 +6,8 @@
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
 use super::config::{LightPrecision, PathFill};
@@ -393,6 +393,11 @@ pub struct LightStats {
     /// The most main-thread time spent landing light and starting relights
     /// in one frame, in milliseconds.
     pub max_frame_ms: f64,
+    /// The most time relights ran on the main thread in one frame, in
+    /// milliseconds. Relights run there only on WASM.
+    pub max_relight_frame_ms: f64,
+    /// The longest relight run on the main thread, in milliseconds.
+    pub max_relight_ms: f64,
     /// Time chunk tasks spent working out their column answers, summed over
     /// them, in milliseconds.
     pub column_ms: f64,
@@ -518,6 +523,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         relights: counters.relights.load(Ordering::Relaxed),
         main_thread_ms: ms(&counters.main_thread_nanos),
         max_frame_ms: ms(&counters.max_frame_nanos),
+        max_relight_frame_ms: ms(&counters.max_relight_frame_nanos),
+        max_relight_ms: ms(&counters.max_relight_nanos),
         column_ms: ms(&counters.column_nanos),
         walks: counters.walks.walks.load(Ordering::Relaxed),
         walk_lookups: counters.walks.lookups.load(Ordering::Relaxed),

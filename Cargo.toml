@@ -119,6 +119,15 @@ libc = "0.2"
 noise = { version = "0.9.0" }
 transvoxel = "2.0.0"
 
+# Examples built for the browser render through WebGL2 into the page's canvas,
+# and `light_caves` reads its arguments from the page's address.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+bevy = { version = "0.20", default-features = false, features = [
+  "web",
+  "webgl2",
+] }
+web-sys = { version = "0.3", features = ["Location", "Window"] }
+
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1

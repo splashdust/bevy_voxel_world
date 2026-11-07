@@ -6,6 +6,15 @@
 //!
 //! Run with `cargo run --example light_caves --features light_propagation`.
 //!
+//! On WASM the world uses a sky reach of 16, as a WASM application should, and
+//! takes its arguments from the page address's query, split at `&`: `?budget`
+//! runs the `budget` mode below, and `sky_reach=30` sets another sky reach
+//! there or on native. Build it for the browser with
+//! `cargo build --release --example light_caves --features light_propagation
+//! --target wasm32-unknown-unknown`, run `wasm-bindgen --target web` on the
+//! result, and serve a page with a canvas whose id is `bevy` that loads it.
+//! Its output goes to the browser's console.
+//!
 //! With the argument `check`, it renders fixed cameras offscreen instead and
 //! checks pixels, for a maintainer to run by hand on a machine with a GPU:
 //!
@@ -33,11 +42,18 @@
 //!
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there.
-
-use std::time::Duration;
+//!
+//! In the browser, `check` can't start processes of its own, so each part
+//! runs from its own page load: `?check-sky-off` and `?check-sky-on`. Each
+//! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
+//!
+//! With the argument `budget`, it measures what voxel edits cost: once the
+//! world has settled, it digs single voxels and then a ball of radius 8 at the
+//! surface, and logs for each how many frames its light took to land and
+//! settle, and the most time relights took in one frame. On WASM relights run
+//! on the main thread, within the world's `wasm_relight_budget` each frame.
 
 use bevy::{
-    app::ScheduleRunnerPlugin,
     camera::RenderTarget,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     light::CascadeShadowConfigBuilder,
@@ -47,10 +63,20 @@ use bevy::{
         view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
     },
     window::ExitCondition,
-    winit::WinitPlugin,
 };
 use bevy_voxel_world::prelude::*;
 use noise::{NoiseFn, Perlin};
+
+/// Writes a line of the checks' output: to standard output on native, and to
+/// the browser's console on WASM.
+macro_rules! report {
+    ($($line:tt)*) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        println!($($line)*);
+        #[cfg(target_arch = "wasm32")]
+        info!($($line)*);
+    }};
+}
 
 const GRASS: u8 = 0;
 const DIRT: u8 = 1;
@@ -262,15 +288,81 @@ impl Scene {
 
 // --- The world ---------------------------------------------------------------
 
-#[derive(Resource, Clone, Default)]
+#[derive(Resource, Clone)]
 struct CaveWorld {
     /// For the pixel checks: with sky light, but no sky fill, or with no sky
     /// light.
     check_sky: Option<bool>,
+    /// How far sky light spreads past where it falls.
+    sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
     look: LightLook,
     /// How many levels light holds. The pixel checks change it while running.
     precision: LightPrecision,
+}
+
+impl Default for CaveWorld {
+    fn default() -> Self {
+        Self {
+            check_sky: None,
+            sky_reach: sky_reach(),
+            look: LightLook::default(),
+            precision: LightPrecision::default(),
+        }
+    }
+}
+
+/// The sky reach from a `sky_reach=N` argument, else 16 on WASM and the
+/// default of 30 elsewhere.
+fn sky_reach() -> u8 {
+    arguments()
+        .iter()
+        .find_map(|argument| argument.strip_prefix("sky_reach=")?.parse().ok())
+        .unwrap_or(if cfg!(target_arch = "wasm32") { 16 } else { 30 })
+}
+
+/// The example's arguments: those on the command line after the program's
+/// name, or on WASM the page address's query split at `&`.
+fn arguments() -> Vec<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let arguments = std::env::args().skip(1).collect();
+    #[cfg(target_arch = "wasm32")]
+    let arguments = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .unwrap_or_default()
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|argument| !argument.is_empty())
+        .map(String::from)
+        .collect();
+    arguments
+}
+
+/// The plugins of an app with no window of its own on native. In the browser
+/// the app draws into the page's canvas with the id `bevy`, since WebGL2
+/// needs one to render at all.
+fn plugins_without_window() -> bevy::app::PluginGroupBuilder {
+    #[cfg(not(target_arch = "wasm32"))]
+    let plugins = DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            ..default()
+        })
+        .disable::<bevy::winit::WinitPlugin>()
+        .add(bevy::app::ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ));
+    #[cfg(target_arch = "wasm32")]
+    let plugins = DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            canvas: Some("#bevy".into()),
+            ..default()
+        }),
+        exit_condition: ExitCondition::DontExit,
+        ..default()
+    });
+    plugins
 }
 
 impl VoxelWorldConfig for CaveWorld {
@@ -300,26 +392,22 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
-        let look = self.look.clone();
-        let precision = self.precision;
+        let light = LightPropagation {
+            sky_reach: self.sky_reach,
+            look: self.look.clone(),
+            precision: self.precision,
+            ..default()
+        };
         Some(match self.check_sky {
-            None => LightPropagation {
-                look,
-                precision,
-                ..default()
-            },
+            None => light,
             Some(true) => LightPropagation {
                 sky_fill: None,
-                look,
-                precision,
-                ..default()
+                ..light
             },
             Some(false) => LightPropagation {
                 sky: Sky::Off,
                 sky_fill: None,
-                look,
-                precision,
-                ..default()
+                ..light
             },
         })
     }
@@ -390,14 +478,25 @@ fn add_lights(commands: &mut Commands) {
 }
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
+    match arguments().first().map(String::as_str) {
         Some("check") => return check(),
         Some("check-sky-off") => return check_part(false),
         Some("check-sky-on") => return check_part(true),
+        Some("budget") => return budget(),
         _ => {}
     }
+    #[cfg(target_arch = "wasm32")]
+    let plugins = DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            canvas: Some("#bevy".into()),
+            ..default()
+        }),
+        ..default()
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let plugins = DefaultPlugins;
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(plugins)
         .add_plugins(VoxelWorldPlugin::with_config(CaveWorld::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, switch_camera)
@@ -623,18 +722,6 @@ const CHECKS: [Check; 23] = [
         None,
         pocket_is_black,
     ),
-    Check {
-        precision: LightPrecision::Steps256,
-        ..settled_check(
-            "at 256 levels a sealed pocket is exactly black",
-            "sealed_pocket_256.png",
-            true,
-            &POCKET_CAMERA,
-            true,
-            None,
-            pocket_is_black,
-        )
-    },
     look_check(
         "a sealed pocket stays exactly black under a flat curve",
         "pocket_flat_curve.png",
@@ -675,6 +762,20 @@ const CHECKS: [Check; 23] = [
             ..curve_look(LevelCurve::exponential(0.95))
         },
     ),
+    // After the look checks, which judge the next frame and so can't follow a
+    // change of precision: chunks show flat light until they relight.
+    Check {
+        precision: LightPrecision::Steps256,
+        ..settled_check(
+            "at 256 levels a sealed pocket is exactly black",
+            "sealed_pocket_256.png",
+            true,
+            &POCKET_CAMERA,
+            true,
+            None,
+            pocket_is_black,
+        )
+    },
     Check {
         name: "a slot given to another chunk the frame after it's freed never shows the other chunk's light",
         file: "slot_room.png",
@@ -859,7 +960,7 @@ struct CheckPlan {
     checks: Vec<&'static Check>,
     next: usize,
     moved_at_frame: u32,
-    /// The last frame on which a chunk wasn't Ready.
+    /// The last frame on which a chunk wasn't Ready or light hadn't settled.
     last_busy_frame: u32,
     frame: u32,
     waiting: bool,
@@ -881,6 +982,14 @@ struct CheckPlan {
 
 /// Runs the checks with sky light off, then with it on, each in a process of
 /// its own, since a world's sky rule is read once.
+#[cfg(target_arch = "wasm32")]
+fn check() {
+    error!("in the browser, run ?check-sky-off and ?check-sky-on, each in a page load");
+}
+
+/// Runs the checks with sky light off, then with it on, each in a process of
+/// its own, since a world's sky rule is read once.
+#[cfg(not(target_arch = "wasm32"))]
 fn check() {
     let mut failed = false;
     for sky in ["sky-off", "sky-on"] {
@@ -899,18 +1008,7 @@ fn check() {
 /// Runs the checks with sky light on or off.
 fn check_part(sky: bool) {
     App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<WinitPlugin>(),
-        )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            1.0 / 60.0,
-        )))
+        .add_plugins(plugins_without_window())
         .add_plugins(VoxelWorldPlugin::with_config(CaveWorld {
             check_sky: Some(sky),
             ..default()
@@ -966,7 +1064,10 @@ fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: b
         switched: 0,
         shots_out: 0,
         shots_failed: 0,
-        directory: std::env::args().nth(2).map(Into::into),
+        directory: arguments()
+            .get(1)
+            .filter(|argument| !argument.contains('='))
+            .map(Into::into),
         look: LightLook::default(),
         precision: LightPrecision::Steps16,
     });
@@ -988,9 +1089,10 @@ fn run_checks(
 ) {
     plan.frame += 1;
     let frame = plan.frame;
-    if chunks
-        .iter()
-        .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready))
+    if !voxel_world.light_is_settled()
+        || chunks
+            .iter()
+            .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready))
     {
         plan.last_busy_frame = frame;
     }
@@ -998,6 +1100,14 @@ fn run_checks(
         return;
     }
     let Some(check) = plan.checks.get(plan.next).copied() else {
+        if plan.next == plan.checks.len() {
+            plan.next += 1;
+            if plan.failed {
+                report!("Some checks FAILED");
+            } else {
+                report!("All checks passed");
+            }
+        }
         exit.write(if plan.failed {
             AppExit::error()
         } else {
@@ -1038,7 +1148,7 @@ fn run_checks(
     // A look change shows on the next frame, with no waiting.
     if !check.next_frame && !(quiet >= 60 && waited >= 120) {
         if waited >= 3600 {
-            println!("FAIL {}: the world never settled", check.name);
+            report!("FAIL {}: the world never settled", check.name);
             plan.failed = true;
             plan.next += 1;
         }
@@ -1065,9 +1175,9 @@ fn run_checks(
               mut pictures: ResMut<Pictures>| {
             let earlier = earlier.and_then(|file| pictures.0.get(file));
             match judge(&captured.image, &camera, &global, earlier) {
-                Ok(note) => println!("PASS {name}: {note}"),
+                Ok(note) => report!("PASS {name}: {note}"),
                 Err(note) => {
-                    println!("FAIL {name}: {note}");
+                    report!("FAIL {name}: {note}");
                     plan.failed = true;
                 }
             }
@@ -1129,7 +1239,7 @@ fn switch_and_judge(
                         &GlobalTransform::default(),
                         None,
                     ) {
-                        println!("  frame {frame}: {note}");
+                        report!("  frame {frame}: {note}");
                         plan.shots_failed += 1;
                     }
                 },
@@ -1140,9 +1250,9 @@ fn switch_and_judge(
         return;
     }
     if plan.shots_failed == 0 {
-        println!("PASS {name}: {SWITCHED_FRAMES} frames black");
+        report!("PASS {name}: {SWITCHED_FRAMES} frames black");
     } else {
-        println!(
+        report!(
             "FAIL {name}: {} of {SWITCHED_FRAMES} frames weren't black",
             plan.shots_failed
         );
@@ -1296,4 +1406,165 @@ fn dim_lamp_glows(
     } else {
         Err(note)
     }
+}
+
+// --- The relight budget ------------------------------------------------------
+
+/// Where the budget mode digs: a single voxel at the top of each column, then
+/// a ball around the top of the last.
+const BUDGET_SITES: [[i32; 2]; 6] = [
+    [-48, -100],
+    [-16, -100],
+    [16, -100],
+    [48, -100],
+    [-32, -70],
+    [32, -70],
+];
+/// Looks down at the budget mode's sites.
+const BUDGET_CAMERA: FixedCamera = camera([0.0, 110.0, -170.0], [0.0, 40.0, -90.0]);
+const BOMB_RADIUS: i32 = 8;
+
+/// The budget mode's progress, and what it measured since the edit it waits
+/// on was set.
+#[derive(Resource, Default)]
+struct Budget {
+    frame: u32,
+    /// The last frame on which a chunk wasn't Ready or light hadn't settled.
+    last_busy_frame: u32,
+    /// The edit being measured: the voxel whose sky light shows the edited
+    /// chunk's light landed, the frame the edit was set on, and the frame its
+    /// light landed on.
+    edit: Option<(IVec3, u32, Option<u32>)>,
+    edits_done: usize,
+    /// The world's light stats as the last frame ended.
+    stats: bevy_voxel_world::light_bench::LightStats,
+    /// Relights started, and the most relight time and the most main-thread
+    /// light time in one frame, in milliseconds.
+    relights: u64,
+    worst_relight_frame_ms: f64,
+    worst_light_frame_ms: f64,
+}
+
+fn budget() {
+    App::new()
+        .add_plugins(plugins_without_window())
+        .add_plugins(VoxelWorldPlugin::with_config(CaveWorld::default()))
+        .init_resource::<Budget>()
+        .add_systems(Startup, setup_budget)
+        .add_systems(Update, dig_and_measure)
+        .add_systems(Last, take_light_stats)
+        .run();
+}
+
+fn setup_budget(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let image =
+        Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
+    commands.spawn((
+        Camera3d::default(),
+        RenderTarget::Image(images.add(image).into()),
+        transform_of(&BUDGET_CAMERA),
+        VoxelWorldCamera::<CaveWorld>::default(),
+    ));
+    add_lights(&mut commands);
+    report!("budget: sky reach {}", sky_reach());
+}
+
+/// The highest solid voxel of the column at `x`, `z`, below y = 200.
+fn top_solid(voxel_world: &VoxelWorld<CaveWorld>, x: i32, z: i32) -> Option<IVec3> {
+    (-64..200)
+        .rev()
+        .map(|y| IVec3::new(x, y, z))
+        .find(|position| voxel_world.get_voxel(*position).is_solid())
+}
+
+/// Waits for the world to settle, then digs at each site in turn, waiting for
+/// each edit's light to land and settle before the next.
+fn dig_and_measure(
+    mut budget: ResMut<Budget>,
+    chunks: Query<&Chunk<CaveWorld>>,
+    mut voxel_world: VoxelWorld<CaveWorld>,
+) {
+    budget.frame += 1;
+    let frame = budget.frame;
+    let busy = !voxel_world.light_is_settled()
+        || chunks.iter().any(|chunk| {
+            voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready)
+        });
+    if busy {
+        budget.last_busy_frame = frame;
+    }
+    if let Some((watched, set_at, landed)) = budget.edit {
+        let lit = voxel_world
+            .light_at(watched)
+            .is_some_and(|light| light.sky > 0.0);
+        let landed = landed.or(lit.then_some(frame));
+        budget.edit = Some((watched, set_at, landed));
+        if busy {
+            return;
+        }
+        report!(
+            "budget: edit {} landed at frame {}, settled at frame {}, {} relights, \
+             at most {:.2} ms of relights and {:.2} ms of light on the main thread in \
+             a frame",
+            budget.edits_done,
+            landed.map_or("never".into(), |landed| (landed - set_at).to_string()),
+            (budget.last_busy_frame + 1).saturating_sub(set_at),
+            budget.relights,
+            budget.worst_relight_frame_ms,
+            budget.worst_light_frame_ms,
+        );
+        budget.edit = None;
+        budget.edits_done += 1;
+        if budget.edits_done == BUDGET_SITES.len() + 1 {
+            report!(
+                "budget: done; the longest relight on the main thread took {:.2} ms",
+                budget.stats.max_relight_ms
+            );
+        }
+        return;
+    }
+    // Each edit waits for 60 quiet frames.
+    if frame - budget.last_busy_frame < 60 || budget.edits_done > BUDGET_SITES.len() {
+        return;
+    }
+    let bomb = budget.edits_done == BUDGET_SITES.len();
+    let [x, z] = BUDGET_SITES[budget.edits_done.min(BUDGET_SITES.len() - 1)];
+    let Some(top) = top_solid(&voxel_world, x, z) else {
+        report!("budget: no solid voxel at {x}, {z}");
+        budget.edits_done += 1;
+        return;
+    };
+    // The lowest voxel dug in the column, open to the sky once dug, reads sky
+    // light once the edited chunk's light lands.
+    let radius = if bomb { BOMB_RADIUS } else { 0 };
+    for dz in -radius..=radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let offset = IVec3::new(dx, dy, dz);
+                if offset.length_squared() <= radius * radius {
+                    voxel_world.set_voxel(top + offset, WorldVoxel::Air);
+                }
+            }
+        }
+    }
+    budget.edit = Some((top - IVec3::Y * radius, frame, None));
+    budget.relights = 0;
+    budget.worst_relight_frame_ms = 0.0;
+    budget.worst_light_frame_ms = 0.0;
+}
+
+/// Adds what light cost this frame, from the world's light stats.
+fn take_light_stats(world: &mut World) {
+    let Some(stats) = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world)
+    else {
+        return;
+    };
+    let mut budget = world.resource_mut::<Budget>();
+    let before = budget.stats;
+    budget.relights += stats.relights - before.relights;
+    let relight_ms = stats.relight_ms - before.relight_ms;
+    let light_ms = stats.main_thread_ms - before.main_thread_ms;
+    budget.worst_relight_frame_ms = budget.worst_relight_frame_ms.max(relight_ms);
+    budget.worst_light_frame_ms = budget.worst_light_frame_ms.max(light_ms);
+    budget.stats = stats;
 }

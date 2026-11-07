@@ -71,7 +71,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
@@ -80,6 +80,7 @@ use bevy::log::warn_once;
 use bevy::mesh::MeshTag;
 use bevy::platform::collections::HashMap;
 use bevy::platform::hash::FixedHasher;
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::{
     render_asset::RenderAssets,
