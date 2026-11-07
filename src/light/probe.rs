@@ -44,7 +44,7 @@ use super::sky::{
     padding_row, proved, provisional, ColumnAnswer, Columns, Hinted, SkyRule,
 };
 use super::solver::{ChunkLight, Solved};
-use super::view::LightView;
+use super::view::{LightView, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_map::ChunkMap;
@@ -483,6 +483,30 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         self.settle(position, entity, sky, known, &counts, record)
     }
 
+    /// Works out the column answer of hinted air at `position` from the fill
+    /// hints and the sky record, and waits for probes if columns stay
+    /// provisional, as [`answer_again`](Self::answer_again) does for a chunk.
+    /// The padding row above it is the bottom of the position above, which
+    /// the answer takes in with the rest of the window.
+    pub fn answer_air(
+        &mut self,
+        position: IVec3,
+        record: &mut SkyRecord,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+        world: &C,
+    ) -> ColumnAnswer {
+        self.answer_again(position, ENTRY, [!0; CHUNK], record, edits, world)
+    }
+
+    /// Gives the waiting chunk at `position` the entity `entity`: a chunk
+    /// retiring in hinted air leaves its columns waiting for the light entry
+    /// or hinted air that takes its place.
+    pub fn rekey(&mut self, position: IVec3, entity: Entity) {
+        if let Some(chunk) = self.waiting.get_mut(&position) {
+            chunk.entity = entity;
+        }
+    }
+
     /// Follows the sky rule `rule` from now on. Waiting chunks must then have
     /// their answers worked out again: see [`answer_loaded_again`].
     pub fn set_rule(&mut self, rule: SkyRule) {
@@ -689,20 +713,23 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
             })
             .collect()
     };
+    let air: Vec<(IVec3, Entity, ColumnAnswer)> = view
+        .read()
+        .air
+        .iter()
+        .map(|(position, air)| (*position, ENTRY, air.inputs.columns.clone()))
+        .collect();
     let chunk_map = chunk_map.get_read_lock();
     let mut changed = Vec::new();
-    for (position, entity, columns) in loaded {
-        let Some(data) = chunk_map.get(&ChunkKey::new(position, 0)) else {
-            continue;
+    for (position, entity, columns) in loaded.into_iter().chain(air) {
+        let answer = if entity == ENTRY {
+            probes.answer_air(position, record, edits, world)
+        } else {
+            let Some(data) = chunk_map.get(&ChunkKey::new(position, 0)) else {
+                continue;
+            };
+            probes.answer_again(position, entity, padding_row(data), record, edits, world)
         };
-        let answer = probes.answer_again(
-            position,
-            entity,
-            padding_row(data),
-            record,
-            edits,
-            world,
-        );
         if answer.sky != columns.sky {
             changed.push(position);
         }
@@ -748,8 +775,41 @@ fn from_hints<C: VoxelWorldConfig>(
     (sky, known)
 }
 
+/// The column answer of hinted air at `position` under `rule`, from the fill
+/// hints and `record` alone, without waiting for probes: the answer
+/// [`SkyProbes::answer_air`] gives it while nothing more is known.
+pub(crate) fn air_answer<C: VoxelWorldConfig>(
+    rule: SkyRule,
+    position: IVec3,
+    record: &mut SkyRecord,
+    edits: &VoxelEdits<C, C::MaterialIndex>,
+    world: &C,
+) -> ColumnAnswer {
+    let window = rule.window(position.y);
+    let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
+    let (mut sky, mut known) = from_hints(world, position, [!0; CHUNK], &counts);
+    for (index, known) in known.iter_mut().enumerate() {
+        if *known {
+            continue;
+        }
+        let above = position + IVec3::Y * (index as i32 + 1);
+        if let Some(mask) = record.get(above, counts[index]) {
+            for (sky, solid) in sky.iter_mut().zip(&mask) {
+                *sky &= !solid;
+            }
+            *known = true;
+        }
+    }
+    if known.len() as u32 == window && known.iter().all(|known| *known) {
+        proved(sky)
+    } else {
+        provisional(sky)
+    }
+}
+
 /// Gives the chunk `entity` at `position` the column answer `answer` in the
-/// world view, keeping its light. Relights then read the new answer.
+/// world view, keeping its light. Relights then read the new answer. With
+/// [`ENTRY`] it gives it to a light entry or to hinted air.
 pub(crate) fn replace_columns(
     view: &LightView,
     position: IVec3,
@@ -757,6 +817,11 @@ pub(crate) fn replace_columns(
     answer: ColumnAnswer,
 ) {
     let mut view = view.write();
+    if entity == ENTRY && view.is_air(position) {
+        let air = view.air.get_mut(&position).unwrap();
+        air.inputs = Arc::new(air.inputs.with_columns(answer));
+        return;
+    }
     let Some(chunk) = view
         .get_mut(&position)
         .filter(|chunk| chunk.entity == entity)

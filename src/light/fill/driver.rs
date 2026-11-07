@@ -144,6 +144,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             }
             self.dirty.insert(*position);
         }
+        self.dirty.extend(view.read().air.keys().copied());
         for (position, _) in record.all_cells() {
             self.dirty.insert(position);
         }
@@ -172,8 +173,10 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         let view = view.read();
         for position in std::mem::take(&mut self.dirty) {
             let count = edits.edit_count(position);
-            let open = match view.get(&position) {
-                Some(chunk) => Some(open_cells(&chunk.light.inputs.occupancy)),
+            // Hinted air is learned from its hint, with no lookups.
+            let inputs = view.inputs(position);
+            let open = match inputs {
+                Some(inputs) => Some(open_cells(&inputs.occupancy)),
                 None => record.cells(position, count).map(|cells| cells.open),
             };
             let Some(open) = open else {
@@ -182,9 +185,9 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
                 }
                 continue;
             };
-            let top = match view.get(&position) {
+            let top = match inputs {
                 Some(_) if probes.is_some_and(|probes| probes.is_waiting(position)) => 0,
-                Some(chunk) => sky_top_cells(&chunk.light.inputs.columns.sky),
+                Some(inputs) => sky_top_cells(&inputs.columns.sky),
                 None => top_from_record(position, rule, &view, record, edits, world),
             };
             let direct = direct_cells(open, top);
