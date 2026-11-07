@@ -603,8 +603,8 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
 /// runs the settings relight: see [`relight_settings`]. A change of precision
 /// or slot capacity also replaces the world's light texture (see
 /// [`LightRoute::replace_texture`](route::LightRoute::replace_texture)), and
-/// a change of precision relights every loaded chunk, since every level is
-/// stored in steps of it. A change of sky fill
+/// a change of precision relights every loaded chunk and solves every coarse
+/// chunk again, since every level is stored in steps of it. A change of sky fill
 /// or of the sky rule first builds the sky fill field again, at once, from
 /// the loaded chunks and the cells the sky record holds, so the relights
 /// read the new fill. Values equal to those last applied start nothing.
@@ -831,6 +831,7 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         for position in positions {
             work.trigger_settings(position);
         }
+        work.solve_coarse_again();
     } else {
         relight_settings(
             settings,

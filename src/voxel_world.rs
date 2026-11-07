@@ -331,7 +331,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// Chunk tasks still running aren't counted, though their light may start
     /// relights once it lands. Chunks above LOD level 0 have no relights to
-    /// wait for. Settled doesn't mean exact: light beside a chunk that isn't
+    /// wait for, except after a change of precision, which solves them all
+    /// again. Settled doesn't mean exact: light beside a chunk that isn't
     /// loaded can be darker than the truth. A world without light propagation
     /// is always settled.
     #[cfg(feature = "light_propagation")]

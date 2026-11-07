@@ -87,7 +87,7 @@ use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
 use super::solver::{relight, ChunkLight, KeptLight, Solved};
 use super::view::{AirInputs, LightView, ViewChunk, ENTRY};
-use super::{LightSettings, SolvedLight};
+use super::{LightSettings, SolvedLight, TaskLight};
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::{ChunkState, ChunkStateOf};
 use crate::chunk_map::ChunkMap;
@@ -218,9 +218,15 @@ pub(crate) struct LightWork<C> {
     meshed: HashMap<Entity, u64>,
     /// The light coarse chunk tasks solved, waiting to land.
     coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved)>,
-    /// The levels each coarse chunk's tag holds without a slot, as in a
-    /// texel.
-    coarse: HashMap<Entity, LightLevels>,
+    /// The key of each coarse chunk whose light has landed, and the levels
+    /// its tag holds without a slot, as in a texel.
+    coarse: HashMap<Entity, (ChunkKey, LightLevels)>,
+    /// Coarse chunks whose light landed at another precision than the
+    /// world's, waiting to be solved again: see
+    /// [`solve_coarse_again`](Self::solve_coarse_again).
+    coarse_queue: Vec<(ChunkKey, Entity)>,
+    /// Coarse chunks being solved again on the task pool.
+    coarse_running: Vec<(ChunkKey, Entity, Task<CoarseSolved>)>,
     /// The version the next light to land gets.
     clock: u64,
     /// Main-thread time spent this frame, in nanoseconds.
@@ -265,6 +271,8 @@ impl<C> Default for LightWork<C> {
             meshed: HashMap::new(),
             coarse_landing: Vec::new(),
             coarse: HashMap::new(),
+            coarse_queue: Vec::new(),
+            coarse_running: Vec::new(),
             clock: 0,
             frame_nanos: 0,
             edit_nanos: 0,
@@ -288,6 +296,17 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             && self.running.is_empty()
             && self.landing.is_empty()
             && self.held.is_empty()
+            && self.coarse_queue.is_empty()
+            && self.coarse_running.is_empty()
+    }
+
+    /// Whether every running relight's task has finished, for its light to
+    /// be collected on the next frame.
+    #[cfg(test)]
+    pub(crate) fn tasks_finished(&self) -> bool {
+        self.running
+            .iter()
+            .all(|running| running.task.is_finished())
     }
 
     /// Queues the light a chunk task solved for the chunk `entity` with
@@ -305,7 +324,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 self.kept_landing.push((key.position, entity, kept));
             }
             SolvedLight::Coarse(solved) => {
-                self.coarse_landing.retain(|(_, held, _)| *held != entity);
+                self.drop_coarse_work(entity);
                 self.coarse_landing.push((key, entity, solved));
             }
         }
@@ -314,7 +333,63 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// The levels the coarse chunk `entity`'s tag holds without a slot, as in
     /// a texel, once its light has landed.
     pub fn coarse_levels(&self, entity: Entity) -> Option<LightLevels> {
-        self.coarse.get(&entity).copied()
+        self.coarse.get(&entity).map(|(_, levels)| *levels)
+    }
+
+    /// Queues every coarse chunk whose light has landed to be solved again
+    /// from its published voxels, after a change of precision.
+    ///
+    /// A coarse chunk otherwise solves only in its own chunk task. Its light
+    /// is converted to the new precision at once, but light worked out at 16
+    /// levels shows 16 levels until it is solved again. One whose light is
+    /// still to land is queued as it lands.
+    pub fn solve_coarse_again(&mut self) {
+        self.coarse_running.clear();
+        self.coarse_queue = self
+            .coarse
+            .iter()
+            .map(|(entity, (key, _))| (*key, *entity))
+            .collect();
+    }
+
+    /// Drops the light waiting to land for the coarse chunk `entity`, and
+    /// its solve queued or running.
+    fn drop_coarse_work(&mut self, entity: Entity) {
+        self.coarse_landing.retain(|(_, held, _)| *held != entity);
+        self.coarse_queue.retain(|(_, queued)| *queued != entity);
+        self.coarse_running
+            .retain(|(_, running, _)| *running != entity);
+    }
+
+    /// Starts solving the queued coarse chunks again, as many as `budget`
+    /// leaves room for under the cap `cap`.
+    fn start_coarse(
+        &mut self,
+        settings: &LightSettings<C>,
+        budget: &mut PoolBudget<C>,
+        cap: usize,
+        chunk_map: &ChunkMap<C, C::MaterialIndex>,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+        world: &C,
+    ) {
+        let count = budget
+            .slots(JobKind::Relight, cap)
+            .min(self.coarse_queue.len());
+        let pool = AsyncComputeTaskPool::get();
+        for (key, entity) in self.coarse_queue.drain(..count).collect::<Vec<_>>() {
+            let Some(data) = chunk_map.get_read_lock().get(&key).cloned() else {
+                continue;
+            };
+            let delegate = world.voxel_lookup_delegate();
+            let Some(TaskLight::Coarse(task)) =
+                settings.task_for(key, entity, data.data_shape, world, edits, delegate)
+            else {
+                continue;
+            };
+            let solve = pool.spawn(async move { task.solve(&data) });
+            self.coarse_running.push((key, entity, solve));
+            budget.started(JobKind::Relight);
+        }
     }
 
     fn arrive_level_0(&mut self, position: IVec3, entity: Entity, solved: Solved) {
@@ -936,7 +1011,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.held.retain(|_, landing| landing.entity != entity);
         self.kept_landing.retain(|(_, held, _)| *held != entity);
         self.meshed.remove(&entity);
-        self.coarse_landing.retain(|(_, held, _)| *held != entity);
+        self.drop_coarse_work(entity);
         self.coarse.remove(&entity);
         let position = self.positions.remove(&entity)?;
         if let Some(census) = &mut self.census {
@@ -1249,8 +1324,22 @@ impl<C: VoxelWorldConfig> Relights<C> {
             let Running { relight, .. } = work.running.swap_remove(index);
             work.finished(relight, solved);
         }
+        let mut index = 0;
+        while index < work.coarse_running.len() {
+            let task = &mut work.coarse_running[index].2;
+            let Some(solved) = future::block_on(future::poll_once(task)) else {
+                index += 1;
+                continue;
+            };
+            finished += 1;
+            let (key, entity, _) = work.coarse_running.swap_remove(index);
+            work.coarse_landing.push((key, entity, solved));
+        }
         budget.set_finished_last_frame(JobKind::Relight, finished);
-        budget.set_running(JobKind::Relight, work.running.len());
+        budget.set_running(
+            JobKind::Relight,
+            work.running.len() + work.coarse_running.len(),
+        );
     }
 
     /// Lands queued light, oldest first, for as long as the frame's landing
@@ -1308,7 +1397,16 @@ impl<C: VoxelWorldConfig> Relights<C> {
             }
             let (sky, voxel) = solved.levels;
             let levels = LightLevels::of_steps(sky, voxel, solved.precision);
-            work.coarse.insert(entity, levels);
+            work.coarse.insert(entity, (key, levels));
+            if solved.precision != settings.task.precision
+                && !work
+                    .coarse_queue
+                    .iter()
+                    .any(|(_, queued)| *queued == entity)
+            {
+                // Solved before a change of precision.
+                work.coarse_queue.push((key, entity));
+            }
             if let Some(route) = route.as_mut() {
                 route.coarse_landed(
                     entity,
@@ -1587,8 +1685,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
     }
 
     /// Starts relights for the chunks a settings change marked, nearest a
-    /// camera first, with the room in the world's [`PoolBudget`] that chunk
-    /// tasks leave. Then counts this frame's main-thread time.
+    /// camera first, then solves of the coarse chunks it queued, with the
+    /// room in the world's [`PoolBudget`] that chunk tasks leave. Then counts
+    /// this frame's main-thread time.
     #[allow(clippy::too_many_arguments)]
     pub fn start_settings(
         mut work: ResMut<LightWork<C>>,
@@ -1617,6 +1716,19 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 &rescans,
                 &states,
                 &cameras,
+            );
+            work.add_frame_time(started);
+        }
+        if !work.coarse_queue.is_empty() {
+            let started = Instant::now();
+            let cap = configuration.max_active_chunk_threads();
+            work.start_coarse(
+                &settings,
+                &mut budget,
+                cap,
+                &chunk_map,
+                &edits,
+                &configuration,
             );
             work.add_frame_time(started);
         }

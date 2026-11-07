@@ -28,6 +28,10 @@ struct CoarseWorld {
     near: i32,
     data: u32,
     hints: Option<KeyHints>,
+    precision: LightPrecision,
+    /// The `min_despawn_distance`, within which chunks spawn whatever their
+    /// fill hint.
+    protected: u32,
 }
 
 /// A world's fill hint for each chunk key, at every level.
@@ -40,6 +44,8 @@ impl Default for CoarseWorld {
             near: 2,
             data: 32,
             hints: None,
+            precision: LightPrecision::Steps16,
+            protected: 1,
         }
     }
 }
@@ -50,6 +56,10 @@ impl VoxelWorldConfig for CoarseWorld {
 
     fn spawning_distance(&self) -> u32 {
         3
+    }
+
+    fn min_despawn_distance(&self) -> u32 {
+        self.protected
     }
 
     fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
@@ -99,6 +109,7 @@ impl VoxelWorldConfig for CoarseWorld {
     fn light_propagation(&self) -> Option<LightPropagation> {
         Some(LightPropagation {
             sky_fill: None,
+            precision: self.precision,
             ..default()
         })
     }
@@ -140,7 +151,12 @@ fn app(scene: Scene, data: u32) -> App {
         scene,
         near: 2,
         data,
-        hints: None,
+        // The test app casts no spawning rays, and the flood fill that finds
+        // chunks to spawn stops at chunks already spawned, so a level-1 chunk
+        // two chunks out respawns after a merge only when this distance
+        // holds it.
+        protected: 2,
+        ..default()
     }))
     .add_systems(Startup, spawn_camera::<CoarseWorld>);
     app
@@ -226,9 +242,17 @@ fn light_at_above_level_0_reads_a_slot_cell_and_a_tag_only_chunk() {
 }
 
 #[test]
-fn reading_across_a_split_stays_plausible() {
+fn reading_across_a_split_and_a_merge_stays_plausible() {
     let mut app = slab_app();
     let coarse = [SHADED, SUNLIT].map(|position| sky_at(&mut app, position));
+    let assert_plausible = |coarse: &[f32; 2], fine: &[f32; 2]| {
+        for (coarse, fine) in coarse.iter().zip(fine) {
+            assert!(
+                (coarse - fine).abs() <= 3.0,
+                "coarse {coarse:?} and fine {fine:?} differ by more than the coarse rule allows"
+            );
+        }
+    };
 
     // Into the shaded chunk, which splits into level-0 chunks.
     move_cameras::<CoarseWorld>(&mut app, Transform::from_xyz(80.0, 20.0, 30.0));
@@ -238,12 +262,49 @@ fn reading_across_a_split_stays_plausible() {
             && light_is_settled(app)
     });
     let fine = [SHADED, SUNLIT].map(|position| sky_at(&mut app, position));
-    for (coarse, fine) in coarse.iter().zip(&fine) {
-        assert!(
-            (coarse - fine).abs() <= 3.0,
-            "coarse {coarse:?} and fine {fine:?} differ by more than the coarse rule allows"
-        );
-    }
+    assert_plausible(&coarse, &fine);
+
+    // Back to where the camera started, so the level-0 chunks merge into
+    // the shaded chunk again.
+    move_cameras::<CoarseWorld>(&mut app, Transform::from_xyz(10.0, 10.0, 10.0));
+    update_until(
+        &mut app,
+        "the shaded chunk to merge back and settle",
+        |app| {
+            chunk_status_of::<CoarseWorld>(app, ABOVE).is_some()
+                && tag_of(app, ABOVE).is_some()
+                && coarse_lit(app, &[SHADED, SUNLIT])
+                && light_is_settled(app)
+        },
+    );
+    let merged = [SHADED, SUNLIT].map(|position| sky_at(&mut app, position));
+    assert_plausible(&merged, &fine);
+}
+
+#[test]
+fn a_change_of_precision_solves_coarse_chunks_again_at_the_new_precision() {
+    let mut app = slab_app();
+    update_until(&mut app, "the shaded coarse chunk to take a slot", |app| {
+        tag_of(app, ABOVE).is_some_and(|tag| tag & HAS_SLOT != 0)
+    });
+    // Under the slab, where sky light falls off from its sides.
+    let under_slab: Vec<IVec3> = (64..96).map(|x| IVec3::new(x, 4, 30)).collect();
+    let fractions = |app: &mut App| {
+        under_slab
+            .iter()
+            .filter(|position| sky_at(app, **position).fract() != 0.0)
+            .count()
+    };
+    assert_eq!(fractions(&mut app), 0, "16 levels read whole levels");
+
+    app.world_mut().resource_mut::<CoarseWorld>().precision = LightPrecision::Steps256;
+    update_until(&mut app, "light to settle at 256 levels", |app| {
+        light_is_settled(app) && tag_of(app, ABOVE).is_some_and(|tag| tag & HAS_SLOT != 0)
+    });
+    assert!(
+        fractions(&mut app) > 0,
+        "the shaded coarse chunk still shows its light at 16 levels"
+    );
 }
 
 fn light_is_settled(app: &mut App) -> bool {

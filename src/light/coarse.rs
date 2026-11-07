@@ -10,7 +10,9 @@
 //! and a voxel edit outside the chunk and its padding doesn't reach it until
 //! then. It takes no part in the world view, the sky record or sky fill, and
 //! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) never
-//! waits on it.
+//! waits on it. The one exception is a change of precision, which solves
+//! every coarse chunk again from its published voxels on the task pool, and
+//! which `light_is_settled` waits for.
 //!
 //! A cell is the data voxel at its middle. Where data voxels are finer than
 //! cells, a cell is open if any data voxel in it is open.
