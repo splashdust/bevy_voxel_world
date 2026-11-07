@@ -454,6 +454,13 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     if solved.rescanned.is_none()
                         && chunk.light.same_levels(&solved.light)
                     {
+                        // The light already there is the light these seeds
+                        // give.
+                        if chunk.solved_from_seeds().is_some() {
+                            chunk.fill_seeds = solved
+                                .fill_seeds
+                                .map(|hash| (Arc::downgrade(&chunk.light), hash));
+                        }
                         chunk.faces = solved.faces;
                         self.held.remove(&position);
                         return None;
@@ -469,6 +476,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                             triggers.extend(around(position));
                         }
                     }
+                    chunk.fill_seeds = solved
+                        .fill_seeds
+                        .map(|hash| (Arc::downgrade(&solved.light), hash));
                     chunk.light = solved.light;
                     chunk.faces = solved.faces;
                     chunk.version = self.clock;
@@ -482,6 +492,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         version: self.clock,
                         edits: solved.own_edits,
                         emission: solved.emission,
+                        fill_seeds: solved
+                            .fill_seeds
+                            .map(|hash| (Arc::downgrade(&solved.light), hash)),
                     };
                     self.clock += 1;
                     let old = view
@@ -718,7 +731,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             .map(|position| (distance_to_nearest(*position, &cameras), *position))
             .collect();
         for position in first_in_start_order(candidates, slots) {
-            self.start_relight(position, settings, budget, rescans);
+            let fill_only = matches!(queue, Queue::Fill);
+            self.start_relight(position, settings, budget, rescans, fill_only);
         }
     }
 
@@ -744,12 +758,17 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// A chunk whose emissive voxels were found under an older emissive list
     /// has them found again in the task, from its published data in
     /// `rescans` and its voxel edits.
+    ///
+    /// A relight that is `fill_only`, started only because sky fill cells
+    /// changed, stops before solving when the chunk's seeds are the ones its
+    /// light was solved from.
     fn start_relight(
         &mut self,
         position: IVec3,
         settings: &LightSettings<C>,
         budget: &mut PoolBudget<C>,
         rescans: &Rescans<'_, C>,
+        fill_only: bool,
     ) {
         self.queue.remove(&position);
         self.settings_queue.remove(&position);
@@ -759,11 +778,14 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let urgent = std::mem::take(&mut chunk.urgent);
         let entity = chunk.entity;
         let edit_frame = settings.edit_frame.load(Ordering::Relaxed);
-        let (version, emission) = settings
+        let (version, emission, solved_from) = settings
             .view
             .read()
             .get(&position)
-            .map_or((0, 0), |chunk| (chunk.version, chunk.emission));
+            .map_or((0, 0, None), |chunk| {
+                (chunk.version, chunk.emission, chunk.solved_from_seeds())
+            });
+        let unless_seeds = solved_from.filter(|_| fill_only);
         let rescan = (emission != settings.task.emission_generation)
             .then(|| rescans.of(position))
             .flatten();
@@ -772,7 +794,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let task = AsyncComputeTaskPool::get().spawn(async move {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("relight_task").entered();
-            relight(&task_settings, &view, position, rescan)
+            relight(&task_settings, &view, position, rescan, unless_seeds)
         });
         self.running.push(Running {
             position,
@@ -1013,6 +1035,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     };
                     let light = &landing.solved.light;
                     if answer != light.inputs.columns {
+                        // Light on other inputs than its seeds were found for.
+                        landing.solved.fill_seeds = None;
                         landing.solved.light = Arc::new(ChunkLight {
                             inputs: Arc::new(light.inputs.with_columns(answer)),
                             sky: light.sky.clone(),
@@ -1100,7 +1124,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
             .copied()
             .collect();
         for position in urgent {
-            work.start_relight(position, &settings, &mut budget, &rescans);
+            work.start_relight(position, &settings, &mut budget, &rescans, false);
         }
         let cap = configuration.max_active_chunk_threads();
         work.start_nearest(
@@ -1275,6 +1299,8 @@ fn rebase(landing: &mut Landing, view: &LightView) {
     {
         return;
     }
+    // Light on other inputs than its seeds were found for.
+    landing.solved.fill_seeds = None;
     landing.solved.light = Arc::new(ChunkLight {
         inputs: chunk.light.inputs.clone(),
         sky: light.sky.clone(),

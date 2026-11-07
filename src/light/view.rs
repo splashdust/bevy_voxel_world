@@ -5,7 +5,7 @@
 //! thread, the way chunk tasks read the chunk map. Only the main thread writes
 //! it, when light lands and when chunks despawn.
 
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -28,6 +28,20 @@ pub(crate) struct ViewChunk {
     /// The [emission generation](super::solver::LightTaskSettings::emission_generation)
     /// its inputs' emissive voxels were found under.
     pub emission: u64,
+    /// For a chunk that takes sky fill, the light a solve landed and the hash
+    /// of the sky fill seeds it was solved from. Anything that puts other
+    /// light in `light` leaves this behind, so it holds only while `light` is
+    /// the light it names.
+    pub fill_seeds: Option<(Weak<ChunkLight>, u64)>,
+}
+
+impl ViewChunk {
+    /// The hash of the sky fill seeds the chunk's light was solved from, if
+    /// known.
+    pub fn solved_from_seeds(&self) -> Option<u64> {
+        let (light, hash) = self.fill_seeds.as_ref()?;
+        std::ptr::eq(light.as_ptr(), Arc::as_ptr(&self.light)).then_some(*hash)
+    }
 }
 
 /// The world view of one world, by level-0 chunk position.
@@ -47,8 +61,6 @@ impl LightView {
 /// What a solve read of the chunks around it: their inputs for the solver, and
 /// the light of its face neighbours for comparing with its own.
 pub(crate) struct Snapshot {
-    /// The position of the chunk the snapshot is for.
-    pub position: IVec3,
     pub neighbours: Neighbourhood,
     /// Each face neighbour's light and its version, by [`Face`].
     pub faces: [Option<(Arc<ChunkLight>, u64)>; 6],
@@ -71,10 +83,6 @@ impl Snapshot {
             Some((chunk.light.clone(), chunk.version))
         });
         debug_assert!(neighbours[neighbour_index(IVec3::ZERO)].is_none());
-        Self {
-            position,
-            neighbours,
-            faces,
-        }
+        Self { neighbours, faces }
     }
 }

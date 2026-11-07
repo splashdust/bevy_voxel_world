@@ -247,6 +247,8 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             if answer.sky != inputs.columns.sky {
                 self.relight.push(position);
             }
+            // Light on other inputs than its seeds were found for.
+            solved.fill_seeds = None;
             let light = &solved.light;
             solved.light = Arc::new(ChunkLight {
                 inputs: Arc::new(inputs.with_columns(answer)),

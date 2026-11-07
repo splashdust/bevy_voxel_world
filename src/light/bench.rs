@@ -1,6 +1,6 @@
 //! Just enough of light propagation's internals for the crate's benchmarks:
-//! `light_kernels` times the kernel and the emissive scan, and
-//! `chunk_lifecycle` reports what solving light costs in chunk tasks. Not
+//! `light_kernels` times the kernel, seeding sky fill and the emissive scan,
+//! and `chunk_lifecycle` reports what solving light costs in chunk tasks. Not
 //! public API.
 
 use std::hint::black_box;
@@ -10,7 +10,11 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use super::config::PathFill;
 use super::faces::Face;
+use super::fill::paths::PathField;
+use super::fill::seed::{CellsAround, Seeding};
+use super::fill::PositionCells;
 use super::inputs::LightInputs;
 use super::inputs::{EmissiveVoxel, Occupancy};
 use super::kernel::{LightBox, Plane, Row, Seed, LEVEL_BITS, MAX_ONE_WORD_REACH};
@@ -194,6 +198,96 @@ fn copy_rows<R: Row>(from: &[u128], to: &mut [R]) {
     }
 }
 
+/// Sky fill's field under [`SkyFill::Paths`](crate::prelude::SkyFill::Paths)
+/// with its defaults, learned from cell masks the caller works out.
+pub struct FillField(PathField);
+
+impl Default for FillField {
+    fn default() -> Self {
+        Self(PathField::new(&PathFill::default()))
+    }
+}
+
+impl FillField {
+    /// Takes in a position's cells, one bit per 8-voxel cell at
+    /// `x + y × 4 + z × 16`: `open` for cells holding no solid voxel, and
+    /// `direct` for open cells whose voxels all have direct sky.
+    pub fn learn(&mut self, position: IVec3, open: u64, direct: u64) {
+        self.0.learn(position, PositionCells { open, direct });
+    }
+
+    /// Works through everything learned.
+    pub fn settle(&mut self) {
+        while self.0.has_pending() {
+            self.0.update(std::time::Duration::MAX);
+        }
+    }
+}
+
+/// The open rows of a sky light box, at one row width.
+enum OpenRows {
+    OneWord(Vec<u64>),
+    TwoWord(Vec<u128>),
+}
+
+/// What a solve seeds sky fill from: the cells of the 27 positions around a
+/// chunk, and the open voxels of its box.
+pub struct SeedBox {
+    around: CellsAround,
+    open: OpenRows,
+    scale: LevelScale,
+}
+
+impl SeedBox {
+    /// The seeding of the chunk at `chunk` from `field`, in a sky light box of
+    /// `reach`, from 1 to 32. `open` says whether light passes the voxel at a
+    /// position in the box, from 0 to `32 + 2 × reach` on each axis.
+    pub fn new(
+        field: &FillField,
+        chunk: IVec3,
+        reach: u32,
+        open: impl Fn(IVec3) -> bool,
+    ) -> Self {
+        let around = std::array::from_fn(|index| {
+            let index = index as i32;
+            let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
+            field.0.cells(chunk + offset).cloned().map(Arc::new)
+        });
+        let side = 32 + 2 * reach as usize;
+        let open = rows(side, open);
+        let open = if reach <= MAX_ONE_WORD_REACH {
+            let mut one_word = vec![0; side * side];
+            copy_rows(&open, &mut one_word);
+            OpenRows::OneWord(one_word)
+        } else {
+            OpenRows::TwoWord(open)
+        };
+        Self {
+            around,
+            open,
+            scale: LevelScale::new(reach),
+        }
+    }
+
+    /// Seeds sky fill as a solve does, from the cells around the chunk to the
+    /// rows the kernel takes. Returns how many levels it seeded, 0 for a
+    /// chunk fill doesn't light.
+    pub fn seed(&self) -> usize {
+        let reach = self.scale.reach() as usize;
+        let Some(seeds) = Seeding::of(&self.around, reach).seeds else {
+            return 0;
+        };
+        match &self.open {
+            OpenRows::OneWord(open) => {
+                black_box(seeds.rows(open, reach, &self.scale)).len()
+            }
+            OpenRows::TwoWord(open) => {
+                black_box(seeds.rows(open, reach, &self.scale)).len()
+            }
+        }
+    }
+}
+
 /// A chunk's light and its six face neighbours', for timing what landing
 /// does to fill a slot.
 pub struct SlotBox {
@@ -334,6 +428,9 @@ pub struct LightStats {
     pub fill_seed_ms: f64,
     /// Relights started because a sky fill cell changed.
     pub fill_relights: u64,
+    /// Of those, the relights that stopped before solving because the
+    /// chunk's sky fill seeds hadn't changed.
+    pub fill_relights_skipped: u64,
     /// Main-thread time the sky fill field spent updating, in milliseconds.
     pub fill_update_ms: f64,
     /// Main-thread time spent on sky fill in all, in milliseconds.
@@ -385,6 +482,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         fill_seeded: counters.fill_seeded.load(Ordering::Relaxed),
         fill_seed_ms: ms(&counters.fill_seed_nanos),
         fill_relights: counters.fill_relights.load(Ordering::Relaxed),
+        fill_relights_skipped: counters.fill_relights_skipped.load(Ordering::Relaxed),
         fill_update_ms: ms(&counters.fill_update_nanos),
         fill_main_thread_ms: ms(&counters.fill_main_thread_nanos),
         fill_probes: counters.fill_probes.load(Ordering::Relaxed),

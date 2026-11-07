@@ -31,7 +31,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bevy::prelude::*;
-use bevy_voxel_world::light_bench::{emissive_scan, KernelBox, SlotBox};
+use bevy_voxel_world::light_bench::{
+    emissive_scan, FillField, KernelBox, SeedBox, SlotBox,
+};
 use bevy_voxel_world::prelude::{LightShape, WorldVoxel};
 use noise::{NoiseFn, Perlin};
 
@@ -482,8 +484,122 @@ fn slot_metrics(dumps: &[Dump], metrics: &mut Metrics) {
     metrics.insert("slot.shell_planes.p50_us".into(), median(&mut times));
 }
 
+/// The chunk positions sky fill's field learns, from the first corner to the
+/// second, both included: the floating island, the mesa and the slab beside
+/// it, and the ground under them.
+const FILL_FROM: IVec3 = IVec3::new(-16, -1, 5);
+const FILL_TO: IVec3 = IVec3::new(2, 7, 17);
+
+/// Chunks lit by sky fill: on and over the ground under the floating island,
+/// under the slab, and against the island's underside.
+const FILL_CHUNKS: [IVec3; 10] = [
+    IVec3::new(-11, 0, 11),
+    IVec3::new(-11, 1, 11),
+    IVec3::new(-10, 1, 10),
+    IVec3::new(-12, 1, 12),
+    IVec3::new(-10, 0, 12),
+    IVec3::new(-11, 4, 11),
+    IVec3::new(0, 1, 11),
+    IVec3::new(-1, 2, 11),
+    IVec3::new(0, 2, 12),
+    IVec3::new(1, 1, 12),
+];
+
+/// The field of sky fill's default model over the learned positions, with
+/// each cell's masks worked out from the scene's voxels.
+fn fill_field(scene: &mut Scene) -> FillField {
+    let low = FILL_FROM * 32;
+    let high = (FILL_TO + IVec3::ONE) * 32;
+    let width = (high.x - low.x) as usize;
+    // The highest solid voxel in each column, from the top of the scene down
+    // to the bottom of the learned positions.
+    let mut top = vec![i32::MIN; width * (high.z - low.z) as usize];
+    for z in low.z..high.z {
+        for x in low.x..high.x {
+            let column = (x - low.x) as usize + (z - low.z) as usize * width;
+            top[column] = (low.y..SCENE_TOP)
+                .rev()
+                .find(|&y| !scene.open(IVec3::new(x, y, z)))
+                .unwrap_or(i32::MIN);
+        }
+    }
+    let mut field = FillField::default();
+    for cz in FILL_FROM.z..=FILL_TO.z {
+        for cy in FILL_FROM.y..=FILL_TO.y {
+            for cx in FILL_FROM.x..=FILL_TO.x {
+                let origin = IVec3::new(cx, cy, cz) * 32;
+                let (mut open, mut direct) = (0u64, 0u64);
+                for cell in 0..64 {
+                    let corner =
+                        origin + IVec3::new(cell & 3, cell >> 2 & 3, cell >> 4) * 8;
+                    let highest = (0..64)
+                        .map(|i| {
+                            let (x, z) = (corner.x + i % 8, corner.z + i / 8);
+                            top[(x - low.x) as usize + (z - low.z) as usize * width]
+                        })
+                        .max()
+                        .unwrap();
+                    let is_open = highest < corner.y
+                        || (0..512).all(|i| {
+                            scene.open(corner + IVec3::new(i % 8, i / 8 % 8, i / 64))
+                        });
+                    if is_open {
+                        open |= 1 << cell;
+                        if highest < corner.y {
+                            direct |= 1 << cell;
+                        }
+                    }
+                }
+                field.learn(IVec3::new(cx, cy, cz), open, direct);
+            }
+        }
+    }
+    field.settle();
+    field
+}
+
+/// Seeding sky fill with the default model, on chunks it lights, at the
+/// default sky reach of 30 and at 16. The gate is 100 µs per chunk at 30.
+fn seed_metrics(metrics: &mut Metrics) {
+    let mut scene = Scene::new();
+    let field = fill_field(&mut scene);
+    for reach in [16, 30] {
+        let side = 32 + 2 * reach as i32;
+        let boxes: Vec<SeedBox> = FILL_CHUNKS
+            .iter()
+            .map(|chunk| {
+                let origin = *chunk * 32 - IVec3::splat(reach as i32);
+                let mut open = vec![false; (side * side * side) as usize];
+                for (i, open) in open.iter_mut().enumerate() {
+                    let i = i as i32;
+                    let p = IVec3::new(i % side, i / side % side, i / (side * side));
+                    *open = scene.open(origin + p);
+                }
+                SeedBox::new(&field, *chunk, reach, |p| {
+                    open[(p.x + p.y * side + p.z * side * side) as usize]
+                })
+            })
+            .filter(|seed_box| seed_box.seed() > 0)
+            .collect();
+        metrics.insert(format!("seed.reach{reach}.chunks"), boxes.len() as f64);
+        let mut times: Vec<f64> = boxes
+            .iter()
+            .map(|seed_box| {
+                best_us(|| {
+                    black_box(seed_box.seed());
+                })
+            })
+            .collect();
+        let most = times.iter().copied().fold(0.0, f64::max);
+        metrics.insert(format!("seed.reach{reach}.p50_us"), median(&mut times));
+        metrics.insert(format!("seed.reach{reach}.max_us"), most);
+    }
+}
+
 fn run_all() -> Metrics {
     let mut metrics = Metrics::new();
+    eprintln!("seeding sky fill...");
+    seed_metrics(&mut metrics);
     eprintln!("cutting boxes from the reference scene...");
     let dumps = dumps();
     metrics.insert("kernel.boxes".into(), dumps.len() as f64);
@@ -614,6 +730,13 @@ fn main() {
                 println!("{key:<38} {value:>10.2}");
             }
             save(label, &metrics);
+        }
+        ["seed"] => {
+            let mut metrics = Metrics::new();
+            seed_metrics(&mut metrics);
+            for (key, value) in &metrics {
+                println!("{key:<38} {value:>10.2}");
+            }
         }
         ["compare", before, after] => {
             if !compare(&load_all(before), &load_all(after)) {
