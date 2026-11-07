@@ -212,6 +212,12 @@ Every setting, what it costs and when a change shows are in the rustdoc of [`Lig
 $ cargo run -r --example light_tuning --features light_propagation
 ```
 
+The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) lights a house and a cave at dusk with light propagation together with Bevy's atmosphere, fog and point lights. Some rooms have lamps, some only windows, and some neither. Walk through them, and place and remove voxels to see the light follow:
+
+```bash
+$ cargo run -r --example light_mountain_house --features light_propagation
+```
+
 ## AI Disclosure
 
 From version 0.19.0 of `bevy_voxel_world`, AI has been used to implement new features, optimize existing ones and write some documentation (such as release notes). On prior versions, AI was used only sparingly for some of the upgrade work to keep up with Bevy versions.

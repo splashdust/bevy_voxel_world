@@ -73,6 +73,10 @@ path = "examples/light_caves.rs"
 required-features = ["light_propagation"]
 
 [[example]]
+name = "light_mountain_house"
+path = "examples/light_mountain_house.rs"
+required-features = ["light_propagation"]
+[[example]]
 name = "light_tuning"
 path = "examples/light_tuning.rs"
 required-features = ["light_propagation"]
