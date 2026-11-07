@@ -16,6 +16,12 @@
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map.
+//! - Each change of the look shows on the frame after it's made, and the glow
+//!   still scales with each lamp's declared level.
+//! - A sealed pocket stays exactly black at minimum brightness 0 under every
+//!   kind of level curve, with entry 0 set above 0.
+//! - Stepped light renders the lamp room and the overhang, as smoothed light
+//!   does.
 //! - A slot given to another chunk the frame after it's freed never shows the
 //!   other chunk's light: two lamps in rooms carved deep in the rock switch on
 //!   and off in turn, so their chunks take and give back the same slot, while
@@ -261,6 +267,8 @@ struct CaveWorld {
     /// For the pixel checks: with sky light, but no sky fill, or with no sky
     /// light.
     check_sky: Option<bool>,
+    /// How light looks. The pixel checks change it while running.
+    look: LightLook,
 }
 
 impl VoxelWorldConfig for CaveWorld {
@@ -290,15 +298,18 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
+        let look = self.look.clone();
         Some(match self.check_sky {
-            None => LightPropagation::default(),
+            None => LightPropagation { look, ..default() },
             Some(true) => LightPropagation {
                 sky_fill: None,
+                look,
                 ..default()
             },
             Some(false) => LightPropagation {
                 sky: Sky::Off,
                 sky_fill: None,
+                look,
                 ..default()
             },
         })
@@ -330,12 +341,20 @@ const LAMP_ROOM_CAMERA: FixedCamera =
     camera([306.0, -30.0, -332.0], [320.5, -40.0, -319.5]);
 const POCKET_CAMERA: FixedCamera = camera([-324.5, 43.0, 124.0], [-316.0, 42.0, 132.0]);
 
+/// Looks under the slab sticking out of the mesa, at the mesa's shaded face.
+const OVERHANG_CAMERA: FixedCamera = camera([0.0, 44.0, 396.0], [0.0, 42.0, 340.0]);
+/// Looks at the mesa's sunlit face and the ground below it.
+const SUNLIT_FACE_CAMERA: FixedCamera = camera([20.0, 60.0, 250.0], [0.0, 40.0, 290.0]);
+/// Looks past the slab from the side the sun shines in from, at ground whose
+/// sky light falls off beside the slab and the cave mouths beyond it.
+const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 372.0]);
+
 const CAMERAS: [FixedCamera; 6] = [
     camera([-260.0, 240.0, -300.0], [-40.0, 90.0, 40.0]),
     LAMP_ROOM_CAMERA,
     camera([-296.0, -24.0, 26.0], [-319.5, -38.0, 0.5]),
     POCKET_CAMERA,
-    camera([0.0, 44.0, 396.0], [0.0, 42.0, 340.0]),
+    OVERHANG_CAMERA,
     camera([-540.0, 120.0, 300.0], [-340.0, 130.0, 360.0]),
 ];
 
@@ -422,33 +441,215 @@ struct Check {
     shadow_maps: bool,
     /// The file of the earlier check whose picture the judge gets.
     earlier: Option<&'static str>,
-    judge:
-        fn(&Image, &Camera, &GlobalTransform, Option<&Image>) -> Result<String, String>,
+    judge: Judge,
     /// Whether it switches the slot lamps while judging a picture each frame.
     switches_lamps: bool,
+    /// The look the world has for the picture.
+    look: fn() -> LightLook,
+    /// Whether it takes the picture on the frame after setting the look,
+    /// without waiting for the world to settle. The camera and the sun must
+    /// be as the check before left them.
+    next_frame: bool,
 }
 
-const CHECKS: [Check; 5] = [
+type Judge =
+    fn(&Image, &Camera, &GlobalTransform, Option<&Image>) -> Result<String, String>;
+
+/// A check with the default look that waits for the world to settle.
+const fn settled_check(
+    name: &'static str,
+    file: &'static str,
+    sky: bool,
+    camera: &'static FixedCamera,
+    shadow_maps: bool,
+    earlier: Option<&'static str>,
+    judge: Judge,
+) -> Check {
     Check {
-        name: "a lamp declared below the top level still glows, scaled by its level",
-        file: "lamp_room.png",
-        sky: false,
-        camera: &LAMP_ROOM_CAMERA,
-        shadow_maps: true,
-        earlier: None,
-        judge: dim_lamp_glows,
+        name,
+        file,
+        sky,
+        camera,
+        shadow_maps,
+        earlier,
+        judge,
         switches_lamps: false,
-    },
+        look: LightLook::default,
+        next_frame: false,
+    }
+}
+
+/// A check that sets `look`, with the camera and the sun as the check before
+/// left them, and judges the picture of the next frame.
+const fn look_check(
+    name: &'static str,
+    file: &'static str,
+    sky: bool,
+    camera: &'static FixedCamera,
+    earlier: Option<&'static str>,
+    judge: Judge,
+    look: fn() -> LightLook,
+) -> Check {
     Check {
-        name: "a sealed pocket with no light in reach is exactly black",
-        file: "sealed_pocket.png",
-        sky: true,
-        camera: &POCKET_CAMERA,
+        name,
+        file,
+        sky,
+        camera,
         shadow_maps: true,
-        earlier: None,
-        judge: pocket_is_black,
+        earlier,
+        judge,
         switches_lamps: false,
-    },
+        look,
+        next_frame: true,
+    }
+}
+
+/// The look with both falloffs and the sun following `curve`, with its entry
+/// for level 0 set to 1, which the crate reads as 0, and minimum brightness 0.
+fn curve_look(curve: LevelCurve) -> LightLook {
+    let mut table = [0.0; 16];
+    for (level, entry) in table.iter_mut().enumerate() {
+        *entry = curve.at(level as f32);
+    }
+    table[0] = 1.0;
+    let curve = LevelCurve::from_table(table);
+    LightLook {
+        sky_falloff: curve.clone(),
+        voxel_falloff: curve.clone(),
+        sun: SunGate::ByLevel(curve),
+        minimum_brightness: 0.0,
+        ..default()
+    }
+}
+
+const CHECKS: [Check; 22] = [
+    settled_check(
+        "a lamp declared below the top level still glows, scaled by its level",
+        "lamp_room.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        true,
+        None,
+        dim_lamp_glows,
+    ),
+    look_check(
+        "a change of voxel brightness shows on the next frame",
+        "look_voxel_brightness.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        Some("lamp_room.png"),
+        differs_from_earlier,
+        || LightLook {
+            voxel_brightness: 250.0,
+            ..default()
+        },
+    ),
+    look_check(
+        "a change of voxel falloff shows on the next frame",
+        "look_voxel_falloff.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        Some("lamp_room.png"),
+        differs_from_earlier,
+        || LightLook {
+            voxel_falloff: LevelCurve::linear(),
+            ..default()
+        },
+    ),
+    look_check(
+        "stepped light renders the lamp room, on the next frame",
+        "look_stepped.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        Some("lamp_room.png"),
+        differs_from_earlier,
+        || LightLook {
+            smoothing: LightSmoothing::Stepped,
+            ..default()
+        },
+    ),
+    look_check(
+        "a minimum brightness shows on the next frame",
+        "look_minimum_brightness.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        Some("lamp_room.png"),
+        differs_from_earlier,
+        || LightLook {
+            minimum_brightness: 0.05,
+            ..default()
+        },
+    ),
+    look_check(
+        "a change of glow shows on the next frame, still scaled by each lamp's level",
+        "look_emissive_glow.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        Some("lamp_room.png"),
+        glow_changes_and_scales,
+        || LightLook {
+            emissive_glow: 2.0,
+            ..default()
+        },
+    ),
+    settled_check(
+        "a sun with no shadow map leaves propagated shade as it was",
+        "lamp_room_no_shadow_map.png",
+        false,
+        &LAMP_ROOM_CAMERA,
+        false,
+        Some("lamp_room.png"),
+        matches_earlier,
+    ),
+    settled_check(
+        "a sealed pocket with no light in reach is exactly black",
+        "sealed_pocket.png",
+        true,
+        &POCKET_CAMERA,
+        true,
+        None,
+        pocket_is_black,
+    ),
+    look_check(
+        "a sealed pocket stays exactly black under a flat curve",
+        "pocket_flat_curve.png",
+        true,
+        &POCKET_CAMERA,
+        None,
+        pocket_is_black,
+        || curve_look(LevelCurve::from_fn(|_| 1.0)),
+    ),
+    look_check(
+        "a sealed pocket stays exactly black under the linear curve",
+        "pocket_linear_curve.png",
+        true,
+        &POCKET_CAMERA,
+        None,
+        pocket_is_black,
+        || curve_look(LevelCurve::linear()),
+    ),
+    look_check(
+        "a sealed pocket stays exactly black under the gamma curve",
+        "pocket_gamma_curve.png",
+        true,
+        &POCKET_CAMERA,
+        None,
+        pocket_is_black,
+        || curve_look(LevelCurve::gamma(2.2)),
+    ),
+    look_check(
+        "a sealed pocket stays exactly black under a slow exponential curve, stepped",
+        "pocket_exponential_curve.png",
+        true,
+        &POCKET_CAMERA,
+        None,
+        pocket_is_black,
+        || LightLook {
+            smoothing: LightSmoothing::Stepped,
+            ao: LightAo::BaseColor,
+            ..curve_look(LevelCurve::exponential(0.95))
+        },
+    ),
     Check {
         name: "a slot given to another chunk the frame after it's freed never shows the other chunk's light",
         file: "slot_room.png",
@@ -458,27 +659,105 @@ const CHECKS: [Check; 5] = [
         earlier: None,
         judge: pocket_is_black,
         switches_lamps: true,
+        look: LightLook::default,
+        next_frame: false,
     },
-    Check {
-        name: "a sun with no shadow map leaves a sealed pocket exactly black",
-        file: "sealed_pocket_no_shadow_map.png",
-        sky: true,
-        camera: &POCKET_CAMERA,
-        shadow_maps: false,
-        earlier: None,
-        judge: pocket_is_black,
-        switches_lamps: false,
-    },
-    Check {
-        name: "a sun with no shadow map leaves propagated shade as it was",
-        file: "lamp_room_no_shadow_map.png",
-        sky: false,
-        camera: &LAMP_ROOM_CAMERA,
-        shadow_maps: false,
-        earlier: Some("lamp_room.png"),
-        judge: matches_earlier,
-        switches_lamps: false,
-    },
+    settled_check(
+        "a sun with no shadow map leaves a sealed pocket exactly black",
+        "sealed_pocket_no_shadow_map.png",
+        true,
+        &POCKET_CAMERA,
+        false,
+        None,
+        pocket_is_black,
+    ),
+    settled_check(
+        "smoothed light renders the overhang",
+        "overhang.png",
+        true,
+        &OVERHANG_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "stepped light renders the overhang, on the next frame",
+        "overhang_stepped.png",
+        true,
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
+        renders_and_differs,
+        || LightLook {
+            smoothing: LightSmoothing::Stepped,
+            ..default()
+        },
+    ),
+    look_check(
+        "turning ambient occlusion off shows on the next frame",
+        "overhang_ao_off.png",
+        true,
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
+        renders_and_differs,
+        || LightLook {
+            ao: LightAo::Off,
+            ..default()
+        },
+    ),
+    look_check(
+        "a change of sky falloff shows on the next frame",
+        "overhang_sky_falloff.png",
+        true,
+        &OVERHANG_CAMERA,
+        Some("overhang.png"),
+        renders_and_differs,
+        || LightLook {
+            sky_falloff: LevelCurve::gamma(2.2),
+            ..default()
+        },
+    ),
+    settled_check(
+        "smoothed light renders the sunlit face of the mesa",
+        "sunlit_face.png",
+        true,
+        &SUNLIT_FACE_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "ambient occlusion on the base colour shows on the next frame",
+        "sunlit_face_ao_base_color.png",
+        true,
+        &SUNLIT_FACE_CAMERA,
+        Some("sunlit_face.png"),
+        renders_and_differs,
+        || LightLook {
+            ao: LightAo::BaseColor,
+            ..default()
+        },
+    ),
+    settled_check(
+        "smoothed light renders the overhang's drip line",
+        "drip_line.png",
+        true,
+        &DRIP_LINE_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "a sun following sky light by level shows on the next frame",
+        "drip_line_sun_by_level.png",
+        true,
+        &DRIP_LINE_CAMERA,
+        Some("drip_line.png"),
+        renders_and_differs,
+        || LightLook {
+            sun: SunGate::ByLevel(LevelCurve::linear()),
+            ..default()
+        },
+    ),
 ];
 
 /// The pictures of the checks so far, by file.
@@ -566,6 +845,9 @@ struct CheckPlan {
     shots_failed: u32,
     /// Where to save the pictures, if anywhere.
     directory: Option<std::path::PathBuf>,
+    /// The look the current check wants, which `follow_plan_look` gives the
+    /// world.
+    look: LightLook,
 }
 
 /// Runs the checks with sky light off, then with it on, each in a process of
@@ -602,6 +884,7 @@ fn check_part(sky: bool) {
         )))
         .add_plugins(VoxelWorldPlugin::with_config(CaveWorld {
             check_sky: Some(sky),
+            ..default()
         }))
         .init_resource::<Pictures>()
         .add_systems(
@@ -610,8 +893,17 @@ fn check_part(sky: bool) {
                 setup_check(commands, images, sky)
             },
         )
-        .add_systems(Update, run_checks)
+        .add_systems(Update, (run_checks, follow_plan_look).chain())
         .run();
+}
+
+/// Gives the world the look the current check wants. It runs apart from
+/// `run_checks`, since writing the world's config takes `ResMut<CaveWorld>`,
+/// which `VoxelWorld<CaveWorld>` can't share a system with.
+fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
+    if world.look != plan.look {
+        world.look = plan.look.clone();
+    }
 }
 
 fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: bool) {
@@ -643,6 +935,7 @@ fn setup_check(mut commands: Commands, mut images: ResMut<Assets<Image>>, sky: b
         shots_out: 0,
         shots_failed: 0,
         directory: std::env::args().nth(2).map(Into::into),
+        look: LightLook::default(),
     });
 }
 
@@ -684,8 +977,10 @@ fn run_checks(
     let shadow_maps_wrong = suns
         .iter()
         .any(|sun| sun.shadow_maps_enabled != check.shadow_maps);
-    if *transform != wanted || shadow_maps_wrong {
+    let look = (check.look)();
+    if *transform != wanted || shadow_maps_wrong || plan.look != look {
         *transform = wanted;
+        plan.look = look;
         for mut sun in &mut suns {
             sun.shadow_maps_enabled = check.shadow_maps;
         }
@@ -702,7 +997,8 @@ fn run_checks(
     }
     let waited = frame - plan.moved_at_frame;
     let quiet = frame - plan.last_busy_frame.max(plan.moved_at_frame);
-    if !(quiet >= 60 && waited >= 120) {
+    // A look change shows on the next frame, with no waiting.
+    if !check.next_frame && !(quiet >= 60 && waited >= 120) {
         if waited >= 3600 {
             println!("FAIL {}: the world never settled", check.name);
             plan.failed = true;
@@ -815,6 +1111,86 @@ fn switch_and_judge(
         plan.failed = true;
     }
     plan.next += 1;
+}
+
+/// Whether `image` differs from the earlier check's picture in at least 0.1% of
+/// its channels by more than one step of rounding.
+fn differs_from_earlier(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let earlier = earlier
+        .and_then(|earlier| earlier.data.as_ref())
+        .ok_or("no earlier picture")?;
+    let differing = data
+        .iter()
+        .zip(earlier)
+        .filter(|(now, before)| now.abs_diff(**before) > 1)
+        .count();
+    let note = format!("{differing} channels differ by more than 1");
+    if differing * 1000 >= data.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether at least a tenth of `image`'s pixels aren't black.
+fn renders(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pixels = data.as_chunks::<4>().0;
+    let lit = pixels
+        .iter()
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    let note = format!("{lit} of {} pixels lit", pixels.len());
+    if lit * 10 >= pixels.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+fn renders_and_differs(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let rendered = renders(image, camera, global, earlier)?;
+    let differs = differs_from_earlier(image, camera, global, earlier)?;
+    Ok(format!("{rendered}, {differs}"))
+}
+
+/// Whether the dim lamp's glow changed from the earlier picture, and it still
+/// glows less than the bright lamp.
+fn glow_changes_and_scales(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let earlier = earlier.ok_or("no earlier picture")?;
+    let top = Vec3::new(0.5, 1.0, 0.5);
+    let bright = brightness_at(image, camera, global, BRIGHT_LAMP_AT.as_vec3() + top)?;
+    let dim = brightness_at(image, camera, global, DIM_LAMP_AT.as_vec3() + top)?;
+    let dim_before = brightness_at(earlier, camera, global, DIM_LAMP_AT.as_vec3() + top)?;
+    let note = format!(
+        "bright lamp {bright}, dim lamp {dim}, dim lamp before the change {dim_before}"
+    );
+    if dim > 0 && dim < bright && dim != dim_before {
+        Ok(note)
+    } else {
+        Err(note)
+    }
 }
 
 fn pocket_is_black(

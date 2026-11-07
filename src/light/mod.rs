@@ -35,6 +35,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bevy::asset::AssetEventSystems;
+use bevy::log::warn_once;
 use bevy::prelude::*;
 
 use crate::chunk::ChunkKey;
@@ -58,7 +60,8 @@ use view::LightView;
 /// values clamped. Only a world that returned a light config has one.
 #[derive(Resource)]
 pub(crate) struct LightSettings<C: VoxelWorldConfig> {
-    #[cfg_attr(not(test), expect(dead_code, reason = "nothing compares settings yet"))]
+    /// The config as last applied. A field outside `look` is the value read
+    /// at plugin build.
     pub config: LightPropagation,
     #[cfg_attr(not(test), expect(dead_code, reason = "nothing compares settings yet"))]
     pub emissive_materials: Vec<(C::MaterialIndex, Emission)>,
@@ -285,7 +288,42 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
                 .after(ChunkLifecycle::<C>::start_chunk_tasks),
         )
             .in_set(VoxelWorldSet::<C>::default()),
+    )
+    .add_systems(
+        PostUpdate,
+        follow_config::<C>
+            .run_if(resource_changed::<C>)
+            .before(AssetEventSystems),
     );
+}
+
+/// Compares world `C`'s light config with what it last applied, on frames
+/// where the world's config resource changed, and applies a changed look.
+///
+/// Only `look` is applied: the world's material writes it into its uniform
+/// on the same frame. The rest is read once at plugin build, and changing
+/// `shown`, or returning `None` after `Some`, logs a warning once.
+pub(crate) fn follow_config<C: VoxelWorldConfig>(
+    world: Res<C>,
+    mut settings: ResMut<LightSettings<C>>,
+) {
+    let Some(config) = world.light_propagation() else {
+        warn_once!(
+            "light propagation: a world's light_propagation() returned None after \
+             returning a config at plugin build, which changes nothing"
+        );
+        return;
+    };
+    if config.shown != settings.config.shown {
+        warn_once!(
+            "light propagation: `shown` is read once at plugin build, so changing it \
+             changes nothing"
+        );
+    }
+    let look = config.look.clamped();
+    if look != settings.config.look {
+        settings.config.look = look;
+    }
 }
 
 /// The level of sky light a chunk shows before its light lands: direct sky,

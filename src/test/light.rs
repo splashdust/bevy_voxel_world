@@ -14,6 +14,8 @@ mod coarse;
 #[cfg(feature = "light_propagation")]
 mod edits;
 #[cfg(feature = "light_propagation")]
+mod look;
+#[cfg(feature = "light_propagation")]
 mod materials;
 #[cfg(feature = "light_propagation")]
 mod reference;

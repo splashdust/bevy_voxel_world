@@ -65,7 +65,7 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 
 use bevy::{
-    asset::uuid_handle,
+    asset::{uuid_handle, AssetEventSystems},
     mesh::MeshVertexBufferLayoutRef,
     pbr::{
         ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
@@ -83,6 +83,7 @@ use super::config::{
     LevelCurve, LightAo, LightPrecision, LightPropagation, LightSmoothing, SunGate,
 };
 use super::route::{self, LightRoute};
+use super::LightSettings;
 use crate::configuration::VoxelWorldConfig;
 use crate::plugin::{add_material_path, VoxelWorldMaterialHandle, WorldMaterial};
 use crate::voxel_world_internal::Internals;
@@ -145,6 +146,14 @@ pub struct VoxelWorldBindings<M: Material> {
     _material: PhantomData<fn() -> M>,
 }
 
+impl<M: Material> VoxelWorldBindings<M> {
+    /// The look the shader reads.
+    #[cfg(test)]
+    pub(crate) fn look(&self) -> &LookUniform {
+        &self.look
+    }
+}
+
 impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
     fn vertex_shader() -> ShaderRef {
         lit_pbr_shader::<M>()
@@ -192,7 +201,7 @@ fn lit_pbr_shader<M: Material>() -> ShaderRef {
 ///
 /// Each curve is 16 levels as 4 `vec4`s, with level 0 forced to 0, so a
 /// face with no light stays black whatever the curve says.
-#[derive(Clone, Copy, Debug, ShaderType)]
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub(crate) struct LookUniform {
     pub sky_falloff: [Vec4; 4],
     pub voxel_falloff: [Vec4; 4],
@@ -334,7 +343,6 @@ where
     add_material_path::<C, VoxelWorldMaterial<M>>(app, handle.clone(), false);
     if handle.is_none() {
         app.insert_resource(HandAddedMaterial::<C, M> {
-            look,
             wrapped_from: None,
             _world: PhantomData,
         })
@@ -346,7 +354,14 @@ where
     }
     app.add_systems(
         PostUpdate,
-        make_texture::<C, M>.run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+        (
+            make_texture::<C, M>
+                .run_if(|route: Res<LightRoute<C>>| route.texture_wanted()),
+            apply_look::<C, M>
+                .run_if(resource_changed::<C>)
+                .after(super::follow_config::<C>)
+                .before(AssetEventSystems),
+        ),
     );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
@@ -373,7 +388,6 @@ fn wrap<M: Material>(
 /// What lit world `C` needs to wrap a material added by hand.
 #[derive(Resource)]
 struct HandAddedMaterial<C, M: Material> {
-    look: LookUniform,
     /// The hand-added material the world's wrapped copy was made from.
     wrapped_from: Option<AssetId<M>>,
     _world: PhantomData<C>,
@@ -387,6 +401,7 @@ struct HandAddedMaterial<C, M: Material> {
 /// each bind their own light texture. The copy's handle is also inserted as
 /// `VoxelWorldMaterialHandle<VoxelWorldMaterial<M>>`, and later edits go
 /// through it: an edit to the hand-added material doesn't reach the copy.
+#[allow(clippy::too_many_arguments)]
 fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
     mut commands: Commands,
     hand_added: Option<Res<VoxelWorldMaterialHandle<M>>>,
@@ -395,6 +410,7 @@ fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
     mut state: ResMut<HandAddedMaterial<C, M>>,
     mut world_material: ResMut<WorldMaterial<C, VoxelWorldMaterial<M>>>,
     route: Res<LightRoute<C>>,
+    settings: Res<LightSettings<C>>,
 ) {
     let Some(hand_added) = hand_added else {
         return;
@@ -406,10 +422,47 @@ fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
     let Some(base) = materials.and_then(|materials| materials.get(id).cloned()) else {
         return;
     };
-    let handle = wrapped.add(wrap(base, route.texture(), state.look));
+    let look = LookUniform::new(&settings.config);
+    let handle = wrapped.add(wrap(base, route.texture(), look));
     state.wrapped_from = Some(id);
     world_material.handle = Some(handle.clone());
     commands.insert_resource(VoxelWorldMaterialHandle { handle });
+}
+
+/// Writes world `C`'s look into the uniform of each of its materials whose
+/// look differs from the one the world last applied.
+///
+/// A world's materials are those binding its light texture, or its
+/// placeholder before the texture is made: its material, and any earlier copy
+/// of a hand-added material that chunks still show.
+///
+/// It runs only on frames where the world's config changed, and writes a
+/// material only when its look changed, since a write makes Bevy prepare the
+/// material's bind group again. It runs before Bevy sends this frame's asset
+/// events, so the frame renders the new look.
+fn apply_look<C: VoxelWorldConfig, M: Material>(
+    settings: Res<LightSettings<C>>,
+    route: Res<LightRoute<C>>,
+    mut materials: ResMut<Assets<VoxelWorldMaterial<M>>>,
+) where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let look = LookUniform::new(&settings.config);
+    let texture = route.texture().id();
+    let changed: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| {
+            material.extension.light_texture.id() == texture
+                && material.extension.look != look
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in changed {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.look = look;
+        }
+    }
 }
 
 /// Makes world `C`'s light texture, once a chunk first takes a slot, and

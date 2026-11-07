@@ -423,31 +423,58 @@ pub enum LightPrecision {
     Steps256,
 }
 
-/// How light looks on chunk faces. Every field shows on the next frame.
+/// How light looks on chunk faces.
+///
+/// Every field shows on the next frame: a change to any of them costs one
+/// write of the world's look uniform, with no relight and no work per chunk.
+/// The crate notices a change on frames where the world's config resource
+/// changed, so a system can tune the look by writing to that resource.
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub struct LightLook {
-    /// Whether light blends between neighbouring voxels on a face.
-    /// Defaults to [`LightSmoothing::Smoothed`].
+    /// Whether light blends between neighbouring voxels on a face, or shows
+    /// each voxel's level as a flat step for a blocky style.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to
+    /// [`LightSmoothing::Smoothed`].
     pub smoothing: LightSmoothing,
-    /// The brightness of each sky light level. Defaults to `0.7^(15 - level)`,
-    /// with level 0 exactly black.
+    /// The brightness of each sky light level, as the share of Bevy's ambient
+    /// light and environment map a face gets.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to
+    /// `0.7^(15 - level)`, with level 0 exactly black.
     pub sky_falloff: LevelCurve,
-    /// The brightness of each voxel light level. Defaults to
+    /// The brightness of each voxel light level, as a share of
+    /// `voxel_brightness`.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to
     /// `0.7^(15 - level)`, with level 0 exactly black.
     pub voxel_falloff: LevelCurve,
-    /// Where Bevy's directional lights shine. Defaults to
+    /// Where Bevy's directional lights shine.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to
     /// [`SunGate::DirectSkyOnly`].
     pub sun: SunGate,
     /// The brightness of voxel light at level 15, multiplied by the camera's
-    /// exposure, at least 0. Defaults to 1,000.
+    /// exposure, at least 0.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to 1,000.
     pub voxel_brightness: f32,
     /// How brightly an emissive voxel's own faces glow, as a multiple of voxel
-    /// light at level 15, at least 0. Defaults to 6.
+    /// light at level 15, at least 0. A lamp declared below level 15 glows
+    /// less, by `voxel_falloff` at its level.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to 6.
     pub emissive_glow: f32,
-    /// What ambient occlusion darkens. Defaults to [`LightAo::IndirectLight`].
+    /// What the mesh's ambient occlusion darkens.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to
+    /// [`LightAo::IndirectLight`].
     pub ao: LightAo,
-    /// The least brightness of any face, at least 0, so caves needn't be pitch
-    /// black. Defaults to 0.
+    /// The least share of Bevy's ambient light any face gets, at least 0, so
+    /// caves needn't be pitch black. At 0, a face no light reaches is exactly
+    /// black.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to 0.
     pub minimum_brightness: f32,
 }
 
@@ -467,7 +494,9 @@ impl Default for LightLook {
 }
 
 impl LightLook {
-    fn clamped(self) -> Self {
+    /// This look with every out-of-range value clamped, logging a warning
+    /// once for each kind of value clamped.
+    pub(crate) fn clamped(self) -> Self {
         Self {
             voxel_brightness: clamp_f32(
                 self.voxel_brightness,
@@ -482,6 +511,20 @@ impl LightLook {
                 f32::MAX,
                 "minimum_brightness",
             ),
+            sky_falloff: self
+                .sky_falloff
+                .clamped(0.0, f32::MAX, "a sky_falloff entry"),
+            voxel_falloff: self.voxel_falloff.clamped(
+                0.0,
+                f32::MAX,
+                "a voxel_falloff entry",
+            ),
+            sun: match self.sun {
+                SunGate::ByLevel(curve) => {
+                    SunGate::ByLevel(curve.clamped(0.0, 1.0, "a sun curve entry"))
+                }
+                direct => direct,
+            },
             ..self
         }
     }
@@ -497,7 +540,11 @@ pub enum LightSmoothing {
     Stepped,
 }
 
-/// The brightness of each light level from 0 to 15.
+/// The brightness of each light level from 0 to 15, as 16 entries.
+///
+/// Level 0 is always black: the entry for it is read as 0 whatever it holds,
+/// so a voxel no light reaches stays black under any curve. Brightness is at
+/// least 0, and a negative or NaN entry is clamped to 0 with a warning.
 #[derive(Reflect, Clone, PartialEq, Debug)]
 pub struct LevelCurve {
     pub(crate) brightness: [f32; 16],
@@ -506,8 +553,76 @@ pub struct LevelCurve {
 impl Default for LevelCurve {
     /// `0.7^(15 - level)`, so each level is 70% as bright as the one above it.
     fn default() -> Self {
+        Self::exponential(0.7)
+    }
+}
+
+impl LevelCurve {
+    /// `base^(15 - level)`: each level is `base` times as bright as the one
+    /// above it, and level 15 is 1.
+    pub fn exponential(base: f32) -> Self {
+        Self::from_fn(|level| base.powi(15 - level as i32))
+    }
+
+    /// `(level / 15)^gamma`, so level 15 is 1. `gamma(2.2)` spreads the levels
+    /// evenly to the eye on a display with that gamma.
+    pub fn gamma(gamma: f32) -> Self {
+        Self::from_fn(|level| (level as f32 / 15.0).powf(gamma))
+    }
+
+    /// `level / 15`, so level 15 is 1.
+    pub fn linear() -> Self {
+        Self::from_fn(|level| level as f32 / 15.0)
+    }
+
+    /// The brightness `brightness(level)` returns for each level from 0 to 15.
+    pub fn from_fn(brightness: impl FnMut(u8) -> f32) -> Self {
+        let mut brightness = brightness;
         Self {
-            brightness: std::array::from_fn(|level| 0.7_f32.powi(15 - level as i32)),
+            brightness: std::array::from_fn(|level| brightness(level as u8)),
+        }
+    }
+
+    /// The brightness of each level from 0 to 15, in order.
+    pub fn from_table(brightness: [f32; 16]) -> Self {
+        Self { brightness }
+    }
+
+    /// The brightness of `level`, as the shader reads it: 0 at level 0 or
+    /// below, the entry at a whole level, between the two entries around a
+    /// level between whole levels, and level 15's above 15.
+    ///
+    /// Gameplay code can dim its own entities the way voxels dim: read the
+    /// light at the entity's voxel with
+    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and
+    /// scale the entity's colour by `sky_falloff.at(levels.sky)` for the
+    /// ambient light it gets and `voxel_falloff.at(levels.voxel)` times
+    /// `voxel_brightness` for voxel light, using the world's [`LightLook`].
+    pub fn at(&self, level: f32) -> f32 {
+        if level.is_nan() || level <= 0.0 {
+            return 0.0;
+        }
+        let level = level.min(15.0);
+        let low = level.floor() as usize;
+        let high = (low + 1).min(15);
+        let entry = |level: usize| {
+            if level == 0 {
+                0.0
+            } else {
+                self.brightness[level]
+            }
+        };
+        let t = level - low as f32;
+        entry(low) * (1.0 - t) + entry(high) * t
+    }
+
+    /// This curve with every entry kept within `min..=max`, logging a warning
+    /// once if one wasn't. NaN becomes `min`.
+    fn clamped(self, min: f32, max: f32, name: &str) -> Self {
+        Self {
+            brightness: self
+                .brightness
+                .map(|entry| clamp_f32(entry, min, max, name)),
         }
     }
 }
@@ -527,20 +642,30 @@ pub enum SunGate {
     /// light.
     #[default]
     DirectSkyOnly,
-    /// Scaled by the sky light level, through this curve.
+    /// Scaled by the sky light level through this curve, from 0, no sun, to
+    /// 1, the whole sun, so the sun follows sky light past direct sky and
+    /// fades as it spreads. Entries are clamped to 0 to 1.
+    ///
+    /// Bevy's shadow map still applies, but rock that hasn't spawned casts no
+    /// shadow, so a curve that lets the sun below level 15 can let it into
+    /// caves where their sky light reaches.
     ByLevel(LevelCurve),
 }
 
-/// What ambient occlusion darkens on a lit chunk.
+/// What the ambient occlusion of a lit chunk's mesh darkens.
+///
+/// The ambient occlusion is what the mesher puts in the mesh's vertex colour.
 #[derive(Reflect, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LightAo {
-    /// Bevy's ambient light and voxel light, so rock keeps its shape in dim
-    /// places.
+    /// Bevy's ambient light and voxel light, leaving the base colour and the
+    /// sun alone, so rock keeps its shape in dim places and sunlit faces show
+    /// no dark corners.
     #[default]
     IndirectLight,
-    /// The base colour, as without light propagation.
+    /// The base colour, so every light darkens in corners, the sun's too, as
+    /// without light propagation.
     BaseColor,
-    /// No ambient occlusion.
+    /// Nothing: ambient occlusion is ignored.
     Off,
 }
 
