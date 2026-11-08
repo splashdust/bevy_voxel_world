@@ -79,7 +79,7 @@ required-features = ["light_propagation"]
 
 [[example]]
 name = "light_tuning"
-path = "examples/light_tuning.rs"
+path = "examples/light_tuning/main.rs"
 required-features = ["light_propagation"]
 # Its tests check that the config it prints is the Rust that builds it.
 test = true
@@ -127,10 +127,12 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = [
 
 [dev-dependencies]
 bevy_northstar = { version = "0.8.0" }
+# `bevy_feathers` draws the `light_tuning` example's settings panel.
 bevy = { version = "0.20", default-features = false, features = [
   "3d",
   "bevy_ui",
   "bevy_ui_render",
+  "bevy_feathers",
   "png",
 ] }
 bevy_panorbit_camera = { version = "0.36.0" }

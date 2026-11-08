@@ -206,7 +206,7 @@ A world that returns `None`, the default, pays nothing. One that opts in gets, b
 
 Set a `GlobalAmbientLight` of about 600: light scales it down in shade, and caves stay black at any value. Propagated light shades chunks only, and `VoxelWorld::light_at` reads the light at a voxel, so a game can dim its own entities to match.
 
-Every setting, what it costs and when a change shows are in the rustdoc of [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning.rs) puts each setting on a dial and prints the config you pick as Rust:
+Every setting, what it costs and when a change shows are in the rustdoc of [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning/main.rs) puts every setting in a panel that says what it does and where in its world to look, times how long each change takes to settle, and prints the config you pick as Rust:
 
 ```bash
 $ cargo run -r --example light_tuning --features light_propagation

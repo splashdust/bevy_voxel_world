@@ -64,10 +64,10 @@ use bevy::reflect::Reflect;
 ///
 /// A change that relights works out again the light of every chunk with an open
 /// voxel touching a solid, counting the solids just past its faces: on native,
-/// a change of reach, shape, sky fill or the sky rule settles in about 0.1 s, 5
-/// to 7 frames at 60 frames a second, in the `light_tuning` example's world of
-/// about 320 chunks, with a brief seam between old and new light, nearest the
-/// camera first. On a streamed world of about 4,000 chunks, 553 of them relit
+/// a change of reach, shape, sky fill or the sky rule settles in about 0.13 s,
+/// 7 or 8 frames at 60 frames a second, in the `light_tuning` example's world
+/// of about 1,500 chunks, with a brief seam between old and new light, nearest
+/// the camera first. On a streamed world of about 4,000 chunks, 553 of them relit
 /// in about 25 frames. Relights for a settings change start after chunk tasks,
 /// so streaming goes on at its usual pace. A chunk of air with no solid beside
 /// it keeps its light, which `light_at` can read a setting behind. A chunk
@@ -226,8 +226,10 @@ pub struct LightPropagation {
     /// about 4,000 chunks it took 5,000 sky probes over about 2,300 frames to
     /// settle, where a change from the default clearance to a ceiling settled
     /// in about 25. Raising the clearance past what the record has seen sends
-    /// sky probes up the chunk positions it adds: from 16 chunks to 32 took 9 s
-    /// to settle in the `light_tuning` example's world.
+    /// sky probes up the chunk positions it adds, apart from those a fill hint
+    /// declares uniform: from 16 chunks to 32 took 9 s to settle on a world of
+    /// about 320 chunks with no fill hints, and 7 frames in the `light_tuning`
+    /// example's world, whose fill hints declare the air above y = 160.
     ///
     /// Defaults to [`Sky::Clearance`] of 16 chunks.
     pub sky: Sky,
@@ -292,8 +294,8 @@ pub struct LightPropagation {
     /// Replaces the texture on change: every chunk with a slot drops to one
     /// level per channel, the old texture is released, every loaded chunk
     /// relights, and the new texture is made when a chunk next needs a slot.
-    /// Chunks look flat while their light lands again: for about 0.2 s, 11
-    /// frames, in the `light_tuning` example's world of about 320 chunks.
+    /// Chunks look flat while their light lands again: for about 1.2 s, 60
+    /// frames, in the `light_tuning` example's world of about 1,500 chunks.
     /// Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
 
@@ -319,8 +321,8 @@ pub struct LightPropagation {
     /// Replaces the texture on change: every chunk with a slot drops to one
     /// level per channel, the old texture is released, the settings relight
     /// runs, and the new texture is made when a chunk next needs a slot. Chunks
-    /// look flat while they take slots again: for about 0.1 s, 5 frames, in the
-    /// `light_tuning` example's world of about 320 chunks. Defaults to 1,024.
+    /// look flat while they take slots again: for about 0.13 s, 7 frames, in the
+    /// `light_tuning` example's world of about 1,500 chunks. Defaults to 1,024.
     pub slot_capacity: u32,
 
     /// How light looks on chunk faces.
