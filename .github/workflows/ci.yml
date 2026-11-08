@@ -13,42 +13,45 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  # Run cargo test, with the default features and with light propagation
+  # Run cargo test, with the default features and with light propagation. Both
+  # feature sets run in one job so the dependencies are built once:
+  # light_propagation doesn't change any dependency's features, so only this
+  # crate is rebuilt for the second set. RUSTFLAGS must stay the same for every
+  # step, or cargo rebuilds everything.
   test:
-    name: Test Suite (${{ matrix.features.name }})
+    name: Test Suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        features:
-          - { name: default, flags: "" }
-          - { name: light_propagation, flags: "--features light_propagation" }
+    env:
+      RUSTFLAGS: "-C debuginfo=0"
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-      - name: Cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-test-${{ matrix.features.name }}-${{ hashFiles('**/Cargo.toml') }}
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
+      # Caches the dependencies, keyed on Cargo.lock and the toolchain, so a
+      # Cargo.toml edit doesn't throw the cache away.
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install Dependencies
         run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      - name: Build benchmarks
-        run: cargo bench --no-run ${{ matrix.features.flags }}
-        env:
-          RUSTFLAGS: "-C debuginfo=0"
-      - name: Run cargo test
-        run: cargo test ${{ matrix.features.flags }}
-        env:
-          RUSTFLAGS: "-C debuginfo=0"
+      # The benches are built in the test profile so they share the
+      # dependencies cargo test builds. `cargo bench --no-run` would build all
+      # of Bevy again with the bench profile's codegen-units = 1.
+      - name: Build benchmarks (default)
+        run: cargo test --benches --no-run
+      - name: Run cargo test (default)
+        run: cargo test
+      # These run even when the default steps failed, so one run reports
+      # both feature sets.
+      - name: Build benchmarks (light_propagation)
+        if: success() || failure()
+        run: cargo test --benches --no-run --features light_propagation
+      - name: Run cargo test (light_propagation)
+        if: success() || failure()
+        run: cargo test --features light_propagation
 
   # Run cargo clippy -- -D warnings, with the default features and with light
   # propagation
