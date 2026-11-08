@@ -68,11 +68,6 @@ path = "examples/navigation.rs"
 required-features = ["navigation"]
 
 [[example]]
-name = "light_caves"
-path = "examples/light_caves.rs"
-required-features = ["light_propagation"]
-
-[[example]]
 name = "light_mountain_house"
 path = "examples/light_mountain_house.rs"
 required-features = ["light_propagation"]
@@ -88,6 +83,13 @@ path = "examples/light_tuning.rs"
 required-features = ["light_propagation"]
 # Its tests check that the config it prints is the Rust that builds it.
 test = true
+
+# Pixel checks that need a GPU, run by hand: see the file's docs.
+[[test]]
+name = "light_render"
+harness = false
+test = false
+required-features = ["light_propagation"]
 
 [[bench]]
 name = "chunk_lifecycle"
@@ -137,7 +139,7 @@ noise = { version = "0.9.0" }
 transvoxel = "2.0.0"
 
 # Examples built for the browser render through WebGL2 into the page's canvas,
-# and `light_caves` reads its arguments from the page's address.
+# and the `light_render` test reads its arguments from the page's address.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 bevy = { version = "0.20", default-features = false, features = [
   "web",

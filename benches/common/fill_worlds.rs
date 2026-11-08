@@ -1,5 +1,5 @@
 //! Worlds for comparing the models of sky fill, shared by `chunk_lifecycle`
-//! and the `light_caves` example's pixel checks: floating islands at several
+//! and the `light_render` test's pixel checks: floating islands at several
 //! heights, overhangs and arches, caves with narrow and wide mouths, sparse
 //! floating voxels with no ground, and buildings with rooms inside.
 //!
