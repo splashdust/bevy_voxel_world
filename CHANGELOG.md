@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.2
+
+Add `light_propagation` feature
+
 ## 0.19.1
 
 ### Bug Fixes
