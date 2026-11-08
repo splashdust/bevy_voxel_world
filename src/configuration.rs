@@ -2,6 +2,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkData, ChunkKey, VoxelArray, PADDED_CHUNK_SIZE};
+#[cfg(feature = "light_propagation")]
+use crate::light::config::{Emission, LightPropagation};
 use crate::meshing::{generate_chunk_mesh_for_shape, scale_texture_coordinates};
 use crate::voxel::WorldVoxel;
 use bevy::prelude::*;
@@ -215,6 +217,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The delegate will be called every time a new chunk needs to be computed. The delegate should
     /// return a function that can be called to check if a voxel exists at a given position. This function
     /// needs to be thread-safe, since chunk computation happens on a separate thread.
+    ///
+    /// With sky light on, a lookup must return the same voxel for a position every
+    /// time: see `Sky` in the `light_propagation` feature.
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         Box::new(|_, _, _| Box::new(|_, _| WorldVoxel::Unset))
     }
@@ -329,6 +334,31 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     }
 
     fn init_root(&self, mut _commands: Commands, _root: Entity) {}
+
+    /// The world's light propagation settings, or `None` for no light, the
+    /// default.
+    ///
+    /// Whether this returns `None` is read once at plugin build. See
+    /// [`LightPropagation`] for what light does and when each setting applies.
+    #[cfg(feature = "light_propagation")]
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        None
+    }
+
+    /// The materials whose voxels give off light, and how much. Empty by
+    /// default, and then no chunk looks for light sources among its voxels.
+    ///
+    /// Relights on change, like a change of reach: every chunk with a solid
+    /// looks for its emissive voxels again in a relight task on the task
+    /// pool, and its neighbours relight again where its emissive voxels
+    /// changed.
+    ///
+    /// Used only by a world whose
+    /// [`light_propagation`](Self::light_propagation) returns a config.
+    #[cfg(feature = "light_propagation")]
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        Vec::new()
+    }
 }
 
 pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(

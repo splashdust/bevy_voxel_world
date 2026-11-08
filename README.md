@@ -10,7 +10,7 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-<img width="700" height="389" alt="bombs" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/bombs.webp" />
+<img width="700" height="389" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/bombs.webp" />
 
 ```bash
 $ cargo run -r --example bombs
@@ -67,7 +67,7 @@ This will update the voxel value at the given location in the persisting `HashMa
 
 Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Solid`.
 
-<img width="800" height="445" alt="voxel_animation" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/voxel_animation.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/voxel_animation.webp" />
 
 ## Voxel materials
 
@@ -147,13 +147,13 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 ### Other shapes
 
-<img width="800" height="445" alt="marching_cubes" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/marching_cubes.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/marching_cubes.webp" />
 
 The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
 
 ## Level of Detail
 
-<img width="800" height="445" alt="noise_terrain_lod" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/noise_terrain_lod.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/noise_terrain_lod.webp" />
 
 Every chunk has a LOD level. A level-0 chunk is 32 voxels on a side and samples every voxel. A chunk at level `L` is `32 << L` voxels on a side and, by default, samples every `1 << L` voxels, so it holds as many samples as a level-0 chunk. Far regions therefore cost about as much as near ones, which lets a world stream out to a distant horizon.
 
@@ -171,6 +171,56 @@ Other `VoxelWorldConfig` methods that matter with LOD levels:
 - `chunk_fill_hint` is an opt-in optimization that lets a world hint at the contents of a chunk. By hinting that a chunk is either 100% air or 100% solid material, the chunk streaming policy can decide to skip over it or stop at it, thereby avoiding unnecessary work.
 
 The consuming code is responsible for hiding seams between levels. `examples/noise_terrain_lod.rs` streams terrain 500 chunks out in six levels, uses fill hints, and hides cracks with skirts by returning `WorldVoxel::Unset` in the padding of its level-1 chunks.
+
+## Light propagation
+
+`bevy_voxel_world` supports voxel light propagation through an opt-in crate feature: `light_propagation`
+
+```bash
+$ cargo add bevy_voxel_world --features light_propagation
+```
+
+Two kinds of light propagates: Sky light and voxel light
+
+- Sky light falls straight down from open sky and then spreads sideways under overhangs.
+- Voxel light spreads out from emissive voxels.
+
+### Enable light propagation
+
+A world opts in on its own by returning a config:
+
+```rust
+impl VoxelWorldConfig for MyWorld {
+    // ...
+    fn light_propagation(&self) -> Option<LightPropagation> {
+        Some(LightPropagation::default())
+    }
+
+    fn emissive_materials(&self) -> Vec<(u8, Emission)> {
+        vec![(LAMP, Emission::level(15.0))]
+    }
+}
+```
+
+By default, the `light_propagation` method returns `None`, which means no light computaion is done, and no performance cost is payed.
+
+When Some config is returned, the light calculations are performed in the chunk tasks, and chunk computation will be slightly slower as a result.
+
+Every setting is documented in [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning/main.rs) puts every setting in a panel that says what it does and where in its world to look for the change. Use the example to test out values interactiely to better understand the config options.
+
+```bash
+$ cargo run -r --example light_tuning --features light_propagation
+```
+
+### Light demo
+
+The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates.
+
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/house.webp" />
+
+```bash
+$ cargo run -r --example light_mountain_house --features light_propagation
+```
 
 ## AI Disclosure
 

@@ -3,9 +3,14 @@ mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
+#[cfg(feature = "light_propagation")]
+mod light;
+#[cfg(not(feature = "light_propagation"))]
+mod light_off;
 mod mesh_cache;
 mod meshing;
 mod plugin;
+mod pool_budget;
 mod streaming_policy;
 mod voxel;
 mod voxel_edits;
@@ -18,6 +23,15 @@ pub mod prelude {
     pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::config::{
+        Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,
+        LightShape, LightSmoothing, OpenFill, PathFill, Sky, SkyFill, SunGate,
+    };
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::LightLevels;
+    #[cfg(not(feature = "light_propagation"))]
+    pub use crate::light_off::*;
     pub use crate::plugin::VoxelWorldPlugin;
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
@@ -47,6 +61,8 @@ pub mod debug {
 }
 
 pub mod rendering {
+    #[cfg(feature = "light_propagation")]
+    pub use crate::light::material::{VoxelWorldBindings, VoxelWorldMaterial};
     pub use crate::plugin::VoxelWorldMaterialHandle;
     pub use crate::voxel_material::vertex_layout;
     pub use crate::voxel_material::ATTRIBUTE_TEX_INDEX;
@@ -56,6 +72,12 @@ pub mod rendering {
 pub mod traversal_alg {
     pub use crate::voxel_traversal::*;
 }
+
+/// Hooks for the crate's own light benchmarks. Not public API: it can change
+/// in any release.
+#[cfg(feature = "light_propagation")]
+#[doc(hidden)]
+pub use crate::light::bench as light_bench;
 
 #[cfg(test)]
 mod test;

@@ -89,7 +89,7 @@ pub fn voxel_cartesian_traversal<F: FnMut(IVec3) -> bool + Sized>(
 /// This algorithm visits all voxels along a ray, using the uniform partitioned grid to determine
 /// what fixed increments of time over the ray are necessary to iterate each voxel exactly once.
 /// This is an implementation of J. Amanatides, A. Woo, "A Fast Voxel Traversal Algorithm for Ray
-/// Tracing", accessible online at http://www.cse.yorku.ca/~amana/research/grid.pdf
+/// Tracing", accessible online at <http://www.cse.yorku.ca/~amana/research/grid.pdf>
 pub fn voxel_line_traversal<F: FnMut(IVec3, f32, VoxelFace) -> bool + Sized>(
     start: Vec3,
     end: Vec3,

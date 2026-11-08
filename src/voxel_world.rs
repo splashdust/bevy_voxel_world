@@ -32,6 +32,25 @@ impl<C> Default for VoxelWorldCamera<C> {
     }
 }
 
+/// A copy of the voxel world `C`'s config, which [`VoxelWorld`] reads in place
+/// of the config resource itself, so a system can take both `ResMut<C>` and
+/// `VoxelWorld<C>`.
+///
+/// It follows the config resource before the startup systems run, and at the
+/// start of each frame where the config changed. So a config inserted after
+/// the plugin shows from the first startup system on, but a change made
+/// during a frame shows through `VoxelWorld` only from the next frame: a
+/// copy can't follow a `ResMut<C>` that a system holds.
+#[derive(Resource)]
+pub(crate) struct ConfigCopy<C>(pub Arc<C>);
+
+impl<C: VoxelWorldConfig> ConfigCopy<C> {
+    /// Copies the config resource again.
+    pub(crate) fn follow(world: Res<C>, mut copy: ResMut<Self>) {
+        copy.0 = Arc::new(world.clone());
+    }
+}
+
 /// The systems that run the chunk lifecycle of the voxel world `C`, in `PreUpdate`.
 ///
 /// Within a frame, they apply voxel edits, spawn and retire chunks, start chunk
@@ -177,13 +196,27 @@ impl<I> VoxelRaycastResult<I> {
 }
 
 /// Grants access to the VoxelWorld in systems
+///
+/// It reads the world's config as it was at the start of the frame, so a
+/// system can hold it beside `ResMut` of the config. A change to the config
+/// made during a frame shows through it from the next frame.
 #[derive(SystemParam)]
 pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    configuration: Res<'w, C>,
+    configuration: Res<'w, ConfigCopy<C>>,
+    #[cfg(feature = "light_propagation")]
+    light: Option<Res<'w, crate::light::LightSettings<C>>>,
+    #[cfg(feature = "light_propagation")]
+    light_work: Option<Res<'w, crate::light::relight::LightWork<C>>>,
+    #[cfg(feature = "light_propagation")]
+    sky_probes: Option<Res<'w, crate::light::probe::SkyProbes<C>>>,
+    #[cfg(feature = "light_propagation")]
+    light_route: Option<Res<'w, crate::light::route::LightRoute<C>>>,
+    #[cfg(feature = "light_propagation")]
+    sky_fill: Option<Res<'w, crate::light::fill::driver::SkyFillWork<C>>>,
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -214,9 +247,136 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         voxel_at(
             &self.voxel_edits.reader(),
             &self.chunk_map.get_map(),
-            self.configuration.as_ref(),
+            self.configuration.0.as_ref(),
             position,
         )
+    }
+
+    /// The light at the voxel at `position`, as levels from 0 to 15.
+    ///
+    /// It reads the light landed for the finest published chunk holding the
+    /// voxel. In a level-0 chunk a solid voxel reads 0, an emissive voxel its
+    /// own level, and an open voxel the light that reached it. Light beside a
+    /// chunk that isn't loaded can read darker than the truth, never brighter.
+    /// A chunk's light can change after it appears, as chunks arriving around
+    /// it relight it; [`VoxelWorld::light_is_settled`] says when that has
+    /// finished.
+    ///
+    /// A chunk above LOD level 0, or a level-0 chunk with a non-default
+    /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
+    /// renders, which is plausible rather than exact: the cell holding the
+    /// voxel while the chunk holds a slot in the world's light texture, and
+    /// otherwise the one level per channel its tag shows. A solid cell reads
+    /// the brightest of its six neighbours, or 0 if all six are solid.
+    ///
+    /// Where nothing renders, in such a chunk with no voxels to mesh or in air
+    /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,
+    /// it walks up the column above the voxel and reads sky light 15 if
+    /// nothing solid is found within the world's
+    /// [sky rule](crate::prelude::Sky),
+    /// and 0 otherwise. **The first reading of such a voxel can run the
+    /// world's voxel lookups on the caller's thread**: under the default sky
+    /// rule, up to about 50 lookups and a lookup closure for each of up to 17
+    /// level-0 chunks the column passes through. The
+    /// answer is kept until the next voxel edit or
+    /// [`VoxelWorld::reset_light`]. A chunk of solid voxels reads 0 with no
+    /// walk.
+    ///
+    /// These readings are plausible, not exact:
+    ///
+    /// - In a chunk of air with no solid voxel beside it, which no face reads,
+    ///   the reading takes the larger of its own light and the sky fill
+    ///   level around it, and can be a level or two off.
+    /// - In air a fill hint kept from spawning with no solid voxel beside it,
+    ///   the reading misses the light beside a 1×1 shaft or a lamp, by up to
+    ///   14 levels, as in the middle of a hinted cavern.
+    /// - The walk's rows step further apart higher up, so it can step past a
+    ///   thin roof far above.
+    ///
+    /// Returns `None` when the world has no light propagation, or no published
+    /// chunk or fill hint says what is at the voxel.
+    #[cfg(feature = "light_propagation")]
+    pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
+        let light = self.light.as_ref()?;
+        light.light_at(
+            &self.chunk_map.get_read_lock(),
+            self.light_work.as_ref()?,
+            self.light_route.as_deref(),
+            self.configuration.0.as_ref(),
+            &self.voxel_edits,
+            position,
+        )
+    }
+
+    /// Whether the world's light has caught up with its chunks: no relight is
+    /// waiting to start or running, no solved light is waiting to land, and
+    /// no sky probe is waiting or running. A loading screen can wait on it.
+    ///
+    /// A voxel edit makes it false from when it is set until its light has
+    /// landed, including the light of chunks re-meshed for it, which waits
+    /// for their new meshes.
+    ///
+    /// A change of light settings that relights makes it false from the frame
+    /// the change is applied until the light of every chunk it relights has
+    /// landed.
+    ///
+    /// Sky probes look up the voxels above chunks whose own tasks couldn't
+    /// tell whether sky light reaches them, which takes a while after a
+    /// stream: until they finish, such chunks show direct sky in columns
+    /// nothing has proved open yet.
+    ///
+    /// With sky fill on, it is also false while the sky fill field has work
+    /// left, a change of fill waits for its relight, which comes at most every
+    /// 500 ms, or a fill probe runs or waits to start.
+    ///
+    /// Chunk tasks still running aren't counted, though their light may start
+    /// relights once it lands. Chunks above LOD level 0 have no relights to
+    /// wait for, except after a change of precision, which solves them all
+    /// again. Settled doesn't mean exact: light beside a chunk that isn't
+    /// loaded can be darker than the truth. A world without light propagation
+    /// is always settled.
+    #[cfg(feature = "light_propagation")]
+    pub fn light_is_settled(&self) -> bool {
+        let reset = self
+            .light
+            .as_ref()
+            .is_some_and(|light| light.reset.load(std::sync::atomic::Ordering::Acquire));
+        let edited = self.light.is_some() && self.voxel_edits.has_pending();
+        !reset
+            && !edited
+            && self
+                .light_work
+                .as_ref()
+                .is_none_or(|work| work.is_settled())
+            && self
+                .sky_probes
+                .as_ref()
+                .is_none_or(|probes| probes.is_settled())
+            && self.sky_fill.as_ref().is_none_or(|fill| fill.is_settled())
+    }
+
+    /// Forgets what the world's light knows about the voxels it looked up,
+    /// and relights every chunk.
+    ///
+    /// Call it after changing what the world's voxel lookups return, for
+    /// example after loading another save into the same world. Sky light
+    /// remembers which columns of the chunk positions it has seen hold a
+    /// solid voxel, and assumes lookups return the same voxels every time, so
+    /// without this, chunks would go on reading the old voxels' shadows.
+    ///
+    /// Spawned chunks keep the voxels they have, and their light follows
+    /// those voxels; chunks spawned later read the new lookups. Light settles
+    /// again over the next frames, as [`VoxelWorld::light_is_settled`] tells.
+    /// Voxel edits need no reset: they relight on their own. Does nothing in
+    /// a world without light propagation.
+    #[cfg(feature = "light_propagation")]
+    pub fn reset_light(&mut self) {
+        if let Some(light) = self.light.as_ref() {
+            light.walks.lock().unwrap().clear();
+            light
+                .reset
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Set the voxel at the given position. It replaces the generated voxel there for
@@ -235,10 +395,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ) -> Arc<dyn Fn(IVec3) -> WorldVoxel<C::MaterialIndex> + Send + Sync> {
         let voxel_edits = self.voxel_edits.reader();
         let chunk_map = self.chunk_map.get_map();
-        let configuration = self.configuration.as_ref().clone();
+        let configuration = self.configuration.0.clone();
 
         Arc::new(move |position| {
-            voxel_at(&voxel_edits, &chunk_map, &configuration, position)
+            voxel_at(&voxel_edits, &chunk_map, configuration.as_ref(), position)
         })
     }
 

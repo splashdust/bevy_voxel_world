@@ -1,9 +1,15 @@
+import bevy_voxel_world::voxel_io::{VoxelVertex, VoxelVertexOutput};
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     mesh_functions,
     view_transformations::position_world_to_clip,
 };
+
+@if(VOXEL_LIGHT)
+import bevy_voxel_world::light::{sample_light, apply_voxel_light};
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+import bevy_voxel_world::light::remove_unshadowed_sun;
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::{
@@ -22,51 +28,9 @@ var mat_array_texture: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(101)
 var mat_array_texture_sampler: sampler;
 
-struct Vertex {
-    @builtin(instance_index) instance_index: u32,
-    @if(VERTEX_POSITIONS)
-    @location(0) position: vec3<f32>,
-    @if(VERTEX_NORMALS)
-    @location(1) normal: vec3<f32>,
-    @if(VERTEX_UVS)
-    @location(2) uv: vec2<f32>,
-    @if(VERTEX_UVS_B)
-    @location(3) uv_b: vec2<f32>,
-    @if(VERTEX_TANGENTS)
-    @location(4) tangent: vec4<f32>,
-    @if(VERTEX_COLORS)
-    @location(5) color: vec4<f32>,
-    // @if(SKINNED)
-    // @location(6) joint_indices: vec4<u32>,
-    // @if(SKINNED)
-    // @location(7) joint_weights: vec4<f32>,
-    @if(MORPH_TARGETS)
-    @builtin(vertex_index) index: u32,
-
-    @location(8) tex_idx: vec3<u32>
-};
-
-struct CustomVertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) world_position: vec4<f32>,
-    @location(1) world_normal: vec3<f32>,
-    @if(VERTEX_UVS)
-    @location(2) uv: vec2<f32>,
-    @if(VERTEX_UVS_B)
-    @location(3) uv_b: vec2<f32>,
-    @if(VERTEX_TANGENTS)
-    @location(4) world_tangent: vec4<f32>,
-    @if(VERTEX_COLORS)
-    @location(5) color: vec4<f32>,
-    @if(VERTEX_OUTPUT_INSTANCE_INDEX)
-    @location(6) @interpolate(flat) instance_index: u32,
-
-    @location(8) @interpolate(flat) tex_idx: vec3<u32>,
-}
-
 @vertex
-fn vertex(vertex: Vertex) -> CustomVertexOutput {
-    var out: CustomVertexOutput;
+fn vertex(vertex: VoxelVertex) -> VoxelVertexOutput {
+    var out: VoxelVertexOutput;
     var model =  mesh_functions::get_world_from_local(vertex.instance_index);
 
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
@@ -94,12 +58,18 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
 
     out.tex_idx = vertex.tex_idx;
 
+    @if(VOXEL_LIGHT) {
+        out.local_position = vertex.position;
+        out.local_normal = vertex.normal;
+        out.light_tag = mesh_functions::get_tag(vertex.instance_index);
+    }
+
     return out;
 }
 
 @fragment
 fn fragment(
-    in: CustomVertexOutput,
+    in: VoxelVertexOutput,
     @builtin(front_facing) is_front: bool,
 )  -> FragmentOutput {
     var standard_in: VertexOutput;
@@ -121,6 +91,9 @@ fn fragment(
     }
 
     pbr_input.material.base_color = textureSample(mat_array_texture, mat_array_texture_sampler, in.uv, in.tex_idx[tex_face]);
+    // The vertex colour holds the mesher's ambient occlusion. With light, it
+    // darkens ambient and voxel light instead of the base colour.
+    @if(!VOXEL_LIGHT)
     pbr_input.material.base_color = pbr_input.material.base_color * in.color;
 
     pbr_input.material.base_color = alpha_discard(
@@ -131,10 +104,19 @@ fn fragment(
 
 @if(PREPASS_PIPELINE)
     let out = deferred_output(in, pbr_input);
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+    apply_voxel_light(
+        &pbr_input,
+        sample_light(in.light_tag, in.local_position, in.local_normal),
+        in.color.r,
+    );
+
 @if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
 @if(!PREPASS_PIPELINE)
     out.color = apply_pbr_lighting(pbr_input);
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE)
+    out.color = remove_unshadowed_sun(pbr_input, out.color);
 @if(!PREPASS_PIPELINE)
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 

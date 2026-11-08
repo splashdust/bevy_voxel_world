@@ -13,9 +13,14 @@ exclude = ["/.github/", "/assets/", "/examples/", "/website/"]
 keywords = ["bevy", "gamedev", "voxelengine", "voxels"]
 categories = ["game-development", "graphics"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 navigation = []
+# Light from the sky and from emissive voxels, spreading through open voxels.
+light_propagation = []
 # Profiling spans for the crate's own work, alongside Bevy's.
 trace = ["bevy/trace"]
 # `trace`, sent to the Tracy profiler.
@@ -62,9 +67,38 @@ name = "navigation"
 path = "examples/navigation.rs"
 required-features = ["navigation"]
 
+[[example]]
+name = "light_mountain_house"
+path = "examples/light_mountain_house.rs"
+required-features = ["light_propagation"]
+
+[[example]]
+name = "light_flythrough"
+path = "examples/light_flythrough.rs"
+required-features = ["light_propagation"]
+
+[[example]]
+name = "light_tuning"
+path = "examples/light_tuning/main.rs"
+required-features = ["light_propagation"]
+# Its tests check that the config it prints is the Rust that builds it.
+test = true
+
+# Pixel checks that need a GPU, run by hand: see the file's docs.
+[[test]]
+name = "light_render"
+harness = false
+test = false
+required-features = ["light_propagation"]
+
 [[bench]]
 name = "chunk_lifecycle"
 harness = false
+
+[[bench]]
+name = "light_kernels"
+harness = false
+required-features = ["light_propagation"]
 
 [dependencies]
 ahash = "0.8.11"
@@ -93,16 +127,27 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = [
 
 [dev-dependencies]
 bevy_northstar = { version = "0.8.0" }
+# `bevy_feathers` draws the `light_tuning` example's settings panel.
 bevy = { version = "0.20", default-features = false, features = [
   "3d",
   "bevy_ui",
   "bevy_ui_render",
+  "bevy_feathers",
   "png",
 ] }
 bevy_panorbit_camera = { version = "0.36.0" }
 libc = "0.2"
 noise = { version = "0.9.0" }
 transvoxel = "2.0.0"
+
+# Examples built for the browser render through WebGL2 into the page's canvas,
+# and the `light_render` test reads its arguments from the page's address.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+bevy = { version = "0.20", default-features = false, features = [
+  "web",
+  "webgl2",
+] }
+web-sys = { version = "0.3", features = ["Location", "Window"] }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
