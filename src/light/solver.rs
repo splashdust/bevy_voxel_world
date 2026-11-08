@@ -22,6 +22,19 @@
 //! the [world view](super::view) as the task finds it. Neighbours arriving
 //! later relight it in a relight task, which runs the same solve: see
 //! [`relight`](super::relight).
+//!
+//! # References
+//!
+//! - [Veloren's terrain mesher](https://gitlab.com/veloren/veloren/-/blob/master/voxygen/src/mesh/terrain.rs):
+//!   works a chunk's light out again for each mesh, from the voxels in a halo
+//!   around the chunk.
+//! - [rustcraft's lighting notes](https://github.com/ArturTrumpfheller/rustcraft/blob/main/docs/LIGHTING.md):
+//!   works a region's light out again from a halo as wide as light's reach,
+//!   reading voxels it doesn't know as solid.
+//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
+//!   found that solving a chunk again from its neighbours' light can't take
+//!   light away, since two chunks can hold each other's light up. So a solve
+//!   here reads only voxels.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};

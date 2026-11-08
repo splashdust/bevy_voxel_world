@@ -32,6 +32,14 @@
 //! padding cells' light rather than its neighbours' border planes. The tag of
 //! a chunk with a slot carries its LOD level in bits 24–27, which the shader
 //! divides the chunk's local positions by.
+//!
+//! # References
+//!
+//! - [Cubyz's lighting](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
+//!   each LOD level spreads its own light, losing more per cell as cells widen.
+//! - [Terasology's batch propagator](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/propagation/StandardBatchPropagator.java):
+//!   spreads light with a scale, which its LOD chunks set so light fades faster
+//!   per cell.
 
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;

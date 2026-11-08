@@ -31,6 +31,22 @@
 // A chunk above LOD level 0 with a slot holds its LOD level L in bits 24-27.
 // Its slot's cells are `1 << L` voxels wide, so its local position is divided
 // by that width, keeping the corner of its first cell at (1, 1, 1).
+//
+// References:
+//
+// - Terasology's `BlockMeshPart`, which lights a vertex from 8 points around
+//   it, so a vertex anywhere gets light:
+//   https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/block/shapes/BlockMeshPart.java
+// - Cubyz's lighting, which blends the light of the 8 cells around a vertex
+//   off the grid:
+//   https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig
+// - Luanti's smooth lighting, which averages the cells around a corner,
+//   leaving out cells that don't carry light:
+//   https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp
+// - tesserae's light propagation, where sky light scales Bevy's occlusion
+//   terms and `directional_shadow_factor`, and voxel light adds through the
+//   emissive channel:
+//   https://github.com/mkappworks-dev/tesserae/pull/3
 
 import bevy_pbr::render::{
     pbr_types::PbrInput,

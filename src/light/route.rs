@@ -68,6 +68,12 @@
 //! [`LightRoute::replace_texture`]. Every chunk with a slot drops to its one
 //! level per channel, and takes a slot in the new texture as its light lands
 //! again.
+//!
+//! # References
+//!
+//! - [all-is-cubes' light texture](https://github.com/kpreid/all-is-cubes/blob/main/all-is-cubes-gpu/src/light_texture.rs):
+//!   light kept in a 3D texture apart from meshes, written in parts as it
+//!   changes, and read by position in the fragment shader.
 
 use std::marker::PhantomData;
 use std::sync::Arc;

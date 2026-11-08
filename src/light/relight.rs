@@ -58,6 +58,19 @@
 //! was loaded, and their next solve reads it as solid. A chunk with provisional
 //! columns may have given them direct sky it doesn't have, so its face
 //! neighbours relight, reading it as solid.
+//!
+//! # References
+//!
+//! - [Luanti's light algorithms](https://github.com/luanti-org/luanti/blob/master/src/voxelalgorithms.cpp):
+//!   a block marks the borders its light couldn't cross into a neighbour that
+//!   wasn't loaded, and `update_block_border_lighting` lights them again once
+//!   the neighbour arrives.
+//! - [Starlight's technical details](https://github.com/PaperMC/Starlight/blob/fabric/TECHNICAL_DETAILS.md):
+//!   when a chunk is lit, an edge check compares its border with what its
+//!   neighbours say it should be.
+//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
+//!   compares the light on a shared face to decide whether a neighbour solves
+//!   again, which costs far less than the solve.
 
 use std::collections::VecDeque;
 use std::marker::PhantomData;

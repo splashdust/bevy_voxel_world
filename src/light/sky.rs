@@ -41,6 +41,15 @@
 //! Sky light reads columns from the world's lookups as well as from loaded
 //! chunks, so it needs a lookup to return the same voxel for a position every
 //! time it is asked.
+//!
+//! # References
+//!
+//! - [Terasology's sunlight regen rule](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/propagation/light/SunlightRegenPropagationRules.java):
+//!   a voxel has sky light when enough open voxels lie straight above it,
+//!   wherever the sky really starts. The sky clearance is that rule counted in
+//!   whole chunks.
+//! - [Minecraft Wiki, "Light"](https://minecraft.wiki/w/Light):
+//!   sky light falling straight down at full level to the first solid.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

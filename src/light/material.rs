@@ -60,6 +60,19 @@
 //! A face reads light blended between voxels, so the gate is a step between
 //! direct sky and the level beside it, worked out from sky reach and
 //! precision.
+//!
+//! # References
+//!
+//! - [Terasology's `BlockMeshPart`](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/block/shapes/BlockMeshPart.java):
+//!   lights a vertex from 8 points around it, so a vertex anywhere gets light.
+//! - [Cubyz's lighting](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
+//!   blends the light of the 8 cells around a vertex off the grid.
+//! - [Luanti's smooth lighting](https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp):
+//!   averages the cells around a corner, leaving out cells that don't carry
+//!   light.
+//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
+//!   sky light dims Bevy's ambient light and sun, and voxel light adds through
+//!   the emissive channel.
 
 use std::any::TypeId;
 use std::marker::PhantomData;

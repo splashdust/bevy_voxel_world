@@ -5,6 +5,12 @@
 //! [`LightPrecision`]: 0 to 15 at 16 levels, 0 to 255 at 256. Gameplay code
 //! reads every level on the 0 to 15 scale, where one step at 256 levels is
 //! 1/17 of a level.
+//!
+//! # References
+//!
+//! - [Minecraft Wiki, "Light"](https://minecraft.wiki/w/Light):
+//!   a 0 to 15 scale for sky light and for light from blocks, the scale
+//!   gameplay code reads here.
 
 use super::config::LightPrecision;
 

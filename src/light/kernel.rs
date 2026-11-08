@@ -24,6 +24,16 @@
 //!
 //! A run also hashes, for each of the chunk's six faces, when light reached
 //! each voxel on that face: see [`FaceHashes`](super::faces::FaceHashes).
+//!
+//! # References
+//!
+//! - [Atrufulgium, "SIMD flood fill"](https://atrufulgium.net/2024/08/21/simd-flood-fill):
+//!   flood fill over 32³ chunks held as rows of bits, one bit per voxel.
+//! - [Chess Programming Wiki, "Dumb7Fill"](https://www.chessprogramming.org/Dumb7Fill):
+//!   a fill that shifts what it has reached and keeps only where it may go, as
+//!   a round of spreading does here.
+//! - [Roblox, "Voxel terrain physics"](https://about.roblox.com/newsroom/2018/01/voxel-terrain-physics):
+//!   shift-and-OR dilation over chunks of voxels with a one-voxel border.
 
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Shl, Shr};
 

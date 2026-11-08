@@ -28,6 +28,14 @@
 //! the cave is black past the pool of light the opening's cells give it. And
 //! a sky full of small floating things gets no fill: a top cell rarely has
 //! all 64 columns clear, so no region sees the sky.
+//!
+//! # References
+//!
+//! - [Luanti's light algorithms](https://github.com/luanti-org/luanti/blob/master/src/voxelalgorithms.cpp):
+//!   `unspread_light` takes out the light that came through a change, then
+//!   `spread_light` floods again from what is left.
+//! - [Starlight's technical details](https://github.com/PaperMC/Starlight/blob/fabric/TECHNICAL_DETAILS.md):
+//!   how a light engine spreads decreases, then increases.
 
 use std::collections::BinaryHeap;
 use std::time::Duration;
