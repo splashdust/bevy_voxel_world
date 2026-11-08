@@ -207,11 +207,14 @@ pub(crate) fn prepare_voxel_texture(
 ) -> Result<(), TextureReinterpretationError> {
     set_repeat_sampler(image);
     // Worlds with the same texture path share one image, so another world may
-    // already have made it an array texture.
-    let is_array = texture_layers > 1
-        && image.texture_descriptor.size.depth_or_array_layers == texture_layers;
+    // already have made it an array texture, perhaps with a blank layer from
+    // `add_layer_if_cube_compatible`.
+    let layers = image.texture_descriptor.size.depth_or_array_layers;
+    let is_array =
+        texture_layers > 1 && (layers == texture_layers || layers == texture_layers + 1);
     if !is_array {
         image.reinterpret_stacked_2d_as_array(texture_layers)?;
+        add_layer_if_cube_compatible(image);
     }
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),
@@ -219,6 +222,26 @@ pub(crate) fn prepare_voxel_texture(
     });
 
     Ok(())
+}
+
+/// Adds a blank layer to an array texture whose layers are square and a
+/// multiple of six in number.
+///
+/// wgpu's OpenGL backend, which WebGL2 runs on, takes such a texture for an
+/// array of cube maps. WebGL2 has no cube map arrays, so the texture would
+/// sample black, and so would every chunk. The blank layer comes after the
+/// last tile, so no texture index reaches it.
+fn add_layer_if_cube_compatible(image: &mut Image) {
+    let size = image.texture_descriptor.size;
+    if size.width != size.height || !size.depth_or_array_layers.is_multiple_of(6) {
+        return;
+    }
+    let Some(data) = image.data.as_mut() else {
+        return;
+    };
+    let layer_bytes = data.len() / size.depth_or_array_layers as usize;
+    data.resize(data.len() + layer_bytes, 0);
+    image.texture_descriptor.size.depth_or_array_layers += 1;
 }
 
 pub(crate) fn set_repeat_sampler(image: &mut Image) {

@@ -1,7 +1,7 @@
 // Builds the demo crate for the browser and puts the result in public/voxel_demo,
 // where the site loads it from.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,6 +35,10 @@ run(wasmBindgen, [
   '--out-dir', out,
   '--out-name', 'voxel_demo',
 ]);
+
+// The demo loads its voxel texture from beside its WebAssembly.
+const texture = 'mountain_house_texture.png';
+copyFileSync(join(website, '..', 'assets', texture), join(out, texture));
 
 // These are the WebAssembly features rustc targets by default. wasm-opt's
 // --all-features would be shorter, but it also emits encodings browsers reject.

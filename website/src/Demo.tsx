@@ -101,7 +101,7 @@ export function Demo() {
 
   return (
     <div className="demo-frame" ref={frame}>
-      <canvas id="voxel-demo" aria-label="A voxel landscape seen from a flying camera" />
+      <canvas id="voxel-demo" aria-label="A voxel house on a mountain ledge at dusk, which you can walk through" />
       <div className={`demo-overlay ${phase.name === 'running' ? 'hidden' : ''}`} aria-live="polite">
         {phase.name === 'waiting' && 'Loading'}
         {phase.name === 'startable' && (

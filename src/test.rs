@@ -1286,6 +1286,33 @@ fn a_voxel_texture_shared_by_two_worlds_can_be_prepared_twice() {
 }
 
 #[test]
+fn a_voxel_texture_of_square_tiles_in_a_multiple_of_six_gets_a_blank_layer() {
+    // Six 2 x 2 tiles, each filled with its own index.
+    let tiles: Vec<u8> = (0..6u8).flat_map(|tile| [tile; 2 * 2 * 4]).collect();
+    let mut image = Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: 2,
+            height: 12,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        tiles.clone(),
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+
+    prepare_voxel_texture(&mut image, 6).unwrap();
+    prepare_voxel_texture(&mut image, 6).unwrap();
+
+    assert_eq!(image.texture_descriptor.size.depth_or_array_layers, 7);
+    assert_eq!(image.height(), 2);
+    let data = image.data.as_ref().unwrap();
+    assert_eq!(data[..tiles.len()], tiles[..]);
+    assert!(data[tiles.len()..].iter().all(|&byte| byte == 0));
+    assert_eq!(data.len(), tiles.len() + 2 * 2 * 4);
+}
+
+#[test]
 fn chunk_will_remesh_event_after_set_voxel() {
     let mut app = _test_setup_app();
 

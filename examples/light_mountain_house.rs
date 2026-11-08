@@ -24,8 +24,12 @@
 //! The scene renders `RENDER_HEIGHT` pixels tall and is stretched over the
 //! window, so a larger window, or a high-density display, costs no more to draw.
 //!
-//! The atmosphere needs compute shaders, which WebGL2 lacks, so in the browser a
-//! plain sky colour and ambient light stand in for it.
+//! In the browser the example renders through WebGL2, which can't run the
+//! atmosphere or volumetric fog. The fog's colour and an ambient light stand in
+//! for the atmosphere, and the valley goes without its mist. The world ends a
+//! little way past the ledge, the house and the cave, in thicker fog, so that
+//! all of it spawns while the page loads. The website's live demo runs this
+//! example there.
 
 use std::sync::{Arc, LazyLock};
 
@@ -791,10 +795,28 @@ impl VoxelWorldConfig for MountainWorld {
         ChunkDespawnStrategy::FarAway
     }
 
+    // A browser runs chunk tasks on the main thread, each to its end before
+    // the next frame. Running one at a time keeps frames even while chunks
+    // stream in.
+    fn max_active_chunk_threads(&self) -> usize {
+        if IN_BROWSER {
+            1
+        } else {
+            usize::MAX
+        }
+    }
+
     // Everything lies between y = 0 and y = 224, with rock below and air above,
     // so spawning rays need not spawn chunks outside it.
+    //
+    // In the browser, the world also ends outside `BROWSER_CHUNKS`.
     fn chunk_fill_hint(&self, key: ChunkKey) -> FillHint {
-        if key.position.y + key.extent() <= 0 {
+        let (min, max) = BROWSER_CHUNKS;
+        let column = key.position.xz();
+        let outside = column.cmpgt(max).any() || (column + key.extent()).cmple(min).any();
+        if IN_BROWSER && outside {
+            FillHint::Uniform(WorldVoxel::Air)
+        } else if key.position.y + key.extent() <= 0 {
             FillHint::Uniform(WorldVoxel::Solid(STONE))
         } else if key.position.y >= 7 {
             FillHint::Uniform(WorldVoxel::Air)
@@ -860,27 +882,39 @@ fn main() {
                 ..default()
             },
         ))
-        .add_plugins(VoxelWorldPlugin::with_config(MountainWorld))
-        .insert_resource(Sun::DUSK)
-        .init_resource::<Placing>()
-        .add_systems(Startup, (setup, spawn_lamps, spawn_smoke))
-        .add_systems(
-            Update,
-            (
-                // `edit_voxels` goes before `grab_mouse`, so the click that
-                // captures the mouse doesn't also place a voxel.
-                (look_around, walk, edit_voxels, grab_mouse).chain(),
-                choose_voxel,
-                turn_sun,
-                follow_sun.run_if(resource_changed::<Sun>),
-                fit_scene_image,
-                flicker,
-                drift_smoke,
-                carry_lantern,
-                toggle_help,
-            ),
-        )
+        .add_plugins(MountainHousePlugin)
         .run();
+}
+
+/// The scene and its controls, without Bevy's default plugins.
+///
+/// The website's live demo includes this file and adds this plugin to its own
+/// app, which sets up the window for a canvas in the page.
+pub struct MountainHousePlugin;
+
+impl Plugin for MountainHousePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(VoxelWorldPlugin::with_config(MountainWorld))
+            .insert_resource(Sun::DUSK)
+            .init_resource::<Placing>()
+            .add_systems(Startup, (setup, spawn_lamps, spawn_smoke))
+            .add_systems(
+                Update,
+                (
+                    // `edit_voxels` goes before `grab_mouse`, so the click that
+                    // captures the mouse doesn't also place a voxel.
+                    (look_around, walk, edit_voxels, grab_mouse).chain(),
+                    choose_voxel,
+                    turn_sun,
+                    follow_sun.run_if(resource_changed::<Sun>),
+                    fit_scene_image,
+                    flicker,
+                    drift_smoke,
+                    carry_lantern,
+                    toggle_help,
+                ),
+            );
+    }
 }
 
 /// Where the camera's feet start: on the ledge, off the house's front corner.
@@ -904,12 +938,35 @@ const FOG: Color = Color::srgb(0.42, 0.45, 0.58);
 const FOG_GLOW: Color = Color::srgba(1.0, 0.62, 0.35, 0.5);
 const MIST_AMBIENT: f32 = 0.3;
 
+/// The ambient light that stands in for the atmosphere in the browser, at dusk
+/// and before.
+const BROWSER_AMBIENT: f32 = 600.0;
+
+/// The smallest and largest chunk columns, along x and z, of the world in the
+/// browser: the ledge, the house, the cave and a little of the valley.
+///
+/// Every chunk drawn costs the browser time each frame, and chunk tasks run
+/// one at a time on the page's one thread. Ending the world here lets every
+/// chunk of it spawn while the page loads, within the default spawning
+/// distance from anywhere in it, so none stream in while walking. The walker
+/// stops at the edge, where the chunks beyond are never generated.
+const BROWSER_CHUNKS: (IVec2, IVec2) = (IVec2::new(-3, -3), IVec2::new(2, 3));
+
+/// How far the distance fog lets you see, in voxels. The browser's shorter
+/// distance hides the edge of its smaller world, and its sky is the fog's
+/// colour, so the world fades into the sky there.
+const FOG_VISIBILITY: f32 = if IN_BROWSER { 150.0 } else { 520.0 };
+
 /// How many metres one voxel stands for, for the atmosphere's haze.
 const METRES_PER_VOXEL: f32 = 14.0;
 
 /// The sun's illuminance before the atmosphere filters it. It is well below real
 /// sunlight, so that one exposure suits both the sky and the lamps.
 const SUN_ILLUMINANCE: f32 = lux::RAW_SUNLIGHT / 40.0;
+
+/// Whether the example runs in a browser, where it renders through WebGL2 and
+/// leaves out what WebGL2 can't do.
+const IN_BROWSER: bool = cfg!(target_arch = "wasm32");
 
 /// How many rows of pixels the scene renders at, whatever the window's size.
 /// The window shows them stretched to fit, so a larger window, or one on a
@@ -939,13 +996,18 @@ fn setup(
     // The camera renders the scene into an image, which a second camera shows
     // stretched over the window, under the help text. Smoothing it as it
     // stretches keeps the pixels even at any window size.
+    // WebGL2 can't view a texture in a second format, so in the browser the
+    // image is sRGB throughout.
     let size = scene_size(&window);
-    let mut scene = Image::new_target_texture(
-        size.x,
-        size.y,
-        TextureFormat::Rgba8Unorm,
-        Some(TextureFormat::Rgba8UnormSrgb),
-    );
+    let (format, view_format) = if IN_BROWSER {
+        (TextureFormat::Rgba8UnormSrgb, None)
+    } else {
+        (
+            TextureFormat::Rgba8Unorm,
+            Some(TextureFormat::Rgba8UnormSrgb),
+        )
+    };
+    let mut scene = Image::new_target_texture(size.x, size.y, format, view_format);
     scene.sampler = ImageSampler::linear();
     let scene = images.add(scene);
     commands.insert_resource(SceneImage(scene.clone()));
@@ -964,83 +1026,103 @@ fn setup(
     // The atmosphere is a planet whose ground is at y = 0. Scaling it down makes
     // one voxel stand for several metres, so the haze of distance shows within
     // the few hundred voxels that are spawned.
-    commands.spawn((
-        Atmosphere::earth(media.add(ScatteringMedium::default())),
-        Transform::from_xyz(0.0, -6_360_000.0 / METRES_PER_VOXEL, 0.0)
-            .with_scale(Vec3::splat(1.0 / METRES_PER_VOXEL)),
-    ));
+    if !IN_BROWSER {
+        commands.spawn((
+            Atmosphere::earth(media.add(ScatteringMedium::default())),
+            Transform::from_xyz(0.0, -6_360_000.0 / METRES_PER_VOXEL, 0.0)
+                .with_scale(Vec3::splat(1.0 / METRES_PER_VOXEL)),
+        ));
+    }
 
     // The atmosphere draws the sky over the colour the camera clears to, and
     // lights the world through its environment map. Light propagation scales
     // the environment map down where sky light is weak, so it doesn't reach
     // into the cellar or deep into the cave.
-    let (clear_color, ambient) = if cfg!(target_arch = "wasm32") {
+    //
+    // In the browser, where there is no atmosphere, the fog's colour and an
+    // ambient light stand in for it, and `follow_sun` dims both after sunset.
+    let (clear_color, ambient) = if IN_BROWSER {
         let ambient = GlobalAmbientLight {
-            brightness: 600.0,
+            brightness: BROWSER_AMBIENT,
             ..default()
         };
-        (Color::srgb(0.3, 0.36, 0.52), ambient)
+        (FOG, ambient)
     } else {
         (Color::BLACK, GlobalAmbientLight::NONE)
     };
     commands.insert_resource(ambient);
 
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            clear_color: ClearColorConfig::Custom(clear_color),
-            // Renders before the window's camera shows its image.
-            order: -1,
-            ..default()
-        },
-        RenderTarget::Image(scene.into()),
-        Projection::Perspective(PerspectiveProjection {
-            fov: 60f32.to_radians(),
-            far: 2000.0,
-            ..default()
-        }),
-        Transform::from_translation(START + Vec3::Y * EYE_HEIGHT),
-        // Facing the house, a little upwards.
-        Viewer {
-            yaw: -2.39,
-            pitch: 0.16,
-            ..default()
-        },
-        Walker {
-            feet: START,
-            ..default()
-        },
-        AtmosphereSettings::default(),
-        AtmosphereEnvironmentMapLight {
-            intensity: 2.5,
-            ..default()
-        },
-        Exposure { ev100: 9.0 },
-        Tonemapping::TonyMcMapface,
-        // Makes the lamps and the faces of emissive voxels glow.
-        Bloom::NATURAL,
-        // Hides the edge of the spawned world in haze.
-        DistanceFog {
-            color: FOG,
-            directional_light_color: FOG_GLOW,
-            directional_light_exponent: 12.0,
-            falloff: FogFalloff::from_visibility_colors(
-                520.0,
-                Color::srgb(0.32, 0.36, 0.5),
-                Color::srgb(0.62, 0.62, 0.72),
-            ),
-        },
-        // Volumetric fog shows only inside a `FogVolume`. Lights with
-        // `VolumetricLight` shine through it, and the ambient colour lights it
-        // in their shadows.
-        VolumetricFog {
-            ambient_color: Color::srgb(0.55, 0.62, 0.8),
-            ambient_intensity: MIST_AMBIENT,
-            step_count: 48,
-            ..default()
-        },
-        VoxelWorldCamera::<MountainWorld>::default(),
-    ));
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                clear_color: ClearColorConfig::Custom(clear_color),
+                // Renders before the window's camera shows its image.
+                order: -1,
+                ..default()
+            },
+            RenderTarget::Image(scene.into()),
+            Projection::Perspective(PerspectiveProjection {
+                fov: 60f32.to_radians(),
+                far: 2000.0,
+                ..default()
+            }),
+            Transform::from_translation(START + Vec3::Y * EYE_HEIGHT),
+            // Facing the house, a little upwards.
+            Viewer {
+                yaw: -2.39,
+                pitch: 0.16,
+                ..default()
+            },
+            Walker {
+                feet: START,
+                ..default()
+            },
+            Exposure { ev100: 9.0 },
+            Tonemapping::TonyMcMapface,
+            // Makes the lamps and the faces of emissive voxels glow.
+            Bloom::NATURAL,
+            // Hides the edge of the spawned world in haze.
+            DistanceFog {
+                color: FOG,
+                directional_light_color: FOG_GLOW,
+                directional_light_exponent: 12.0,
+                falloff: FogFalloff::from_visibility_colors(
+                    FOG_VISIBILITY,
+                    Color::srgb(0.32, 0.36, 0.5),
+                    Color::srgb(0.62, 0.62, 0.72),
+                ),
+            },
+            VoxelWorldCamera::<MountainWorld>::default(),
+            // WebGL2 can't sample a multisampled depth texture, which the
+            // camera's effects ask for.
+            if IN_BROWSER {
+                Msaa::Off
+            } else {
+                Msaa::default()
+            },
+        ))
+        .id();
+    // WebGL2 can't run the atmosphere or volumetric fog, so the browser goes
+    // without both.
+    if !IN_BROWSER {
+        commands.entity(camera).insert((
+            AtmosphereSettings::default(),
+            AtmosphereEnvironmentMapLight {
+                intensity: 2.5,
+                ..default()
+            },
+            // Volumetric fog shows only inside a `FogVolume`. Lights with
+            // `VolumetricLight` shine through it, and the ambient colour lights
+            // it in their shadows.
+            VolumetricFog {
+                ambient_color: Color::srgb(0.55, 0.62, 0.8),
+                ambient_intensity: MIST_AMBIENT,
+                step_count: 48,
+                ..default()
+            },
+        ));
+    }
 
     // Light propagation lets the sun shine on chunks only on faces with direct
     // sky, so it can't reach into the cave through rock that hasn't spawned. It
@@ -1062,16 +1144,18 @@ fn setup(
     ));
 
     // Mist in the valley below the ledge.
-    commands.spawn((
-        FogVolume {
-            density_factor: 0.08,
-            absorption: 0.05,
-            scattering: 0.4,
-            ..default()
-        },
-        Transform::from_xyz(-25.0, 17.0, -110.0)
-            .with_scale(Vec3::new(500.0, 34.0, 180.0)),
-    ));
+    if !IN_BROWSER {
+        commands.spawn((
+            FogVolume {
+                density_factor: 0.08,
+                absorption: 0.05,
+                scattering: 0.4,
+                ..default()
+            },
+            Transform::from_xyz(-25.0, 17.0, -110.0)
+                .with_scale(Vec3::new(500.0, 34.0, 180.0)),
+        ));
+    }
 
     commands.spawn((
         HelpText,
@@ -1183,6 +1267,12 @@ impl Sun {
         Transform::default().looking_to(-self.direction(), Vec3::Y)
     }
 
+    /// How much of the sun shows above the horizon, from 1 down to 0 as it
+    /// sinks below.
+    fn above_horizon(&self) -> f32 {
+        smoothstep(-0.04, 0.04, self.elevation)
+    }
+
     /// How much daylight is left, from 1 at dusk and above down to 0.08 once the
     /// sun is well below the horizon.
     fn daylight(&self) -> f32 {
@@ -1207,13 +1297,21 @@ fn turn_sun(time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, mut sun: ResMut<Su
 /// Moves the directional light with the sun, and dims the fog and mist after it
 /// sets. The atmosphere's sky follows the light on its own, but the fog's
 /// colours are fixed values that would otherwise glow in the dark.
+///
+/// In the browser it also dims the sky colour and ambient light that stand in
+/// for the atmosphere, and puts the sun out below the horizon, where the
+/// atmosphere would have filtered it out.
 fn follow_sun(
     sun: Res<Sun>,
-    mut lights: Query<&mut Transform, With<DirectionalLight>>,
-    mut cameras: Query<(&mut DistanceFog, &mut VolumetricFog)>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut lights: Query<(&mut Transform, &mut DirectionalLight)>,
+    mut cameras: Query<(&mut Camera, &mut DistanceFog, Option<&mut VolumetricFog>)>,
 ) {
-    for mut transform in &mut lights {
+    for (mut transform, mut light) in &mut lights {
         *transform = sun.transform();
+        if IN_BROWSER {
+            light.illuminance = SUN_ILLUMINANCE * sun.above_horizon();
+        }
     }
     let daylight = sun.daylight();
     let dim = |color: Color| {
@@ -1225,10 +1323,18 @@ fn follow_sun(
             linear.alpha,
         )
     };
-    for (mut fog, mut mist) in &mut cameras {
+    for (mut camera, mut fog, mist) in &mut cameras {
         fog.color = dim(FOG);
         fog.directional_light_color = dim(FOG_GLOW);
-        mist.ambient_intensity = MIST_AMBIENT * daylight;
+        if let Some(mut mist) = mist {
+            mist.ambient_intensity = MIST_AMBIENT * daylight;
+        }
+        if IN_BROWSER {
+            camera.clear_color = ClearColorConfig::Custom(dim(FOG));
+        }
+    }
+    if IN_BROWSER {
+        ambient.brightness = BROWSER_AMBIENT * daylight;
     }
 }
 
