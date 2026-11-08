@@ -649,7 +649,7 @@ fn a_minimal_world_reads_the_same_light_as_a_shown_one_through_streaming_fill_an
     let mut minimal = App::new();
     minimal
         .add_plugins((
-            MinimalPlugins,
+            crate::test::test_plugins(),
             VoxelWorldPlugin::<LampWorld>::minimal_with_config(world.clone()),
         ))
         .add_systems(Startup, spawn_camera::<LampWorld>);

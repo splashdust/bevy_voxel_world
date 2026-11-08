@@ -26,7 +26,7 @@ use rand::{rngs::StdRng, RngExt, SeedableRng};
 
 fn _test_setup_app() -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<DefaultWorld>::minimal()));
     app.add_systems(Startup, |mut commands: Commands| {
         commands.spawn((
             Camera3d::default(),
@@ -41,7 +41,7 @@ fn _test_setup_app() -> App {
 #[test]
 fn chunks_spawn_with_multiple_voxel_world_cameras() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<DefaultWorld>::minimal()));
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<DefaultWorld>::minimal()));
     app.add_systems(Startup, |mut commands: Commands| {
         let first_transform =
             Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -201,6 +201,34 @@ fn spawn_camera<C: VoxelWorldConfig>(mut commands: Commands) {
     ));
 }
 
+/// `MinimalPlugins` with one async compute thread per core.
+///
+/// Chunk and light tasks run on `AsyncComputeTaskPool`, and Bevy's task pools
+/// are shared by every test in the process. Bevy's default gives that pool a
+/// quarter of the cores, which is one thread on a 4-core machine, too few for
+/// tests running side by side to finish before their deadlines.
+///
+/// The pools are created by the first app built, so every test app uses this
+/// to get the same sizes whichever test runs first.
+fn test_plugins() -> bevy::app::PluginGroupBuilder {
+    let cores = bevy::tasks::available_parallelism();
+    MinimalPlugins.set(TaskPoolPlugin {
+        task_pool_options: TaskPoolOptions {
+            // The compute pool gets the threads the other pools leave, so
+            // adding the async threads on top keeps it at its default size.
+            min_total_threads: 2 * cores,
+            async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+                min_threads: cores,
+                max_threads: cores,
+                percent: 0.0,
+                on_thread_spawn: None,
+                on_thread_destroy: None,
+            },
+            ..default()
+        },
+    })
+}
+
 /// Runs `app` at least once and until `done` holds, failing the test if it takes
 /// too long.
 fn update_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
@@ -258,7 +286,7 @@ fn chunk_data<C: VoxelWorldConfig>(
 #[test]
 fn a_system_can_hold_res_mut_of_the_config_and_voxel_world_together() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(
             Update,
@@ -300,7 +328,7 @@ fn a_startup_system_reads_a_config_inserted_after_the_plugin() {
     struct ReadAtStartup(WorldVoxel);
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<HintOnlyWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<HintOnlyWorld>::minimal()))
         .insert_resource(HintOnlyWorld { hinted: 7 })
         .add_systems(
             Startup,
@@ -323,7 +351,7 @@ struct Published(Vec<IVec3>);
 #[test]
 fn minimal_world_publishes_generated_voxels() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
 
     let below_ground = IVec3::new(1, -3, 1);
@@ -340,7 +368,7 @@ fn minimal_world_publishes_generated_voxels() {
 #[test]
 fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .init_resource::<Published>()
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(
@@ -369,7 +397,7 @@ fn published_chunks_are_readable_by_systems_after_the_voxel_world_set() {
 #[test]
 fn a_chunk_is_ready_once_it_is_published() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
 
     update_until(&mut app, "the chunk at the origin to be ready", |app| {
@@ -399,7 +427,7 @@ impl VoxelWorldConfig for PausedWorld {
 #[test]
 fn a_chunk_has_no_data_until_it_is_published() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<PausedWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<PausedWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<PausedWorld>);
 
     for _ in 0..3 {
@@ -419,7 +447,7 @@ struct Retired(Vec<IVec3>);
 #[test]
 fn a_retiring_chunk_can_be_queried_in_the_frame_it_retires() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .init_resource::<Retired>()
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(
@@ -492,7 +520,7 @@ impl VoxelWorldConfig for ThrottledWorld {
 fn the_world_survives_despawning_every_published_chunk() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<ThrottledWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<ThrottledWorld>);
@@ -565,7 +593,7 @@ fn chunks_in_publish_order<C: VoxelWorldConfig>(app: &mut App) -> (Vec<ChunkKey>
 fn chunks_are_generated_around_the_camera_first_then_nearest_first() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<ThrottledWorld>::minimal(),
     ))
     .insert_resource(ThrottledWorld { task_slots: 1 })
@@ -633,7 +661,7 @@ impl VoxelWorldConfig for OneTaskLevelsWorld {
 fn coarse_chunks_are_generated_alongside_the_fine_chunks_as_large_on_screen() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<OneTaskLevelsWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<OneTaskLevelsWorld>);
@@ -685,7 +713,7 @@ impl VoxelWorldConfig for AllAroundWorld {
 fn every_edited_chunk_gets_a_task_in_the_same_frame() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<AllAroundWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<AllAroundWorld>);
@@ -839,7 +867,7 @@ impl VoxelWorldConfig for HandAddedMaterialWorld {
 fn meshing_app() -> App {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         bevy::asset::AssetPlugin::default(),
         bevy::image::ImagePlugin::default(),
         bevy::mesh::MeshPlugin,
@@ -1451,7 +1479,7 @@ impl VoxelWorldConfig for ReuseWorld {
 #[test]
 fn a_remeshed_chunk_reuses_its_previous_data() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<ReuseWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<ReuseWorld>::minimal()))
         .init_resource::<Announced>()
         .add_systems(Startup, spawn_camera::<ReuseWorld>)
         .add_systems(Update, record_announcements::<ReuseWorld>);
@@ -1515,7 +1543,7 @@ impl VoxelWorldConfig for SolidWorld {
 #[test]
 fn a_full_chunk_keeps_an_edited_voxel_of_another_material() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<SolidWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<SolidWorld>::minimal()))
         .init_resource::<Announced>()
         .add_systems(Startup, spawn_camera::<SolidWorld>)
         .add_systems(Update, record_announcements::<SolidWorld>);
@@ -1547,7 +1575,7 @@ fn a_full_chunk_keeps_an_edited_voxel_of_another_material() {
 #[test]
 fn chunk_at_finds_the_chunk_covering_a_voxel() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
     update_until(&mut app, "the chunk at the origin to be ready", |app| {
         chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
@@ -1620,7 +1648,7 @@ const COARSE_SAMPLE: IVec3 = IVec3::new(68, -2, 6);
 /// the chunk `COARSE` is ready.
 fn levels_world_app() -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<LevelsWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<LevelsWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<LevelsWorld>);
     update_until(&mut app, "the coarse chunk to be ready", |app| {
         chunk_status_of::<LevelsWorld>(app, COARSE) == Some(ChunkStatus::Ready)
@@ -1810,7 +1838,7 @@ fn chunk_keys<C: VoxelWorldConfig>(app: &mut App) -> HashSet<ChunkKey> {
 fn hinted_chunks_are_not_spawned_and_get_voxel_answers_from_their_hints() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<HintedFloorWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<HintedFloorWorld>);
@@ -1854,7 +1882,7 @@ fn hinted_chunks_are_not_spawned_and_get_voxel_answers_from_their_hints() {
 fn the_raycast_hits_hinted_ground_where_no_chunk_exists() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<HintedFloorWorld>::minimal(),
     ))
     // Two cameras six chunks apart, so that the published chunks' bounds, which
@@ -1938,7 +1966,7 @@ impl VoxelWorldConfig for MisHintedWorld {
 fn a_hinted_chunk_in_the_protected_radius_is_generated_and_a_wrong_hint_is_noticed() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<MisHintedWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<MisHintedWorld>);
@@ -1971,7 +1999,7 @@ fn a_hinted_chunk_in_the_protected_radius_is_generated_and_a_wrong_hint_is_notic
 #[test]
 fn a_chunk_is_found_by_its_exact_key_only() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
     update_until(&mut app, "the chunk at the origin to be ready", |app| {
         chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
@@ -2331,7 +2359,7 @@ fn flat_ground_meshes_as_one_quad() {
 #[test]
 fn raycast_finds_voxel() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
 
     update_until(&mut app, "the chunk at the origin to be ready", |app| {
@@ -2392,7 +2420,7 @@ fn raycast_stays_on_its_ray_when_published_chunks_span_a_wide_area() {
 
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<WideFloorWorld>::minimal(),
     ))
     .add_systems(Startup, |mut commands: Commands| {
@@ -2694,7 +2722,7 @@ fn voxel_line_traversal_ending_on_voxel_boundary() {
 #[test]
 fn chunk_data_has_voxels_at_negative_coordinates() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
     let chunk_pos = IVec3::splat(-1);
 
@@ -2873,7 +2901,7 @@ impl VoxelWorldConfig for SlowLookupWorld {
 fn frames_without_voxel_edits_do_not_wait_for_chunk_tasks() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<SlowLookupWorld>::minimal(),
     ));
     app.add_systems(Startup, |mut commands: Commands| {
@@ -2934,7 +2962,7 @@ struct KeepEditing(bool);
 fn a_chunk_edited_every_frame_still_publishes() {
     const EDITED: IVec3 = IVec3::new(16, 16, 16);
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<SlowTaskWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<SlowTaskWorld>::minimal()))
         .insert_resource(KeepEditing(true))
         .add_systems(Startup, spawn_camera::<SlowTaskWorld>)
         .add_systems(
@@ -2972,7 +3000,7 @@ fn a_chunk_edited_every_frame_still_publishes() {
 fn an_edited_chunk_gets_a_task_slot_before_waiting_spawns() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<ThrottledWorld>::minimal(),
     ))
     .insert_resource(ThrottledWorld { task_slots: 1 })
@@ -3081,7 +3109,7 @@ impl VoxelWorldConfig for SlowEditedWorld {
 fn frames_with_voxel_edits_do_not_wait_for_chunk_tasks() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<SlowEditedWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<SlowEditedWorld>)
@@ -3114,7 +3142,7 @@ fn frames_with_voxel_edits_do_not_wait_for_chunk_tasks() {
 #[test]
 fn a_published_chunk_includes_the_edits_in_its_padding() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
 
     update_until(&mut app, "the chunk at the origin to be ready", |app| {
@@ -3192,7 +3220,7 @@ impl VoxelWorldConfig for OneSlowTaskWorld {
 fn despawning_a_generating_chunk_frees_its_task_slot_and_lets_it_respawn() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<OneSlowTaskWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<OneSlowTaskWorld>);
@@ -3226,7 +3254,7 @@ fn despawning_a_generating_chunk_frees_its_task_slot_and_lets_it_respawn() {
 #[test]
 fn despawning_a_ready_chunk_removes_its_data_and_lets_it_respawn() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .init_resource::<Announced>()
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(Update, record_announcements::<FloorWorld>);
@@ -3255,7 +3283,7 @@ fn despawning_a_ready_chunk_removes_its_data_and_lets_it_respawn() {
 #[test]
 fn a_respawned_chunk_keeps_its_data_when_the_old_chunk_is_removed_late() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .init_resource::<Announced>()
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(Update, record_announcements::<FloorWorld>);
@@ -3301,7 +3329,7 @@ fn a_respawned_chunk_keeps_its_data_when_the_old_chunk_is_removed_late() {
 #[test]
 fn a_remeshed_chunk_is_published_again_but_spawns_once() {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, VoxelWorldPlugin::<FloorWorld>::minimal()))
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .init_resource::<Announced>()
         .add_systems(Startup, spawn_camera::<FloorWorld>)
         .add_systems(Update, record_announcements::<FloorWorld>);
@@ -3326,7 +3354,7 @@ fn a_remeshed_chunk_is_published_again_but_spawns_once() {
 fn a_chunk_spawned_again_after_despawning_announces_its_spawn_again() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<ThrottledWorld>::minimal(),
     ))
     .init_resource::<Announced>()
@@ -3375,7 +3403,7 @@ impl VoxelWorldConfig for SparseDataWorld {
 fn an_edit_in_a_neighbours_padding_two_voxels_deep_regenerates_the_chunk() {
     let mut app = App::new();
     app.add_plugins((
-        MinimalPlugins,
+        test_plugins(),
         VoxelWorldPlugin::<SparseDataWorld>::minimal(),
     ))
     .add_systems(Startup, spawn_camera::<SparseDataWorld>);

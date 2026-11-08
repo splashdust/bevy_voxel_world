@@ -277,7 +277,7 @@ mod with_feature {
     fn an_out_of_range_reach_clamps_and_doesnt_panic() {
         let mut app = App::new();
         app.add_plugins((
-            MinimalPlugins,
+            crate::test::test_plugins(),
             VoxelWorldPlugin::<OutOfRangeWorld>::minimal(),
         ))
         .add_systems(Startup, spawn_camera::<OutOfRangeWorld>);
