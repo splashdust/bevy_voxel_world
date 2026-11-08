@@ -10,7 +10,7 @@
 
 This plugin makes it easy to generate and modify voxel terrains in Bevy. `bevy_voxel_world` handles multithreaded meshing, chunk spawning/despawning, texture mapping and provides an easy to use API that can be accessed from any system.
 
-<img width="700" height="389" alt="bombs" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/bombs.webp" />
+<img width="700" height="389" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/bombs.webp" />
 
 ```bash
 $ cargo run -r --example bombs
@@ -67,7 +67,7 @@ This will update the voxel value at the given location in the persisting `HashMa
 
 Voxels are keyed by their XYZ coordinate in the world, specified by an `IVec3`. The type of voxel is specified by the `WorldVoxel` type. A voxel can be `Unset`, `Air` or `Solid`.
 
-<img width="800" height="445" alt="voxel_animation" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/voxel_animation.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/voxel_animation.webp" />
 
 ## Voxel materials
 
@@ -147,13 +147,13 @@ See this [full example of custom meshing](https://github.com/splashdust/bevy_vox
 
 ### Other shapes
 
-<img width="800" height="445" alt="marching_cubes" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/marching_cubes.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/marching_cubes.webp" />
 
 The delegate doesn't have to produce cubical voxels. The [marching cubes example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/marching_cubes.rs) turns each chunk's voxels into a density field and extracts a smooth surface with the [transvoxel](https://crates.io/crates/transvoxel) crate, rendered with a `StandardMaterial` and vertex colours instead of the default voxel material.
 
 ## Level of Detail
 
-<img width="800" height="445" alt="noise_terrain_lod" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/noise_terrain_lod.webp" />
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/noise_terrain_lod.webp" />
 
 Every chunk has a LOD level. A level-0 chunk is 32 voxels on a side and samples every voxel. A chunk at level `L` is `32 << L` voxels on a side and, by default, samples every `1 << L` voxels, so it holds as many samples as a level-0 chunk. Far regions therefore cost about as much as near ones, which lets a world stream out to a distant horizon.
 
@@ -215,6 +215,8 @@ $ cargo run -r --example light_tuning --features light_propagation
 ### Light demo
 
 The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates.
+
+<img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/house.webp" />
 
 ```bash
 $ cargo run -r --example light_mountain_house --features light_propagation
