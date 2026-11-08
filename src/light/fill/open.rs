@@ -18,8 +18,12 @@
 //! keeps only the sun's own shadow. A cave is black past what its opening
 //! shows of the sky.
 //!
-//! Rays only rise, so a change to a position's cells casts again the cells of
-//! the known positions below and beside it within `reach`, and its own.
+//! Rays only rise, so a change to a position's cells can only change the
+//! cells of the known positions below and beside it within `reach`, and its
+//! own. Of those, only the positions whose rays read it when they last cast
+//! cast again: in open air rays reach the sky within a cell or two, and a
+//! world of sparse voxels would otherwise cast every position under each one
+//! it learns, more than the field gets through at rest.
 
 use std::time::Duration;
 
@@ -82,6 +86,9 @@ struct Entry {
     /// The unknown positions that stopped a ray of a cell that isn't direct
     /// sky.
     asks: Vec<IVec3>,
+    /// The positions the rays of its cells read when they last cast, as bits
+    /// at their [`look_index`].
+    reads: Vec<u64>,
 }
 
 /// What a cell's ray reads of a position.
@@ -211,6 +218,7 @@ impl OpenField {
                     },
                     worked_out: false,
                     asks: Vec::new(),
+                    reads: Vec::new(),
                 });
                 entry.cells = cells;
                 self.recast.insert(position);
@@ -228,10 +236,12 @@ impl OpenField {
             for z in -span..=span {
                 for x in -span..=span {
                     let below = position + IVec3::new(x, y, z);
-                    let casts = self
-                        .entries
-                        .get(&below)
-                        .is_some_and(|entry| casting(entry.cells) != 0);
+                    let index = look_index(position - below, span);
+                    let casts = self.entries.get(&below).is_some_and(|entry| {
+                        casting(entry.cells) != 0
+                            && (!entry.worked_out
+                                || entry.reads[index / 64] >> (index % 64) & 1 == 1)
+                    });
                     if casts {
                         self.recast.insert(below);
                     }
@@ -288,9 +298,7 @@ impl OpenField {
                     at[axis] += ray.step[axis];
                     next[axis] += ray.delta[axis];
                     let offset = IVec3::new(at.x >> 2, at.y >> 2, at.z >> 2);
-                    let index = (offset.x + span) as usize
-                        + offset.y as usize * side
-                        + (offset.z + span) as usize * side * (span as usize + 1);
+                    let index = look_index(offset, span);
                     let look = match self.looks[index] {
                         Look::NotRead => {
                             let look = match self.entries.get(&(position + offset)) {
@@ -333,8 +341,15 @@ impl OpenField {
             sunlit: sun & !cells.direct,
             levels,
         };
+        let mut reads = vec![0u64; self.looks.len().div_ceil(64)];
+        for (index, look) in self.looks.iter().enumerate() {
+            if !matches!(look, Look::NotRead) {
+                reads[index / 64] |= 1 << (index % 64);
+            }
+        }
         let entry = self.entries.get_mut(&position).unwrap();
         entry.asks = asks;
+        entry.reads = reads;
         if entry.worked_out && entry.fill == fill {
             return false;
         }
@@ -342,6 +357,15 @@ impl OpenField {
         entry.worked_out = true;
         true
     }
+}
+
+/// Where the position `offset` from a casting position is in the positions
+/// its rays can reach, `span` up and to each side.
+fn look_index(offset: IVec3, span: i32) -> usize {
+    let side = (2 * span + 1) as usize;
+    (offset.x + span) as usize
+        + offset.y as usize * side
+        + (offset.z + span) as usize * side * (span as usize + 1)
 }
 
 /// The cells of a position with `cells` that cast rays: open, and not direct
@@ -416,5 +440,57 @@ mod tests {
         let under = cell_bit(1, 2, 1).trailing_zeros() as usize;
         assert_eq!(cells.direct >> under & 1, 0);
         assert!((1..SKY_LEVEL).contains(&cells.levels[under]));
+    }
+
+    /// A field of open air in 11×1×11 positions whose cells all see the sky,
+    /// except the bottom cells of the position at the origin, whose columns
+    /// are blocked just above them. Its top cells are direct sky, so the
+    /// rays of the bottom cells stop within the position at the origin and
+    /// the ones beside it.
+    fn shaded_floor() -> OpenField {
+        let mut field = field();
+        for z in -5..=5 {
+            for x in -5..=5 {
+                let position = IVec3::new(x, 0, z);
+                let direct = if position == IVec3::ZERO {
+                    // Every cell but the bottom 16.
+                    !0xffff
+                } else {
+                    !0
+                };
+                field.learn(position, PositionCells { open: !0, direct });
+            }
+        }
+        field.update(Duration::MAX);
+        field
+    }
+
+    #[test]
+    fn a_position_no_ray_read_casts_no_cell_again() {
+        let mut field = shaded_floor();
+        assert!(!field.has_pending());
+        let before = field.cells(IVec3::ZERO).unwrap().clone();
+        // Above and beside the origin, within the reach of its rays, but past
+        // the sky its rays reach first.
+        let far = IVec3::new(3, 1, 3);
+        field.learn(far, PositionCells { open: 0, direct: 0 });
+        // One update with no time to spare casts one position: the one learned.
+        field.update(Duration::ZERO);
+        assert!(
+            !field.has_pending(),
+            "a cell that never read it casts again"
+        );
+        assert!(field.cells(IVec3::ZERO).unwrap() == &before);
+    }
+
+    #[test]
+    fn a_position_a_ray_read_casts_that_cell_again() {
+        let mut field = shaded_floor();
+        let before = field.cells(IVec3::ZERO).unwrap().clone();
+        // Make the cells beside the origin solid: the shaded cells' rays read
+        // them.
+        field.learn(IVec3::X, PositionCells { open: 0, direct: 0 });
+        field.update(Duration::MAX);
+        assert!(field.cells(IVec3::ZERO).unwrap() != &before);
     }
 }
