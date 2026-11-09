@@ -388,6 +388,19 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         self.voxel_edits.set(position, voxel);
     }
 
+    /// Sets the voxels in the box from `min` inclusive to `max`
+    /// exclusive, each to the voxel `voxel` returns for it, leaving those it
+    /// returns `None` for alone. Setting a region this way costs far less per
+    /// voxel than `set_voxel` in a loop when the region covers whole chunks.
+    pub fn set_voxels_in(
+        &mut self,
+        min: IVec3,
+        max: IVec3,
+        voxel: impl FnMut(IVec3) -> Option<WorldVoxel<C::MaterialIndex>>,
+    ) {
+        self.voxel_edits.set_region(min, max, voxel);
+    }
+
     /// Get a sendable closure that can be used to get the voxel at the given position
     /// This is useful for spawning tasks that need to access the voxel world
     pub fn get_voxel_fn(

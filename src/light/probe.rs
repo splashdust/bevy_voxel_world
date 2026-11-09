@@ -120,7 +120,7 @@ pub(crate) struct ProbeRead {
 pub(crate) fn probe_position<I: Copy + PartialEq>(
     position: IVec3,
     mut lookup: impl FnMut(IVec3) -> crate::voxel::WorldVoxel<I>,
-    edits: Option<&HashMap<IVec3, crate::voxel::WorldVoxel<I>>>,
+    edits: Option<&crate::voxel_edits::Bucket<I>>,
     cells: bool,
 ) -> ProbeRead {
     let min = position * CHUNK_SIZE_I;
@@ -141,7 +141,7 @@ pub(crate) fn probe_position<I: Copy + PartialEq>(
                 let at = min + IVec3::new(x as i32, y as i32, z as i32);
                 lookups += 1;
                 let voxel = edits
-                    .and_then(|edits| edits.get(&at).copied())
+                    .and_then(|edits| edits.get(at))
                     .unwrap_or_else(|| lookup(at));
                 if voxel.is_solid() {
                     *solid |= 1 << z;

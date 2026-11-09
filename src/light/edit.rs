@@ -83,6 +83,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     #[cfg(feature = "trace")]
     let _span = bevy::log::info_span!("relight_edits").entered();
+    let edited: Vec<IVec3> = requests.edited_voxels.clone();
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
     settings.walks.lock().unwrap().clear();
@@ -105,7 +106,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         .max(settings.task.voxel_scale.reach()) as i32;
 
     let mut by_chunk: HashMap<IVec3, Vec<IVec3>> = HashMap::new();
-    for p in &requests.edited {
+    for p in &edited {
         by_chunk.entry(chunk_containing(*p)).or_default().push(*p);
     }
     let mut relight: HashSet<IVec3> = HashSet::new();
@@ -113,7 +114,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
 
     // Which edits touch light, read before any input changes.
     let fill = settings.task.fill.is_some();
-    for p in &requests.edited {
+    for p in &edited {
         if quiet {
             if touches_light(&view, *p, voxel(*p).is_solid()) {
                 relight.insert(chunk_containing(*p));
@@ -130,7 +131,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
 
     // A solid placed in the padding of a chunk of air makes it take sky fill.
     if fill {
-        for p in requests.edited.iter().filter(|p| voxel(**p).is_solid()) {
+        for p in edited.iter().filter(|p| voxel(**p).is_solid()) {
             let own = chunk_containing(*p);
             for position in within_reach(*p, 1).filter(|position| *position != own) {
                 let Some(chunk) = view.get_mut(&position) else {

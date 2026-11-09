@@ -233,10 +233,10 @@ impl LightInputs {
         if let (Some(edits), false) = (&rescan.edits, emission.is_empty()) {
             let min = position * CHUNK_SIZE_I;
             for (at, voxel) in edits.iter() {
-                let local = *at - min;
+                let local = at - min;
                 let (x, y, z) = (local.x as u8, local.y as u8, local.z as u8);
                 emissive.retain(|emitter| (emitter.x, emitter.y, emitter.z) != (x, y, z));
-                if let Some(level) = uniform_emission(*voxel, emission) {
+                if let Some(level) = uniform_emission(voxel, emission) {
                     emissive.push(EmissiveVoxel { x, y, z, level });
                 }
             }

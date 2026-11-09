@@ -25,7 +25,7 @@ use crate::{
     pool_budget::{JobKind, PendingChunks, PoolBudget},
     prelude::default_chunk_meshing_delegate,
     streaming_policy::{CameraPosition, StartOrder},
-    voxel_edits::{chunks_including, VoxelEdits},
+    voxel_edits::{chunks_including_box, EditedBox, VoxelEdits},
     voxel_world::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate, VoxelWorldCamera,
@@ -342,9 +342,12 @@ impl<C> ChunkIndex<C> {
 /// Retiring.
 #[derive(Resource)]
 pub(crate) struct ChunkRequests<C> {
-    /// Positions of voxels whose voxel edits changed. Every chunk, at any LOD
-    /// level, whose padded voxels include one of them is now stale.
-    pub edited: Vec<IVec3>,
+    /// Boxes of voxels whose voxel edits changed. Every chunk, at any LOD
+    /// level, whose padded voxels include a voxel of one is now stale.
+    pub edited: Vec<EditedBox>,
+    /// The voxels whose edits changed, for work that needs the exact set.
+    /// Cleared with `edited`.
+    pub edited_voxels: Vec<IVec3>,
     /// Chunks to spawn.
     pub spawn: Vec<ChunkKey>,
     /// Chunks to despawn.
@@ -356,6 +359,7 @@ impl<C> Default for ChunkRequests<C> {
     fn default() -> Self {
         Self {
             edited: Vec::new(),
+            edited_voxels: Vec::new(),
             spawn: Vec::new(),
             retire: Vec::new(),
             _marker: PhantomData,
@@ -413,9 +417,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                     (lod_level, padding_depth(shape, lod_level))
                 })
                 .collect();
-            for voxel in requests.edited.drain(..) {
+            requests.edited_voxels.clear();
+            for edited in requests.edited.drain(..) {
                 for &(lod_level, padding) in &levels {
-                    stale.extend(chunks_including(voxel, lod_level, padding));
+                    stale.extend(chunks_including_box(
+                        edited.min, edited.max, lod_level, padding,
+                    ));
                 }
             }
         }

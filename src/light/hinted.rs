@@ -77,13 +77,13 @@ pub(crate) fn air_inputs<C: VoxelWorldConfig>(
         if let Some(bucket) = edits.buckets(std::iter::once(position)).pop().flatten() {
             let min = position * CHUNK_SIZE_I;
             for (at, voxel) in bucket.iter() {
-                let local = (*at - min).as_uvec3();
+                let local = (at - min).as_uvec3();
                 let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
                 occupancy.set(x, y, z, voxel.is_solid());
                 let level = match voxel {
                     crate::voxel::WorldVoxel::Solid(material) => emission
                         .iter()
-                        .find(|(emissive, _)| emissive == material)
+                        .find(|(emissive, _)| *emissive == material)
                         .map(|(_, level)| *level),
                     _ => None,
                 };
