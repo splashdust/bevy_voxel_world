@@ -15,7 +15,9 @@
 //! A commit reports a [`ChangeSet`] per level-0 chunk whose edits changed: the
 //! voxels whose committed edit changed, with their new edits. The chunk
 //! lifecycle marks the chunks they reach stale through
-//! [`ChangeSet::stale_boxes`], and light reads the voxels themselves.
+//! [`ChangeSet::stale_boxes`], light reads the voxels themselves, and each
+//! set becomes the chunk's [`EditDelta`](crate::prelude::EditDelta) in the
+//! commit's message.
 
 use std::{
     marker::PhantomData,
@@ -27,13 +29,11 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use crate::{
     chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I},
     configuration::LodLevel,
+    edit_delta::{voxel_index, voxel_local, CHUNK_VOXELS},
     voxel::WorldVoxel,
 };
 
 type Voxels<I> = HashMap<IVec3, WorldVoxel<I>>;
-
-/// How many voxels a level-0 chunk has.
-const BUCKET_VOXELS: usize = (CHUNK_SIZE_I * CHUNK_SIZE_I * CHUNK_SIZE_I) as usize;
 
 /// A bucket holding this many edits turns from a map into an array.
 ///
@@ -67,7 +67,7 @@ pub(crate) struct Bucket<I> {
 enum Store<I> {
     Sparse(Voxels<I>),
     Dense {
-        /// `BUCKET_VOXELS` slots, x varying fastest.
+        /// `CHUNK_VOXELS` slots, by [`voxel_index`].
         voxels: Box<[Option<WorldVoxel<I>>]>,
         /// How many slots are set.
         count: usize,
@@ -85,19 +85,11 @@ impl<I: Copy + PartialEq> Bucket<I> {
 
     #[inline]
     fn index(&self, position: IVec3) -> usize {
-        let local = position - self.min;
-        (local.x + local.y * CHUNK_SIZE_I + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I)
-            as usize
+        voxel_index(position - self.min)
     }
 
     fn position_of(&self, index: usize) -> IVec3 {
-        let i = index as i32;
-        self.min
-            + IVec3::new(
-                i % CHUNK_SIZE_I,
-                i / CHUNK_SIZE_I % CHUNK_SIZE_I,
-                i / (CHUNK_SIZE_I * CHUNK_SIZE_I),
-            )
+        self.min + voxel_local(index)
     }
 
     #[inline]
@@ -136,14 +128,10 @@ impl<I: Copy + PartialEq> Bucket<I> {
     /// Turns a sparse bucket dense, for a region write that will fill it.
     pub fn make_dense(&mut self) {
         if let Store::Sparse(sparse) = &self.store {
-            let mut voxels = vec![None; BUCKET_VOXELS].into_boxed_slice();
+            let mut voxels = vec![None; CHUNK_VOXELS].into_boxed_slice();
             let min = self.min;
             for (&position, &voxel) in sparse {
-                let local = position - min;
-                voxels[(local.x
-                    + local.y * CHUNK_SIZE_I
-                    + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I)
-                    as usize] = Some(voxel);
+                voxels[voxel_index(position - min)] = Some(voxel);
             }
             let count = sparse.len();
             self.store = Store::Dense { voxels, count };
@@ -212,6 +200,8 @@ pub(crate) struct ChangeSet<I> {
     /// some of them, so the edit sequence before the commit can't be worked
     /// out from the one after it and the voxels' count.
     pub replaced: bool,
+    /// The chunk's edit sequence after the commit.
+    pub seq: u64,
     /// Each voxel whose committed edit changed, with its new edit, or `None`
     /// where its edit was removed.
     pub voxels: Vec<(IVec3, Option<WorldVoxel<I>>)>,
@@ -399,6 +389,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             sets.push(ChangeSet {
                 chunk,
                 replaced: false,
+                seq: committed.seq,
                 voxels: changes,
             });
         }

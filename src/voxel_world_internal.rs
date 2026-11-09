@@ -10,6 +10,7 @@ use crate::{
     chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
+    edit_delta::{EditDelta, EditsCommitted},
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
@@ -182,15 +183,21 @@ where
         requests.retire.extend(plan.retire);
     }
 
-    /// Commits the voxel edits set since the last frame, and requests that the
-    /// chunks they make stale be updated.
+    /// Commits the voxel edits set since the last frame, writes an
+    /// [`EditsCommitted`] for each level-0 chunk whose edits changed, and
+    /// requests that the chunks they make stale be updated.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        mut committed: MessageWriter<EditsCommitted<C>>,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        requests.edited.extend(voxel_edits.commit());
+        let sets = voxel_edits.commit();
+        committed.write_batch(sets.iter().map(|set| EditsCommitted {
+            delta: EditDelta::from_change_set(set),
+        }));
+        requests.edited.extend(sets);
     }
 
     /// Shows the meshes of chunks once this world's material is ready.

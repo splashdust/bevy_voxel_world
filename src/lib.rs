@@ -3,6 +3,7 @@ mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
+mod edit_delta;
 #[cfg(feature = "light_propagation")]
 mod light;
 #[cfg(not(feature = "light_propagation"))]
@@ -23,6 +24,7 @@ pub mod prelude {
     pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
+    pub use crate::edit_delta::{EditDelta, EditsCommitted};
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{
         Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,
@@ -54,6 +56,11 @@ pub mod custom_meshing {
     pub use crate::meshing::generate_chunk_mesh_for_shape;
     pub use crate::meshing::mesh_from_quads;
     pub use crate::meshing::scale_texture_coordinates;
+}
+
+/// The forms an [`EditDelta`](prelude::EditDelta) carries its voxels in.
+pub mod edits {
+    pub use crate::edit_delta::{Mask, Voxels};
 }
 
 pub mod debug {
