@@ -614,7 +614,10 @@ impl<I: Copy + PartialEq> ChunkEdits<I> {
         }
     }
 
-    #[inline]
+    // Kept out of the chunk task's body: inlined there, it changes how the
+    // compiler lays out the task's loop for chunks without edits, which most
+    // chunks are, and slows their generation though they never call it.
+    #[inline(never)]
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
         let chunk_pos = chunk_containing(position);
         match &self.buckets {
