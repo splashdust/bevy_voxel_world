@@ -388,10 +388,18 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         self.voxel_edits.set(position, voxel);
     }
 
-    /// Sets the voxels in the box from `min` inclusive to `max`
-    /// exclusive, each to the voxel `voxel` returns for it, leaving those it
-    /// returns `None` for alone. Setting a region this way costs far less per
-    /// voxel than `set_voxel` in a loop when the region covers whole chunks.
+    /// Sets each voxel in the box from `min` inclusive to `max` exclusive to
+    /// the voxel `voxel` returns for its position, leaving those it returns
+    /// `None` for alone.
+    ///
+    /// Each voxel set is a voxel edit, just as with [`VoxelWorld::set_voxel`],
+    /// and `WorldVoxel::Unset` is set like any other voxel. A box that is
+    /// empty or inverted along any axis sets nothing. A chunk-sized array of
+    /// voxels is set by passing the chunk's extent as the box and indexing the
+    /// array in `voxel`.
+    ///
+    /// Setting most of a chunk's voxels this way costs far less per voxel
+    /// than calling `set_voxel` for each of them.
     pub fn set_voxels_in(
         &mut self,
         min: IVec3,

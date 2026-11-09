@@ -145,7 +145,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             }));
         }
         self.add_air_around(key.position, world, edits);
-        let own_edits = edits.edit_count(key.position);
+        let own_edits = edits.edit_sequence(key.position);
         let kept = self
             .view
             .read()
@@ -165,7 +165,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 (1..=sky::walkable(window) as i32).map(|y| key.position + IVec3::Y * y);
             let counts: Vec<u64> = positions
                 .clone()
-                .map(|position| edits.edit_count(position))
+                .map(|position| edits.edit_sequence(position))
                 .collect();
             let mut record = self.record.lock().unwrap();
             let above = positions
@@ -187,7 +187,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 delegate,
                 found: SkyFound {
                     edits: counts,
-                    own_edits: edits.edit_count(key.position),
+                    own_edits: edits.edit_sequence(key.position),
                     generation: record.generation(),
                     ..default()
                 },

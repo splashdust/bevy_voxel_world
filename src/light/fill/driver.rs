@@ -157,7 +157,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
     ) {
         for (position, chunk) in view.read().iter() {
             let occupancy = &chunk.light.inputs.occupancy;
-            let count = edits.edit_count(*position);
+            let count = edits.edit_sequence(*position);
             if chunk.edits == count {
                 let open = Some(open_cells(occupancy));
                 record.insert(*position, &occupancy.solid_columns(), open, count);
@@ -192,7 +192,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         }
         let view = view.read();
         for position in std::mem::take(&mut self.dirty) {
-            let count = edits.edit_count(position);
+            let count = edits.edit_sequence(position);
             // Hinted air is learned from its hint, with no lookups.
             let inputs = view.inputs(position);
             let open = match inputs {
@@ -294,7 +294,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
                 .fill_probe_lookups
                 .fetch_add(read.lookups, Ordering::Relaxed);
             if probe.generation != record.generation()
-                || edits.edit_count(probe.position) != probe.edits
+                || edits.edit_sequence(probe.position) != probe.edits
             {
                 continue;
             }
@@ -319,7 +319,10 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         fill.dirty.extend(touched);
         for position in record.take_forgotten() {
             // A position replaced in the record is held again.
-            if record.cells(position, edits.edit_count(position)).is_none() {
+            if record
+                .cells(position, edits.edit_sequence(position))
+                .is_none()
+            {
                 fill.evicted.insert(position);
             }
             fill.note_with_below(position, rule);
@@ -438,7 +441,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
             fill.probing.insert(position);
             fill.running.push(FillProbe {
                 position,
-                edits: edits.edit_count(position),
+                edits: edits.edit_sequence(position),
                 generation,
                 task,
             });
@@ -478,7 +481,7 @@ fn top_from_record<C: VoxelWorldConfig>(
     let mut sky = [!0u32; crate::chunk::CHUNK_SIZE_U as usize];
     for above in 1..=window as i32 {
         let above = position + IVec3::Y * above;
-        let count = edits.edit_count(above);
+        let count = edits.edit_sequence(above);
         let solid = match view.get(&above) {
             Some(chunk) if chunk.edits == count => {
                 Some(chunk.light.inputs.occupancy.solid_columns())

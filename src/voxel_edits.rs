@@ -1,18 +1,22 @@
-///
-/// Voxel edits
-/// Every voxel edit of a voxel world, kept for as long as the world exists, and
-/// which chunks each voxel edit makes stale.
-///
-/// Voxel edits can be set from systems running in parallel, and are committed
-/// once a frame. The module reads no Bevy world state, so it can be tested with
-/// plain values.
-///
-/// PROTOTYPE (dense buckets, region edits): the edits of each level-0 chunk
-/// live in a `Bucket` that starts as a hash map and turns into a 32³ array once
-/// it holds many edits, and a region of voxels can be set in one call. The
-/// commit reports what changed as boxes, one per chunk when many voxels in it
-/// changed.
-///
+//! Every voxel edit of a voxel world, kept for as long as the world exists,
+//! and which chunks each voxel edit makes stale.
+//!
+//! Voxel edits can be set from systems running in parallel, and are committed
+//! once a frame. The module reads no Bevy world state, so it can be tested
+//! with plain values.
+//!
+//! The edits of each level-0 chunk live in a [`Bucket`] with the chunk's edit
+//! sequence: how many of the chunk's voxel edits have ever changed in a
+//! commit. A bucket starts as a map from position to voxel and turns into an
+//! array of every voxel in the chunk once it holds many edits, so that setting
+//! most of a chunk, as an animation does every frame, costs an array write per
+//! voxel rather than a hash map insert.
+//!
+//! A commit reports a [`ChangeSet`] per level-0 chunk whose edits changed: the
+//! voxels whose committed edit changed, with their new edits. The chunk
+//! lifecycle marks the chunks they reach stale through
+//! [`ChangeSet::stale_boxes`], and light reads the voxels themselves.
+
 use std::{
     marker::PhantomData,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
@@ -31,21 +35,32 @@ type Voxels<I> = HashMap<IVec3, WorldVoxel<I>>;
 /// How many voxels a level-0 chunk has.
 const BUCKET_VOXELS: usize = (CHUNK_SIZE_I * CHUNK_SIZE_I * CHUNK_SIZE_I) as usize;
 
-/// A sparse bucket with this many edits turns dense. A dense bucket of byte
-/// materials is 64 KiB; a sparse entry costs about 32 bytes with the map's
-/// slack, so this is about where the two are the same size.
+/// A bucket holding this many edits turns from a map into an array.
+///
+/// The array takes the same memory however few edits it holds, and a commit
+/// compares every one of its slots; the map takes memory per edit and hashes
+/// each read and write. This is about where the two take the same memory, so
+/// a chunk with fewer edits stays a map and one with more is as small as an
+/// array.
 const DENSE_AT: usize = 2048;
 
-/// Up to this many changed voxels in one chunk are reported one by one; more
-/// are reported as the one box around them.
+/// A chunk with more changed voxels than this in one commit is marked stale as
+/// the one box around them, rather than voxel by voxel.
+///
+/// Marking voxel by voxel finds exactly the chunks whose padding reaches a
+/// changed voxel, but its cost grows with the voxels. The box costs the same
+/// however many voxels it holds, and can mark a neighbouring chunk that none
+/// of the voxels reach, which then remeshes for nothing.
 const BOXED_AT: usize = 64;
 
-/// The edited voxels of one level-0 chunk.
+/// The voxel edits of one level-0 chunk, with its edit sequence.
 #[derive(Clone)]
 pub(crate) struct Bucket<I> {
     /// The chunk's minimum voxel.
     min: IVec3,
     store: Store<I>,
+    /// The chunk's edit sequence. Only committed buckets keep it.
+    seq: u64,
 }
 
 #[derive(Clone)]
@@ -64,13 +79,15 @@ impl<I: Copy + PartialEq> Bucket<I> {
         Self {
             min: chunk_pos * CHUNK_SIZE_I,
             store: Store::Sparse(Voxels::default()),
+            seq: 0,
         }
     }
 
     #[inline]
     fn index(&self, position: IVec3) -> usize {
         let local = position - self.min;
-        (local.x + local.y * CHUNK_SIZE_I + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I) as usize
+        (local.x + local.y * CHUNK_SIZE_I + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I)
+            as usize
     }
 
     fn position_of(&self, index: usize) -> IVec3 {
@@ -81,17 +98,6 @@ impl<I: Copy + PartialEq> Bucket<I> {
                 i / CHUNK_SIZE_I % CHUNK_SIZE_I,
                 i / (CHUNK_SIZE_I * CHUNK_SIZE_I),
             )
-    }
-
-    pub fn len(&self) -> usize {
-        match &self.store {
-            Store::Sparse(voxels) => voxels.len(),
-            Store::Dense { count, .. } => *count,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     #[inline]
@@ -134,7 +140,9 @@ impl<I: Copy + PartialEq> Bucket<I> {
             let min = self.min;
             for (&position, &voxel) in sparse {
                 let local = position - min;
-                voxels[(local.x + local.y * CHUNK_SIZE_I + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I)
+                voxels[(local.x
+                    + local.y * CHUNK_SIZE_I
+                    + local.z * CHUNK_SIZE_I * CHUNK_SIZE_I)
                     as usize] = Some(voxel);
             }
             let count = sparse.len();
@@ -156,7 +164,7 @@ impl<I: Copy + PartialEq> Bucket<I> {
     }
 
     /// The edits in `pending` that differ from this bucket's.
-    fn changes_from(&self, pending: &Bucket<I>) -> Vec<(IVec3, WorldVoxel<I>)> {
+    fn changes_from(&self, pending: &Bucket<I>) -> Vec<(IVec3, Option<WorldVoxel<I>>)> {
         let mut changes = Vec::new();
         match (&pending.store, &self.store) {
             (
@@ -170,7 +178,7 @@ impl<I: Copy + PartialEq> Bucket<I> {
                 for (i, (p, c)) in pending.iter().zip(committed.iter()).enumerate() {
                     if let Some(v) = p {
                         if *c != Some(*v) {
-                            changes.push((self.position_of(i), *v));
+                            changes.push((self.position_of(i), Some(*v)));
                         }
                     }
                 }
@@ -178,7 +186,7 @@ impl<I: Copy + PartialEq> Bucket<I> {
             _ => {
                 for (position, voxel) in pending.iter() {
                     if self.get(position) != Some(voxel) {
-                        changes.push((position, voxel));
+                        changes.push((position, Some(voxel)));
                     }
                 }
             }
@@ -195,29 +203,45 @@ type BucketMap<I> = HashMap<IVec3, EditBucket<I>>;
 /// Committed edits, by chunk.
 type Committed<I> = Arc<RwLock<BucketMap<I>>>;
 
-/// A box of voxels whose edits changed in a commit, `min` and `max` inclusive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EditedBox {
-    pub min: IVec3,
-    pub max: IVec3,
+/// The voxels of one level-0 chunk whose committed edits changed in a commit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChangeSet<I> {
+    /// The level-0 chunk position.
+    pub chunk: IVec3,
+    /// Whether the commit replaced the chunk's edits rather than changing
+    /// some of them, so the edit sequence before the commit can't be worked
+    /// out from the one after it and the voxels' count.
+    pub replaced: bool,
+    /// Each voxel whose committed edit changed, with its new edit, or `None`
+    /// where its edit was removed.
+    pub voxels: Vec<(IVec3, Option<WorldVoxel<I>>)>,
 }
 
-/// What a commit changed: boxes for the chunk lifecycle, which marks every
-/// chunk they reach stale, and the voxels themselves for work that needs the
-/// exact set, such as light.
-#[derive(Default)]
-pub(crate) struct Changes {
-    pub boxes: Vec<EditedBox>,
-    pub voxels: Vec<IVec3>,
-}
-
-impl Changes {
-    pub fn is_empty(&self) -> bool {
-        self.voxels.is_empty()
+impl<I> ChangeSet<I> {
+    /// Boxes, `min` and `max` inclusive, holding every changed voxel: one box
+    /// per voxel, or the one box around them when there are more than
+    /// [`BOXED_AT`]. [`chunks_including_box`] gives the chunks each box makes
+    /// stale.
+    pub fn stale_boxes(&self) -> impl Iterator<Item = (IVec3, IVec3)> + '_ {
+        let positions = self.voxels.iter().map(|(position, _)| *position);
+        let around = (self.voxels.len() > BOXED_AT).then(|| {
+            positions
+                .clone()
+                .fold((IVec3::MAX, IVec3::MIN), |(min, max), position| {
+                    (min.min(position), max.max(position))
+                })
+        });
+        let one_by_one = around
+            .is_none()
+            .then_some(positions.map(|position| (position, position)));
+        around.into_iter().chain(one_by_one.into_iter().flatten())
     }
 }
 
-fn bucket_mut<I: Copy + PartialEq>(map: &mut BucketMap<I>, chunk: IVec3) -> &mut Bucket<I> {
+fn bucket_mut<I: Copy + PartialEq>(
+    map: &mut BucketMap<I>,
+    chunk: IVec3,
+) -> &mut Bucket<I> {
     Arc::make_mut(
         map.entry(chunk)
             .or_insert_with(|| Arc::new(Bucket::new(chunk))),
@@ -238,10 +262,6 @@ pub struct VoxelEdits<C, I> {
     /// when an edit is set while a reader holds it.
     pending: Mutex<Arc<BucketMap<I>>>,
     committed: Committed<I>,
-    /// How many times each level-0 chunk position's committed edits have
-    /// changed, for positions with edits.
-    #[cfg(feature = "light_propagation")]
-    counts: RwLock<HashMap<IVec3, u64>>,
     _marker: PhantomData<C>,
 }
 
@@ -250,8 +270,6 @@ impl<C, I> Default for VoxelEdits<C, I> {
         Self {
             pending: Mutex::default(),
             committed: Arc::default(),
-            #[cfg(feature = "light_propagation")]
-            counts: RwLock::default(),
             _marker: PhantomData,
         }
     }
@@ -318,8 +336,9 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Commits the pending edits. Returns boxes around the voxels that changed;
-    /// [`chunks_including_box`] gives the chunks each one makes stale.
+    /// Commits the pending edits. Returns a change set for each level-0 chunk
+    /// whose committed edits changed, and moves its edit sequence on by the
+    /// number of voxels in it.
     ///
     /// An edit that sets a voxel to the voxel already committed there changes
     /// nothing. So setting the same voxel every frame, or setting a voxel and
@@ -327,58 +346,52 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     ///
     /// A chunk's committed edits are copied only when a running chunk task
     /// still holds them.
-    pub(crate) fn commit(&self) -> Changes {
+    pub(crate) fn commit(&self) -> Vec<ChangeSet<I>> {
         // The pending edits stay locked until they are committed, so a reader
         // made during the commit finds each edit either pending or committed.
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() {
-            return Changes::default();
+            return Vec::new();
         }
         let mut buckets = {
             #[cfg(feature = "trace")]
             let _span = bevy::log::info_span!("wait_voxel_edits_write").entered();
             self.committed.write().unwrap()
         };
-        let mut edited = Changes::default();
+        let mut sets = Vec::new();
         for (&chunk, pending_bucket) in pending.iter() {
-            let committed = buckets
-                .entry(chunk)
-                .or_insert_with(|| Arc::new(Bucket::new(chunk)));
-            let changes = committed.changes_from(pending_bucket);
+            let changes = match buckets.get(&chunk) {
+                Some(committed) => committed.changes_from(pending_bucket),
+                None => Bucket::new(chunk).changes_from(pending_bucket),
+            };
             if changes.is_empty() {
                 continue;
             }
-            let committed = Arc::make_mut(committed);
+            let committed = Arc::make_mut(
+                buckets
+                    .entry(chunk)
+                    .or_insert_with(|| Arc::new(Bucket::new(chunk))),
+            );
             if changes.len() >= DENSE_AT {
                 committed.make_dense();
             }
-            let mut min = IVec3::MAX;
-            let mut max = IVec3::MIN;
             for &(position, voxel) in &changes {
-                committed.insert(position, voxel);
-                min = min.min(position);
-                max = max.max(position);
+                if let Some(voxel) = voxel {
+                    committed.insert(position, voxel);
+                }
             }
-            if changes.len() <= BOXED_AT {
-                edited.boxes.extend(
-                    changes
-                        .iter()
-                        .map(|&(p, _)| EditedBox { min: p, max: p }),
-                );
-            } else {
-                edited.boxes.push(EditedBox { min, max });
-            }
-            edited.voxels.extend(changes.iter().map(|&(p, _)| p));
-            #[cfg(feature = "light_propagation")]
-            {
-                *self.counts.write().unwrap().entry(chunk).or_default() += changes.len() as u64;
-            }
+            committed.seq += changes.len() as u64;
+            sets.push(ChangeSet {
+                chunk,
+                replaced: false,
+                voxels: changes,
+            });
         }
         match Arc::get_mut(&mut pending) {
             Some(map) => map.clear(),
             None => *pending = Arc::default(),
         }
-        edited
+        sets
     }
 
     /// The edits the chunk task of the chunk at `key` reads: those within the
@@ -430,17 +443,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             .collect()
     }
 
-    /// How many times the committed edits of the level-0 chunk at `position`
-    /// have changed: 0 for a position with no edits. Work that reads the
-    /// position's voxels notes it when it starts, and its result is stale if
-    /// it has moved since.
-    #[cfg(feature = "light_propagation")]
-    pub(crate) fn edit_count(&self, position: IVec3) -> u64 {
-        let counts = self.counts.read().unwrap();
-        if counts.is_empty() {
+    /// The edit sequence of the level-0 chunk at `position`: 0 for a chunk
+    /// with no edits. Work that reads the chunk's voxels notes it when it
+    /// starts, and its result is stale if the sequence has moved since.
+    #[cfg_attr(not(any(test, feature = "light_propagation")), expect(dead_code))]
+    pub(crate) fn edit_sequence(&self, position: IVec3) -> u64 {
+        let buckets = self.committed.read().unwrap();
+        if buckets.is_empty() {
             return 0;
         }
-        counts.get(&position).copied().unwrap_or(0)
+        buckets.get(&position).map_or(0, |bucket| bucket.seq)
     }
 
     /// Whether edits have been set since the last commit.
@@ -511,6 +523,7 @@ fn buckets_read_by(key: ChunkKey, padding: IVec3) -> (IVec3, IVec3) {
 /// each axis. `padding` is the [`padding_depth`] of the chunks at `lod_level`.
 ///
 /// [`padding_depth`]: crate::chunk::padding_depth
+#[cfg(test)]
 pub(crate) fn chunks_including(
     position: IVec3,
     lod_level: LodLevel,
@@ -623,7 +636,222 @@ mod tests {
     /// Sets one voxel and commits it, returning the voxels that changed.
     fn commit_one(edits: &Edits, position: IVec3, voxel: WorldVoxel) -> Vec<IVec3> {
         edits.set(position, voxel);
-        edits.commit().voxels
+        changed_voxels(&edits.commit())
+    }
+
+    /// The positions of every voxel in `sets`.
+    fn changed_voxels(sets: &[ChangeSet<u8>]) -> Vec<IVec3> {
+        sets.iter()
+            .flat_map(|set| set.voxels.iter().map(|(position, _)| *position))
+            .collect()
+    }
+
+    /// The voxels of the chunk at `chunk_pos`, x varying fastest.
+    fn every_voxel_of(chunk_pos: IVec3) -> impl Iterator<Item = IVec3> {
+        let min = chunk_pos * CHUNK_SIZE_I;
+        (0..CHUNK_SIZE_I).flat_map(move |z| {
+            (0..CHUNK_SIZE_I).flat_map(move |y| {
+                (0..CHUNK_SIZE_I).map(move |x| min + IVec3::new(x, y, z))
+            })
+        })
+    }
+
+    #[test]
+    fn a_commit_reports_the_changed_voxels_of_each_chunk_with_their_new_edits() {
+        let edits = Edits::default();
+        let in_origin = IVec3::new(1, 2, 3);
+        let below_origin = IVec3::new(-1, 2, 3);
+        edits.set(in_origin, WorldVoxel::Solid(1));
+        edits.set(below_origin, WorldVoxel::Air);
+
+        let mut sets = edits.commit();
+        sets.sort_by_key(|set| set.chunk.x);
+
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].chunk, IVec3::new(-1, 0, 0));
+        assert_eq!(sets[0].voxels, vec![(below_origin, Some(WorldVoxel::Air))]);
+        assert_eq!(sets[1].chunk, IVec3::ZERO);
+        assert_eq!(
+            sets[1].voxels,
+            vec![(in_origin, Some(WorldVoxel::Solid(1)))]
+        );
+        assert!(sets.iter().all(|set| !set.replaced));
+    }
+
+    #[test]
+    fn unset_is_an_edit_like_any_other() {
+        let edits = Edits::default();
+        let position = IVec3::new(4, 4, 4);
+
+        assert_eq!(
+            commit_one(&edits, position, WorldVoxel::Unset),
+            vec![position]
+        );
+        assert_eq!(edits.reader().get(position), Some(WorldVoxel::Unset));
+    }
+
+    #[test]
+    fn the_edit_sequence_counts_every_voxel_whose_edit_changed() {
+        let edits = Edits::default();
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 0);
+
+        for x in 0..3 {
+            edits.set(IVec3::new(x, 0, 0), WorldVoxel::Solid(1));
+        }
+        edits.commit();
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 3);
+
+        // The same voxels again change nothing; one new voxel moves it on.
+        edits.set(IVec3::ZERO, WorldVoxel::Solid(1));
+        edits.set(IVec3::X, WorldVoxel::Solid(2));
+        edits.commit();
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 4);
+        assert_eq!(edits.edit_sequence(IVec3::X), 0);
+    }
+
+    #[test]
+    fn a_region_whose_voxels_all_return_none_leaves_no_edits() {
+        let edits = Edits::default();
+        edits.set_region(IVec3::ZERO, IVec3::splat(CHUNK_SIZE_I), |_| None);
+
+        assert!(edits.commit().is_empty());
+        assert!(!edits
+            .committed()
+            .reach(ChunkKey::new(IVec3::ZERO, 0), default_padding(0)));
+    }
+
+    #[test]
+    fn an_empty_or_inverted_region_sets_nothing() {
+        let edits = Edits::default();
+        let set = |min: IVec3, max: IVec3| {
+            edits.set_region(min, max, |position| {
+                panic!("asked for {position} in an empty box")
+            });
+        };
+        set(IVec3::ZERO, IVec3::ZERO);
+        set(IVec3::ZERO, IVec3::new(4, 0, 4));
+        set(IVec3::splat(4), IVec3::ZERO);
+
+        assert!(edits.commit().is_empty());
+    }
+
+    #[test]
+    fn a_region_sets_the_voxels_it_returns_across_chunks() {
+        let edits = Edits::default();
+        let (min, max) = (IVec3::new(-2, 0, 0), IVec3::new(2, 2, 1));
+        edits.set_region(min, max, |position| {
+            (position.y == 0).then_some(WorldVoxel::Solid(position.x as u8))
+        });
+
+        let mut changed = changed_voxels(&edits.commit());
+        changed.sort_by_key(|position| position.x);
+        assert_eq!(
+            changed,
+            (-2..2).map(|x| IVec3::new(x, 0, 0)).collect::<Vec<_>>()
+        );
+        let reader = edits.reader();
+        assert_eq!(
+            reader.get(IVec3::new(-1, 0, 0)),
+            Some(WorldVoxel::Solid(255))
+        );
+        assert_eq!(reader.get(IVec3::new(-1, 1, 0)), None);
+    }
+
+    #[test]
+    fn a_chunk_with_many_edits_keeps_each_of_them() {
+        let edits = Edits::default();
+        let voxel = |position: IVec3| WorldVoxel::Solid((position.x + position.y) as u8);
+        let set: Vec<IVec3> = every_voxel_of(IVec3::ZERO).take(DENSE_AT + 100).collect();
+        for &position in &set {
+            edits.set(position, voxel(position));
+        }
+
+        assert_eq!(edits.commit()[0].voxels.len(), set.len());
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), set.len() as u64);
+        let reader = edits.reader();
+        for &position in &set {
+            assert_eq!(reader.get(position), Some(voxel(position)), "{position}");
+        }
+        let unset = every_voxel_of(IVec3::ZERO).nth(DENSE_AT + 100).unwrap();
+        assert_eq!(reader.get(unset), None);
+    }
+
+    #[test]
+    fn a_region_equal_to_a_few_committed_edits_changes_only_the_others() {
+        let edits = Edits::default();
+        let (same, other) = (IVec3::new(1, 1, 1), IVec3::new(2, 2, 2));
+        for position in [same, other] {
+            edits.set(position, WorldVoxel::Solid(1));
+        }
+        edits.commit();
+
+        // A region over the whole chunk, setting only those two voxels.
+        edits.set_region(IVec3::ZERO, IVec3::splat(CHUNK_SIZE_I), |position| {
+            (position == same || position == other)
+                .then(|| WorldVoxel::Solid(if position == same { 1 } else { 2 }))
+        });
+
+        assert_eq!(changed_voxels(&edits.commit()), vec![other]);
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 3);
+    }
+
+    #[test]
+    fn a_few_voxels_equal_to_a_full_chunk_of_edits_change_only_the_others() {
+        let edits = Edits::default();
+        edits.set_region(IVec3::ZERO, IVec3::splat(CHUNK_SIZE_I), |_| {
+            Some(WorldVoxel::Solid(1))
+        });
+        edits.commit();
+
+        let other = IVec3::new(2, 2, 2);
+        edits.set(IVec3::ONE, WorldVoxel::Solid(1));
+        edits.set(other, WorldVoxel::Solid(2));
+
+        assert_eq!(changed_voxels(&edits.commit()), vec![other]);
+    }
+
+    #[test]
+    fn a_full_chunk_set_again_with_one_voxel_different_changes_that_voxel() {
+        let edits = Edits::default();
+        let full = IVec3::splat(CHUNK_SIZE_I);
+        edits.set_region(IVec3::ZERO, full, |_| Some(WorldVoxel::Solid(1)));
+        edits.commit();
+
+        let other = IVec3::new(2, 2, 2);
+        edits.set_region(IVec3::ZERO, full, |position| {
+            Some(WorldVoxel::Solid(if position == other { 2 } else { 1 }))
+        });
+
+        assert_eq!(changed_voxels(&edits.commit()), vec![other]);
+    }
+
+    /// The boxes a change set of `count` voxels along a diagonal is reported as.
+    fn boxes_for_diagonal(count: i32) -> Vec<(IVec3, IVec3)> {
+        let edits = Edits::default();
+        for i in 0..count {
+            edits.set(
+                IVec3::new(i % CHUNK_SIZE_I, i / CHUNK_SIZE_I, 7),
+                WorldVoxel::Solid(1),
+            );
+        }
+        let sets = edits.commit();
+        assert_eq!(sets.len(), 1);
+        sets[0].stale_boxes().collect()
+    }
+
+    #[test]
+    fn a_few_changed_voxels_are_reported_one_by_one() {
+        let boxes = boxes_for_diagonal(BOXED_AT as i32);
+        assert_eq!(boxes.len(), BOXED_AT);
+        assert!(boxes.iter().all(|(min, max)| min == max));
+    }
+
+    #[test]
+    fn many_changed_voxels_are_reported_as_the_box_around_them() {
+        assert_eq!(
+            boxes_for_diagonal(BOXED_AT as i32 + 1),
+            vec![(IVec3::new(0, 0, 7), IVec3::new(LAST, 2, 7))]
+        );
     }
 
     /// The level-0 chunks that an edit at `position` makes stale.

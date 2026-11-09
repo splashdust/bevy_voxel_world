@@ -70,7 +70,7 @@ pub(crate) fn air_inputs<C: VoxelWorldConfig>(
     emission: &[(C::MaterialIndex, u8)],
     columns: ColumnAnswer,
 ) -> AirInputs {
-    let count = edits.edit_count(position);
+    let count = edits.edit_sequence(position);
     let mut occupancy = Occupancy::Open;
     let mut emissive = Vec::new();
     if count > 0 {

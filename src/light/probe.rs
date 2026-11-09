@@ -18,9 +18,9 @@
 //! first, since they are the most likely to show wrong light and the cheapest
 //! to settle, and the nearest among equals.
 //!
-//! A probe notes its position's edit count when it starts. If the count moved
-//! by the time it finishes, its mask is thrown away and the position is probed
-//! again.
+//! A probe notes its position's edit sequence when it starts. If the sequence
+//! moved by the time it finishes, its mask is thrown away and the position is
+//! probed again.
 //!
 //! A waiting chunk that retires ripples relights from its face neighbours,
 //! which may have read its provisional direct sky. A chunk retiring with every
@@ -95,7 +95,7 @@ impl Waiting {
 
 struct Probe {
     position: IVec3,
-    /// The position's edit count when the probe started.
+    /// The position's edit sequence when the probe started.
     edits: u64,
     /// The sky record's generation when the probe started.
     generation: u64,
@@ -265,7 +265,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             });
         }
 
-        if fresh && edits.edit_count(position) == found.own_edits {
+        if fresh && edits.edit_sequence(position) == found.own_edits {
             let mask = inputs.occupancy.solid_columns();
             let open = record.keeps_cells().then(|| open_cells(&inputs.occupancy));
             record.insert(position, &mask, open, found.own_edits);
@@ -379,7 +379,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     /// Works out the column answer of the chunk `entity` at `position` from
     /// the columns `sky` and the positions `known` above it, taking in the
     /// masks the record holds for the others, and keeps the chunk waiting if
-    /// it still has provisional columns. `counts` are the edit counts of the
+    /// it still has provisional columns. `counts` are the edit sequences of the
     /// positions above it.
     fn settle(
         &mut self,
@@ -566,7 +566,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                     .probe_lookups
                     .fetch_add(read.lookups, Ordering::Relaxed);
                 if probe.generation != record.generation()
-                    || edits.edit_count(probe.position) != probe.edits
+                    || edits.edit_sequence(probe.position) != probe.edits
                 {
                     counters.probes_discarded.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -648,7 +648,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             probes.probing.insert(position);
             probes.running.push(Probe {
                 position,
-                edits: edits.edit_count(position),
+                edits: edits.edit_sequence(position),
                 generation,
                 task,
             });
@@ -717,7 +717,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
                 *position,
                 &occupancy.solid_columns(),
                 open,
-                edits.edit_count(*position),
+                edits.edit_sequence(*position),
             );
         }
         view.iter()
@@ -753,7 +753,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
     changed
 }
 
-/// The edit counts of the `count` positions above the chunk at `position`,
+/// The edit sequences of the `count` positions above the chunk at `position`,
 /// lowest first.
 fn edit_counts<C, I: Copy + PartialEq>(
     edits: &VoxelEdits<C, I>,
@@ -761,7 +761,7 @@ fn edit_counts<C, I: Copy + PartialEq>(
     count: usize,
 ) -> Vec<u64> {
     (1..=count as i32)
-        .map(|y| edits.edit_count(position + IVec3::Y * y))
+        .map(|y| edits.edit_sequence(position + IVec3::Y * y))
         .collect()
 }
 

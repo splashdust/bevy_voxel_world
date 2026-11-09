@@ -190,9 +190,7 @@ where
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        let committed = voxel_edits.commit();
-        requests.edited.extend(committed.boxes);
-        requests.edited_voxels.extend(committed.voxels);
+        requests.edited.extend(voxel_edits.commit());
     }
 
     /// Shows the meshes of chunks once this world's material is ready.

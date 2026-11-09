@@ -83,7 +83,24 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     #[cfg(feature = "trace")]
     let _span = bevy::log::info_span!("relight_edits").entered();
-    let edited: Vec<IVec3> = requests.edited_voxels.clone();
+    let edited: Vec<IVec3> = requests
+        .edited
+        .iter()
+        .flat_map(|set| set.voxels.iter().map(|(position, _)| *position))
+        .collect();
+    // How far each edited chunk's edit sequence moved in this commit, or
+    // `None` where the commit replaced the chunk's edits, so the sequence
+    // before it can't be told and light takes the path for a chunk it has no
+    // inputs for.
+    let mut moved: HashMap<IVec3, Option<u64>> = HashMap::new();
+    for set in &requests.edited {
+        let n = moved.entry(set.chunk).or_insert(Some(0));
+        *n = n
+            .filter(|_| !set.replaced)
+            .map(|n| n + set.voxels.len() as u64);
+    }
+    let sequence_before =
+        |position: IVec3| moved[&position].map(|n| edits.edit_sequence(position) - n);
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
     settings.walks.lock().unwrap().clear();
@@ -163,8 +180,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let mut columns: Vec<(IVec3, usize, usize)> = Vec::new();
     let mut old_occupancy = HashMap::new();
     for (position, voxels) in &by_chunk {
-        let count = edits.edit_count(*position);
-        let before = count - voxels.len() as u64;
+        let count = edits.edit_sequence(*position);
+        let before = sequence_before(*position);
         if view.is_air(*position) {
             // Hinted air's voxels are its hint with the edits over them.
             let old = view.air[position].inputs.clone();
@@ -184,7 +201,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             work.fill_touch(*position);
             continue;
         }
-        let chunk = view.get_mut(position).filter(|chunk| chunk.edits == before);
+        let chunk = view
+            .get_mut(position)
+            .filter(|chunk| Some(chunk.edits) == before);
         let Some(chunk) = chunk else {
             // The chunk's next chunk task works out its inputs.
             for p in voxels {
@@ -255,9 +274,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 if let Some(old) = old_occupancy.get(position) {
                     return Some(*old);
                 }
-                let before =
-                    edits.edit_count(*position) - by_chunk[position].len() as u64;
-                record.get(*position, before)
+                sequence_before(*position)
+                    .and_then(|before| record.get(*position, before))
             });
             let placed = by_chunk[position].iter().any(|p| {
                 let local = local(*p);
@@ -294,7 +312,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             }
         }
         for (position, mask) in &masks {
-            let count = edits.edit_count(*position);
+            let count = edits.edit_sequence(*position);
             if current.contains(position) {
                 let occupancy = &view.inputs(*position).unwrap().occupancy;
                 let open = record.keeps_cells().then(|| open_cells(occupancy));
@@ -304,8 +322,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 // cell, which only reading the rest of the cell can tell, so
                 // its cells are left unknown.
                 let voxels = &by_chunk[position];
-                let before = count - voxels.len() as u64;
-                let open = record.cells(*position, before).and_then(|cells| {
+                let cells = sequence_before(*position)
+                    .and_then(|before| record.cells(*position, before));
+                let open = cells.and_then(|cells| {
                     voxels.iter().try_fold(cells.open, |open, p| {
                         let local = local(*p);
                         voxel(*p).is_solid().then(|| {
@@ -323,7 +342,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         drop(record);
 
         let status = |view: &View, above: IVec3, x: usize, z: usize| -> Option<bool> {
-            let count = edits.edit_count(above);
+            let count = edits.edit_sequence(above);
             if let Some(chunk) = view.get(&above).filter(|chunk| chunk.edits == count) {
                 return Some(column_blocked_in(&chunk.light.inputs, x, z));
             }

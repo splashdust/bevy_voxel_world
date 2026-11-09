@@ -755,6 +755,86 @@ fn every_edited_chunk_gets_a_task_in_the_same_frame() {
     }
 }
 
+#[test]
+fn a_region_set_is_read_back_at_once_and_published() {
+    let mut app = App::new();
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+
+    // A box across the eight chunks around the origin, leaving the voxels at
+    // y = 1 alone.
+    let (set, left) = (IVec3::new(-2, 0, 1), IVec3::new(1, 1, -2));
+    let read = app
+        .world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<FloorWorld>| {
+            voxel_world.set_voxels_in(IVec3::splat(-2), IVec3::splat(2), |position| {
+                (position.y != 1).then_some(WorldVoxel::Solid(9))
+            });
+            [set, left].map(|position| voxel_world.get_voxel(position))
+        })
+        .unwrap();
+    assert_eq!(read, [WorldVoxel::Solid(9), WorldVoxel::Air]);
+
+    update_until(
+        &mut app,
+        "the chunk west of the origin to show the region",
+        |app| {
+            chunk_data::<FloorWorld>(app, IVec3::new(-1, 0, 0))
+                .is_some_and(|data| data.has_voxel(set, WorldVoxel::Solid(9)))
+        },
+    );
+    let data = chunk_data::<FloorWorld>(&mut app, IVec3::new(0, 0, -1)).unwrap();
+    assert!(data.has_voxel(left, WorldVoxel::Air));
+}
+
+#[test]
+fn a_region_setting_every_voxel_of_a_chunk_updates_the_chunks_reading_them() {
+    let mut app = App::new();
+    app.add_plugins((
+        test_plugins(),
+        VoxelWorldPlugin::<AllAroundWorld>::minimal(),
+    ))
+    .init_resource::<UpdatedKeys>()
+    .add_systems(Startup, spawn_camera::<AllAroundWorld>)
+    .add_systems(Update, record_updated_keys::<AllAroundWorld>);
+    update_until(
+        &mut app,
+        "the chunks around the origin to be ready",
+        |app| {
+            (0..27).all(|i| {
+                let chunk_pos = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
+                chunk_status::<AllAroundWorld>(app, chunk_pos) == Some(ChunkStatus::Ready)
+            })
+        },
+    );
+    app.world_mut().resource_mut::<UpdatedKeys>().0.clear();
+
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<AllAroundWorld>| {
+            voxel_world.set_voxels_in(IVec3::ZERO, IVec3::splat(CHUNK_SIZE_I), |_| {
+                Some(WorldVoxel::Solid(7))
+            });
+        })
+        .unwrap();
+    app.update();
+
+    // The chunk itself, and every chunk whose padding reaches into it.
+    let updated: HashSet<IVec3> = app
+        .world()
+        .resource::<UpdatedKeys>()
+        .0
+        .iter()
+        .map(|key| key.position)
+        .collect();
+    let around: HashSet<IVec3> = (0..27)
+        .map(|i| IVec3::new(i % 3, i / 3 % 3, i / 9) - 1)
+        .collect();
+    assert_eq!(updated, around);
+}
+
 /// A world whose voxel texture never loads.
 #[derive(Resource, Clone, Default)]
 struct MissingTextureWorld;
