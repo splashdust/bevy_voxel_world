@@ -218,24 +218,39 @@ pub(crate) struct ChangeSet<I> {
 }
 
 impl<I> ChangeSet<I> {
-    /// Boxes, `min` and `max` inclusive, holding every changed voxel: one box
-    /// per voxel, or the one box around them when there are more than
-    /// [`BOXED_AT`]. [`chunks_including_box`] gives the chunks each box makes
-    /// stale.
-    pub fn stale_boxes(&self) -> impl Iterator<Item = (IVec3, IVec3)> + '_ {
+    /// Boxes holding every changed voxel: one box per voxel, or the one box
+    /// around them when there are more than [`BOXED_AT`].
+    /// [`chunks_including_box`] gives the chunks each box makes stale.
+    pub fn stale_boxes(&self) -> impl Iterator<Item = EditedBox> + '_ {
         let positions = self.voxels.iter().map(|(position, _)| *position);
         let around = (self.voxels.len() > BOXED_AT).then(|| {
-            positions
-                .clone()
-                .fold((IVec3::MAX, IVec3::MIN), |(min, max), position| {
-                    (min.min(position), max.max(position))
-                })
+            positions.clone().fold(
+                EditedBox {
+                    min: IVec3::MAX,
+                    max: IVec3::MIN,
+                },
+                |around, position| EditedBox {
+                    min: around.min.min(position),
+                    max: around.max.max(position),
+                },
+            )
         });
-        let one_by_one = around
-            .is_none()
-            .then_some(positions.map(|position| (position, position)));
+        let one_by_one =
+            around
+                .is_none()
+                .then_some(positions.map(|position| EditedBox {
+                    min: position,
+                    max: position,
+                }));
         around.into_iter().chain(one_by_one.into_iter().flatten())
     }
+}
+
+/// A box of voxels, from `min` to `max`, both inclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EditedBox {
+    pub min: IVec3,
+    pub max: IVec3,
 }
 
 fn bucket_mut<I: Copy + PartialEq>(
@@ -825,8 +840,9 @@ mod tests {
         assert_eq!(changed_voxels(&edits.commit()), vec![other]);
     }
 
-    /// The boxes a change set of `count` voxels along a diagonal is reported as.
-    fn boxes_for_diagonal(count: i32) -> Vec<(IVec3, IVec3)> {
+    /// The stale boxes of a commit of the first `count` voxels of the slice
+    /// z = 7 of the chunk at the origin, x varying fastest.
+    fn boxes_for_voxels_in_a_row(count: i32) -> Vec<EditedBox> {
         let edits = Edits::default();
         for i in 0..count {
             edits.set(
@@ -841,16 +857,19 @@ mod tests {
 
     #[test]
     fn a_few_changed_voxels_are_reported_one_by_one() {
-        let boxes = boxes_for_diagonal(BOXED_AT as i32);
+        let boxes = boxes_for_voxels_in_a_row(BOXED_AT as i32);
         assert_eq!(boxes.len(), BOXED_AT);
-        assert!(boxes.iter().all(|(min, max)| min == max));
+        assert!(boxes.iter().all(|voxels| voxels.min == voxels.max));
     }
 
     #[test]
     fn many_changed_voxels_are_reported_as_the_box_around_them() {
         assert_eq!(
-            boxes_for_diagonal(BOXED_AT as i32 + 1),
-            vec![(IVec3::new(0, 0, 7), IVec3::new(LAST, 2, 7))]
+            boxes_for_voxels_in_a_row(BOXED_AT as i32 + 1),
+            vec![EditedBox {
+                min: IVec3::new(0, 0, 7),
+                max: IVec3::new(LAST, 2, 7)
+            }]
         );
     }
 

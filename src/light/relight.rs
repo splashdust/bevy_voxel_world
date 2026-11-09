@@ -394,9 +394,15 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 continue;
             };
             let delegate = world.voxel_lookup_delegate();
-            let Some(TaskLight::Coarse(task)) =
-                settings.task_for(key, entity, data.data_shape, world, edits, delegate)
-            else {
+            let Some(TaskLight::Coarse(task)) = settings.task_for(
+                key,
+                entity,
+                data.data_shape,
+                world,
+                edits,
+                delegate,
+                false,
+            ) else {
                 continue;
             };
             let solve = pool.spawn(async move { task.solve(&data) });

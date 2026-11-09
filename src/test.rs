@@ -1599,6 +1599,95 @@ fn a_remeshed_chunk_reuses_its_previous_data() {
     );
 }
 
+/// A world solid below `floor` and air above it, whose voxel lookups read
+/// `floor` from the config, so a test can change what they return.
+#[derive(Resource, Clone, Default)]
+struct MovableFloorWorld {
+    floor: i32,
+}
+
+impl VoxelWorldConfig for MovableFloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        1
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let floor = self.floor;
+        Box::new(move |_, _, _| {
+            Box::new(move |pos, _| {
+                if pos.y < floor {
+                    WorldVoxel::Solid(1)
+                } else {
+                    WorldVoxel::Air
+                }
+            })
+        })
+    }
+}
+
+#[test]
+fn regenerate_chunks_publishes_the_new_generated_voxels_with_the_edits_still_shown() {
+    let mut app = App::new();
+    app.add_plugins((
+        test_plugins(),
+        VoxelWorldPlugin::<MovableFloorWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<MovableFloorWorld>);
+
+    let edited = IVec3::new(5, 20, 5);
+    let raised = IVec3::new(5, 10, 5);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<MovableFloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<MovableFloorWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(9));
+        })
+        .unwrap();
+    update_until(&mut app, "the edit to be published", |app| {
+        chunk_data::<MovableFloorWorld>(app, IVec3::ZERO)
+            .and_then(|data| data.get_voxel_at_world_position(edited))
+            == Some(WorldVoxel::Solid(9))
+    });
+    let entity = app
+        .world()
+        .resource::<ChunkIndex<MovableFloorWorld>>()
+        .get(ChunkKey::new(IVec3::ZERO, 0));
+
+    // The floor rises above `raised`, which the chunk published as air.
+    app.world_mut().resource_mut::<MovableFloorWorld>().floor = 16;
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<MovableFloorWorld>| {
+            voxel_world.regenerate_chunks();
+        })
+        .unwrap();
+    update_until(&mut app, "the regenerated voxels to be published", |app| {
+        chunk_data::<MovableFloorWorld>(app, IVec3::ZERO)
+            .and_then(|data| data.get_voxel_at_world_position(raised))
+            == Some(WorldVoxel::Solid(1))
+    });
+
+    let data = chunk_data::<MovableFloorWorld>(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(
+        data.get_voxel_at_world_position(edited),
+        Some(WorldVoxel::Solid(9))
+    );
+    assert_eq!(
+        app.world()
+            .resource::<ChunkIndex<MovableFloorWorld>>()
+            .get(ChunkKey::new(IVec3::ZERO, 0),),
+        entity,
+        "the chunk should regenerate in place, not respawn"
+    );
+}
+
 /// A world solid all through, so every chunk is full of one material.
 #[derive(Resource, Clone, Default)]
 struct SolidWorld;

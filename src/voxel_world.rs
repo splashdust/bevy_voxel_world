@@ -9,7 +9,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
-    chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
+    chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::{FillHint, VoxelWorldConfig},
     traversal_alg::voxel_line_traversal,
@@ -204,6 +204,7 @@ impl<I> VoxelRaycastResult<I> {
 pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
+    chunk_requests: Res<'w, ChunkRequests<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     configuration: Res<'w, ConfigCopy<C>>,
@@ -365,10 +366,12 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// without this, chunks would go on reading the old voxels' shadows.
     ///
     /// Spawned chunks keep the voxels they have, and their light follows
-    /// those voxels; chunks spawned later read the new lookups. Light settles
-    /// again over the next frames, as [`VoxelWorld::light_is_settled`] tells.
-    /// Voxel edits need no reset: they relight on their own. Does nothing in
-    /// a world without light propagation.
+    /// those voxels; chunks spawned later read the new lookups.
+    /// [`VoxelWorld::regenerate_chunks`] makes spawned chunks read them too,
+    /// and calls this itself. Light settles again over the next frames, as
+    /// [`VoxelWorld::light_is_settled`] tells. Voxel edits need no reset:
+    /// they relight on their own. Does nothing in a world without light
+    /// propagation.
     #[cfg(feature = "light_propagation")]
     pub fn reset_light(&mut self) {
         if let Some(light) = self.light.as_ref() {
@@ -377,6 +380,26 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
                 .reset
                 .store(true, std::sync::atomic::Ordering::Release);
         }
+    }
+
+    /// Regenerates every spawned chunk: its next chunk task looks up all of
+    /// its voxels again through the world's voxel lookup, and shows the voxel
+    /// edits over them.
+    ///
+    /// Call it after changing what the world's voxel lookups return, for
+    /// example after switching to a new seed. Chunks keep their entities,
+    /// their components and their meshes until the new voxels are published,
+    /// and voxel edits stay. A chunk whose task is running publishes that
+    /// task's voxels first, then regenerates in the task that follows. The
+    /// request is picked up at the start of the next run of the chunk
+    /// lifecycle, in [`VoxelWorldSet`].
+    ///
+    /// With the `light_propagation` feature it also calls `reset_light`, so
+    /// light follows the new voxels.
+    pub fn regenerate_chunks(&mut self) {
+        self.chunk_requests.regenerate(IVec3::MIN, IVec3::MAX);
+        #[cfg(feature = "light_propagation")]
+        self.reset_light();
     }
 
     /// Set the voxel at the given position. It replaces the generated voxel there for
