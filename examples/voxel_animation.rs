@@ -1,8 +1,8 @@
 //! Animates ripples in a pool of water by setting its voxels every frame.
 //!
-//! Shows how to animate voxels with `set_voxel`. Every voxel in the pool is set each
-//! frame, across four chunks, and the chunks where something changed remesh to show
-//! it.
+//! Shows how to animate voxels with `set_voxels_in`, which sets a box of voxels in
+//! one call. Every voxel in the pool is set each frame, across four chunks, and the
+//! chunks where something changed remesh to show it.
 
 use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
 use bevy_voxel_world::prelude::*;
@@ -74,24 +74,40 @@ fn build_basin(mut voxel_world: VoxelWorld<DefaultWorld>) {
 }
 
 // Fill the pool with water up to the height of ripples spreading out from its
-// centre. Each frame sets every voxel in the pool, and the chunks they changed
-// in remesh to show the new frame.
+// centre. Each frame sets every voxel in the box around the pool, leaving the
+// rim alone, and the chunks where something changed remesh to show the new
+// frame.
 fn animate_water(mut voxel_world: VoxelWorld<DefaultWorld>, time: Res<Time>) {
     let t = time.elapsed_secs();
+    let extent = POOL_RADIUS.ceil() as i32;
+    let width = 2 * extent;
 
-    for (x, z, distance) in columns_within(POOL_RADIUS) {
-        let wave = (distance * 0.2 - t * 2.0).sin();
-        let height = (MAX_HEIGHT as f32 * (0.5 + 0.4 * wave)).round() as i32;
+    // The water's height in each column of the box, or `None` outside the pool
+    let heights: Vec<Option<i32>> = (0..width * width)
+        .map(|i| {
+            let distance = column_distance(i % width - extent, i / width - extent);
+            let wave = (distance * 0.2 - t * 2.0).sin();
+            (distance <= POOL_RADIUS)
+                .then(|| (MAX_HEIGHT as f32 * (0.5 + 0.4 * wave)).round() as i32)
+        })
+        .collect();
 
-        for y in 1..=MAX_HEIGHT {
-            let voxel = if y <= height {
-                WorldVoxel::Solid(WATER)
-            } else {
-                WorldVoxel::Air
-            };
-            voxel_world.set_voxel(IVec3::new(x, y, z), voxel);
-        }
-    }
+    let min = IVec3::new(-extent, 1, -extent);
+    let max = IVec3::new(extent, MAX_HEIGHT + 1, extent);
+    voxel_world.set_voxels_in(min, max, |position| {
+        let column = (position.x + extent) + (position.z + extent) * width;
+        let height = heights[column as usize]?;
+        Some(if position.y <= height {
+            WorldVoxel::Solid(WATER)
+        } else {
+            WorldVoxel::Air
+        })
+    });
+}
+
+// The distance from the pool's centre to the middle of the column at `x`, `z`
+fn column_distance(x: i32, z: i32) -> f32 {
+    Vec2::new(x as f32 + 0.5, z as f32 + 0.5).length()
 }
 
 // The columns within `radius` of the pool's centre, with their distance from it
@@ -99,7 +115,7 @@ fn columns_within(radius: f32) -> impl Iterator<Item = (i32, i32, f32)> {
     let extent = radius.ceil() as i32;
     (-extent..extent)
         .flat_map(move |x| (-extent..extent).map(move |z| (x, z)))
-        .map(|(x, z)| (x, z, Vec2::new(x as f32 + 0.5, z as f32 + 0.5).length()))
+        .map(|(x, z)| (x, z, column_distance(x, z)))
         .filter(move |&(_, _, distance)| distance <= radius)
 }
 
