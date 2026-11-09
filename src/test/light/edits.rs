@@ -251,6 +251,49 @@ fn a_radius_8_bomb_and_its_undo_match_the_reference() {
     edit_and_undo(&[IVec3::ZERO], &bomb);
 }
 
+/// [`cavern`] with its floor lamp turned to stone and its shaft filled, so
+/// regenerating changes a chunk's emissive voxels and occupancy but none of
+/// its voxel edits.
+fn dark_cavern(p: IVec3) -> WorldVoxel {
+    let shaft = p.x == 8 && p.z == 8 && (16..40).contains(&p.y);
+    if p == FLOOR_LAMP || shaft {
+        WorldVoxel::Solid(STONE)
+    } else {
+        cavern(p)
+    }
+}
+
+#[test]
+fn a_regenerated_chunk_is_solved_again_and_matches_the_reference() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    let edit = place(IVec3::new(2, 10, 3));
+    set_voxels(&mut app, &[edit]);
+    settle(&mut app, "light to settle after the edit");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        &reference(&[IVec3::ZERO], edited(&[edit])),
+        "before regenerating",
+    );
+
+    app.world_mut().resource_mut::<LampWorld>().scene = Arc::new(dark_cavern);
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<LampWorld>| {
+            voxel_world.regenerate_chunks()
+        })
+        .unwrap();
+    settle(&mut app, "light to settle after regenerating");
+    let after = reference(&[IVec3::ZERO], |p| {
+        if p == edit.0 {
+            edit.1
+        } else {
+            dark_cavern(p)
+        }
+    });
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after regenerating");
+}
+
 pub(super) fn relights_started(app: &App) -> u64 {
     app.world()
         .resource::<LightSettings<LampWorld>>()
