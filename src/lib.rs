@@ -24,7 +24,7 @@ pub mod prelude {
     pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
-    pub use crate::edit_delta::{EditDelta, EditsCommitted};
+    pub use crate::edit_delta::{EditDelta, EditGap, EditsCommitted};
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{
         Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,

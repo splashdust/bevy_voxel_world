@@ -294,6 +294,83 @@ fn a_regenerated_chunk_is_solved_again_and_matches_the_reference() {
     assert_matches(&mut app, &[IVec3::ZERO], &after, "after regenerating");
 }
 
+/// The edit deltas the sender world of
+/// [`a_receiver_of_edit_deltas_settles_on_the_reference`] committed.
+#[derive(Resource, Default)]
+struct Sent(Vec<EditDelta<u8>>);
+
+type Sender = crate::test::FloorWorld;
+
+fn record_sent(
+    mut sent: ResMut<Sent>,
+    mut messages: MessageReader<EditsCommitted<Sender>>,
+) {
+    sent.0
+        .extend(messages.read().map(|message| message.delta.clone()));
+}
+
+fn apply_deltas(app: &mut App, deltas: Vec<EditDelta<u8>>) {
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
+            for delta in &deltas {
+                voxel_world.apply_delta(delta.clone()).unwrap();
+            }
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_receiver_of_edit_deltas_settles_on_the_reference() {
+    // A sender world with no camera, which only commits edits, beside the
+    // receiver that renders the cavern.
+    let mut app = app(world());
+    app.add_plugins(VoxelWorldPlugin::<Sender>::minimal())
+        .init_resource::<Sent>()
+        .add_systems(Update, record_sent);
+    settle(&mut app, "the world to stream in");
+
+    let edits = [
+        place(IVec3::new(2, 10, 3)),
+        dig(IVec3::new(14, 3, 12)),
+        (IVec3::new(16, 10, 28), WorldVoxel::Solid(LAMP)),
+    ];
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<Sender>| {
+            for (position, voxel) in edits {
+                voxel_world.set_voxel(position, voxel);
+            }
+        })
+        .unwrap();
+    app.update();
+    let deltas = std::mem::take(&mut app.world_mut().resource_mut::<Sent>().0);
+    assert_eq!(deltas.len(), 1);
+    apply_deltas(&mut app, deltas);
+    settle(&mut app, "light to settle after the deltas");
+    let after = reference(&[IVec3::ZERO], edited(&edits));
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the deltas");
+
+    // An edit of the receiver's own, which the sender's full delta then
+    // removes. The sender's next edit sets a voxel to the stone it already
+    // is, so its full delta is as new as the receiver's edits.
+    set_voxels(&mut app, &[place(IVec3::new(9, 4, 8))]);
+    settle(&mut app, "light to settle after the receiver's edit");
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<Sender>| {
+            voxel_world.set_voxel(IVec3::new(0, 30, 0), WorldVoxel::Solid(STONE));
+        })
+        .unwrap();
+    app.update();
+    let full = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<Sender>| {
+            voxel_world.full_delta(IVec3::ZERO)
+        })
+        .unwrap();
+    apply_deltas(&mut app, vec![full]);
+    settle(&mut app, "light to settle after the full delta");
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the full delta");
+}
+
 pub(super) fn relights_started(app: &App) -> u64 {
     app.world()
         .resource::<LightSettings<LampWorld>>()

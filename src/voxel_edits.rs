@@ -18,6 +18,12 @@
 //! [`ChangeSet::stale_boxes`], light reads the voxels themselves, and each
 //! set becomes the chunk's [`EditDelta`](crate::prelude::EditDelta) in the
 //! commit's message.
+//!
+//! Edit deltas applied from another world join the pending edits in the
+//! order they arrive among the voxels set, and assign the chunk's edit
+//! sequence rather than count towards it. A full delta marks the chunk's
+//! pending bucket replaced: the commit then drops the chunk's committed edits
+//! that the bucket lacks, and reports them as removed.
 
 use std::{
     marker::PhantomData,
@@ -29,7 +35,7 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use crate::{
     chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I},
     configuration::LodLevel,
-    edit_delta::{voxel_index, voxel_local, CHUNK_VOXELS},
+    edit_delta::{voxel_index, voxel_local, EditDelta, EditGap, CHUNK_VOXELS},
     voxel::WorldVoxel,
 };
 
@@ -61,6 +67,22 @@ pub(crate) struct Bucket<I> {
     store: Store<I>,
     /// The chunk's edit sequence. Only committed buckets keep it.
     seq: u64,
+    /// Whether the commit replaces the chunk's committed edits with this
+    /// bucket's, rather than setting this bucket's over them. Only pending
+    /// buckets keep it.
+    replaced: bool,
+    /// The edit sequence that the last edit delta applied since the last
+    /// commit assigned. Only pending buckets keep it.
+    assigned: Option<Assigned>,
+}
+
+/// The edit sequence an applied edit delta assigned to a pending bucket.
+#[derive(Clone, Copy)]
+struct Assigned {
+    /// The delta's edit sequence.
+    seq: u64,
+    /// How many voxels local sets have changed in the bucket since.
+    sets_after: u64,
 }
 
 #[derive(Clone)]
@@ -80,6 +102,8 @@ impl<I: Copy + PartialEq> Bucket<I> {
             min: chunk_pos * CHUNK_SIZE_I,
             store: Store::Sparse(Voxels::default()),
             seq: 0,
+            replaced: false,
+            assigned: None,
         }
     }
 
@@ -121,6 +145,34 @@ impl<I: Copy + PartialEq> Bucket<I> {
                 }
                 *slot = Some(voxel);
                 true
+            }
+        }
+    }
+
+    /// Sets the voxel at `position` from a local set rather than an applied
+    /// delta.
+    #[inline]
+    fn set(&mut self, position: IVec3, voxel: WorldVoxel<I>) {
+        let changed = self.insert(position, voxel);
+        self.count_sets(changed as u64);
+    }
+
+    /// Counts `changed` voxels changed by local sets towards the edit
+    /// sequence the bucket's commit reaches.
+    #[inline]
+    fn count_sets(&mut self, changed: u64) {
+        if let Some(assigned) = &mut self.assigned {
+            assigned.sets_after += changed;
+        }
+    }
+
+    /// Removes every edit in the bucket.
+    fn clear(&mut self) {
+        match &mut self.store {
+            Store::Sparse(voxels) => voxels.clear(),
+            Store::Dense { voxels, count } => {
+                voxels.fill(None);
+                *count = 0;
             }
         }
     }
@@ -181,6 +233,19 @@ impl<I: Copy + PartialEq> Bucket<I> {
         }
         changes
     }
+
+    /// The edits that change when `pending` replaces this bucket's edits:
+    /// each edit of this bucket that `pending` lacks, as removed, then each
+    /// edit of `pending` that differs from this bucket's.
+    fn replaced_by(&self, pending: &Bucket<I>) -> Vec<(IVec3, Option<WorldVoxel<I>>)> {
+        let mut changes: Vec<_> = self
+            .iter()
+            .filter(|&(position, _)| pending.get(position).is_none())
+            .map(|(position, _)| (position, None))
+            .collect();
+        changes.extend(self.changes_from(pending));
+        changes
+    }
 }
 
 /// The edited voxels of one chunk, shared with the chunk tasks that read them.
@@ -196,9 +261,11 @@ type Committed<I> = Arc<RwLock<BucketMap<I>>>;
 pub(crate) struct ChangeSet<I> {
     /// The level-0 chunk position.
     pub chunk: IVec3,
-    /// Whether the commit replaced the chunk's edits rather than changing
-    /// some of them, so the edit sequence before the commit can't be worked
-    /// out from the one after it and the voxels' count.
+    /// Whether the edit sequence before the commit can't be worked out from
+    /// the one after it and the voxels' count. That is so where the commit
+    /// replaced the chunk's edits rather than changing some of them, and
+    /// where voxels set before an applied edit delta committed with it. The
+    /// chunk's message then carries its full delta.
     pub replaced: bool,
     /// The chunk's edit sequence after the commit.
     pub seq: u64,
@@ -233,6 +300,16 @@ impl<I> ChangeSet<I> {
                     max: position,
                 }));
         around.into_iter().chain(one_by_one.into_iter().flatten())
+    }
+
+    /// The box around every voxel whose edit was removed, both corners
+    /// inclusive, or `None` if no edit was.
+    pub fn removed_box(&self) -> Option<(IVec3, IVec3)> {
+        self.voxels
+            .iter()
+            .filter(|(_, voxel)| voxel.is_none())
+            .map(|(position, _)| (*position, *position))
+            .reduce(|(min, max), (p, _)| (min.min(p), max.max(p)))
     }
 }
 
@@ -286,7 +363,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     pub(crate) fn set(&self, position: IVec3, voxel: WorldVoxel<I>) {
         let chunk = chunk_containing(position);
         let mut pending = self.pending.lock().unwrap();
-        bucket_mut(Arc::make_mut(&mut pending), chunk).insert(position, voxel);
+        bucket_mut(Arc::make_mut(&mut pending), chunk).set(position, voxel);
     }
 
     /// Sets the voxels in the box from `min` inclusive to `max` exclusive for
@@ -315,19 +392,80 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     if (hi - lo).element_product() as usize >= DENSE_AT {
                         bucket.make_dense();
                     }
+                    let mut changed = 0;
                     for z in lo.z..hi.z {
                         for y in lo.y..hi.y {
                             for x in lo.x..hi.x {
                                 let position = IVec3::new(x, y, z);
                                 if let Some(v) = voxel(position) {
-                                    bucket.insert(position, v);
+                                    changed += bucket.insert(position, v) as u64;
                                 }
                             }
                         }
                     }
+                    bucket.count_sets(changed);
                 }
             }
         }
+    }
+
+    /// Applies `delta` if it continues from the edit sequence its chunk
+    /// reaches this frame: the sequence the last delta applied to the chunk
+    /// since the last commit assigned, else the committed one. See
+    /// [`VoxelWorld::apply_delta`](crate::prelude::VoxelWorld::apply_delta).
+    ///
+    /// The delta's voxels join the chunk's pending edits after any set before
+    /// them. A full delta first drops the chunk's pending edits and has the
+    /// commit replace its committed edits.
+    pub(crate) fn apply(&self, delta: EditDelta<I>) -> Result<(), EditGap> {
+        let mut pending = self.pending.lock().unwrap();
+        let local = match pending.get(&delta.chunk).and_then(|b| b.assigned) {
+            Some(assigned) => assigned.seq,
+            None => self.edit_sequence(delta.chunk),
+        };
+        if !delta.applies_at(local)? {
+            return Ok(());
+        }
+        let bucket = bucket_mut(Arc::make_mut(&mut pending), delta.chunk);
+        if delta.full {
+            bucket.clear();
+            bucket.replaced = true;
+        }
+        if delta.len() >= DENSE_AT {
+            bucket.make_dense();
+        }
+        for (position, voxel) in delta.iter() {
+            bucket.insert(position, voxel);
+        }
+        bucket.assigned = Some(Assigned {
+            seq: delta.seq,
+            sets_after: 0,
+        });
+        Ok(())
+    }
+
+    /// The full delta of the level-0 chunk at `chunk`, from its committed
+    /// edits: an empty one at sequence 0 for a chunk with no bucket.
+    pub(crate) fn full_delta(&self, chunk: IVec3) -> EditDelta<I> {
+        let buckets = self.committed.read().unwrap();
+        let Some(bucket) = buckets.get(&chunk) else {
+            return EditDelta::new(chunk, 0, true, Vec::new());
+        };
+        let voxels = bucket
+            .iter()
+            .map(|(position, voxel)| (bucket.index(position) as u16, voxel))
+            .collect();
+        EditDelta::new(chunk, bucket.seq, true, voxels)
+    }
+
+    /// Every level-0 chunk position holding committed edits, or an empty
+    /// bucket left by removing them, with its edit sequence.
+    pub(crate) fn edited_chunks(&self) -> Vec<(IVec3, u64)> {
+        let buckets = self.committed.read().unwrap();
+        buckets
+            .iter()
+            .map(|(&chunk, bucket)| (chunk, bucket.seq))
+            .collect()
     }
 
     /// Returns a reader that works from any thread.
@@ -342,8 +480,11 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     }
 
     /// Commits the pending edits. Returns a change set for each level-0 chunk
-    /// whose committed edits changed, and moves its edit sequence on by the
-    /// number of voxels in it.
+    /// whose committed edits or edit sequence changed.
+    ///
+    /// A chunk's edit sequence moves on by the number of voxels in its change
+    /// set. Where an edit delta was applied, it takes the delta's sequence
+    /// instead, plus the voxels local sets changed after it.
     ///
     /// An edit that sets a voxel to the voxel already committed there changes
     /// nothing. So setting the same voxel every frame, or setting a voxel and
@@ -365,11 +506,25 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         };
         let mut sets = Vec::new();
         for (&chunk, pending_bucket) in pending.iter() {
-            let changes = match buckets.get(&chunk) {
-                Some(committed) => committed.changes_from(pending_bucket),
-                None => Bucket::new(chunk).changes_from(pending_bucket),
+            let empty;
+            let committed = match buckets.get(&chunk) {
+                Some(committed) => committed,
+                None => {
+                    empty = Bucket::new(chunk);
+                    &empty
+                }
             };
-            if changes.is_empty() {
+            let changes = if pending_bucket.replaced {
+                committed.replaced_by(pending_bucket)
+            } else {
+                committed.changes_from(pending_bucket)
+            };
+            let before = committed.seq;
+            let counted = before + changes.len() as u64;
+            let seq = pending_bucket
+                .assigned
+                .map_or(counted, |assigned| assigned.seq + assigned.sets_after);
+            if changes.is_empty() && seq == before {
                 continue;
             }
             let committed = Arc::make_mut(
@@ -377,19 +532,26 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     .entry(chunk)
                     .or_insert_with(|| Arc::new(Bucket::new(chunk))),
             );
-            if changes.len() >= DENSE_AT {
-                committed.make_dense();
-            }
-            for &(position, voxel) in &changes {
-                if let Some(voxel) = voxel {
-                    committed.insert(position, voxel);
+            if pending_bucket.replaced {
+                committed.store = pending_bucket.store.clone();
+            } else {
+                if changes.len() >= DENSE_AT {
+                    committed.make_dense();
+                }
+                for &(position, voxel) in &changes {
+                    if let Some(voxel) = voxel {
+                        committed.insert(position, voxel);
+                    }
                 }
             }
-            committed.seq += changes.len() as u64;
+            committed.seq = seq;
             sets.push(ChangeSet {
                 chunk,
-                replaced: false,
-                seq: committed.seq,
+                // Local sets before an applied delta count towards its
+                // voxels but not its sequence, so the sequence before can't
+                // be worked out from the voxels.
+                replaced: pending_bucket.replaced || seq < counted,
+                seq,
                 voxels: changes,
             });
         }
@@ -452,7 +614,6 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// The edit sequence of the level-0 chunk at `position`: 0 for a chunk
     /// with no edits. Work that reads the chunk's voxels notes it when it
     /// starts, and its result is stale if the sequence has moved since.
-    #[cfg_attr(not(any(test, feature = "light_propagation")), expect(dead_code))]
     pub(crate) fn edit_sequence(&self, position: IVec3) -> u64 {
         let buckets = self.committed.read().unwrap();
         if buckets.is_empty() {
@@ -685,6 +846,73 @@ mod tests {
             vec![(in_origin, Some(WorldVoxel::Solid(1)))]
         );
         assert!(sets.iter().all(|set| !set.replaced));
+    }
+
+    /// An edit delta of the chunk at the origin, setting the voxels at
+    /// `positions` to `Solid(1)`.
+    fn delta(seq: u64, full: bool, positions: &[IVec3]) -> EditDelta<u8> {
+        let voxels = positions
+            .iter()
+            .map(|&position| (voxel_index(position) as u16, WorldVoxel::Solid(1)))
+            .collect();
+        EditDelta::new(IVec3::ZERO, seq, full, voxels)
+    }
+
+    #[test]
+    fn a_full_delta_commits_as_replaced_with_the_edits_it_removed() {
+        let edits = Edits::default();
+        let (removed, kept, added) = (IVec3::X, IVec3::Y, IVec3::Z);
+        edits.set(removed, WorldVoxel::Solid(2));
+        edits.set(kept, WorldVoxel::Solid(1));
+        edits.commit();
+
+        assert_eq!(edits.apply(delta(10, true, &[kept, added])), Ok(()));
+        let sets = edits.commit();
+
+        assert_eq!(
+            sets,
+            vec![ChangeSet {
+                chunk: IVec3::ZERO,
+                replaced: true,
+                seq: 10,
+                voxels: vec![(removed, None), (added, Some(WorldVoxel::Solid(1)))],
+            }]
+        );
+        assert_eq!(sets[0].removed_box(), Some((removed, removed)));
+        assert_eq!(edits.reader().get(removed), None);
+    }
+
+    #[test]
+    fn voxels_set_after_an_applied_delta_move_the_sequence_on_from_it() {
+        let edits = Edits::default();
+        assert_eq!(
+            edits.apply(delta(5, false, &[IVec3::X])),
+            Err(EditGap {
+                chunk: IVec3::ZERO,
+                local: 0,
+                received: 5,
+            })
+        );
+        assert_eq!(edits.apply(delta(1, false, &[IVec3::X])), Ok(()));
+        edits.set(IVec3::Y, WorldVoxel::Solid(3));
+
+        let sets = edits.commit();
+        assert_eq!((sets[0].seq, sets[0].replaced), (2, false));
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 2);
+    }
+
+    #[test]
+    fn voxels_set_before_an_applied_delta_leave_its_sequence_untold() {
+        let edits = Edits::default();
+        edits.set(IVec3::Y, WorldVoxel::Solid(3));
+        edits.set(IVec3::Z, WorldVoxel::Solid(3));
+        assert_eq!(edits.apply(delta(1, false, &[IVec3::X])), Ok(()));
+
+        let sets = edits.commit();
+        // Three voxels changed, but the sequence is the delta's, so the
+        // sequence before can't be worked out from them.
+        assert_eq!(sets[0].voxels.len(), 3);
+        assert_eq!((sets[0].seq, sets[0].replaced), (1, true));
     }
 
     #[test]

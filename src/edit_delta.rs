@@ -13,6 +13,53 @@
 //! voxels at sequence `seq` continues from a chunk whose sequence is
 //! `seq - n`, so a receiver can tell when it missed one.
 //!
+//! # Applying deltas
+//!
+//! A receiving world takes each delta through
+//! [`VoxelWorld::apply_delta`], which checks the delta against the chunk's
+//! edit sequence `s`, counting deltas applied to the chunk earlier in the
+//! frame:
+//!
+//! - An incremental delta at `seq <= s` was already applied, and is skipped.
+//! - One at `seq - n == s` applies, and the chunk's sequence becomes `seq`.
+//! - Any other is a gap: the receiver missed a delta for the chunk. It is
+//!   dropped and reported as an [`EditGap`].
+//! - A full delta carries every edit the chunk has, so it needs nothing
+//!   before it. One older than `s` is skipped, and any other replaces the
+//!   chunk's edits.
+//!
+//! Applied voxels commit next `PreUpdate`, with the voxels set this frame, so
+//! the chunk lifecycle and light handle them like any other voxel edit. A
+//! receiver's commit writes [`EditsCommitted`] too, at the sequences it
+//! received.
+//!
+//! # Channels and recovery
+//!
+//! Deltas belong on a reliable, ordered channel. The sequence check catches
+//! a delta that arrives out of order or after one went missing, but not a
+//! missing last delta, since nothing after it shows the gap. These flows are
+//! game messages, each a chunk position one way and a full delta back, and
+//! each heals what the channel let through:
+//!
+//! - **Gap request**: on an [`EditGap`], the client asks the server for the
+//!   chunk's full delta, from [`VoxelWorld::full_delta`], and applies it.
+//! - **Join**: a joining client receives the full delta of every chunk in
+//!   [`VoxelWorld::edited_chunks`] that its interest covers. A client
+//!   re-joining a server forgets its edits first, so that the server's
+//!   sequences aren't skipped as older than its own.
+//! - **Heartbeat**: on a channel that can drop deltas, the server now and
+//!   then sends its edited chunks with their sequences. A client whose own
+//!   sequence for a chunk is lower requests that chunk's full delta.
+//!
+//! # Schedule
+//!
+//! A delta applied in `Update` commits in the next frame's `PreUpdate`, the
+//! same one frame later that [`VoxelWorld::set_voxel`] commits. A game that
+//! wants a delta to commit in the frame it arrives applies it from a system
+//! in `PreUpdate` ordered before [`VoxelWorldSet`].
+//!
+//! # Chunk layout
+//!
 //! A voxel's place in a delta is its index within the chunk,
 //! `x + 32 * y + 1024 * z`, from the voxel's position relative to the chunk's
 //! minimum voxel, each axis 0 to 31. This is not the padded position that
@@ -24,6 +71,11 @@
 //! mask marks in index order.
 //!
 //! [`get_chunk_voxel_position`]: crate::prelude::get_chunk_voxel_position
+//! [`VoxelWorld::apply_delta`]: crate::prelude::VoxelWorld::apply_delta
+//! [`VoxelWorld::full_delta`]: crate::prelude::VoxelWorld::full_delta
+//! [`VoxelWorld::edited_chunks`]: crate::prelude::VoxelWorld::edited_chunks
+//! [`VoxelWorld::set_voxel`]: crate::prelude::VoxelWorld::set_voxel
+//! [`VoxelWorldSet`]: crate::prelude::VoxelWorldSet
 
 use bevy::prelude::*;
 
@@ -69,6 +121,15 @@ pub(crate) fn voxel_local(index: usize) -> IVec3 {
 
 /// The voxel edits of one level-0 chunk that changed in one commit, with the
 /// chunk's edit sequence after it.
+///
+/// A world applies a delta through
+/// [`VoxelWorld::apply_delta`](crate::prelude::VoxelWorld::apply_delta),
+/// which checks it against the chunk's edit sequence `s` there:
+///
+/// | delta | skipped | applied | reported as an [`EditGap`] |
+/// |-------|---------|---------|----------------------------|
+/// | incremental, `n` voxels | `seq <= s` | `seq - n == s` | otherwise |
+/// | full | `seq < s` | `seq >= s` | never |
 ///
 /// The field order is part of the crate's public API, so that a serialised
 /// delta keeps its layout across releases.
@@ -168,6 +229,42 @@ impl<I: Copy> EditDelta<I> {
         }
     }
 
+    /// Whether a world whose chunk is at edit sequence `local` applies this
+    /// delta, by the rule in the module docs. Returns `Ok(false)` for a delta
+    /// already applied, and the gap for one that doesn't continue from
+    /// `local` or doesn't fit a chunk.
+    pub(crate) fn applies_at(&self, local: u64) -> Result<bool, EditGap> {
+        let gap = EditGap {
+            chunk: self.chunk,
+            local,
+            received: self.seq,
+        };
+        if !self.fits_a_chunk() {
+            return Err(gap);
+        }
+        if self.full {
+            return Ok(self.seq >= local);
+        }
+        if self.seq <= local {
+            return Ok(false);
+        }
+        match self.seq.checked_sub(self.len() as u64) {
+            Some(before) if before == local => Ok(true),
+            _ => Err(gap),
+        }
+    }
+
+    /// Whether every voxel index is within a chunk, and a dense delta has a
+    /// voxel for each voxel its mask marks.
+    fn fits_a_chunk(&self) -> bool {
+        match &self.voxels {
+            Voxels::Sparse(voxels) => voxels
+                .iter()
+                .all(|&(index, _)| (index as usize) < CHUNK_VOXELS),
+            Voxels::Dense { mask, voxels } => mask.len() == voxels.len(),
+        }
+    }
+
     /// The delta of a commit's change set.
     pub(crate) fn from_change_set(set: &ChangeSet<I>) -> Self {
         // A replaced chunk's delta carries every edit it has left, which the
@@ -240,6 +337,38 @@ impl std::fmt::Debug for Mask {
         f.debug_set().entries(self.iter()).finish()
     }
 }
+
+/// An edit delta that a world dropped because it doesn't continue from the
+/// chunk's edit sequence: the world missed a delta for the chunk in between.
+///
+/// The game asks the sender for the chunk's full delta, and applies it.
+/// [`VoxelWorld::apply_delta`] also reports a delta whose voxels don't fit a
+/// chunk this way, since the full delta repairs that too.
+///
+/// [`VoxelWorld::apply_delta`]: crate::prelude::VoxelWorld::apply_delta
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditGap {
+    /// The level-0 chunk position.
+    pub chunk: IVec3,
+    /// The chunk's edit sequence in the world that dropped the delta,
+    /// counting the deltas applied to it this frame.
+    pub local: u64,
+    /// The edit sequence of the dropped delta.
+    pub received: u64,
+}
+
+impl std::fmt::Display for EditGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "edit delta at sequence {} doesn't continue from sequence {} of chunk {}",
+            self.received, self.local, self.chunk
+        )
+    }
+}
+
+impl std::error::Error for EditGap {}
 
 /// Written by the commit of the voxel world `C`, in `PreUpdate` within
 /// [`VoxelWorldSet`], once for each level-0 chunk whose voxel edits changed.

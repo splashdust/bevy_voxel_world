@@ -186,6 +186,10 @@ where
     /// Commits the voxel edits set since the last frame, writes an
     /// [`EditsCommitted`] for each level-0 chunk whose edits changed, and
     /// requests that the chunks they make stale be updated.
+    ///
+    /// A chunk whose edits were replaced reports its full delta, and the
+    /// chunks showing an edit that was removed regenerate, since their
+    /// published voxels have it baked in.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -195,8 +199,17 @@ where
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
         let sets = voxel_edits.commit();
         committed.write_batch(sets.iter().map(|set| EditsCommitted {
-            delta: EditDelta::from_change_set(set),
+            delta: if set.replaced {
+                voxel_edits.full_delta(set.chunk)
+            } else {
+                EditDelta::from_change_set(set)
+            },
         }));
+        for set in sets.iter().filter(|set| set.replaced) {
+            if let Some((min, max)) = set.removed_box() {
+                requests.regenerate(min, max);
+            }
+        }
         requests.edited.extend(sets);
     }
 

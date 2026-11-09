@@ -12,6 +12,7 @@ use crate::{
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::{FillHint, VoxelWorldConfig},
+    edit_delta::{EditDelta, EditGap},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
@@ -430,6 +431,48 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         voxel: impl FnMut(IVec3) -> Option<WorldVoxel<C::MaterialIndex>>,
     ) {
         self.voxel_edits.set_region(min, max, voxel);
+    }
+
+    /// Applies an edit delta from another world, if it continues from the
+    /// edit sequence of its chunk here. Returns `Ok` for a delta applied or
+    /// one already applied, and an [`EditGap`] for one that doesn't continue,
+    /// which is dropped: ask the sender for the chunk's full delta and apply
+    /// that. See the [`EditDelta`] docs for the rule.
+    ///
+    /// The delta's voxels commit with the voxels set this frame, in the order
+    /// they were set and applied, and the chunk takes the delta's edit
+    /// sequence. A full delta replaces the chunk's edits: those it doesn't
+    /// carry are removed, along with the voxels set in the chunk earlier this
+    /// frame, and the chunks showing them regenerate. A chunk that isn't
+    /// spawned keeps the delta's voxels, and shows them once it spawns.
+    ///
+    /// Called from `Update`, the delta commits in the next `PreUpdate`. Its
+    /// sequence counts towards the next delta for the chunk right away, so
+    /// two deltas for one chunk can be applied in one frame.
+    pub fn apply_delta(
+        &mut self,
+        delta: EditDelta<C::MaterialIndex>,
+    ) -> Result<(), EditGap> {
+        self.voxel_edits.apply(delta)
+    }
+
+    /// The full delta of the level-0 chunk at `chunk_pos`: every voxel edit
+    /// it has, at its edit sequence. A chunk with no edits gives an empty one
+    /// at sequence 0.
+    ///
+    /// It reads committed edits only, so a voxel set this frame isn't in it
+    /// until the next commit.
+    pub fn full_delta(&self, chunk_pos: IVec3) -> EditDelta<C::MaterialIndex> {
+        self.voxel_edits.full_delta(chunk_pos)
+    }
+
+    /// Every level-0 chunk position with voxel edits, in no particular order,
+    /// with its edit sequence. A chunk whose edits were all removed is listed
+    /// too, with no edits, so that the removal reaches other worlds.
+    ///
+    /// It reads committed edits only, like [`VoxelWorld::full_delta`].
+    pub fn edited_chunks(&self) -> Vec<(IVec3, u64)> {
+        self.voxel_edits.edited_chunks()
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position
