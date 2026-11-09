@@ -257,7 +257,7 @@ pub(crate) struct Solved {
     /// What a chunk task found out about the chunk's columns, with sky light
     /// on. A relight finds nothing.
     pub sky: Option<SkyFound>,
-    /// The edit count of the chunk's position when its chunk task started,
+    /// The edit sequence of the chunk's position when its chunk task started,
     /// which its voxels reflect. 0 for a relight, which keeps the inputs it
     /// read.
     pub own_edits: u64,
@@ -295,7 +295,7 @@ pub(crate) struct LightTask<I> {
     pub settings: Arc<LightTaskSettings<I>>,
     pub view: LightView,
     pub walk: Option<SkyWalk<I>>,
-    /// The edit count of the chunk's position when the task started.
+    /// The edit sequence of the chunk's position when the task started.
     pub own_edits: u64,
     /// The world's edit frame when the task started.
     pub edit_frame: u64,
