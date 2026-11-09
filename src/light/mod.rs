@@ -121,7 +121,11 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     ///
     /// A level-0 chunk whose light the world view holds for its current voxel
     /// edits is being re-meshed after an edit, which relights it without its
-    /// task: the task keeps that light and skips its solve.
+    /// task: the task keeps that light and skips its solve. A task that
+    /// regenerates its chunk, `from_scratch`, always solves, since the
+    /// chunk's voxels can change with no change to its edits, and its light
+    /// landing puts the chunk's new occupancy and emissive voxels in the
+    /// world view.
     ///
     /// With sky light on, the task gets the world's lookup `delegate` to walk
     /// the chunk positions above the chunk, and the fill hints and voxel edits
@@ -135,6 +139,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         world: &C,
         edits: &VoxelEdits<C, C::MaterialIndex>,
         delegate: VoxelLookupDelegate<C::MaterialIndex>,
+        from_scratch: bool,
     ) -> Option<TaskLight<C::MaterialIndex>> {
         if takes_coarse_path(key, data_shape) {
             return Some(TaskLight::Coarse(CoarseTask {
@@ -150,7 +155,9 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             .view
             .read()
             .get(&key.position)
-            .filter(|chunk| chunk.entity == entity && chunk.edits == own_edits)
+            .filter(|chunk| {
+                !from_scratch && chunk.entity == entity && chunk.edits == own_edits
+            })
             .map(|chunk| chunk.light.clone());
         if let Some(light) = kept {
             return Some(TaskLight::Kept(KeptTask {
