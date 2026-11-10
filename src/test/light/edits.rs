@@ -335,16 +335,24 @@ fn remove_edits(
 
 #[test]
 fn clearing_edits_matches_the_reference() {
-    remove_edits("clearing the edits", edits_to_remove(), |mut voxel_world| {
-        voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(64));
-    });
+    remove_edits(
+        "clearing the edits",
+        edits_to_remove(),
+        |mut voxel_world| {
+            voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(64));
+        },
+    );
 }
 
 #[test]
 fn forgetting_edits_matches_the_reference() {
-    remove_edits("forgetting the edits", edits_to_remove(), |mut voxel_world| {
-        voxel_world.forget_edits();
-    });
+    remove_edits(
+        "forgetting the edits",
+        edits_to_remove(),
+        |mut voxel_world| {
+            voxel_world.forget_edits();
+        },
+    );
 }
 
 #[test]
@@ -354,8 +362,9 @@ fn clearing_a_block_of_thousands_of_edits_matches_the_reference() {
     let (min, max) = (IVec3::new(0, 4, 0), IVec3::new(24, 12, 16));
     let mut edits: Vec<_> = (min.z..max.z)
         .flat_map(|z| {
-            (min.y..max.y)
-                .flat_map(move |y| (min.x..max.x).map(move |x| place(IVec3::new(x, y, z))))
+            (min.y..max.y).flat_map(move |y| {
+                (min.x..max.x).map(move |x| place(IVec3::new(x, y, z)))
+            })
         })
         .collect();
     edits.push(place(FLOOR_LAMP));

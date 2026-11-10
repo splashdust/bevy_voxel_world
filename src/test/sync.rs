@@ -312,7 +312,10 @@ fn deltas_setting_a_voxel_and_back_in_one_frame_report_a_delta_that_continues() 
         delta.full || delta.seq - delta.len() as u64 == 1,
         "{delta:?} doesn't continue from sequence 1"
     );
-    assert_eq!(get_voxel::<Receiver>(&mut app, position), WorldVoxel::Solid(1));
+    assert_eq!(
+        get_voxel::<Receiver>(&mut app, position),
+        WorldVoxel::Solid(1)
+    );
 }
 
 #[test]

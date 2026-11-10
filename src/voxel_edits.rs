@@ -1243,7 +1243,10 @@ mod tests {
         edits.commit();
         assert!(!is_dense(&edits, IVec3::ZERO));
         assert_eq!(edits.full_delta(IVec3::ZERO).len(), 32 * 32 - 2);
-        assert_eq!(edits.reader().get(IVec3::new(5, 0, 5)), Some(WorldVoxel::Solid(1)));
+        assert_eq!(
+            edits.reader().get(IVec3::new(5, 0, 5)),
+            Some(WorldVoxel::Solid(1))
+        );
 
         edits.clear_all();
         edits.commit();
@@ -1303,7 +1306,9 @@ mod tests {
         }
         edits.set(in_z, WorldVoxel::Solid(1));
         edits.commit();
-        let highest = edits.edit_stamp(IVec3::ZERO).max(edits.edit_stamp(IVec3::Z));
+        let highest = edits
+            .edit_stamp(IVec3::ZERO)
+            .max(edits.edit_stamp(IVec3::Z));
         assert!(edits.stamp_has_edits(edits.edit_stamp(IVec3::ZERO)));
 
         edits.forget();
