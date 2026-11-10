@@ -489,7 +489,7 @@ fn top_from_record<C: VoxelWorldConfig>(
             Some(solid) => solid,
             None => match Hinted::of(
                 world.chunk_fill_hint(ChunkKey::new(above, 0)),
-                count > 0,
+                edits.stamp_has_edits(count),
             ) {
                 Hinted::Air => continue,
                 Hinted::Solid | Hinted::Unknown => return 0,

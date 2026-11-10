@@ -245,7 +245,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 .zip(found.edits.iter().zip(&counts))
                 .any(|(known, (noted, now))| *known && noted != now);
         let (sky, known) = if stale {
-            from_hints(world, position, found.open, &counts)
+            from_hints(world, edits, position, found.open, &counts)
         } else {
             (inputs.columns.sky, found.known)
         };
@@ -489,7 +489,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         let window = self.rule.window(position.y);
         let open = if window == 0 { [!0; CHUNK] } else { padding };
         let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
-        let (sky, known) = from_hints(world, position, open, &counts);
+        let (sky, known) = from_hints(world, edits, position, open, &counts);
         self.settle(position, entity, sky, known, &counts, record)
     }
 
@@ -768,9 +768,10 @@ fn edit_counts<C, I: Copy + PartialEq>(
 /// The columns open in a chunk's padding row, `open`, as the fill hints of the
 /// positions above the chunk at `position` leave them, and which of those
 /// positions the hints settle. A hint is ignored for a position whose edit
-/// count in `counts` isn't 0.
+/// stamp in `counts`, read from `edits`, says it has edits.
 fn from_hints<C: VoxelWorldConfig>(
     world: &C,
+    edits: &VoxelEdits<C, C::MaterialIndex>,
     position: IVec3,
     open: Columns,
     counts: &[u64],
@@ -779,7 +780,8 @@ fn from_hints<C: VoxelWorldConfig>(
     let mut known = vec![false; counts.len()];
     for (index, count) in counts.iter().enumerate() {
         let above = position + IVec3::Y * (index as i32 + 1);
-        match Hinted::of(world.chunk_fill_hint(ChunkKey::new(above, 0)), *count > 0) {
+        let edited = edits.stamp_has_edits(*count);
+        match Hinted::of(world.chunk_fill_hint(ChunkKey::new(above, 0)), edited) {
             Hinted::Air => known[index] = true,
             Hinted::Solid => sky = [0; CHUNK],
             Hinted::Unknown => {}
@@ -800,7 +802,7 @@ pub(crate) fn air_answer<C: VoxelWorldConfig>(
 ) -> ColumnAnswer {
     let window = rule.window(position.y);
     let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
-    let (mut sky, mut known) = from_hints(world, position, [!0; CHUNK], &counts);
+    let (mut sky, mut known) = from_hints(world, edits, position, [!0; CHUNK], &counts);
     for (index, known) in known.iter_mut().enumerate() {
         if *known {
             continue;

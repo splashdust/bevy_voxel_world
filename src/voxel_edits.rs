@@ -38,6 +38,9 @@ use std::{
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
+#[cfg(feature = "light_propagation")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use bevy::{platform::collections::HashMap, prelude::*};
 
 use crate::{
@@ -471,9 +474,11 @@ pub struct VoxelEdits<C, I> {
     /// A change set for each chunk whose edits were forgotten since the last
     /// commit, every edit it held removed.
     forgotten: Mutex<Vec<ChangeSet<I>>>,
-    /// For each chunk position whose edits were ever forgotten, how far its
-    /// [`edit_stamp`](Self::edit_stamp) runs ahead of its edit sequence.
-    stamp_offsets: RwLock<HashMap<IVec3, u64>>,
+    /// How far every [`edit_stamp`](Self::edit_stamp) runs ahead of its
+    /// chunk's edit sequence. Changed only under the committed edits' write
+    /// lock, and read under their read lock.
+    #[cfg(feature = "light_propagation")]
+    forget_epoch: AtomicU64,
     _marker: PhantomData<C>,
 }
 
@@ -483,7 +488,8 @@ impl<C, I> Default for VoxelEdits<C, I> {
             pending: Mutex::default(),
             committed: Arc::default(),
             forgotten: Mutex::default(),
-            stamp_offsets: RwLock::default(),
+            #[cfg(feature = "light_propagation")]
+            forget_epoch: AtomicU64::default(),
             _marker: PhantomData,
         }
     }
@@ -622,11 +628,14 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         if buckets.is_empty() {
             return;
         }
-        let mut offsets = self.stamp_offsets.write().unwrap();
         let mut forgotten = self.forgotten.lock().unwrap();
+        // The new epoch is past every stamp handed out so far: the old epoch
+        // plus the largest sequence any chunk reached since.
+        #[cfg(feature = "light_propagation")]
+        let highest = buckets.values().map(|bucket| bucket.seq).max().unwrap_or(0);
+        #[cfg(feature = "light_propagation")]
+        self.forget_epoch.fetch_add(highest + 1, Ordering::Relaxed);
         for (chunk, bucket) in buckets.drain() {
-            let offset = offsets.entry(chunk).or_default();
-            *offset += bucket.seq + 1;
             forgotten.push(ChangeSet {
                 chunk,
                 replaced: true,
@@ -875,23 +884,27 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// that reads the chunk's voxels notes it when it starts, and its result
     /// is stale if the stamp has moved since. A later stamp is larger.
     ///
-    /// It is the chunk's edit sequence, plus an offset that grows each time
-    /// the chunk's edits are forgotten. Forgetting sets the sequence back to
-    /// 0, and the offset keeps the stamp from ever going back to a value it
-    /// had, when the chunk's edits may have been different.
+    /// It is the chunk's edit sequence plus the forget epoch, which every
+    /// forget raises past each stamp handed out before it. Forgetting sets
+    /// the sequence back to 0, and the epoch keeps the stamp from ever going
+    /// back to a value it had, when the chunk's edits may have been
+    /// different. A forget moves the stamp of every position, edited or not.
     #[cfg(feature = "light_propagation")]
     pub(crate) fn edit_stamp(&self, position: IVec3) -> u64 {
         let buckets = self.committed.read().unwrap();
-        let offsets = self.stamp_offsets.read().unwrap();
-        let offset = if offsets.is_empty() {
-            0
-        } else {
-            offsets.get(&position).copied().unwrap_or(0)
-        };
+        let epoch = self.forget_epoch.load(Ordering::Relaxed);
         if buckets.is_empty() {
-            return offset;
+            return epoch;
         }
-        offset + buckets.get(&position).map_or(0, |bucket| bucket.seq)
+        epoch + buckets.get(&position).map_or(0, |bucket| bucket.seq)
+    }
+
+    /// Whether `stamp`, an [`edit_stamp`](Self::edit_stamp) read since the
+    /// last forget, is of a chunk whose edit sequence is above 0: one that
+    /// holds edits, or did since the last forget.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn stamp_has_edits(&self, stamp: u64) -> bool {
+        stamp > self.forget_epoch.load(Ordering::Relaxed)
     }
 
     /// Whether edits have been set since the last commit.
@@ -1276,7 +1289,36 @@ mod tests {
         edits.commit();
         assert_eq!(edits.edit_sequence(IVec3::ZERO), 1);
         assert!(edits.edit_stamp(IVec3::ZERO) > before + 1);
-        assert_eq!(edits.edit_stamp(IVec3::X), 0);
+    }
+
+    #[cfg(feature = "light_propagation")]
+    #[test]
+    fn after_a_forget_every_stamp_is_past_each_stamp_handed_out_before() {
+        let edits = Edits::default();
+        // Three edits in the chunk at the origin, one in the chunk above it
+        // along z.
+        let in_z = IVec3::new(0, 0, 32);
+        for x in 0..3 {
+            edits.set(IVec3::new(x, 0, 0), WorldVoxel::Solid(1));
+        }
+        edits.set(in_z, WorldVoxel::Solid(1));
+        edits.commit();
+        let highest = edits.edit_stamp(IVec3::ZERO).max(edits.edit_stamp(IVec3::Z));
+        assert!(edits.stamp_has_edits(edits.edit_stamp(IVec3::ZERO)));
+
+        edits.forget();
+        for chunk in [IVec3::ZERO, IVec3::Z, IVec3::X] {
+            assert!(edits.edit_stamp(chunk) > highest, "{chunk}");
+            assert!(!edits.stamp_has_edits(edits.edit_stamp(chunk)), "{chunk}");
+        }
+
+        // An edit in the chunk along z alone, then a second forget.
+        edits.set(in_z, WorldVoxel::Solid(2));
+        edits.commit();
+        let highest = edits.edit_stamp(IVec3::Z);
+        assert!(edits.stamp_has_edits(highest));
+        edits.forget();
+        assert!(edits.edit_stamp(IVec3::ZERO) > highest);
     }
 
     #[test]

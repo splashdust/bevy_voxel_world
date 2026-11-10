@@ -27,14 +27,21 @@
 //!
 //! Light tells whether what it holds for a position is current by the
 //! position's edit stamp, [`VoxelEdits::edit_stamp`]: the chunk's edit
-//! sequence, plus an offset that grows each time the chunk's edits are
-//! forgotten, so the stamp never goes back. The world view, the sky record
-//! and running probes each note the stamp their voxels were read at. A chunk
-//! task's light that lands with a smaller stamp than the world view holds is
-//! dropped as stale, and equal stamps mean the same voxels. Forgetting sets
-//! the edit sequence back to 0, so the sequence alone would have the chunk
-//! task that regenerates a forgotten chunk dropped as stale, and could come
-//! back to a value light noted for different voxels.
+//! sequence, plus a forget epoch that each forget raises past every stamp
+//! handed out before it, so the stamp never goes back. The world view, the
+//! sky record and running probes each note the stamp their voxels were read
+//! at. A chunk task's light that lands with a smaller stamp than the world
+//! view holds is dropped as stale, and equal stamps mean the same voxels.
+//! Forgetting sets the edit sequence back to 0, so the sequence alone would
+//! have the chunk task that regenerates a forgotten chunk dropped as stale,
+//! and could come back to a value light noted for different voxels.
+//!
+//! The epoch moves every position's stamp, not only those of the forgotten
+//! chunks, so after a forget light treats all it holds as read before the
+//! last edit: each chunk takes the miss path once, and the sky record and
+//! running probes start over. A stamp above the epoch,
+//! [`VoxelEdits::stamp_has_edits`], tells a position with edits, whose fill
+//! hint light ignores.
 //!
 //! An edit is worked out against what light held before the commit, at the
 //! stamp after it less the number of voxels the commit changed. A commit that
@@ -396,7 +403,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 return Some(mask[x] >> z & 1 == 1);
             }
             let hint = configuration.chunk_fill_hint(ChunkKey::new(above, 0));
-            match Hinted::of(hint, count > 0) {
+            match Hinted::of(hint, edits.stamp_has_edits(count)) {
                 Hinted::Air => Some(false),
                 Hinted::Solid => Some(true),
                 Hinted::Unknown => None,

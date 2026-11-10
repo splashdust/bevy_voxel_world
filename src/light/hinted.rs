@@ -73,7 +73,7 @@ pub(crate) fn air_inputs<C: VoxelWorldConfig>(
     let count = edits.edit_stamp(position);
     let mut occupancy = Occupancy::Open;
     let mut emissive = Vec::new();
-    if count > 0 {
+    if edits.stamp_has_edits(count) {
         if let Some(bucket) = edits.buckets(std::iter::once(position)).pop().flatten() {
             let min = position * CHUNK_SIZE_I;
             for (at, voxel) in bucket.iter() {
