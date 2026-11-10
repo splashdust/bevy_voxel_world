@@ -191,3 +191,32 @@ fn a_world_whose_material_index_has_no_serde_still_exports_deltas() {
         vec![(IVec3::ONE, WorldVoxel::Solid(PlainIndex(3)))]
     );
 }
+
+#[test]
+fn a_cleared_chunks_empty_full_delta_survives_postcard() {
+    let mut app = sync_app();
+    super::origin_ready(&mut app);
+    let position = IVec3::new(3, 4, 5);
+    let deltas = send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Solid(7));
+        voxel_world.set_voxel(position + IVec3::X, WorldVoxel::Solid(7));
+    });
+    assert_eq!(super::apply(&mut app, deltas), vec![Ok(())]);
+    app.update();
+    super::published(&mut app, position, WorldVoxel::Solid(7));
+
+    send(&mut app, |voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::ZERO, IVec3::splat(32));
+    });
+    let cleared = round_trip(&full_delta::<Sender>(&mut app, IVec3::ZERO));
+    assert!(cleared.full && cleared.is_empty());
+    assert_eq!(cleared.seq, 4);
+
+    assert_eq!(super::apply(&mut app, vec![cleared]), vec![Ok(())]);
+    app.update();
+    super::published(&mut app, position, WorldVoxel::Air);
+    assert_eq!(
+        super::edited_chunks::<Receiver>(&mut app),
+        vec![(IVec3::ZERO, 4)]
+    );
+}
