@@ -18,7 +18,7 @@
 //! first, since they are the most likely to show wrong light and the cheapest
 //! to settle, and the nearest among equals.
 //!
-//! A probe notes its position's edit sequence when it starts. If the sequence
+//! A probe notes its position's edit stamp when it starts. If the stamp
 //! moved by the time it finishes, its mask is thrown away and the position is
 //! probed again.
 //!
@@ -95,7 +95,7 @@ impl Waiting {
 
 struct Probe {
     position: IVec3,
-    /// The position's edit sequence when the probe started.
+    /// The position's edit stamp when the probe started.
     edits: u64,
     /// The sky record's generation when the probe started.
     generation: u64,
@@ -379,7 +379,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     /// Works out the column answer of the chunk `entity` at `position` from
     /// the columns `sky` and the positions `known` above it, taking in the
     /// masks the record holds for the others, and keeps the chunk waiting if
-    /// it still has provisional columns. `counts` are the edit sequences of the
+    /// it still has provisional columns. `counts` are the edit stamps of the
     /// positions above it.
     fn settle(
         &mut self,
@@ -753,7 +753,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
     changed
 }
 
-/// The edit sequences of the `count` positions above the chunk at `position`,
+/// The edit stamps of the `count` positions above the chunk at `position`,
 /// lowest first.
 fn edit_counts<C, I: Copy + PartialEq>(
     edits: &VoxelEdits<C, I>,

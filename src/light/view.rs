@@ -26,7 +26,7 @@ pub(crate) struct ViewChunk {
     /// Changes whenever `light` does, and never goes back, so a task can tell
     /// whether the light it compared against is still there when it lands.
     pub version: u64,
-    /// The edit sequence of the chunk's position its inputs reflect.
+    /// The edit stamp of the chunk's position its inputs reflect.
     pub edits: u64,
     /// The [emission generation](super::solver::LightTaskSettings::emission_generation)
     /// its inputs' emissive voxels were found under.
@@ -66,7 +66,7 @@ pub(crate) struct AirInputs {
     /// Its voxels, every one open with the voxel edits over it, and its column
     /// answer.
     pub inputs: Arc<LightInputs>,
-    /// The edit sequence of the position its inputs reflect.
+    /// The edit stamp of the position its inputs reflect.
     pub edits: u64,
 }
 

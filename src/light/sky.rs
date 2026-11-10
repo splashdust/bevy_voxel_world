@@ -213,10 +213,10 @@ pub(crate) struct SkyFound {
     /// By position above the chunk, lowest first, whether the answer takes
     /// in its voxels: from a fill hint, the sky record or a walk.
     pub known: Vec<bool>,
-    /// The edit sequence of each position above the chunk when the task
+    /// The edit stamp of each position above the chunk when the task
     /// started.
     pub edits: Vec<u64>,
-    /// The edit sequence of the chunk's own position when the task started.
+    /// The edit stamp of the chunk's own position when the task started.
     pub own_edits: u64,
     /// The sky record's generation when the task started.
     pub generation: u64,

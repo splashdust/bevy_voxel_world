@@ -24,6 +24,27 @@
 //! These relights are urgent: they start at once, ahead of the pool budget,
 //! even for chunks being re-meshed, whose chunk tasks skip their own solve.
 //! The light of a chunk being re-meshed waits for its new mesh to land.
+//!
+//! Light tells whether what it holds for a position is current by the
+//! position's edit stamp, [`VoxelEdits::edit_stamp`]: the chunk's edit
+//! sequence, plus an offset that grows each time the chunk's edits are
+//! forgotten, so the stamp never goes back. The world view, the sky record
+//! and running probes each note the stamp their voxels were read at. A chunk
+//! task's light that lands with a smaller stamp than the world view holds is
+//! dropped as stale, and equal stamps mean the same voxels. Forgetting sets
+//! the edit sequence back to 0, so the sequence alone would have the chunk
+//! task that regenerates a forgotten chunk dropped as stale, and could come
+//! back to a value light noted for different voxels.
+//!
+//! An edit is worked out against what light held before the commit, at the
+//! stamp after it less the number of voxels the commit changed. A commit that
+//! replaced a chunk's edits, a clear, a forget or an applied full delta,
+//! can't be counted back that way, so light treats that chunk as one it holds
+//! nothing for, and the chunk's next chunk task works out its inputs. That
+//! chunk regenerates, and a chunk task that regenerates always solves its
+//! light rather than keep the light the world view holds, since its voxels
+//! can change while its edit stamp doesn't: see
+//! [`LightSettings::task_for`](super::LightSettings::task_for).
 
 use std::sync::atomic::Ordering;
 
@@ -88,10 +109,10 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         .iter()
         .flat_map(|set| set.voxels.iter().map(|(position, _)| *position))
         .collect();
-    // How far each edited chunk's edit sequence moved in this commit, or
-    // `None` where the commit replaced the chunk's edits, so the sequence
-    // before it can't be told and light takes the path for a chunk it has no
-    // inputs for.
+    // How far each edited chunk's edit stamp moved in this commit, or `None`
+    // where the commit replaced the chunk's edits, so the stamp before it
+    // can't be told and light takes the path for a chunk it has no inputs
+    // for.
     let mut moved: HashMap<IVec3, Option<u64>> = HashMap::new();
     for set in &requests.edited {
         let n = moved.entry(set.chunk).or_insert(Some(0));
