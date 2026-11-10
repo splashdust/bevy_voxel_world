@@ -224,7 +224,7 @@ $ cargo run -r --example light_mountain_house --features light_propagation
 
 ## Syncing and saving voxel edits
 
-Every commit of voxel edits writes an `EditsCommitted<C>` message for each level-0 chunk whose edits changed, carrying an `EditDelta`: the chunk's changed voxels and its edit sequence after them. The same value moves edits to another world, over a network or into a save file.
+Every commit of voxel edits writes an `EditsCommitted<C>` message for each level-0 chunk whose edits changed, carrying an `EditDelta`: the chunk's changed voxels and its edit sequence after them. This can be used to move edits to another world, over a network or into a save file.
 
 ```rust
 // On the server: forward each committed delta to the clients that need it.
@@ -250,7 +250,7 @@ A save is the `full_delta` of each chunk in `edited_chunks`, and a load is `forg
 
 The opt-in `serde` feature serialises voxels and deltas in any format. The [`edits` module docs](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/edits/index.html) describe the rule a delta is applied by, the channel it assumes, the join, gap and heartbeat flows, and the serialised layout.
 
-The [`multiplayer_loopback` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/multiplayer_loopback.rs) runs a server and two clients in one app over a fake network whose faults are on keys, and the [`save_load` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/save_load.rs) saves edits and the terrain seed to a file and loads them back.
+The [`multiplayer_loopback` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/multiplayer_loopback.rs) runs a server and two clients in one app over a fake network, and the [`save_load` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/save_load.rs) saves edits and the terrain seed to a file and loads them back.
 
 ```bash
 $ cargo run -r --example multiplayer_loopback --features serde
