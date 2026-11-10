@@ -4,23 +4,27 @@
 
 ### Syncing and saving voxel edits
 
-- Add `EditDelta`, the voxel edits of one level-0 chunk that changed in one commit with the chunk's edit sequence after it, and `EditsCommitted<C>`, the message each commit writes per level-0 chunk whose edits changed. A server forwards these to clients; a single-player game reads them to learn what changed.
-
-- Add `VoxelWorld::apply_delta`, which applies another world's delta if it continues from the chunk's edit sequence and returns an `EditGap` if it doesn't, and `VoxelWorld::full_delta` and `VoxelWorld::edited_chunks`, which export a chunk's edits for a joining client or a save file. The `edits` module docs describe the continuation rule, the channel it assumes, and the gap, join and heartbeat flows a game builds on it.
-
-- Add `VoxelWorld::clear_voxels_in` and `VoxelWorld::clear_edits`, which remove edits so the generated voxels show again and reach other worlds as full deltas, and `VoxelWorld::forget_edits`, which drops every edit and edit sequence without telling anyone, before loading a save or joining a server again.
-
-- Add `VoxelWorld::regenerate_chunks`, which makes every spawned chunk look up its voxels again, for example after switching to a new seed. Chunks that showed a removed edit regenerate on their own.
-
-- Add the `serde` feature: `Serialize` and `Deserialize` on `WorldVoxel`, `EditDelta` and its voxel forms in `edits`, in any format. The layout carries no version; the `edits` module docs describe it.
-
-- Add `VoxelWorld::set_voxels_in`, which sets the voxels of a box from a closure, at far less cost per voxel than `set_voxel` when it covers most of a chunk. The `voxel_animation` example uses it.
-
-- Add the `multiplayer_loopback` example, a server and two clients in one app syncing edits over a fake network with faults on a key, and the `save_load` example, which saves edits and the seed to a file and loads them back. Both need the `serde` feature.
+- Enable world sync for multiplayer use cases
+- Make it easier to support save/load
+- Support clearing the world
+- Support batch edits, which improves performance when editing a larger volume of voxels in a single action
 
 ## 0.19.2
 
 Add `light_propagation` feature
+
+Light propagation sits behind the off-by-default `light_propagation` cargo feature, and a world can turn it on by returning settings from `VoxelWorldConfig::light_propagation`.
+
+There are two kinds of light: Sky light and voxel light
+
+- Sky light falls straight down from open sky and then spreads sideways under overhangs.
+- Voxel light spreads out from emissive voxels.
+
+Both kinds stop at solid voxels.
+
+Each chunk works out its light in its own chunk task, then works it out again when neighbouring chunks or edits arrive, while chunks above LOD level 0 use a cheaper solve from their own cells. Shaders read the light from a 3D texture with one slot per chunk, so meshes stay shared.
+
+For now only white light is supported, but regular colored Bevy lights can be used to add tint and glow. Colored light propagation in bevy_voxel_world may be added in a future update.
 
 ## 0.19.1
 
