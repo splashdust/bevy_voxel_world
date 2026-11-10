@@ -65,6 +65,11 @@ name = "multiple_cameras"
 path = "examples/multiple_cameras.rs"
 
 [[example]]
+name = "multiplayer_loopback"
+path = "examples/multiplayer_loopback.rs"
+required-features = ["serde"]
+
+[[example]]
 name = "navigation"
 path = "examples/navigation.rs"
 required-features = ["navigation"]
