@@ -3,7 +3,12 @@ use block_mesh::{MergeVoxel, Voxel, VoxelVisibility};
 
 pub const VOXEL_SIZE: f32 = 1.;
 
+/// One voxel of a world, holding the world's material index `I` when solid.
+///
+/// The variant order is part of the crate's public API, so that a serialised
+/// voxel keeps its layout across releases.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WorldVoxel<I = u8> {
     #[default]
     Unset,

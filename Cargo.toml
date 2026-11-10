@@ -25,6 +25,8 @@ light_propagation = []
 trace = ["bevy/trace"]
 # `trace`, sent to the Tracy profiler.
 trace_tracy = ["trace", "bevy/trace_tracy"]
+# `Serialize` and `Deserialize` on voxels and edit deltas, in any format.
+serde = ["dep:serde"]
 
 [[example]]
 name = "fast_traversal_ray"
@@ -115,6 +117,7 @@ futures-lite = "2.6.1"
 hashbrown = "0.17.1"
 ndshape = "0.3.0"
 rand = "0.10.1"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 weak-table = { version = "0.4.0", features = ["ahash"] }
 
 # The browser needs a getrandom backend enabled for each version in use: rand
@@ -137,7 +140,10 @@ bevy = { version = "0.20", default-features = false, features = [
 ] }
 bevy_panorbit_camera = { version = "0.36.0" }
 libc = "0.2"
+# Formats for edit deltas in tests and examples: the crate imposes none.
+lz4_flex = "0.14"
 noise = { version = "0.9.0" }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 transvoxel = "2.0.0"
 
 # Examples built for the browser render through WebGL2 into the page's canvas,
