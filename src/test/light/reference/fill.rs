@@ -575,7 +575,7 @@ fn seed(seeds: &mut [Option<u32>], box_light: &Reference, chunk: IVec3, cells: &
     }
     let reach = box_light.reach;
     let steps = box_light.top as i32;
-    let mut by_level: Vec<Vec<bool>> = vec![vec![false; seeds.len()]; steps as usize];
+    let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); steps as usize];
     for z in 0..GRID {
         for y in 0..GRID {
             for x in 0..GRID {
@@ -596,15 +596,20 @@ fn seed(seeds: &mut [Option<u32>], box_light: &Reference, chunk: IVec3, cells: &
                 }) {
                     if let Some(i) = box_light.index(p) {
                         if box_light.open[i] {
-                            by_level[level][i] = true;
+                            by_level[level].push(i);
                         }
                     }
                 }
             }
         }
     }
-    for (level, mut voxels) in by_level.into_iter().enumerate() {
-        if !voxels.iter().any(|seeded| *seeded) {
+    // Each level's seeds run 7 face steps through open voxels, outward from
+    // the seeded voxels. Passing over the whole box once per level instead is
+    // too slow at 256 levels. `reached[i]` is the last level whose run
+    // reached voxel `i`.
+    let mut reached = vec![usize::MAX; seeds.len()];
+    for (level, voxels) in by_level.into_iter().enumerate() {
+        if voxels.is_empty() {
             continue;
         }
         let Some(start) =
@@ -615,19 +620,29 @@ fn seed(seeds: &mut [Option<u32>], box_light: &Reference, chunk: IVec3, cells: &
         if start >= reach {
             continue;
         }
-        for _ in 0..7 {
-            let before = voxels.clone();
-            for (i, voxel) in voxels.iter_mut().enumerate() {
-                if *voxel || !box_light.open[i] {
-                    continue;
-                }
-                *voxel = box_light.neighbours(i, 3).any(|n| before[n]);
+        let mut frontier = Vec::new();
+        for i in voxels {
+            if reached[i] != level {
+                reached[i] = level;
+                frontier.push(i);
             }
         }
-        for (i, seeded) in voxels.iter().enumerate() {
-            if *seeded {
-                seeds[i] = Some(seeds[i].map_or(start, |s| s.min(start)));
+        let mut run = frontier.clone();
+        for _ in 0..7 {
+            let mut next = Vec::new();
+            for i in frontier {
+                for n in box_light.neighbours(i, 3) {
+                    if box_light.open[n] && reached[n] != level {
+                        reached[n] = level;
+                        next.push(n);
+                    }
+                }
             }
+            run.extend_from_slice(&next);
+            frontier = next;
+        }
+        for i in run {
+            seeds[i] = Some(seeds[i].map_or(start, |s| s.min(start)));
         }
     }
 }
