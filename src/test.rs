@@ -760,9 +760,19 @@ fn a_region_set_is_read_back_at_once_and_published() {
     let mut app = App::new();
     app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
         .add_systems(Startup, spawn_camera::<FloorWorld>);
-    update_until(&mut app, "the chunk at the origin to be ready", |app| {
-        chunk_status::<FloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
-    });
+    // The voxel left alone is read from the published chunk south of the
+    // origin.
+    update_until(
+        &mut app,
+        "the chunks the voxels are read in to be ready",
+        |app| {
+            [IVec3::ZERO, IVec3::new(0, 0, -1)]
+                .into_iter()
+                .all(|chunk| {
+                    chunk_status::<FloorWorld>(app, chunk) == Some(ChunkStatus::Ready)
+                })
+        },
+    );
 
     // A box across the eight chunks around the origin, leaving the voxels at
     // y = 1 alone.
