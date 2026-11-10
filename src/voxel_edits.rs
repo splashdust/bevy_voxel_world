@@ -475,8 +475,9 @@ pub struct VoxelEdits<C, I> {
     /// commit, every edit it held removed.
     forgotten: Mutex<Vec<ChangeSet<I>>>,
     /// How far every [`edit_stamp`](Self::edit_stamp) runs ahead of its
-    /// chunk's edit sequence. Changed only under the committed edits' write
-    /// lock, and read under their read lock.
+    /// chunk's edit sequence. Changed only while the committed edits are
+    /// locked for writing, so a stamp read with them locked for reading
+    /// pairs the epoch with the sequences it belongs to.
     #[cfg(feature = "light_propagation")]
     forget_epoch: AtomicU64,
     _marker: PhantomData<C>,
