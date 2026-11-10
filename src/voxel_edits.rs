@@ -487,7 +487,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         max: IVec3,
         mut voxel: impl FnMut(IVec3) -> Option<WorldVoxel<I>>,
     ) {
-        if (max - min).cmple(IVec3::ZERO).any() {
+        if max.cmple(min).any() {
             return;
         }
         let mut pending = self.pending.lock().unwrap();
@@ -525,7 +525,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// the next commit removes the committed ones and those set earlier this
     /// frame. A box that is empty or inverted along any axis clears nothing.
     pub(crate) fn clear_region(&self, min: IVec3, max: IVec3) {
-        if (max - min).cmple(IVec3::ZERO).any() {
+        if max.cmple(min).any() {
             return;
         }
         let max = max - 1;

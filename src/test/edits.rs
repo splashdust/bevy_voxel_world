@@ -175,3 +175,41 @@ fn a_delta_names_its_voxels_by_world_position() {
         vec![(below_origin, WorldVoxel::Solid(2))]
     );
 }
+
+#[test]
+fn clearing_the_largest_box_clears_every_edit() {
+    let mut app = edits_app();
+    commit(&mut app, |voxel_world| {
+        voxel_world.set_voxel(IVec3::new(1, 2, 3), WorldVoxel::Solid(4));
+        voxel_world.set_voxel(IVec3::new(-40, -1, 70), WorldVoxel::Solid(4));
+    });
+
+    let deltas = commit(&mut app, |voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::MIN, IVec3::MAX);
+    });
+
+    assert_eq!(
+        deltas
+            .iter()
+            .map(|delta| (delta.chunk, delta.full, delta.len()))
+            .collect::<Vec<_>>(),
+        vec![(IVec3::new(-2, -1, 2), true, 0), (IVec3::ZERO, true, 0)]
+    );
+}
+
+#[test]
+fn an_inverted_box_as_large_as_can_be_sets_and_clears_nothing() {
+    let mut app = edits_app();
+    commit(&mut app, |voxel_world| {
+        voxel_world.set_voxel(IVec3::ONE, WorldVoxel::Solid(4));
+    });
+
+    let deltas = commit(&mut app, |voxel_world| {
+        voxel_world.set_voxels_in(IVec3::MAX, IVec3::MIN, |position| {
+            panic!("asked for {position} in an inverted box")
+        });
+        voxel_world.clear_voxels_in(IVec3::MAX, IVec3::MIN);
+    });
+
+    assert_eq!(deltas, vec![]);
+}
