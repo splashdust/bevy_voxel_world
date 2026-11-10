@@ -16,7 +16,7 @@
 //! which of its 8-voxel cells are open and which have direct sky. A
 //! world's sky fill field is counted against the record's cap too.
 //!
-//! Each mask notes the edit count of its position when its voxels were read.
+//! Each mask notes the edit stamp of its position when its voxels were read.
 //! A mask whose position has been edited since reads as missing, so a voxel
 //! edit never leaves a stale mask behind.
 
@@ -85,7 +85,7 @@ struct Entry {
     mask: Mask,
     /// With sky fill on, the position's cells.
     cells: Option<PositionCells>,
-    /// The position's edit count when its voxels were read.
+    /// The position's edit stamp when its voxels were read.
     edits: u64,
     /// When it was last read or written, on the record's clock.
     used: u64,
@@ -162,7 +162,7 @@ impl SkyRecord {
         self.evict_past_cap();
     }
 
-    /// The cells of `position`, if the record holds them, made at edit count
+    /// The cells of `position`, if the record holds them, made at edit stamp
     /// `edits`.
     pub fn cells(&mut self, position: IVec3, edits: u64) -> Option<PositionCells> {
         let entry = self.entries.get(&position)?;
@@ -208,7 +208,7 @@ impl SkyRecord {
     }
 
     /// The columns holding a solid at `position`, or `None` if the record
-    /// doesn't hold the position, or holds a mask made before the edit count
+    /// doesn't hold the position, or holds a mask made before the edit stamp
     /// moved from `edits`.
     pub fn get(&mut self, position: IVec3, edits: u64) -> Option<Columns> {
         let entry = self.entries.get_mut(&position)?;
@@ -224,7 +224,7 @@ impl SkyRecord {
         Some(columns)
     }
 
-    /// Records the columns holding a solid at `position`, read at edit count
+    /// Records the columns holding a solid at `position`, read at edit stamp
     /// `edits`, forgetting the least recently used positions if the record
     /// grows past its cap.
     ///

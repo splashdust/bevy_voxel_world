@@ -755,6 +755,96 @@ fn every_edited_chunk_gets_a_task_in_the_same_frame() {
     }
 }
 
+#[test]
+fn a_region_set_is_read_back_at_once_and_published() {
+    let mut app = App::new();
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<FloorWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<FloorWorld>);
+    // The voxel left alone is read from the published chunk south of the
+    // origin.
+    update_until(
+        &mut app,
+        "the chunks the voxels are read in to be ready",
+        |app| {
+            [IVec3::ZERO, IVec3::new(0, 0, -1)]
+                .into_iter()
+                .all(|chunk| {
+                    chunk_status::<FloorWorld>(app, chunk) == Some(ChunkStatus::Ready)
+                })
+        },
+    );
+
+    // A box across the eight chunks around the origin, leaving the voxels at
+    // y = 1 alone.
+    let (set, left) = (IVec3::new(-2, 0, 1), IVec3::new(1, 1, -2));
+    let read = app
+        .world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<FloorWorld>| {
+            voxel_world.set_voxels_in(IVec3::splat(-2), IVec3::splat(2), |position| {
+                (position.y != 1).then_some(WorldVoxel::Solid(9))
+            });
+            [set, left].map(|position| voxel_world.get_voxel(position))
+        })
+        .unwrap();
+    assert_eq!(read, [WorldVoxel::Solid(9), WorldVoxel::Air]);
+
+    update_until(
+        &mut app,
+        "the chunk west of the origin to show the region",
+        |app| {
+            chunk_data::<FloorWorld>(app, IVec3::new(-1, 0, 0))
+                .is_some_and(|data| data.has_voxel(set, WorldVoxel::Solid(9)))
+        },
+    );
+    let data = chunk_data::<FloorWorld>(&mut app, IVec3::new(0, 0, -1)).unwrap();
+    assert!(data.has_voxel(left, WorldVoxel::Air));
+}
+
+#[test]
+fn a_region_setting_every_voxel_of_a_chunk_updates_the_chunks_reading_them() {
+    let mut app = App::new();
+    app.add_plugins((
+        test_plugins(),
+        VoxelWorldPlugin::<AllAroundWorld>::minimal(),
+    ))
+    .init_resource::<UpdatedKeys>()
+    .add_systems(Startup, spawn_camera::<AllAroundWorld>)
+    .add_systems(Update, record_updated_keys::<AllAroundWorld>);
+    update_until(
+        &mut app,
+        "the chunks around the origin to be ready",
+        |app| {
+            (0..27).all(|i| {
+                let chunk_pos = IVec3::new(i % 3, i / 3 % 3, i / 9) - 1;
+                chunk_status::<AllAroundWorld>(app, chunk_pos) == Some(ChunkStatus::Ready)
+            })
+        },
+    );
+    app.world_mut().resource_mut::<UpdatedKeys>().0.clear();
+
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<AllAroundWorld>| {
+            voxel_world.set_voxels_in(IVec3::ZERO, IVec3::splat(CHUNK_SIZE_I), |_| {
+                Some(WorldVoxel::Solid(7))
+            });
+        })
+        .unwrap();
+    app.update();
+
+    // The chunk itself, and every chunk whose padding reaches into it.
+    let updated: HashSet<IVec3> = app
+        .world()
+        .resource::<UpdatedKeys>()
+        .0
+        .iter()
+        .map(|key| key.position)
+        .collect();
+    let around: HashSet<IVec3> = (0..27)
+        .map(|i| IVec3::new(i % 3, i / 3 % 3, i / 9) - 1)
+        .collect();
+    assert_eq!(updated, around);
+}
+
 /// A world whose voxel texture never loads.
 #[derive(Resource, Clone, Default)]
 struct MissingTextureWorld;
@@ -1543,6 +1633,95 @@ fn a_remeshed_chunk_reuses_its_previous_data() {
     assert_eq!(
         data.get_voxel_at_world_position(IVec3::new(16, -1, 16)),
         Some(WorldVoxel::Solid(1))
+    );
+}
+
+/// A world solid below `floor` and air above it, whose voxel lookups read
+/// `floor` from the config, so a test can change what they return.
+#[derive(Resource, Clone, Default)]
+struct MovableFloorWorld {
+    floor: i32,
+}
+
+impl VoxelWorldConfig for MovableFloorWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        1
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let floor = self.floor;
+        Box::new(move |_, _, _| {
+            Box::new(move |pos, _| {
+                if pos.y < floor {
+                    WorldVoxel::Solid(1)
+                } else {
+                    WorldVoxel::Air
+                }
+            })
+        })
+    }
+}
+
+#[test]
+fn regenerate_chunks_publishes_the_new_generated_voxels_with_the_edits_still_shown() {
+    let mut app = App::new();
+    app.add_plugins((
+        test_plugins(),
+        VoxelWorldPlugin::<MovableFloorWorld>::minimal(),
+    ))
+    .add_systems(Startup, spawn_camera::<MovableFloorWorld>);
+
+    let edited = IVec3::new(5, 20, 5);
+    let raised = IVec3::new(5, 10, 5);
+    update_until(&mut app, "the chunk at the origin to be ready", |app| {
+        chunk_status::<MovableFloorWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<MovableFloorWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Solid(9));
+        })
+        .unwrap();
+    update_until(&mut app, "the edit to be published", |app| {
+        chunk_data::<MovableFloorWorld>(app, IVec3::ZERO)
+            .and_then(|data| data.get_voxel_at_world_position(edited))
+            == Some(WorldVoxel::Solid(9))
+    });
+    let entity = app
+        .world()
+        .resource::<ChunkIndex<MovableFloorWorld>>()
+        .get(ChunkKey::new(IVec3::ZERO, 0));
+
+    // The floor rises above `raised`, which the chunk published as air.
+    app.world_mut().resource_mut::<MovableFloorWorld>().floor = 16;
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<MovableFloorWorld>| {
+            voxel_world.regenerate_chunks();
+        })
+        .unwrap();
+    update_until(&mut app, "the regenerated voxels to be published", |app| {
+        chunk_data::<MovableFloorWorld>(app, IVec3::ZERO)
+            .and_then(|data| data.get_voxel_at_world_position(raised))
+            == Some(WorldVoxel::Solid(1))
+    });
+
+    let data = chunk_data::<MovableFloorWorld>(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(
+        data.get_voxel_at_world_position(edited),
+        Some(WorldVoxel::Solid(9))
+    );
+    assert_eq!(
+        app.world()
+            .resource::<ChunkIndex<MovableFloorWorld>>()
+            .get(ChunkKey::new(IVec3::ZERO, 0),),
+        entity,
+        "the chunk should regenerate in place, not respawn"
     );
 }
 
@@ -3584,4 +3763,6 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
     );
 }
 
+mod edits;
 mod light;
+mod sync;

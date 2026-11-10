@@ -8,6 +8,7 @@ use bevy::{asset::load_internal_asset, ecs::system::EntityCommands, prelude::*};
 use crate::{
     chunk_lifecycle::ChunkLifecycle,
     configuration::{DefaultWorld, VoxelWorldConfig},
+    edits::EditsCommitted,
     voxel_material::{
         add_shaders, default_material, DefaultVoxelMaterial, VOXEL_TEXTURE_SHADER_HANDLE,
     },
@@ -330,7 +331,8 @@ where
             .add_message::<ChunkPublished<C>>()
             .add_message::<ChunkWillDespawn<C>>()
             .add_message::<ChunkWillRemesh<C>>()
-            .add_message::<ChunkWillUpdate<C>>();
+            .add_message::<ChunkWillUpdate<C>>()
+            .add_message::<EditsCommitted<C>>();
 
         // Spawning of meshes is optional, mainly to simplify testing.
         // This makes voxel_world work with a MinimalPlugins setup.

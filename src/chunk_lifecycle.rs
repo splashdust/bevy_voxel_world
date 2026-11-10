@@ -7,7 +7,7 @@
 use std::{
     collections::VecDeque,
     marker::PhantomData,
-    sync::{Arc, RwLockReadGuard},
+    sync::{Arc, Mutex, RwLockReadGuard},
 };
 
 use bevy::{
@@ -25,7 +25,7 @@ use crate::{
     pool_budget::{JobKind, PendingChunks, PoolBudget},
     prelude::default_chunk_meshing_delegate,
     streaming_policy::{CameraPosition, StartOrder},
-    voxel_edits::{chunks_including, VoxelEdits},
+    voxel_edits::{chunks_including_box, ChangeSet, ChunkRange, EditedBox, VoxelEdits},
     voxel_world::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate, VoxelWorldCamera,
@@ -53,21 +53,33 @@ pub enum ChunkStatus {
 pub enum ChunkState<T: Send + Sync + 'static> {
     /// `priority` chunks start their chunk task before the others. They are
     /// the follow-ups of superseded tasks, and chunks remeshing after a voxel
-    /// edit.
+    /// edit. A `from_scratch` chunk regenerates: its task starts with none of
+    /// the chunk's published voxel data.
     Pending {
         priority: bool,
+        from_scratch: bool,
     },
-    /// `superseded` turns true when a voxel edit makes the running task's
-    /// inputs stale. A follow-up task starts once this one is published.
+    /// `from_scratch` is the running task's own flag, kept for the task that
+    /// starts again if its cached mesh expires. `superseded` turns `Some` when
+    /// a voxel edit or a regenerate request makes the running task's inputs
+    /// stale. A follow-up task starts once this one is published.
     Generating {
         task: T,
-        superseded: bool,
+        from_scratch: bool,
+        superseded: Option<FollowUp>,
     },
     Ready,
     /// `kept` turns true once the chunk has been Retiring for a whole frame.
     Retiring {
         kept: bool,
     },
+}
+
+/// The task that follows a superseded task once that one is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FollowUp {
+    /// Whether the follow-up regenerates the chunk.
+    pub from_scratch: bool,
 }
 
 /// Something that happens to a chunk.
@@ -80,6 +92,9 @@ pub(crate) enum ChunkEvent<T> {
     CachedMeshExpired,
     /// A voxel edit made the chunk's voxel data stale.
     Edited,
+    /// The chunk must regenerate: its published voxel data is stale and its
+    /// next task can't reuse it.
+    Regenerate,
     /// The chunk was chosen for despawning.
     Retire,
     /// The despawn step of a frame ran.
@@ -117,7 +132,7 @@ impl<T: Send + Sync + 'static> ChunkState<T> {
     }
 
     fn has_priority(&self) -> bool {
-        matches!(self, ChunkState::Pending { priority: true })
+        matches!(self, ChunkState::Pending { priority: true, .. })
     }
 }
 
@@ -141,37 +156,91 @@ pub(crate) fn transition<T: Send + Sync + 'static>(
         }
         (state @ S::Retiring { .. }, _) => (state, Effect::None),
         (_, E::Retire) => (S::Retiring { kept: false }, Effect::AnnounceRetiring),
-        (S::Pending { .. }, E::TaskStarted(task)) => (
+        (S::Pending { from_scratch, .. }, E::TaskStarted(task)) => (
             S::Generating {
                 task,
-                superseded: false,
+                from_scratch,
+                superseded: None,
             },
             Effect::None,
         ),
         (S::Generating { superseded, .. }, E::TaskFinished) => {
-            let state = if superseded {
-                S::Pending { priority: true }
-            } else {
-                S::Ready
+            let state = match superseded {
+                Some(follow_up) => S::Pending {
+                    priority: true,
+                    from_scratch: follow_up.from_scratch,
+                },
+                None => S::Ready,
             };
             (state, Effect::Publish)
         }
         // The chunk's task already started once, so it shouldn't wait behind
-        // the other Pending chunks again.
-        (S::Generating { .. }, E::CachedMeshExpired) => {
-            (S::Pending { priority: true }, Effect::None)
-        }
-        // The running task finishes and is published, then a follow-up starts.
-        (S::Generating { task, .. }, E::Edited) => (
+        // the other Pending chunks again. Nothing was published, so a task
+        // that started from scratch starts from scratch again.
+        (
             S::Generating {
-                task,
-                superseded: true,
+                from_scratch,
+                superseded,
+                ..
+            },
+            E::CachedMeshExpired,
+        ) => (
+            S::Pending {
+                priority: true,
+                from_scratch: from_scratch
+                    || superseded.is_some_and(|follow_up| follow_up.from_scratch),
             },
             Effect::None,
         ),
-        (S::Pending { .. } | S::Ready, E::Edited) => {
-            (S::Pending { priority: true }, Effect::None)
-        }
+        // The running task finishes and is published, then a follow-up starts.
+        (
+            S::Generating {
+                task,
+                from_scratch,
+                superseded,
+            },
+            event @ (E::Edited | E::Regenerate),
+        ) => (
+            S::Generating {
+                task,
+                from_scratch,
+                superseded: Some(FollowUp {
+                    from_scratch: matches!(event, E::Regenerate)
+                        || superseded.is_some_and(|follow_up| follow_up.from_scratch),
+                }),
+            },
+            Effect::None,
+        ),
+        (S::Pending { from_scratch, .. }, E::Edited) => (
+            S::Pending {
+                priority: true,
+                from_scratch,
+            },
+            Effect::None,
+        ),
+        (S::Ready, E::Edited) => (
+            S::Pending {
+                priority: true,
+                from_scratch: false,
+            },
+            Effect::None,
+        ),
+        // A regenerate request can reach every spawned chunk, so a chunk it
+        // makes Pending starts in start order, nearest a camera first.
+        (S::Pending { priority, .. }, E::Regenerate) => (
+            S::Pending {
+                priority,
+                from_scratch: true,
+            },
+            Effect::None,
+        ),
+        (S::Ready, E::Regenerate) => (
+            S::Pending {
+                priority: false,
+                from_scratch: true,
+            },
+            Effect::None,
+        ),
         (state, _) => (state, Effect::None),
     }
 }
@@ -340,26 +409,55 @@ impl<C> ChunkIndex<C> {
 ///
 /// Requests other than spawns are ignored for chunks that don't exist or are
 /// Retiring.
+///
+/// Public only because `VoxelWorld` asks through it; this module isn't
+/// exported.
 #[derive(Resource)]
-pub(crate) struct ChunkRequests<C> {
-    /// Positions of voxels whose voxel edits changed. Every chunk, at any LOD
-    /// level, whose padded voxels include one of them is now stale.
-    pub edited: Vec<IVec3>,
+pub struct ChunkRequests<C: VoxelWorldConfig> {
+    /// The level-0 chunks whose voxel edits changed in this frame's commit.
+    /// Every chunk, at any LOD level, whose padded voxels include a changed
+    /// voxel is now stale.
+    pub(crate) edited: Vec<ChangeSet<C::MaterialIndex>>,
     /// Chunks to spawn.
     pub spawn: Vec<ChunkKey>,
     /// Chunks to despawn.
     pub retire: Vec<ChunkKey>,
+    /// Boxes of voxels whose chunks must regenerate: see
+    /// [`regenerate`](Self::regenerate).
+    regenerate: Mutex<Vec<EditedBox>>,
     _marker: PhantomData<C>,
 }
 
-impl<C> Default for ChunkRequests<C> {
+impl<C: VoxelWorldConfig> Default for ChunkRequests<C> {
     fn default() -> Self {
         Self {
             edited: Vec::new(),
             spawn: Vec::new(),
             retire: Vec::new(),
+            regenerate: Mutex::default(),
             _marker: PhantomData,
         }
+    }
+}
+
+impl<C: VoxelWorldConfig> ChunkRequests<C> {
+    /// Asks every spawned chunk, at any LOD level, whose padded voxels
+    /// include a voxel of the box from `min` to `max`, both inclusive, to
+    /// regenerate: its next chunk task starts with none of its published
+    /// voxel data, so it publishes the generator's voxels with the voxel
+    /// edits over them.
+    ///
+    /// A chunk whose task is running lets that task publish, and regenerates
+    /// in the task that follows. It takes a shared borrow, so `VoxelWorld`
+    /// can ask too; the next `apply_requests` picks the box up.
+    pub(crate) fn regenerate(&self, min: IVec3, max: IVec3) {
+        self.regenerate_boxes([EditedBox { min, max }]);
+    }
+
+    /// Asks the chunks including a voxel of any of `boxes` to regenerate, as
+    /// [`regenerate`](Self::regenerate) does for one box.
+    pub(crate) fn regenerate_boxes(&self, boxes: impl IntoIterator<Item = EditedBox>) {
+        self.regenerate.lock().unwrap().extend(boxes);
     }
 }
 
@@ -404,21 +502,45 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
 
+        // The LOD levels with chunks, each with its padding depth, for the
+        // edits and regenerate requests, if there are any.
+        let asked = !requests.edited.is_empty()
+            || !requests.regenerate.get_mut().unwrap().is_empty();
+        let levels: Vec<(LodLevel, IVec3)> = index
+            .levels_in_use()
+            .filter(|_| asked)
+            .map(|lod_level| {
+                let shape = configuration.chunk_data_shape(lod_level);
+                (lod_level, padding_depth(shape, lod_level))
+            })
+            .collect();
         let mut stale: HashSet<ChunkKey> = HashSet::new();
-        if !requests.edited.is_empty() {
-            let levels: Vec<_> = index
-                .levels_in_use()
-                .map(|lod_level| {
-                    let shape = configuration.chunk_data_shape(lod_level);
-                    (lod_level, padding_depth(shape, lod_level))
-                })
-                .collect();
-            for voxel in requests.edited.drain(..) {
+        for set in requests.edited.drain(..) {
+            // A set that changed no voxel moved only its chunk's edit
+            // sequence, as two applied deltas setting a voxel and back do.
+            // Light holds the chunk's inputs at the edit stamp it read them
+            // at, and treats them as stale once the stamp moves, so the
+            // level-0 chunk takes a new task, which reads them at the new one.
+            #[cfg(feature = "light_propagation")]
+            if set.voxels.is_empty() {
+                stale.insert(ChunkKey::new(set.chunk, 0));
+            }
+            for voxels in set.stale_boxes() {
                 for &(lod_level, padding) in &levels {
-                    stale.extend(chunks_including(voxel, lod_level, padding));
+                    stale.extend(chunks_including_box(
+                        voxels.min, voxels.max, lod_level, padding,
+                    ));
                 }
             }
         }
+        regenerate_requested(
+            requests,
+            &mut index,
+            &mut chunks,
+            &levels,
+            &mut stale,
+            ev_update,
+        );
         for key in stale {
             let Some(entity) = index.get(key) else {
                 continue;
@@ -436,7 +558,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
-                ChunkStateOf::<C>::Pending { priority: false },
+                ChunkStateOf::<C>::Pending {
+                    priority: false,
+                    from_scratch: false,
+                },
                 Transform::from_translation(key.world_position() - 1.0),
             ));
             let entity = chunk_entity.id();
@@ -702,6 +827,70 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 }
 
+/// Applies the regenerate requests in `requests` to the spawned chunks they
+/// reach, and announces the updates of those not in `stale`.
+///
+/// A chunk in `stale` stays there, so it is also marked edited and keeps an
+/// edited chunk's place at the front: a clear in front of the player
+/// regenerates its chunks as soon as a set would remesh them, while a
+/// request to regenerate every chunk lets them wait in start order.
+fn regenerate_requested<C: VoxelWorldConfig>(
+    requests: &mut ChunkRequests<C>,
+    index: &mut ChunkIndex<C>,
+    chunks: &mut Query<&mut ChunkStateOf<C>>,
+    levels: &[(LodLevel, IVec3)],
+    stale: &mut HashSet<ChunkKey>,
+    ev_update: &mut MessageWriter<ChunkWillUpdate<C>>,
+) {
+    let boxes = std::mem::take(requests.regenerate.get_mut().unwrap());
+    if boxes.is_empty() {
+        return;
+    }
+    let mut reached: HashSet<ChunkKey> = HashSet::new();
+    for voxels in boxes {
+        let ranges: Vec<(LodLevel, ChunkRange)> = levels
+            .iter()
+            .map(|&(lod_level, padding)| {
+                let range =
+                    ChunkRange::including_box(voxels.min, voxels.max, lod_level, padding);
+                (lod_level, range)
+            })
+            .collect();
+        // A box can reach far more chunk positions than there are chunks, as
+        // one asking every chunk to regenerate does, so such a box is checked
+        // against each chunk instead.
+        let positions = ranges
+            .iter()
+            .map(|(_, range)| range.chunk_count())
+            .fold(0, i64::saturating_add);
+        if positions > index.entities.len() as i64 {
+            reached.extend(index.entities.keys().copied().filter(|key| {
+                ranges.iter().any(|(lod_level, range)| {
+                    *lod_level == key.lod_level && range.contains(*key)
+                })
+            }));
+            continue;
+        }
+        for &(lod_level, padding) in levels {
+            reached.extend(
+                chunks_including_box(voxels.min, voxels.max, lod_level, padding)
+                    .filter(|key| index.contains(*key)),
+            );
+        }
+    }
+    for key in reached {
+        let Some(entity) = index.get(key) else {
+            continue;
+        };
+        if let Ok(mut state) = chunks.get_mut(entity) {
+            index.apply(entity, key, &mut state, ChunkEvent::Regenerate);
+        }
+        if !stale.contains(&key) {
+            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+        }
+    }
+}
+
 /// The Pending chunks of the voxel world `C`, as the [`PoolBudget`] starts
 /// them.
 struct Pending<'a, 'w, 's, 'm, C: VoxelWorldConfig> {
@@ -766,15 +955,16 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             // index on the next frame at the latest.
             return false;
         };
-        if state.status() != ChunkStatus::Pending {
+        let ChunkState::Pending { from_scratch, .. } = *state else {
             return false;
-        }
+        };
 
         let key = chunk.key;
-        // Data left by a despawned chunk at this key isn't this chunk's.
+        // Data left by a despawned chunk at this key isn't this chunk's, and a
+        // chunk that regenerates reuses none of its own.
         let previous_chunk_data =
             ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map)
-                .filter(|data| data.entity == entity);
+                .filter(|data| data.entity == entity && !from_scratch);
         let lookup_delegate = self.configuration.voxel_lookup_delegate();
         let voxel_data_fn =
             lookup_delegate(key.position, key.lod_level, previous_chunk_data.clone());
@@ -811,6 +1001,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
                 self.configuration,
                 self.voxel_edits,
                 lookup_delegate,
+                from_scratch,
             );
         }
 
@@ -853,91 +1044,178 @@ mod tests {
         (state.status(), effect)
     }
 
-    fn generating(superseded: bool) -> State {
-        ChunkState::Generating {
-            task: "task",
-            superseded,
+    fn pending(priority: bool, from_scratch: bool) -> State {
+        ChunkState::Pending {
+            priority,
+            from_scratch,
         }
     }
 
-    fn live_states() -> [State; 5] {
-        [
-            ChunkState::Pending { priority: false },
-            ChunkState::Pending { priority: true },
-            generating(false),
-            generating(true),
-            ChunkState::Ready,
-        ]
+    /// A Generating chunk whose task started `from_scratch` or not, and whose
+    /// follow-up, if it was superseded, starts from scratch or not.
+    fn generating(from_scratch: bool, follow_up: Option<bool>) -> State {
+        ChunkState::Generating {
+            task: "task",
+            from_scratch,
+            superseded: follow_up.map(|from_scratch| FollowUp { from_scratch }),
+        }
+    }
+
+    /// Every Generating state: with and without a task from scratch, and
+    /// with no follow-up or one from scratch or not.
+    fn generating_states() -> Vec<State> {
+        let mut states = Vec::new();
+        for from_scratch in [false, true] {
+            for follow_up in [None, Some(false), Some(true)] {
+                states.push(generating(from_scratch, follow_up));
+            }
+        }
+        states
+    }
+
+    fn pending_states() -> Vec<State> {
+        let mut states = Vec::new();
+        for priority in [false, true] {
+            for from_scratch in [false, true] {
+                states.push(pending(priority, from_scratch));
+            }
+        }
+        states
+    }
+
+    fn live_states() -> Vec<State> {
+        let mut states = pending_states();
+        states.extend(generating_states());
+        states.push(ChunkState::Ready);
+        states
+    }
+
+    /// The `priority` and `from_scratch` of a Pending state, or `None` for
+    /// another state.
+    fn pending_flags(state: &State) -> Option<(bool, bool)> {
+        match state {
+            ChunkState::Pending {
+                priority,
+                from_scratch,
+            } => Some((*priority, *from_scratch)),
+            _ => None,
+        }
+    }
+
+    /// The `from_scratch` of a Generating state and its follow-up's, or
+    /// `None` for another state.
+    fn generating_flags(state: &State) -> Option<(bool, Option<bool>)> {
+        match state {
+            ChunkState::Generating {
+                from_scratch,
+                superseded,
+                ..
+            } => Some((
+                *from_scratch,
+                superseded.map(|follow_up| follow_up.from_scratch),
+            )),
+            _ => None,
+        }
     }
 
     #[test]
-    fn a_started_task_makes_a_pending_chunk_generating() {
+    fn a_started_task_makes_a_pending_chunk_generating_from_scratch_if_it_was() {
         for priority in [false, true] {
-            let (state, effect) = transition(
-                ChunkState::Pending { priority },
-                ChunkEvent::TaskStarted("task"),
-            );
-            assert!(matches!(
-                state,
-                ChunkState::Generating {
-                    task: "task",
-                    superseded: false
-                }
-            ));
-            assert_eq!(effect, Effect::None);
+            for from_scratch in [false, true] {
+                let (state, effect) = transition(
+                    pending(priority, from_scratch),
+                    ChunkEvent::TaskStarted("task"),
+                );
+                assert!(matches!(state, ChunkState::Generating { task: "task", .. }));
+                assert_eq!(generating_flags(&state), Some((from_scratch, None)));
+                assert_eq!(effect, Effect::None);
+            }
         }
     }
 
     #[test]
     fn a_finished_task_is_published_and_makes_the_chunk_ready() {
-        assert_eq!(
-            status_and_effect(generating(false), ChunkEvent::TaskFinished),
-            (ChunkStatus::Ready, Effect::Publish)
-        );
+        for from_scratch in [false, true] {
+            assert_eq!(
+                status_and_effect(
+                    generating(from_scratch, None),
+                    ChunkEvent::TaskFinished
+                ),
+                (ChunkStatus::Ready, Effect::Publish)
+            );
+        }
     }
 
     #[test]
     fn an_expired_cached_mesh_sends_the_chunk_back_to_the_front_unpublished() {
-        for superseded in [false, true] {
-            let (state, effect) =
-                transition(generating(superseded), ChunkEvent::CachedMeshExpired);
-            assert!(matches!(state, ChunkState::Pending { priority: true }));
+        for state in generating_states() {
+            let (from_scratch, follow_up) = generating_flags(&state).unwrap();
+            let (state, effect) = transition(state, ChunkEvent::CachedMeshExpired);
+            // Nothing was published, so a task from scratch is still owed.
+            let owed = from_scratch || follow_up == Some(true);
+            assert_eq!(pending_flags(&state), Some((true, owed)));
             assert_eq!(effect, Effect::None);
         }
     }
 
     #[test]
     fn an_edit_supersedes_a_running_task_without_dropping_it() {
-        for superseded in [false, true] {
-            let (state, effect) = transition(generating(superseded), ChunkEvent::Edited);
-            assert!(matches!(
-                state,
-                ChunkState::Generating {
-                    task: "task",
-                    superseded: true
-                }
-            ));
+        for state in generating_states() {
+            let (from_scratch, follow_up) = generating_flags(&state).unwrap();
+            let (state, effect) = transition(state, ChunkEvent::Edited);
+            assert!(matches!(state, ChunkState::Generating { task: "task", .. }));
+            // A follow-up from scratch asked for earlier stays from scratch.
+            assert_eq!(
+                generating_flags(&state),
+                Some((from_scratch, Some(follow_up == Some(true))))
+            );
+            assert_eq!(effect, Effect::None);
+        }
+    }
+
+    #[test]
+    fn a_regenerate_request_supersedes_a_running_task_with_a_follow_up_from_scratch() {
+        for state in generating_states() {
+            let (from_scratch, _) = generating_flags(&state).unwrap();
+            let (state, effect) = transition(state, ChunkEvent::Regenerate);
+            assert!(matches!(state, ChunkState::Generating { task: "task", .. }));
+            assert_eq!(generating_flags(&state), Some((from_scratch, Some(true))));
             assert_eq!(effect, Effect::None);
         }
     }
 
     #[test]
     fn a_superseded_task_is_published_then_followed_up_first() {
-        let (state, effect) = transition(generating(true), ChunkEvent::TaskFinished);
-        assert!(matches!(state, ChunkState::Pending { priority: true }));
-        assert_eq!(effect, Effect::Publish);
+        for from_scratch in [false, true] {
+            for follow_up in [false, true] {
+                let (state, effect) = transition(
+                    generating(from_scratch, Some(follow_up)),
+                    ChunkEvent::TaskFinished,
+                );
+                // The task's own data is published, so only the follow-up's
+                // flag counts.
+                assert_eq!(pending_flags(&state), Some((true, follow_up)));
+                assert_eq!(effect, Effect::Publish);
+            }
+        }
     }
 
     #[test]
     fn an_edited_chunk_waits_for_a_task_at_the_front() {
-        let states: [State; 3] = [
-            ChunkState::Pending { priority: false },
-            ChunkState::Pending { priority: true },
-            ChunkState::Ready,
-        ];
-        for state in states {
+        for state in pending_states().into_iter().chain([ChunkState::Ready]) {
+            let from_scratch = pending_flags(&state).is_some_and(|(_, f)| f);
             let (state, effect) = transition(state, ChunkEvent::Edited);
-            assert!(matches!(state, ChunkState::Pending { priority: true }));
+            assert_eq!(pending_flags(&state), Some((true, from_scratch)));
+            assert_eq!(effect, Effect::None);
+        }
+    }
+
+    #[test]
+    fn a_regenerated_chunk_waits_for_a_task_from_scratch_in_its_place() {
+        for state in pending_states().into_iter().chain([ChunkState::Ready]) {
+            let priority = pending_flags(&state).is_some_and(|(p, _)| p);
+            let (state, effect) = transition(state, ChunkEvent::Regenerate);
+            assert_eq!(pending_flags(&state), Some((priority, true)));
             assert_eq!(effect, Effect::None);
         }
     }
@@ -979,6 +1257,7 @@ mod tests {
             ChunkEvent::TaskFinished,
             ChunkEvent::CachedMeshExpired,
             ChunkEvent::Edited,
+            ChunkEvent::Regenerate,
         ] {
             assert_eq!(
                 status_and_effect(ChunkState::Retiring { kept: false }, event),

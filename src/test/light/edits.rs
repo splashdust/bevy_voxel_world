@@ -15,8 +15,10 @@ use super::reference::Reference;
 use super::sky_light::{chunk_light, light_is_settled, settled_but, sky_light, spawned};
 use super::voxel_light::{app, light_at, Hold, LampWorld, DIM_LAMP, LAMP, STONE};
 use crate::chunk_map::ChunkMap;
+use crate::edits::{voxel_index, Voxels};
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::voxel_edits::VoxelEdits;
 
 /// A lamp in the floor of the cavern of [`cavern`].
 const FLOOR_LAMP: IVec3 = IVec3::new(-6, 3, 2);
@@ -249,6 +251,275 @@ fn a_radius_8_bomb_and_its_undo_match_the_reference() {
         .map(|offset| dig(centre + offset))
         .collect();
     edit_and_undo(&[IVec3::ZERO], &bomb);
+}
+
+/// [`cavern`] with its floor lamp turned to stone and its shaft filled, so
+/// regenerating changes a chunk's emissive voxels and occupancy but none of
+/// its voxel edits.
+fn dark_cavern(p: IVec3) -> WorldVoxel {
+    let shaft = p.x == 8 && p.z == 8 && (16..40).contains(&p.y);
+    if p == FLOOR_LAMP || shaft {
+        WorldVoxel::Solid(STONE)
+    } else {
+        cavern(p)
+    }
+}
+
+#[test]
+fn a_regenerated_chunk_is_solved_again_and_matches_the_reference() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    let edit = place(IVec3::new(2, 10, 3));
+    set_voxels(&mut app, &[edit]);
+    settle(&mut app, "light to settle after the edit");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        &reference(&[IVec3::ZERO], edited(&[edit])),
+        "before regenerating",
+    );
+
+    app.world_mut().resource_mut::<LampWorld>().scene = Arc::new(dark_cavern);
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<LampWorld>| {
+            voxel_world.regenerate_chunks()
+        })
+        .unwrap();
+    settle(&mut app, "light to settle after regenerating");
+    let after = reference(&[IVec3::ZERO], |p| {
+        if p == edit.0 {
+            edit.1
+        } else {
+            dark_cavern(p)
+        }
+    });
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after regenerating");
+}
+
+/// Edits across the origin chunk and the chunk above it: a placed stone and
+/// a dug floor where light is, a torch, the floor lamp turned to stone, and
+/// the shaft capped, and a second shaft dug through the roof.
+fn edits_to_remove() -> Vec<(IVec3, WorldVoxel)> {
+    let mut edits = vec![
+        place(IVec3::new(2, 10, 3)),
+        dig(IVec3::new(14, 3, 12)),
+        (IVec3::new(16, 10, 28), WorldVoxel::Solid(LAMP)),
+        place(FLOOR_LAMP),
+        place(IVec3::new(8, 39, 8)),
+    ];
+    edits.extend((16..40).map(|y| dig(IVec3::new(-4, y, -4))));
+    edits
+}
+
+/// Streams [`cavern`], sets `edits`, then runs `remove` and checks that
+/// light settles back on the unedited cavern.
+fn remove_edits(
+    what: &str,
+    edits: Vec<(IVec3, WorldVoxel)>,
+    remove: impl FnMut(VoxelWorld<LampWorld>) + Send + Sync + 'static,
+) {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    set_voxels(&mut app, &edits);
+    settle(&mut app, "light to settle after the edits");
+    let after = reference(&[IVec3::ZERO], edited(&edits));
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the edits");
+
+    app.world_mut().run_system_once(remove).unwrap();
+    settle(&mut app, &format!("light to settle after {what}"));
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        &format!("after {what}"),
+    );
+}
+
+#[test]
+fn clearing_edits_matches_the_reference() {
+    remove_edits(
+        "clearing the edits",
+        edits_to_remove(),
+        |mut voxel_world| {
+            voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(64));
+        },
+    );
+}
+
+#[test]
+fn forgetting_edits_matches_the_reference() {
+    remove_edits(
+        "forgetting the edits",
+        edits_to_remove(),
+        |mut voxel_world| {
+            voxel_world.forget_edits();
+        },
+    );
+}
+
+#[test]
+fn light_is_settled_goes_false_on_a_forget_until_its_light_lands() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    set_voxels(&mut app, &[place(IVec3::new(2, 10, 3))]);
+    settle(&mut app, "light to settle after the edit");
+    assert!(light_is_settled(&mut app));
+
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<LampWorld>| {
+            voxel_world.forget_edits();
+        })
+        .unwrap();
+    assert!(!light_is_settled(&mut app), "settled with a forget waiting");
+    settle(&mut app, "light to settle after the forget");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        "after the forget",
+    );
+}
+
+#[test]
+fn a_commit_moving_only_a_chunks_edit_sequence_brings_its_light_up_to_it() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    // A voxel of the cavern's air, edited to the air it already is.
+    let at = IVec3::new(2, 10, 3);
+    let delta = |seq: u64, voxel: WorldVoxel| EditDelta {
+        chunk: IVec3::ZERO,
+        seq,
+        full: false,
+        voxels: Voxels::Sparse(vec![(voxel_index(at) as u16, voxel)]),
+    };
+    apply_deltas(&mut app, vec![delta(1, WorldVoxel::Air)]);
+    settle(&mut app, "light to settle after the first delta");
+
+    // Stone and back to air in one frame: the commit changes no voxel, and
+    // moves the chunk's edit sequence from 1 to 3.
+    apply_deltas(
+        &mut app,
+        vec![
+            delta(2, WorldVoxel::Solid(STONE)),
+            delta(3, WorldVoxel::Air),
+        ],
+    );
+    settle(&mut app, "light to settle after the deltas");
+
+    let stamp = app
+        .world()
+        .resource::<VoxelEdits<LampWorld, u8>>()
+        .edit_stamp(IVec3::ZERO);
+    let held = app
+        .world()
+        .resource::<LightSettings<LampWorld>>()
+        .view
+        .read()
+        .get(&IVec3::ZERO)
+        .map(|chunk| chunk.edits);
+    assert_eq!(held, Some(stamp), "light holds the origin at an old stamp");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        "after the deltas",
+    );
+}
+
+#[test]
+fn clearing_a_block_of_thousands_of_edits_matches_the_reference() {
+    // Stone filling the cavern from the floor up 8 voxels, over 24 x 16
+    // voxels of the origin chunk, and the floor lamp put out.
+    let (min, max) = (IVec3::new(0, 4, 0), IVec3::new(24, 12, 16));
+    let mut edits: Vec<_> = (min.z..max.z)
+        .flat_map(|z| {
+            (min.y..max.y).flat_map(move |y| {
+                (min.x..max.x).map(move |x| place(IVec3::new(x, y, z)))
+            })
+        })
+        .collect();
+    edits.push(place(FLOOR_LAMP));
+    remove_edits("clearing the block", edits, move |mut voxel_world| {
+        voxel_world.clear_voxels_in(min, max);
+        voxel_world.clear_voxels_in(FLOOR_LAMP, FLOOR_LAMP + 1);
+    });
+}
+
+/// The edit deltas the sender world of
+/// [`a_receiver_of_edit_deltas_settles_on_the_reference`] committed.
+#[derive(Resource, Default)]
+struct Sent(Vec<EditDelta<u8>>);
+
+type Sender = crate::test::FloorWorld;
+
+fn record_sent(
+    mut sent: ResMut<Sent>,
+    mut messages: MessageReader<EditsCommitted<Sender>>,
+) {
+    sent.0
+        .extend(messages.read().map(|message| message.delta.clone()));
+}
+
+fn apply_deltas(app: &mut App, deltas: Vec<EditDelta<u8>>) {
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
+            for delta in &deltas {
+                voxel_world.apply_delta(delta.clone()).unwrap();
+            }
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_receiver_of_edit_deltas_settles_on_the_reference() {
+    // A sender world with no camera, which only commits edits, beside the
+    // receiver that renders the cavern.
+    let mut app = app(world());
+    app.add_plugins(VoxelWorldPlugin::<Sender>::minimal())
+        .init_resource::<Sent>()
+        .add_systems(Update, record_sent);
+    settle(&mut app, "the world to stream in");
+
+    let edits = [
+        place(IVec3::new(2, 10, 3)),
+        dig(IVec3::new(14, 3, 12)),
+        (IVec3::new(16, 10, 28), WorldVoxel::Solid(LAMP)),
+    ];
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<Sender>| {
+            for (position, voxel) in edits {
+                voxel_world.set_voxel(position, voxel);
+            }
+        })
+        .unwrap();
+    app.update();
+    let deltas = std::mem::take(&mut app.world_mut().resource_mut::<Sent>().0);
+    assert_eq!(deltas.len(), 1);
+    apply_deltas(&mut app, deltas);
+    settle(&mut app, "light to settle after the deltas");
+    let after = reference(&[IVec3::ZERO], edited(&edits));
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the deltas");
+
+    // An edit of the receiver's own, which the sender's full delta then
+    // removes. The sender's next edit sets a voxel to the stone it already
+    // is, so its full delta is as new as the receiver's edits.
+    set_voxels(&mut app, &[place(IVec3::new(9, 4, 8))]);
+    settle(&mut app, "light to settle after the receiver's edit");
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<Sender>| {
+            voxel_world.set_voxel(IVec3::new(0, 30, 0), WorldVoxel::Solid(STONE));
+        })
+        .unwrap();
+    app.update();
+    let full = app
+        .world_mut()
+        .run_system_once(|voxel_world: VoxelWorld<Sender>| {
+            voxel_world.full_delta(IVec3::ZERO)
+        })
+        .unwrap();
+    apply_deltas(&mut app, vec![full]);
+    settle(&mut app, "light to settle after the full delta");
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the full delta");
 }
 
 pub(super) fn relights_started(app: &App) -> u64 {

@@ -52,15 +52,12 @@
 //!   sky light falling straight down at full level to the first solid.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::config::Sky;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::configuration::{FillHint, VoxelLookupDelegate};
-use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 const PADDED: usize = PADDED_CHUNK_SIZE as usize;
@@ -168,7 +165,7 @@ pub(crate) struct Above<I> {
     /// The position's columns holding a solid, from the sky record.
     recorded: Option<Columns>,
     /// The voxel edits in the position, read before the world's lookups.
-    edits: Option<Arc<HashMap<IVec3, WorldVoxel<I>>>>,
+    edits: Option<crate::voxel_edits::EditBucket<I>>,
 }
 
 impl<I> Above<I> {
@@ -178,7 +175,7 @@ impl<I> Above<I> {
     pub fn new(
         hint: FillHint<I>,
         recorded: Option<Columns>,
-        edits: Option<Arc<HashMap<IVec3, WorldVoxel<I>>>>,
+        edits: Option<crate::voxel_edits::EditBucket<I>>,
     ) -> Self
     where
         I: Copy + PartialEq,
@@ -216,10 +213,10 @@ pub(crate) struct SkyFound {
     /// By position above the chunk, lowest first, whether the answer takes
     /// in its voxels: from a fill hint, the sky record or a walk.
     pub known: Vec<bool>,
-    /// The edit count of each position above the chunk when the task
+    /// The edit stamp of each position above the chunk when the task
     /// started.
     pub edits: Vec<u64>,
-    /// The edit count of the chunk's own position when the task started.
+    /// The edit stamp of the chunk's own position when the task started.
     pub own_edits: u64,
     /// The sky record's generation when the task started.
     pub generation: u64,
@@ -325,7 +322,7 @@ impl<I: Copy + PartialEq> SkyWalk<I> {
                         let voxel = above
                             .edits
                             .as_ref()
-                            .and_then(|edits| edits.get(&at).copied())
+                            .and_then(|edits| edits.get(at))
                             .unwrap_or_else(|| lookup(at, None));
                         if voxel.is_solid() {
                             *open &= !(1 << z);

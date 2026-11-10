@@ -18,9 +18,9 @@
 //! first, since they are the most likely to show wrong light and the cheapest
 //! to settle, and the nearest among equals.
 //!
-//! A probe notes its position's edit count when it starts. If the count moved
-//! by the time it finishes, its mask is thrown away and the position is probed
-//! again.
+//! A probe notes its position's edit stamp when it starts. If the stamp
+//! moved by the time it finishes, its mask is thrown away and the position is
+//! probed again.
 //!
 //! A waiting chunk that retires ripples relights from its face neighbours,
 //! which may have read its provisional direct sky. A chunk retiring with every
@@ -95,7 +95,7 @@ impl Waiting {
 
 struct Probe {
     position: IVec3,
-    /// The position's edit count when the probe started.
+    /// The position's edit stamp when the probe started.
     edits: u64,
     /// The sky record's generation when the probe started.
     generation: u64,
@@ -120,7 +120,7 @@ pub(crate) struct ProbeRead {
 pub(crate) fn probe_position<I: Copy + PartialEq>(
     position: IVec3,
     mut lookup: impl FnMut(IVec3) -> crate::voxel::WorldVoxel<I>,
-    edits: Option<&HashMap<IVec3, crate::voxel::WorldVoxel<I>>>,
+    edits: Option<&crate::voxel_edits::Bucket<I>>,
     cells: bool,
 ) -> ProbeRead {
     let min = position * CHUNK_SIZE_I;
@@ -141,7 +141,7 @@ pub(crate) fn probe_position<I: Copy + PartialEq>(
                 let at = min + IVec3::new(x as i32, y as i32, z as i32);
                 lookups += 1;
                 let voxel = edits
-                    .and_then(|edits| edits.get(&at).copied())
+                    .and_then(|edits| edits.get(at))
                     .unwrap_or_else(|| lookup(at));
                 if voxel.is_solid() {
                     *solid |= 1 << z;
@@ -245,7 +245,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 .zip(found.edits.iter().zip(&counts))
                 .any(|(known, (noted, now))| *known && noted != now);
         let (sky, known) = if stale {
-            from_hints(world, position, found.open, &counts)
+            from_hints(world, edits, position, found.open, &counts)
         } else {
             (inputs.columns.sky, found.known)
         };
@@ -265,7 +265,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             });
         }
 
-        if fresh && edits.edit_count(position) == found.own_edits {
+        if fresh && edits.edit_stamp(position) == found.own_edits {
             let mask = inputs.occupancy.solid_columns();
             let open = record.keeps_cells().then(|| open_cells(&inputs.occupancy));
             record.insert(position, &mask, open, found.own_edits);
@@ -379,7 +379,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
     /// Works out the column answer of the chunk `entity` at `position` from
     /// the columns `sky` and the positions `known` above it, taking in the
     /// masks the record holds for the others, and keeps the chunk waiting if
-    /// it still has provisional columns. `counts` are the edit counts of the
+    /// it still has provisional columns. `counts` are the edit stamps of the
     /// positions above it.
     fn settle(
         &mut self,
@@ -489,7 +489,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
         let window = self.rule.window(position.y);
         let open = if window == 0 { [!0; CHUNK] } else { padding };
         let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
-        let (sky, known) = from_hints(world, position, open, &counts);
+        let (sky, known) = from_hints(world, edits, position, open, &counts);
         self.settle(position, entity, sky, known, &counts, record)
     }
 
@@ -566,7 +566,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                     .probe_lookups
                     .fetch_add(read.lookups, Ordering::Relaxed);
                 if probe.generation != record.generation()
-                    || edits.edit_count(probe.position) != probe.edits
+                    || edits.edit_stamp(probe.position) != probe.edits
                 {
                     counters.probes_discarded.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -648,7 +648,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             probes.probing.insert(position);
             probes.running.push(Probe {
                 position,
-                edits: edits.edit_count(position),
+                edits: edits.edit_stamp(position),
                 generation,
                 task,
             });
@@ -717,7 +717,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
                 *position,
                 &occupancy.solid_columns(),
                 open,
-                edits.edit_count(*position),
+                edits.edit_stamp(*position),
             );
         }
         view.iter()
@@ -753,7 +753,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
     changed
 }
 
-/// The edit counts of the `count` positions above the chunk at `position`,
+/// The edit stamps of the `count` positions above the chunk at `position`,
 /// lowest first.
 fn edit_counts<C, I: Copy + PartialEq>(
     edits: &VoxelEdits<C, I>,
@@ -761,16 +761,17 @@ fn edit_counts<C, I: Copy + PartialEq>(
     count: usize,
 ) -> Vec<u64> {
     (1..=count as i32)
-        .map(|y| edits.edit_count(position + IVec3::Y * y))
+        .map(|y| edits.edit_stamp(position + IVec3::Y * y))
         .collect()
 }
 
 /// The columns open in a chunk's padding row, `open`, as the fill hints of the
 /// positions above the chunk at `position` leave them, and which of those
 /// positions the hints settle. A hint is ignored for a position whose edit
-/// count in `counts` isn't 0.
+/// stamp in `counts`, read from `edits`, says it has edits.
 fn from_hints<C: VoxelWorldConfig>(
     world: &C,
+    edits: &VoxelEdits<C, C::MaterialIndex>,
     position: IVec3,
     open: Columns,
     counts: &[u64],
@@ -779,7 +780,8 @@ fn from_hints<C: VoxelWorldConfig>(
     let mut known = vec![false; counts.len()];
     for (index, count) in counts.iter().enumerate() {
         let above = position + IVec3::Y * (index as i32 + 1);
-        match Hinted::of(world.chunk_fill_hint(ChunkKey::new(above, 0)), *count > 0) {
+        let edited = edits.stamp_has_edits(*count);
+        match Hinted::of(world.chunk_fill_hint(ChunkKey::new(above, 0)), edited) {
             Hinted::Air => known[index] = true,
             Hinted::Solid => sky = [0; CHUNK],
             Hinted::Unknown => {}
@@ -800,7 +802,7 @@ pub(crate) fn air_answer<C: VoxelWorldConfig>(
 ) -> ColumnAnswer {
     let window = rule.window(position.y);
     let counts = edit_counts(edits, position, super::sky::walkable(window) as usize);
-    let (mut sky, mut known) = from_hints(world, position, [!0; CHUNK], &counts);
+    let (mut sky, mut known) = from_hints(world, edits, position, [!0; CHUNK], &counts);
     for (index, known) in known.iter_mut().enumerate() {
         if *known {
             continue;

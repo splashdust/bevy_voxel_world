@@ -10,6 +10,7 @@ use crate::{
     chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
+    edits::{EditDelta, EditsCommitted},
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
@@ -182,15 +183,37 @@ where
         requests.retire.extend(plan.retire);
     }
 
-    /// Commits the voxel edits set since the last frame, and requests that the
-    /// chunks they make stale be updated.
+    /// Commits the voxel edits set since the last frame, writes an
+    /// [`EditsCommitted`] for each level-0 chunk whose edits changed, and
+    /// requests that the chunks they make stale be updated.
+    ///
+    /// A chunk whose edits were replaced reports its full delta, and the
+    /// chunks showing an edit that was removed regenerate, since their
+    /// published voxels have it baked in. Edits forgotten since the last
+    /// frame make their chunks regenerate too, with no message.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        mut committed: MessageWriter<EditsCommitted<C>>,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        requests.edited.extend(voxel_edits.commit());
+        let sets = voxel_edits.commit();
+        committed.write_batch(sets.iter().map(|set| EditsCommitted {
+            delta: if set.replaced {
+                voxel_edits.full_delta(set.chunk)
+            } else {
+                EditDelta::from_change_set(set)
+            },
+        }));
+        // Forgotten edits change chunks as removed edits do, but no other
+        // world hears of them.
+        let forgotten = voxel_edits.take_forgotten();
+        for set in sets.iter().chain(&forgotten).filter(|set| set.replaced) {
+            requests.regenerate_boxes(set.removed_boxes());
+        }
+        requests.edited.extend(forgotten);
+        requests.edited.extend(sets);
     }
 
     /// Shows the meshes of chunks once this world's material is ready.

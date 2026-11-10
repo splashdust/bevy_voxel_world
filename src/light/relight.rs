@@ -394,9 +394,15 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 continue;
             };
             let delegate = world.voxel_lookup_delegate();
-            let Some(TaskLight::Coarse(task)) =
-                settings.task_for(key, entity, data.data_shape, world, edits, delegate)
-            else {
+            let Some(TaskLight::Coarse(task)) = settings.task_for(
+                key,
+                entity,
+                data.data_shape,
+                world,
+                edits,
+                delegate,
+                false,
+            ) else {
                 continue;
             };
             let solve = pool.spawn(async move { task.solve(&data) });
@@ -1510,7 +1516,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     let answer = match (probes.as_mut(), record.as_mut()) {
                         (Some(probes), Some(record)) => {
                             let own = landing.solved.own_edits;
-                            if edits.edit_count(position) == own {
+                            if edits.edit_stamp(position) == own {
                                 let occupancy = &landing.solved.light.inputs.occupancy;
                                 let open =
                                     record.keeps_cells().then(|| open_cells(occupancy));

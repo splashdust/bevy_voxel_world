@@ -9,9 +9,10 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
-    chunk_lifecycle::{ChunkIndex, ChunkStateOf, ChunkStatus},
+    chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::{FillHint, VoxelWorldConfig},
+    edits::{EditDelta, EditGap},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
@@ -204,6 +205,7 @@ impl<I> VoxelRaycastResult<I> {
 pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
+    chunk_requests: Res<'w, ChunkRequests<C>>,
     chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
     configuration: Res<'w, ConfigCopy<C>>,
@@ -365,10 +367,12 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// without this, chunks would go on reading the old voxels' shadows.
     ///
     /// Spawned chunks keep the voxels they have, and their light follows
-    /// those voxels; chunks spawned later read the new lookups. Light settles
-    /// again over the next frames, as [`VoxelWorld::light_is_settled`] tells.
-    /// Voxel edits need no reset: they relight on their own. Does nothing in
-    /// a world without light propagation.
+    /// those voxels; chunks spawned later read the new lookups.
+    /// [`VoxelWorld::regenerate_chunks`] makes spawned chunks read them too,
+    /// and calls this itself. Light settles again over the next frames, as
+    /// [`VoxelWorld::light_is_settled`] tells. Voxel edits need no reset:
+    /// they relight on their own. Does nothing in a world without light
+    /// propagation.
     #[cfg(feature = "light_propagation")]
     pub fn reset_light(&mut self) {
         if let Some(light) = self.light.as_ref() {
@@ -379,13 +383,161 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         }
     }
 
-    /// Set the voxel at the given position. It replaces the generated voxel there for
-    /// as long as the world exists, and `get_voxel` returns it right away. Setting a
+    /// Regenerates every spawned chunk: its next chunk task looks up all of
+    /// its voxels again through the world's voxel lookup, and shows the voxel
+    /// edits over them.
+    ///
+    /// Call it after changing what the world's voxel lookups return, for
+    /// example after switching to a new seed. Chunks keep their entities,
+    /// their components and their meshes until the new voxels are published,
+    /// and voxel edits stay. A chunk whose task is running publishes that
+    /// task's voxels first, then regenerates in the task that follows. The
+    /// request is picked up at the start of the next run of the chunk
+    /// lifecycle, in [`VoxelWorldSet`].
+    ///
+    /// With the `light_propagation` feature it also calls `reset_light`, so
+    /// light follows the new voxels.
+    pub fn regenerate_chunks(&mut self) {
+        self.chunk_requests.regenerate(IVec3::MIN, IVec3::MAX);
+        #[cfg(feature = "light_propagation")]
+        self.reset_light();
+    }
+
+    /// Set the voxel at the given position. It replaces the generated voxel there
+    /// until it is cleared or forgotten, and `get_voxel` returns it right away. Setting a
     /// voxel doesn't spawn a chunk: a spawned chunk that contains it remeshes to show
     /// it, and a chunk spawned later shows it from the start. When the same position
     /// is set more than once, the last voxel set wins.
     pub fn set_voxel(&mut self, position: IVec3, voxel: WorldVoxel<C::MaterialIndex>) {
         self.voxel_edits.set(position, voxel);
+    }
+
+    /// Sets each voxel in the box from `min` inclusive to `max` exclusive to
+    /// the voxel `voxel` returns for its position, leaving those it returns
+    /// `None` for alone.
+    ///
+    /// Each voxel set is a voxel edit, just as with [`VoxelWorld::set_voxel`],
+    /// and `WorldVoxel::Unset` is set like any other voxel. A box that is
+    /// empty or inverted along any axis sets nothing. A chunk-sized array of
+    /// voxels is set by passing the chunk's extent as the box and indexing the
+    /// array in `voxel`.
+    ///
+    /// Setting most of a chunk's voxels this way costs far less per voxel
+    /// than calling `set_voxel` for each of them.
+    ///
+    /// The box is set chunk by chunk, and `voxel` may read this world's
+    /// voxels, such as through `get_voxel`. A system reading the world at the
+    /// same time can find part of the box set.
+    pub fn set_voxels_in(
+        &mut self,
+        min: IVec3,
+        max: IVec3,
+        voxel: impl FnMut(IVec3) -> Option<WorldVoxel<C::MaterialIndex>>,
+    ) {
+        self.voxel_edits.set_region(min, max, voxel);
+    }
+
+    /// Clears the voxel edits in the box from `min` inclusive to `max`
+    /// exclusive, so its voxels show what the world generates there again.
+    /// A box that is empty or inverted along any axis clears nothing. Clear
+    /// a chunk by passing its extent as the box, and one voxel with a box
+    /// one voxel wide.
+    ///
+    /// The clear commits next `PreUpdate`, like a set. It removes the edits
+    /// committed in the box and those set in it earlier this frame; voxels
+    /// set after it in the same frame stay. Each chunk that loses an edit
+    /// moves its edit sequence on by the voxels its commit changed, the
+    /// edits it lost among them, and reports its
+    /// [full delta](VoxelWorld::full_delta) in [`EditsCommitted`]: the edits
+    /// it has left, none for a chunk cleared of all of them. Such a chunk
+    /// stays in [`VoxelWorld::edited_chunks`], so the clear reaches worlds
+    /// that join or load later.
+    ///
+    /// A cleared voxel reads the voxel its chunk last published until the
+    /// chunk regenerates, since the voxel world can't run the world's
+    /// generator for one voxel. A set voxel reads back at once; a cleared one
+    /// does not. Chunks that showed a removed edit regenerate, and
+    /// [`ChunkPublished`] says when one has.
+    ///
+    /// A clear removes edits in front of the player, and other worlds see it.
+    /// A world receiving another world's edits never clears to catch up
+    /// with it, since that moves its sequences past the sender's, and the
+    /// sender's next deltas are then skipped as already applied: it forgets
+    /// with [`VoxelWorld::forget_edits`] instead.
+    ///
+    /// [`EditsCommitted`]: crate::prelude::EditsCommitted
+    pub fn clear_voxels_in(&mut self, min: IVec3, max: IVec3) {
+        self.voxel_edits.clear_region(min, max);
+    }
+
+    /// Clears every voxel edit in the world, as
+    /// [`VoxelWorld::clear_voxels_in`] does for a box: each edited chunk
+    /// reports an empty full delta and regenerates.
+    pub fn clear_edits(&mut self) {
+        self.voxel_edits.clear_all();
+    }
+
+    /// Forgets every voxel edit and every chunk's edit sequence, at once:
+    /// edits set this frame go too, and [`VoxelWorld::edited_chunks`] is
+    /// empty right after. Chunks that showed an edit regenerate. Nothing is
+    /// reported in `EditsCommitted`, so no other world hears of it.
+    ///
+    /// Forget makes room for another world's edits: before loading a save,
+    /// before joining a server again, or before switching to a new seed. A
+    /// chunk with no sequence takes the next full delta it is given, and
+    /// reads the next incremental one as a gap, so the other world's edits
+    /// arrive whole. Loading a save into a world that has edits is forget,
+    /// then [`VoxelWorld::apply_delta`] of each saved full delta: the saved
+    /// sequences become the world's. Clearing first instead would leave
+    /// sequences newer than the saved ones, which would then be skipped.
+    ///
+    /// To remove edits in front of the player, so other worlds see them go,
+    /// use [`VoxelWorld::clear_voxels_in`] or [`VoxelWorld::clear_edits`].
+    pub fn forget_edits(&mut self) {
+        self.voxel_edits.forget();
+    }
+
+    /// Applies an edit delta from another world, if it continues from the
+    /// edit sequence of its chunk here. Returns `Ok` for a delta applied or
+    /// one already applied, and an [`EditGap`] for one that doesn't continue,
+    /// which is dropped: ask the sender for the chunk's full delta and apply
+    /// that. The [`edits`](crate::edits) module docs give the rule, and the
+    /// channel and recovery flows a game builds around it.
+    ///
+    /// The delta's voxels commit with the voxels set this frame, in the order
+    /// they were set and applied, and the chunk takes the delta's edit
+    /// sequence. A full delta replaces the chunk's edits: those it doesn't
+    /// carry are removed, along with the voxels set in the chunk earlier this
+    /// frame, and the chunks showing them regenerate. A chunk that isn't
+    /// spawned keeps the delta's voxels, and shows them once it spawns.
+    ///
+    /// Called from `Update`, the delta commits in the next `PreUpdate`. Its
+    /// sequence counts towards the next delta for the chunk right away, so
+    /// two deltas for one chunk can be applied in one frame.
+    pub fn apply_delta(
+        &mut self,
+        delta: EditDelta<C::MaterialIndex>,
+    ) -> Result<(), EditGap> {
+        self.voxel_edits.apply(delta)
+    }
+
+    /// The full delta of the level-0 chunk at `chunk_pos`: every voxel edit
+    /// it has, at its edit sequence. A chunk with no edits gives an empty one
+    /// at sequence 0.
+    ///
+    /// It reads committed edits only, so a voxel set this frame isn't in it
+    /// until the next commit.
+    pub fn full_delta(&self, chunk_pos: IVec3) -> EditDelta<C::MaterialIndex> {
+        self.voxel_edits.full_delta(chunk_pos)
+    }
+
+    /// Every level-0 chunk position with voxel edits, in no particular order,
+    /// with its edit sequence. A chunk whose edits were all removed is listed
+    /// too, with no edits, so that the removal reaches other worlds.
+    ///
+    /// It reads committed edits only, like [`VoxelWorld::full_delta`].
+    pub fn edited_chunks(&self) -> Vec<(IVec3, u64)> {
+        self.voxel_edits.edited_chunks()
     }
 
     /// Get a sendable closure that can be used to get the voxel at the given position

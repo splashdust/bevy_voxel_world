@@ -46,8 +46,12 @@ The off-main-thread work that generates a chunk's voxel data and builds its mesh
 _Avoid_: chunk thread
 
 **Superseded task**:
-A chunk task whose inputs went stale while it ran, because of a voxel edit; it still finishes and is published, and a fresh chunk task follows it.
+A chunk task whose inputs went stale while it ran, because of a voxel edit or a clear; it still finishes and is published, and a fresh chunk task follows it.
 _Avoid_: cancelled task
+
+**Regenerate**:
+To run a chunk's task again from the generator alone, keeping none of the chunk's previous voxel data. A chunk regenerates when its voxel edits are cleared or forgotten, or when the world is told its generator changed.
+_Avoid_: invalidate, refresh, rebuild (meshing a chunk again from the voxels it has)
 
 **Publish**:
 To make a finished chunk task's voxel data readable through the voxel world, independent of whether a mesh is ever shown.
@@ -55,8 +59,28 @@ To make a finished chunk task's voxel data readable through the voxel world, ind
 ### Voxels
 
 **Voxel edit**:
-A voxel set through the voxel world. It replaces the generated voxel at its position for as long as the world exists, across chunk despawns and respawns.
+A voxel set through the voxel world. It replaces the generated voxel at its position until it is cleared or forgotten, or the world is dropped, across chunk despawns and respawns.
 _Avoid_: modified voxel, voxel write
+
+**Edit delta**:
+The voxel edits of one level-0 chunk that changed in one commit, with their new values and the chunk's edit sequence after it. The unit in which voxel edits travel between worlds and to disk.
+_Avoid_: edit event, change set (the crate-internal commit output it is built from), snapshot
+
+**Full delta**:
+An edit delta carrying every voxel edit a chunk currently has. Applying it replaces the chunk's voxel edits with the ones it carries, so an empty one clears the chunk.
+_Avoid_: chunk snapshot (a chunk's voxels, not its edits), bucket dump
+
+**Edit sequence**:
+A chunk's count of how many of its voxel edits have ever changed in a commit. It only moves forward, and an edit delta states the chunk's edit sequence after it, so a receiver can tell whether the delta continues from what it has.
+_Avoid_: edit counter, version, revision
+
+**Clear**:
+Removing a voxel edit, so its position shows the generated voxel again. A chunk's clear reaches other worlds as a full delta, so the chunk's edit sequence keeps moving forward.
+_Avoid_: revert, delete edit, reset (the light's operation)
+
+**Forget**:
+A world dropping a chunk's voxel edits together with its edit sequence, as if it had never received them, so the next edit delta it receives reads as a gap. The receiver's way to drop edits before being sent them again; never a server's decision about the world.
+_Avoid_: clear (which keeps the edit sequence), prune, evict
 
 ### Streaming
 

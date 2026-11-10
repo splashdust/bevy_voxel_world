@@ -1,8 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Syncing and saving voxel edits
+
+- Enable world sync for multiplayer use cases
+- Make it easier to support save/load
+- Support clearing the world
+- Support batch edits, which improves performance when editing a larger volume of voxels in a single action
+
 ## 0.19.2
 
 Add `light_propagation` feature
+
+Light propagation sits behind the off-by-default `light_propagation` cargo feature, and a world can turn it on by returning settings from `VoxelWorldConfig::light_propagation`.
+
+There are two kinds of light: Sky light and voxel light
+
+- Sky light falls straight down from open sky and then spreads sideways under overhangs.
+- Voxel light spreads out from emissive voxels.
+
+Both kinds stop at solid voxels.
+
+Each chunk works out its light in its own chunk task, then works it out again when neighbouring chunks or edits arrive, while chunks above LOD level 0 use a cheaper solve from their own cells. Shaders read the light from a 3D texture with one slot per chunk, so meshes stay shared.
+
+For now only white light is supported, but regular colored Bevy lights can be used to add tint and glow. Colored light propagation in bevy_voxel_world may be added in a future update.
 
 ## 0.19.1
 
