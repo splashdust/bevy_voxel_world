@@ -13,11 +13,6 @@
 //!   - S to save, L to load the save again, dropping edits made since
 //!   - N for a new world: a random seed and no edits
 //!   - C to clear every edit
-//!   - Arrow keys to move around
-//!   - On a trackpad: scroll with two fingers to orbit, with Shift held to
-//!     pan, and pinch to zoom
-//!   - With a mouse: drag with the middle button to orbit, with Shift held to
-//!     pan, and scroll to zoom
 //!
 //! C and N look alike but differ underneath. A clear is a decision about the
 //! world: every edited chunk moves its edit sequence on and reports an empty
@@ -38,7 +33,6 @@ use std::{collections::HashSet, sync::Arc};
 use bevy::{
     light::CascadeShadowConfigBuilder, platform::collections::HashMap, prelude::*,
 };
-use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, TrackpadBehavior};
 use bevy_voxel_world::prelude::*;
 use noise::{HybridMulti, NoiseFn, Perlin};
 use serde::{Deserialize, Serialize};
@@ -51,14 +45,11 @@ const GRASS: u8 = 2;
 const CARVE_RADIUS: i32 = 6;
 const BLOB_RADIUS: i32 = 4;
 
-/// The height of the flat ground the hills rise from. It lies inside the
-/// level-0 chunks at y = 0, which spawn, rather than on top of the chunks
+/// The height of the flat ground the low hills rise from. It lies inside
+/// the level-0 chunks at y = 0, which spawn, rather than on top of the chunks
 /// below them, which are hinted as solid and never spawn, so never show
 /// their top face.
 const FLOOR: f64 = 16.0;
-
-/// How fast the arrow keys move the camera, in voxels per second.
-const PAN_SPEED: f32 = 60.0;
 
 /// The voxel world, whose terrain comes from `seed`.
 ///
@@ -114,7 +105,7 @@ impl VoxelWorldConfig for SaveLoadWorld {
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, PanOrbitCameraPlugin))
+        .add_plugins(DefaultPlugins)
         .add_plugins(VoxelWorldPlugin::with_config(SaveLoadWorld::default()))
         .init_resource::<SaveState>()
         .add_systems(Startup, (setup, load_at_startup))
@@ -123,7 +114,6 @@ fn main() {
         // brush strokes commit in the next frame's `PreUpdate`. A load or a
         // clear made here commits then too.
         .add_systems(Update, (track_unsaved, keys, brushes, update_panel).chain())
-        .add_systems(Update, move_with_arrow_keys)
         .run();
 }
 
@@ -387,9 +377,10 @@ fn keys(
 }
 
 /// Left click carves a sphere of air where the cursor points, and right
-/// click, or Shift + left click, lays a blob of brick on the surface there. Each sets a box of
-/// voxels in one `set_voxels_in` call, leaving those outside the sphere alone,
-/// so a few clicks give a chunk enough edits to be saved in the dense form.
+/// click, or Shift + left click, lays a blob of brick on the surface there.
+/// Each sets a box of voxels in one `set_voxels_in` call, leaving those
+/// outside the sphere alone, so a few clicks give a chunk enough edits to be
+/// saved in the dense form.
 fn brushes(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -469,22 +460,8 @@ fn update_panel(
 fn setup(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-60.0, FLOOR as f32 + 50.0, -60.0)
+        Transform::from_xyz(-50.0, FLOOR as f32 + 40.0, -50.0)
             .looking_at(Vec3::new(0.0, FLOOR as f32, 0.0), Vec3::Y),
-        PanOrbitCamera {
-            focus: Vec3::new(0.0, FLOOR as f32, 0.0),
-            // Both mouse buttons are brushes, so the camera takes the middle
-            // button, and a trackpad's two-finger scroll and pinch.
-            button_orbit: MouseButton::Middle,
-            button_pan: MouseButton::Middle,
-            modifier_pan: Some(KeyCode::ShiftLeft),
-            trackpad_behavior: TrackpadBehavior::BlenderLike {
-                modifier_pan: Some(KeyCode::ShiftLeft),
-                modifier_zoom: Some(KeyCode::ControlLeft),
-            },
-            trackpad_pinch_to_zoom_enabled: true,
-            ..default()
-        },
         VoxelWorldCamera::<SaveLoadWorld>::default(),
     ));
 
@@ -527,33 +504,7 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-/// Moves the camera's focus along the ground with the arrow keys, up the
-/// screen for the up arrow, whichever way the camera faces.
-fn move_with_arrow_keys(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut camera: Query<(&mut PanOrbitCamera, &Transform)>,
-) {
-    let Ok((mut camera, transform)) = camera.single_mut() else {
-        return;
-    };
-    let forward = transform.forward().with_y(0.0).normalize_or_zero();
-    let right = transform.right().with_y(0.0).normalize_or_zero();
-    let mut direction = Vec3::ZERO;
-    for (key, step) in [
-        (KeyCode::ArrowUp, forward),
-        (KeyCode::ArrowDown, -forward),
-        (KeyCode::ArrowRight, right),
-        (KeyCode::ArrowLeft, -right),
-    ] {
-        if keys.pressed(key) {
-            direction += step;
-        }
-    }
-    camera.target_focus += direction.normalize_or_zero() * PAN_SPEED * time.delta_secs();
-}
-
-/// Rolling hills from `seed` on flat ground, grass with snow on the tops.
+/// Low hills from `seed` on flat ground, grass with snow on the tops.
 fn terrain(
     seed: u32,
 ) -> Box<dyn FnMut(IVec3, Option<WorldVoxel>) -> WorldVoxel + Send + Sync> {
@@ -573,14 +524,14 @@ fn terrain(
         let height = *heights.entry((pos.x, pos.z)).or_insert_with(|| {
             let sample = noise.get([pos.x as f64 / 300.0, pos.z as f64 / 300.0]);
             // The noise dips below the floor about half the time, which
-            // leaves wide flat stretches between the hills. Capped below
-            // y = 64, where the chunks hinted as air begin.
-            (FLOOR + sample * 48.0).clamp(FLOOR, 63.0)
+            // leaves wide flat stretches between the hills, where edits are
+            // easiest to see.
+            (FLOOR + sample * 12.0).clamp(FLOOR, FLOOR + 8.0)
         });
         let y = pos.y as f64;
         if y >= height {
             WorldVoxel::Air
-        } else if y > FLOOR + 28.0 {
+        } else if y > FLOOR + 5.0 {
             WorldVoxel::Solid(SNOW)
         } else {
             WorldVoxel::Solid(GRASS)
