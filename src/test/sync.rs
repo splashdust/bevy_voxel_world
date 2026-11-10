@@ -12,6 +12,9 @@ use super::{
 use crate::edits::{Mask, Voxels};
 use crate::prelude::*;
 
+#[cfg(feature = "serde")]
+mod serialise;
+
 /// Every edit delta a world `C` committed so far, in commit order.
 #[derive(Resource)]
 struct Committed<C>(Vec<EditDelta<u8>>, std::marker::PhantomData<C>);

@@ -70,6 +70,26 @@
 //! ([`Voxels::Dense`]): a [`Mask`] of the chunk's voxels, plus the voxels the
 //! mask marks in index order.
 //!
+//! # Serialising
+//!
+//! With the crate's `serde` feature, [`EditDelta`], [`Voxels`], [`Mask`] and
+//! [`WorldVoxel`] implement `Serialize` and `Deserialize`, in whatever format
+//! the game picks. A delta's material index needs to implement them too; the
+//! feature puts no bound on [`VoxelWorldConfig::MaterialIndex`].
+//!
+//! - The chunk position is three `i32`, x then y then z.
+//! - The mask is a byte sequence of exactly 4096 bytes: its words in order,
+//!   each little-endian. Any other length is a deserialise error.
+//! - Everything else is serde's derived layout, so the order of the types'
+//!   fields and variants is the layout. A change to that order is a breaking
+//!   change to the crate's API.
+//!
+//! The crate adds no version to the layout. A game that keeps deltas across
+//! releases, in a save file or between a client and a server of different
+//! builds, wraps them in its own envelope that starts with a version. A good
+//! start is `postcard` behind one version byte, with the bytes compressed by
+//! `lz4_flex` when written to a file.
+//!
 //! [`get_chunk_voxel_position`]: crate::prelude::get_chunk_voxel_position
 //! [`VoxelWorld::apply_delta`]: crate::prelude::VoxelWorld::apply_delta
 //! [`VoxelWorld::full_delta`]: crate::prelude::VoxelWorld::full_delta
@@ -131,11 +151,18 @@ pub(crate) fn voxel_local(index: usize) -> IVec3 {
 /// | incremental, `n` voxels | `seq <= s` | `seq - n == s` | otherwise |
 /// | full | `seq < s` | `seq >= s` | never |
 ///
-/// The field order is part of the crate's public API, so that a serialised
-/// delta keeps its layout across releases.
+/// With the crate's `serde` feature, a delta serialises in any format, its
+/// chunk position as three `i32` and a dense delta's [`Mask`] as 4096 bytes.
+/// The order of its fields, and of the fields and variants of the types it
+/// holds, is part of the crate's public API, so that a serialised delta keeps
+/// its layout across releases. The layout carries no version: a game that
+/// keeps deltas across its own releases puts one in the envelope it wraps them
+/// in, such as a version byte before `postcard` bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EditDelta<I> {
     /// The level-0 chunk position.
+    #[cfg_attr(feature = "serde", serde(with = "chunk_position"))]
     pub chunk: IVec3,
     /// The chunk's edit sequence after this delta.
     pub seq: u64,
@@ -152,6 +179,7 @@ pub struct EditDelta<I> {
 /// The crate writes [`Dense`](Self::Dense) for a delta of 2048 voxels or
 /// more, and [`Sparse`](Self::Sparse) otherwise, but reads either.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Voxels<I> {
     /// Each voxel with its index within the chunk, in index order.
     Sparse(Vec<(u16, WorldVoxel<I>)>),
@@ -167,6 +195,10 @@ pub enum Voxels<I> {
 ///
 /// The bit for the voxel at index `i` is bit `i % 64` of word `i / 64`,
 /// counting from the least significant bit.
+///
+/// With the crate's `serde` feature, a mask serialises as a byte sequence of
+/// exactly 4096 bytes, its words in order, each little-endian. Deserialising
+/// any other length is an error.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Mask(Box<[u64; MASK_WORDS]>);
 
@@ -323,6 +355,11 @@ impl Mask {
     pub fn words(&self) -> &[u64; MASK_WORDS] {
         &self.0
     }
+
+    /// The mask with the given words, as laid out in the type's docs.
+    pub fn from_words(words: [u64; MASK_WORDS]) -> Self {
+        Self(Box::new(words))
+    }
 }
 
 impl Default for Mask {
@@ -335,6 +372,89 @@ impl Default for Mask {
 impl std::fmt::Debug for Mask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+/// How many bytes a serialised [`Mask`] takes.
+#[cfg(feature = "serde")]
+const MASK_BYTES: usize = MASK_WORDS * 8;
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Mask {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut bytes = [0; MASK_BYTES];
+        for (to, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.0.iter()) {
+            *to = word.to_le_bytes();
+        }
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Mask {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        deserializer.deserialize_bytes(MaskVisitor)
+    }
+}
+
+#[cfg(feature = "serde")]
+struct MaskVisitor;
+
+#[cfg(feature = "serde")]
+impl<'de> serde::de::Visitor<'de> for MaskVisitor {
+    type Value = Mask;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{MASK_BYTES} bytes")
+    }
+
+    fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Mask, E> {
+        if bytes.len() != MASK_BYTES {
+            return Err(E::invalid_length(bytes.len(), &self));
+        }
+        let mut words = [0; MASK_WORDS];
+        for (word, from) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*from);
+        }
+        Ok(Mask::from_words(words))
+    }
+
+    // Formats with no byte type, such as JSON, write bytes as a sequence.
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> Result<Mask, A::Error> {
+        let mut bytes = Vec::with_capacity(MASK_BYTES);
+        while let Some(byte) = seq.next_element()? {
+            bytes.push(byte);
+            if bytes.len() > MASK_BYTES {
+                return Err(serde::de::Error::invalid_length(bytes.len(), &self));
+            }
+        }
+        self.visit_bytes(&bytes)
+    }
+}
+
+/// Serialises a chunk position as three `i32`, the layout glam's own `serde`
+/// feature gives an `IVec3`, without the crate turning that feature on.
+#[cfg(feature = "serde")]
+mod chunk_position {
+    use bevy::math::IVec3;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        chunk: &IVec3,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        chunk.to_array().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<IVec3, D::Error> {
+        <[i32; 3]>::deserialize(deserializer).map(IVec3::from_array)
     }
 }
 
