@@ -13,11 +13,13 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  # Run cargo test, with the default features and with light propagation. Both
-  # feature sets run in one job so the dependencies are built once:
-  # light_propagation doesn't change any dependency's features, so only this
-  # crate is rebuilt for the second set. RUSTFLAGS must stay the same for every
-  # step, or cargo rebuilds everything.
+  # Run cargo test, with the default features, with light propagation, and
+  # with serde and light propagation together, which also builds the examples
+  # that need serde. The feature sets run in one job so the dependencies are
+  # built once: neither feature changes any dependency's features (Bevy
+  # already builds serde with derive), so only this crate is rebuilt for each
+  # set. RUSTFLAGS must stay the same for every step, or cargo rebuilds
+  # everything.
   test:
     name: Test Suite
     runs-on: ubuntu-latest
@@ -52,9 +54,15 @@ jobs:
       - name: Run cargo test (light_propagation)
         if: success() || failure()
         run: cargo test --features light_propagation
+      - name: Build benchmarks (serde,light_propagation)
+        if: success() || failure()
+        run: cargo test --benches --no-run --features serde,light_propagation
+      - name: Run cargo test (serde,light_propagation)
+        if: success() || failure()
+        run: cargo test --features serde,light_propagation
 
-  # Run cargo clippy -- -D warnings, with the default features and with light
-  # propagation
+  # Run cargo clippy -- -D warnings, with the default features, with light
+  # propagation, and with serde and light propagation together
   clippy_check:
     name: Clippy (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -65,6 +73,7 @@ jobs:
         features:
           - { name: default, flags: "" }
           - { name: light_propagation, flags: "--features light_propagation" }
+          - { name: serde-light_propagation, flags: "--features serde,light_propagation" }
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
