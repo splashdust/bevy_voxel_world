@@ -522,7 +522,9 @@ fn terrain(
             return WorldVoxel::Solid(GRASS);
         }
         let height = *heights.entry((pos.x, pos.z)).or_insert_with(|| {
-            20.0 + noise.get([pos.x as f64 / 300.0, pos.z as f64 / 300.0]) * 30.0
+            let sample = noise.get([pos.x as f64 / 300.0, pos.z as f64 / 300.0]);
+            // Capped below y = 64, where the chunks hinted as air begin.
+            (20.0 + sample * 30.0).min(63.0)
         });
         let y = pos.y as f64;
         if y >= height {
