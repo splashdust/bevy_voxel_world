@@ -10,7 +10,7 @@ use crate::{
     chunk_lifecycle::{ChunkIndex, ChunkRequests},
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
-    edit_delta::{EditDelta, EditsCommitted},
+    edits::{EditDelta, EditsCommitted},
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,

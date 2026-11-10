@@ -42,7 +42,7 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use crate::{
     chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I},
     configuration::LodLevel,
-    edit_delta::{voxel_index, voxel_local, EditDelta, EditGap, CHUNK_VOXELS},
+    edits::{voxel_index, voxel_local, EditDelta, EditGap, CHUNK_VOXELS},
     voxel::WorldVoxel,
 };
 

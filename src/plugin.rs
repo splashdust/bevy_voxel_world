@@ -8,7 +8,7 @@ use bevy::{asset::load_internal_asset, ecs::system::EntityCommands, prelude::*};
 use crate::{
     chunk_lifecycle::ChunkLifecycle,
     configuration::{DefaultWorld, VoxelWorldConfig},
-    edit_delta::EditsCommitted,
+    edits::EditsCommitted,
     voxel_material::{
         add_shaders, default_material, DefaultVoxelMaterial, VOXEL_TEXTURE_SHADER_HANDLE,
     },

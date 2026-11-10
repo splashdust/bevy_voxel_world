@@ -1,9 +1,13 @@
 //! Edit deltas: the voxel edits of one level-0 chunk that changed in one
 //! commit, as a value a game can send to another world or write to disk.
 //!
+//! [`EditDelta`], [`EditsCommitted`] and [`EditGap`] are also in the prelude.
+//! This module adds the forms a delta's voxels take, [`Voxels`] and [`Mask`],
+//! and the guide below to syncing and saving voxel edits.
+//!
 //! Every commit writes an [`EditsCommitted`] message for each level-0 chunk
 //! whose voxel edits changed, carrying the chunk's [`EditDelta`]. A world with
-//! no networking can read it as an edit event that names the changed voxels.
+//! no networking can read it to learn which voxels each commit changed.
 //! In a networked game, the server forwards each delta to the clients whose
 //! interest covers its chunk. A listen server's own world is the server, so it
 //! forwards too. A pure client ignores the message, and a client never forwards
@@ -58,6 +62,26 @@
 //! wants a delta to commit in the frame it arrives applies it from a system
 //! in `PreUpdate` ordered before [`VoxelWorldSet`].
 //!
+//! # Removing edits
+//!
+//! - A **clear**, [`VoxelWorld::clear_voxels_in`] or
+//!   [`VoxelWorld::clear_edits`], removes edits and reaches other worlds.
+//!   Each chunk it reaches moves its edit sequence on by the edits it lost,
+//!   and its message carries its full delta: an empty one for a chunk that
+//!   lost every edit. A server resets its world this way.
+//! - A **forget**, [`VoxelWorld::forget_edits`], drops every edit and every
+//!   edit sequence, and writes no message. A receiver forgets before it is
+//!   sent another world's edits again: before joining a server again, or
+//!   before loading a save, which is a forget and then an apply of each saved
+//!   full delta. A receiver never clears to catch up with a sender, since a
+//!   clear moves its sequences past the sender's, and the sender's next
+//!   deltas are then skipped as already applied.
+//!
+//! Either way, the chunks that showed a removed edit regenerate: their next
+//! chunk task looks up their voxels again rather than starting from the
+//! voxels they published, which have the edits in them. Until then, a cleared
+//! voxel reads the voxel its chunk last published.
+//!
 //! # Chunk layout
 //!
 //! A voxel's place in a delta is its index within the chunk,
@@ -95,6 +119,9 @@
 //! [`VoxelWorld::full_delta`]: crate::prelude::VoxelWorld::full_delta
 //! [`VoxelWorld::edited_chunks`]: crate::prelude::VoxelWorld::edited_chunks
 //! [`VoxelWorld::set_voxel`]: crate::prelude::VoxelWorld::set_voxel
+//! [`VoxelWorld::clear_voxels_in`]: crate::prelude::VoxelWorld::clear_voxels_in
+//! [`VoxelWorld::clear_edits`]: crate::prelude::VoxelWorld::clear_edits
+//! [`VoxelWorld::forget_edits`]: crate::prelude::VoxelWorld::forget_edits
 //! [`VoxelWorldSet`]: crate::prelude::VoxelWorldSet
 
 use bevy::prelude::*;

@@ -12,7 +12,7 @@ use crate::{
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::{FillHint, VoxelWorldConfig},
-    edit_delta::{EditDelta, EditGap},
+    edits::{EditDelta, EditGap},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
@@ -496,7 +496,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// edit sequence of its chunk here. Returns `Ok` for a delta applied or
     /// one already applied, and an [`EditGap`] for one that doesn't continue,
     /// which is dropped: ask the sender for the chunk's full delta and apply
-    /// that. See the [`EditDelta`] docs for the rule.
+    /// that. The [`edits`](crate::edits) module docs give the rule, and the
+    /// channel and recovery flows a game builds around it.
     ///
     /// The delta's voxels commit with the voxels set this frame, in the order
     /// they were set and applied, and the chunk takes the delta's edit
