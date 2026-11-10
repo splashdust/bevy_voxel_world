@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_voxel_world"
-version = "0.19.2"
+version = "0.19.3"
 dependencies = [
  "ahash",
  "bevy",
