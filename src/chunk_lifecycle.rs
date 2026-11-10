@@ -814,8 +814,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
 }
 
 /// Applies the regenerate requests in `requests` to the spawned chunks they
-/// reach, and announces their updates. A chunk that regenerates leaves
-/// `stale`, since regenerating also shows its voxel edits.
+/// reach, and announces the updates of those not in `stale`.
+///
+/// A chunk in `stale` stays there, so it is also marked edited and keeps an
+/// edited chunk's place at the front: a clear in front of the player
+/// regenerates its chunks as soon as a set would remesh them, while a
+/// request to regenerate every chunk lets them wait in start order.
 fn regenerate_requested<C: VoxelWorldConfig>(
     requests: &mut ChunkRequests<C>,
     index: &mut ChunkIndex<C>,
@@ -864,14 +868,15 @@ fn regenerate_requested<C: VoxelWorldConfig>(
         }
     }
     for key in reached {
-        stale.remove(&key);
         let Some(entity) = index.get(key) else {
             continue;
         };
         if let Ok(mut state) = chunks.get_mut(entity) {
             index.apply(entity, key, &mut state, ChunkEvent::Regenerate);
         }
-        ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+        if !stale.contains(&key) {
+            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+        }
     }
 }
 
