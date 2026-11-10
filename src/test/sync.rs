@@ -437,6 +437,63 @@ fn a_delta_whose_voxels_do_not_fit_a_chunk_is_reported_as_a_gap() {
 }
 
 #[test]
+fn a_delta_past_the_voxel_positions_or_the_highest_sequence_is_reported_as_a_gap() {
+    let mut app = sync_app();
+    let one_voxel = |chunk: IVec3, seq: u64| EditDelta {
+        chunk,
+        seq,
+        full: true,
+        voxels: Voxels::Sparse(vec![(0, WorldVoxel::Solid(1))]),
+    };
+    let gap = |chunk: IVec3, received: u64| {
+        Err(EditGap {
+            chunk,
+            local: 0,
+            received,
+        })
+    };
+    // The chunks holding the lowest and the highest voxel positions, and the
+    // ones past them, which hold no `i32` voxel position.
+    let lowest = crate::chunk::chunk_containing(IVec3::MIN);
+    let highest = crate::chunk::chunk_containing(IVec3::MAX);
+    let highest_seq = 1 << 48;
+
+    let results = apply(
+        &mut app,
+        vec![
+            one_voxel(lowest, 1),
+            one_voxel(highest, 1),
+            one_voxel(lowest - IVec3::X, 1),
+            one_voxel(highest + IVec3::Z, 1),
+            one_voxel(IVec3::ZERO, highest_seq),
+            one_voxel(IVec3::Y, highest_seq + 1),
+            one_voxel(IVec3::Y, u64::MAX),
+        ],
+    );
+    assert_eq!(
+        results,
+        vec![
+            Ok(()),
+            Ok(()),
+            gap(lowest - IVec3::X, 1),
+            gap(highest + IVec3::Z, 1),
+            Ok(()),
+            gap(IVec3::Y, highest_seq + 1),
+            gap(IVec3::Y, u64::MAX),
+        ]
+    );
+    app.update();
+    assert_eq!(
+        edited_chunks::<Receiver>(&mut app),
+        vec![(lowest, 1), (IVec3::ZERO, highest_seq), (highest, 1)]
+    );
+    assert_eq!(
+        get_voxel::<Receiver>(&mut app, IVec3::MIN),
+        WorldVoxel::Solid(1)
+    );
+}
+
+#[test]
 fn the_export_methods_read_committed_edits_only() {
     let mut app = sync_app();
     assert_eq!(

@@ -31,6 +31,8 @@
 //! - A full delta carries every edit the chunk has, so it needs nothing
 //!   before it. One older than `s` is skipped, and any other replaces the
 //!   chunk's edits.
+//! - A malformed delta of either kind is dropped and reported as an
+//!   [`EditGap`] too, as [`EditGap`] says.
 //!
 //! Applied voxels commit next `PreUpdate`, with the voxels set this frame, so
 //! the chunk lifecycle and light handle them like any other voxel edit. A
@@ -66,9 +68,10 @@
 //!
 //! - A **clear**, [`VoxelWorld::clear_voxels_in`] or
 //!   [`VoxelWorld::clear_edits`], removes edits and reaches other worlds.
-//!   Each chunk it reaches moves its edit sequence on by the edits it lost,
-//!   and its message carries its full delta: an empty one for a chunk that
-//!   lost every edit. A server resets its world this way.
+//!   Each chunk it reaches moves its edit sequence on by the voxels its
+//!   commit changed, the edits it lost among them, and its message carries
+//!   its full delta: an empty one for a chunk that lost every edit. A server
+//!   resets its world this way.
 //! - A **forget**, [`VoxelWorld::forget_edits`], drops every edit and every
 //!   edit sequence, and writes no message. A receiver forgets before it is
 //!   sent another world's edits again: before joining a server again, or
@@ -127,13 +130,24 @@
 use bevy::prelude::*;
 
 use crate::{
-    chunk::CHUNK_SIZE_I, configuration::VoxelWorldConfig, voxel::WorldVoxel,
+    chunk::{chunk_containing, CHUNK_SIZE_I},
+    configuration::VoxelWorldConfig,
+    voxel::WorldVoxel,
     voxel_edits::ChangeSet,
 };
 
 /// How many voxels a level-0 chunk has.
 pub(crate) const CHUNK_VOXELS: usize =
     (CHUNK_SIZE_I * CHUNK_SIZE_I * CHUNK_SIZE_I) as usize;
+
+/// The highest edit sequence a world takes from an applied delta. A delta at
+/// a higher one is reported as an [`EditGap`].
+///
+/// A chunk's edit sequence counts the voxels its commits change, so no chunk
+/// gets near this by its own edits. The bound keeps a malformed delta from
+/// setting a sequence so high that later sums with it overflow: later edits
+/// counting the sequence on, and the edit stamps light makes from it.
+pub(crate) const MAX_APPLIED_SEQ: u64 = 1 << 48;
 
 /// How many `u64` words a [`Mask`] holds: one bit per voxel of a chunk.
 const MASK_WORDS: usize = CHUNK_VOXELS / 64;
@@ -177,6 +191,9 @@ pub(crate) fn voxel_local(index: usize) -> IVec3 {
 /// |-------|---------|---------|----------------------------|
 /// | incremental, `n` voxels | `seq <= s` | `seq - n == s` | otherwise |
 /// | full | `seq < s` | `seq >= s` | never |
+///
+/// A malformed delta of either kind is reported as an [`EditGap`] too: see
+/// there.
 ///
 /// With the crate's `serde` feature, a delta serialises in any format, its
 /// chunk position as three `i32` and a dense delta's [`Mask`] as 4096 bytes.
@@ -291,14 +308,14 @@ impl<I: Copy> EditDelta<I> {
     /// Whether a world whose chunk is at edit sequence `local` applies this
     /// delta, by the rule in the module docs. Returns `Ok(false)` for a delta
     /// already applied, and the gap for one that doesn't continue from
-    /// `local` or doesn't fit a chunk.
+    /// `local` or isn't well formed.
     pub(crate) fn applies_at(&self, local: u64) -> Result<bool, EditGap> {
         let gap = EditGap {
             chunk: self.chunk,
             local,
             received: self.seq,
         };
-        if !self.fits_a_chunk() {
+        if !self.is_well_formed() {
             return Err(gap);
         }
         if self.full {
@@ -313,9 +330,19 @@ impl<I: Copy> EditDelta<I> {
         }
     }
 
-    /// Whether every voxel index is within a chunk, and a dense delta has a
-    /// voxel for each voxel its mask marks.
-    fn fits_a_chunk(&self) -> bool {
+    /// Whether the delta is one a world can apply: its chunk position is one
+    /// that `i32` voxel positions lie in, its sequence is at most
+    /// [`MAX_APPLIED_SEQ`], every voxel index is within a chunk, and a dense
+    /// delta has a voxel for each voxel its mask marks.
+    ///
+    /// A world works out the voxel positions of the chunk as `i32`, so a
+    /// chunk position outside that range would overflow.
+    fn is_well_formed(&self) -> bool {
+        let chunk_fits = self.chunk.cmpge(chunk_containing(IVec3::MIN)).all()
+            && self.chunk.cmple(chunk_containing(IVec3::MAX)).all();
+        if !chunk_fits || self.seq > MAX_APPLIED_SEQ {
+            return false;
+        }
         match &self.voxels {
             Voxels::Sparse(voxels) => voxels
                 .iter()
@@ -338,6 +365,28 @@ impl<I: Copy> EditDelta<I> {
             })
             .collect();
         Self::new(set.chunk, set.seq, set.replaced, voxels)
+    }
+}
+
+impl<I: Copy> Voxels<I> {
+    /// The voxels of `slots`, one slot per voxel of a chunk by index, `count`
+    /// of them set, in the form their count calls for. The slots are in
+    /// index order already, so nothing is sorted.
+    pub(crate) fn from_slots(slots: &[Option<WorldVoxel<I>>], count: usize) -> Self {
+        let set = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, voxel)| Some((index as u16, (*voxel)?)));
+        if count < DENSE_DELTA_AT {
+            return Voxels::Sparse(set.collect());
+        }
+        let mut mask = Mask::default();
+        let mut voxels = Vec::with_capacity(count);
+        for (index, voxel) in set {
+            mask.insert(index);
+            voxels.push(voxel);
+        }
+        Voxels::Dense { mask, voxels }
     }
 }
 
@@ -489,8 +538,11 @@ mod chunk_position {
 /// chunk's edit sequence: the world missed a delta for the chunk in between.
 ///
 /// The game asks the sender for the chunk's full delta, and applies it.
-/// [`VoxelWorld::apply_delta`] also reports a delta whose voxels don't fit a
-/// chunk this way, since the full delta repairs that too.
+/// [`VoxelWorld::apply_delta`] also reports a malformed delta this way, since
+/// the full delta repairs one damaged on its way: one whose voxels don't fit
+/// a chunk, whose chunk position no `i32` voxel position lies in, or whose
+/// sequence is past 2^48, far past what a chunk reaches by counting its own
+/// edits.
 ///
 /// [`VoxelWorld::apply_delta`]: crate::prelude::VoxelWorld::apply_delta
 #[must_use]

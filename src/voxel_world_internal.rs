@@ -210,9 +210,7 @@ where
         // world hears of them.
         let forgotten = voxel_edits.take_forgotten();
         for set in sets.iter().chain(&forgotten).filter(|set| set.replaced) {
-            if let Some((min, max)) = set.removed_box() {
-                requests.regenerate(min, max);
-            }
+            requests.regenerate_boxes(set.removed_boxes());
         }
         requests.edited.extend(forgotten);
         requests.edited.extend(sets);

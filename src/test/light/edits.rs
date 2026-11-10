@@ -15,8 +15,10 @@ use super::reference::Reference;
 use super::sky_light::{chunk_light, light_is_settled, settled_but, sky_light, spawned};
 use super::voxel_light::{app, light_at, Hold, LampWorld, DIM_LAMP, LAMP, STONE};
 use crate::chunk_map::ChunkMap;
+use crate::edits::{voxel_index, Voxels};
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::voxel_edits::VoxelEdits;
 
 /// A lamp in the floor of the cavern of [`cavern`].
 const FLOOR_LAMP: IVec3 = IVec3::new(-6, 3, 2);
@@ -352,6 +354,75 @@ fn forgetting_edits_matches_the_reference() {
         |mut voxel_world| {
             voxel_world.forget_edits();
         },
+    );
+}
+
+#[test]
+fn light_is_settled_goes_false_on_a_forget_until_its_light_lands() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    set_voxels(&mut app, &[place(IVec3::new(2, 10, 3))]);
+    settle(&mut app, "light to settle after the edit");
+    assert!(light_is_settled(&mut app));
+
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<LampWorld>| {
+            voxel_world.forget_edits();
+        })
+        .unwrap();
+    assert!(!light_is_settled(&mut app), "settled with a forget waiting");
+    settle(&mut app, "light to settle after the forget");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        "after the forget",
+    );
+}
+
+#[test]
+fn a_commit_moving_only_a_chunks_edit_sequence_brings_its_light_up_to_it() {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    // A voxel of the cavern's air, edited to the air it already is.
+    let at = IVec3::new(2, 10, 3);
+    let delta = |seq: u64, voxel: WorldVoxel| EditDelta {
+        chunk: IVec3::ZERO,
+        seq,
+        full: false,
+        voxels: Voxels::Sparse(vec![(voxel_index(at) as u16, voxel)]),
+    };
+    apply_deltas(&mut app, vec![delta(1, WorldVoxel::Air)]);
+    settle(&mut app, "light to settle after the first delta");
+
+    // Stone and back to air in one frame: the commit changes no voxel, and
+    // moves the chunk's edit sequence from 1 to 3.
+    apply_deltas(
+        &mut app,
+        vec![
+            delta(2, WorldVoxel::Solid(STONE)),
+            delta(3, WorldVoxel::Air),
+        ],
+    );
+    settle(&mut app, "light to settle after the deltas");
+
+    let stamp = app
+        .world()
+        .resource::<VoxelEdits<LampWorld, u8>>()
+        .edit_stamp(IVec3::ZERO);
+    let held = app
+        .world()
+        .resource::<LightSettings<LampWorld>>()
+        .view
+        .read()
+        .get(&IVec3::ZERO)
+        .map(|chunk| chunk.edits);
+    assert_eq!(held, Some(stamp), "light holds the origin at an old stamp");
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        "after the deltas",
     );
 }
 

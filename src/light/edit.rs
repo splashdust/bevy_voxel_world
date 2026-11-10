@@ -44,12 +44,19 @@
 //! hint light ignores.
 //!
 //! A removed edit leaves the voxel the world generates there, which light
-//! looks up for a chunk that lost a few edits, so that, for instance, a
-//! cleared dig closes its columns at once. A chunk that lost more, as a clear
-//! or forget of a dense chunk does, has its removed voxels read as unset
-//! rather than make thousands of lookups on the main thread. Light can then
-//! be wrong about them only for a moment: such a chunk regenerates, and its
-//! chunk task works out its inputs and solves its light again.
+//! looks up for the chunks that lost a few edits, so that, for instance, a
+//! cleared dig closes its columns at once. A commit looks up a few hundred
+//! removed voxels at most, so the chunks past that, and any chunk that lost
+//! more, as a clear or forget of a dense chunk does, have their removed
+//! voxels read as unset rather than make thousands of lookups on the main
+//! thread. Light can then be wrong about them only for a moment: such a chunk
+//! regenerates, and its chunk task works out its inputs and solves its light
+//! again.
+//!
+//! A chunk whose edits were replaced relights whole, with the chunks within
+//! reach of the box around its changed voxels, rather than having each voxel
+//! checked against the light it held: a forget or clear can change every
+//! voxel of many chunks at once.
 //!
 //! An edit is worked out against what light held before the commit, at the
 //! stamp after it less the number of voxels the commit changed. A commit that
@@ -91,12 +98,13 @@ const CEILING_DEPTH: i32 = 64;
 /// How far from an edit, in voxels, chunks relight for sky fill.
 const FILL_RUN_REACH: i32 = 8;
 
-/// A chunk losing at most this many edits in a commit has the voxels left
-/// in their place looked up; past it, they read as unset.
+/// How many voxels whose edits were removed one commit looks up, in all. A
+/// chunk's removed voxels are looked up together while they fit in what is
+/// left; past it, they read as unset.
 ///
 /// The lookups run on the main thread, one per voxel, and a clear or forget
-/// of a whole chunk would make thousands of them.
-const LOOKED_UP_REMOVALS: usize = 64;
+/// of a whole chunk, or of many chunks, would make thousands of them.
+const LOOKED_UP_REMOVALS: usize = 256;
 
 /// The six steps to a voxel's face neighbours.
 const STEPS: [IVec3; 6] = [
@@ -126,11 +134,18 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     #[cfg(feature = "trace")]
     let _span = bevy::log::info_span!("relight_edits").entered();
-    let edited: Vec<IVec3> = requests
-        .edited
-        .iter()
-        .flat_map(|set| set.voxels.iter().map(|(position, _)| *position))
-        .collect();
+    // The new edit of each changed voxel, or `None` where its edit was
+    // removed. A voxel listed by more than one change set, as by a forget and
+    // then a commit, takes the last one's.
+    let mut changed: HashMap<IVec3, Option<WorldVoxel<C::MaterialIndex>>> =
+        HashMap::new();
+    for set in &requests.edited {
+        changed.extend(set.voxels.iter().copied());
+    }
+    let mut by_chunk: HashMap<IVec3, Vec<IVec3>> = HashMap::new();
+    for p in changed.keys() {
+        by_chunk.entry(chunk_containing(*p)).or_default().push(*p);
+    }
     // How far each edited chunk's edit stamp moved in this commit, or `None`
     // where the commit replaced the chunk's edits, so the stamp before it
     // can't be told and light takes the path for a chunk it has no inputs
@@ -150,29 +165,34 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let quiet = work.is_settled();
     let reader = edits.reader();
     // A removed edit leaves the voxel the world generates there, which only
-    // the world's voxel lookup knows. It is looked up for a chunk that lost
-    // at most `LOOKED_UP_REMOVALS` edits.
+    // the world's voxel lookup knows. A chunk's removed voxels are looked up
+    // while they fit in what is left of `LOOKED_UP_REMOVALS`.
     let mut generated = HashMap::new();
-    for set in &requests.edited {
-        let removed: Vec<_> = set
-            .voxels
+    let mut lookups_left = LOOKED_UP_REMOVALS;
+    for (position, voxels) in &by_chunk {
+        if lookups_left == 0 {
+            break;
+        }
+        let removed: Vec<IVec3> = voxels
             .iter()
-            .filter(|(p, voxel)| voxel.is_none() && reader.get(*p).is_none())
-            .take(LOOKED_UP_REMOVALS + 1)
+            .copied()
+            .filter(|p| changed[p].is_none())
+            .take(lookups_left + 1)
             .collect();
-        if removed.is_empty() || removed.len() > LOOKED_UP_REMOVALS {
+        if removed.is_empty() || removed.len() > lookups_left {
             continue;
         }
-        let mut lookup = (configuration.voxel_lookup_delegate())(set.chunk, 0, None);
-        for (p, _) in removed {
-            generated.insert(*p, lookup(*p, None));
+        lookups_left -= removed.len();
+        let mut lookup = (configuration.voxel_lookup_delegate())(*position, 0, None);
+        for p in removed {
+            generated.insert(p, lookup(p, None));
         }
     }
-    let voxel = |p: IVec3| {
-        reader
-            .get(p)
-            .or_else(|| generated.get(&p).copied())
-            .unwrap_or(WorldVoxel::Unset)
+    // The voxel at a changed position, from the change sets rather than the
+    // world's edits, so no lock is taken per voxel.
+    let voxel = |p: IVec3| match changed.get(&p) {
+        Some(Some(voxel)) => *voxel,
+        _ => generated.get(&p).copied().unwrap_or(WorldVoxel::Unset),
     };
     let emission = &settings.task.emission;
     let level_of = |voxel: WorldVoxel<C::MaterialIndex>| match voxel {
@@ -189,33 +209,55 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         .map_or(0, |scale| scale.reach())
         .max(settings.task.voxel_scale.reach()) as i32;
 
-    let mut by_chunk: HashMap<IVec3, Vec<IVec3>> = HashMap::new();
-    for p in &edited {
-        by_chunk.entry(chunk_containing(*p)).or_default().push(*p);
-    }
     let mut relight: HashSet<IVec3> = HashSet::new();
     let mut view = settings.view.write();
 
     // Which edits touch light, read before any input changes.
     let fill = settings.task.fill.is_some();
-    for p in &edited {
-        if quiet {
-            if touches_light(&view, *p, voxel(*p).is_solid()) {
-                relight.insert(chunk_containing(*p));
+    for (position, voxels) in &by_chunk {
+        // A chunk whose edits were replaced takes the path for a chunk light
+        // holds no inputs for, below. It relights whole, with the chunks
+        // within reach of the box around its changed voxels, rather than
+        // voxel by voxel: a clear or forget can change every voxel of it.
+        if moved[position].is_none() {
+            let (min, max) = voxels
+                .iter()
+                .fold((IVec3::MAX, IVec3::MIN), |(min, max), p| {
+                    (min.min(*p), max.max(*p))
+                });
+            if quiet {
+                relight.insert(*position);
+            } else {
+                relight.extend(within_reach_of_box(min, max, reach));
             }
-        } else {
-            relight.extend(within_reach(*p, reach));
+            if fill {
+                relight.extend(within_reach_of_box(min, max, FILL_RUN_REACH));
+            }
+            continue;
         }
-        // Sky fill's seeds run up to 7 voxels from their cell, so a change
-        // can move them in the chunks within 8 voxels.
-        if fill {
-            relight.extend(within_reach(*p, FILL_RUN_REACH));
+        for p in voxels {
+            if quiet {
+                if touches_light(&view, *p, voxel(*p).is_solid()) {
+                    relight.insert(*position);
+                }
+            } else {
+                relight.extend(within_reach(*p, reach));
+            }
+            // Sky fill's seeds run up to 7 voxels from their cell, so a
+            // change can move them in the chunks within 8 voxels.
+            if fill {
+                relight.extend(within_reach(*p, FILL_RUN_REACH));
+            }
         }
     }
 
     // A solid placed in the padding of a chunk of air makes it take sky fill.
     if fill {
-        for p in edited.iter().filter(|p| voxel(**p).is_solid()) {
+        for p in by_chunk
+            .values()
+            .flatten()
+            .filter(|p| voxel(**p).is_solid())
+        {
             let own = chunk_containing(*p);
             for position in within_reach(*p, 1).filter(|position| *position != own) {
                 let Some(chunk) = view.get_mut(&position) else {
@@ -272,10 +314,15 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             .get_mut(position)
             .filter(|chunk| Some(chunk.edits) == before);
         let Some(chunk) = chunk else {
-            // The chunk's next chunk task works out its inputs.
+            // The chunk's next chunk task works out its inputs. Each column
+            // holding a changed voxel is listed once.
+            let mut listed = [0u32; CHUNK];
             for p in voxels {
                 let local = local(*p);
-                columns.push((*position, local.x, local.z));
+                if listed[local.x] >> local.z & 1 == 0 {
+                    listed[local.x] |= 1 << local.z;
+                    columns.push((*position, local.x, local.z));
+                }
             }
             continue;
         };
@@ -333,6 +380,16 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     if let (Some(rule), Some(probes)) = (settings.sky_rule, probes.as_mut()) {
         columns.sort_by_key(|(position, x, z)| (position.to_array(), *x, *z));
         columns.dedup();
+        // The columns of each edited chunk holding a voxel the commit made
+        // solid, worked out once per chunk rather than once per column.
+        let mut placed_columns: HashMap<IVec3, Columns> = HashMap::new();
+        for (position, voxels) in &by_chunk {
+            let placed = placed_columns.entry(*position).or_insert([0; CHUNK]);
+            for p in voxels.iter().filter(|p| voxel(**p).is_solid()) {
+                let local = local(*p);
+                placed[local.x] |= 1 << local.z;
+            }
+        }
         let mut record = settings.record.lock().unwrap();
         let mut masks: HashMap<IVec3, Option<Columns>> = HashMap::new();
         let mut flips = Vec::new();
@@ -344,10 +401,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 sequence_before(*position)
                     .and_then(|before| record.get(*position, before))
             });
-            let placed = by_chunk[position].iter().any(|p| {
-                let local = local(*p);
-                (local.x, local.z) == (*x, *z) && voxel(*p).is_solid()
-            });
+            let placed = placed_columns[position][*x] >> *z & 1 == 1;
             // Whether the column holds a solid now, or `None` if nothing
             // tells: at an unloaded position the record doesn't hold, its
             // voxels are left for a sky probe to look up.
@@ -608,11 +662,22 @@ fn column_looked_up<C: VoxelWorldConfig>(
 /// The chunk positions whose light a change at the voxel `p` can reach: those
 /// whose box, `reach` past each face, holds it.
 fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> {
-    let chunk = chunk_containing(p);
-    let local = p - chunk * CHUNK_SIZE_I;
+    within_reach_of_box(p, p, reach)
+}
+
+/// The chunk positions whose light a change at any voxel of the box from
+/// `min` to `max` can reach: those whose box, `reach` past each face, holds a
+/// voxel of it. The box is within one chunk, both corners inclusive.
+fn within_reach_of_box(
+    min: IVec3,
+    max: IVec3,
+    reach: i32,
+) -> impl Iterator<Item = IVec3> {
+    let chunk = chunk_containing(min);
+    let (low, high) = (min - chunk * CHUNK_SIZE_I, max - chunk * CHUNK_SIZE_I);
     let range = move |axis: usize| {
-        let low = if local[axis] < reach { -1 } else { 0 };
-        let high = if local[axis] >= CHUNK_SIZE_I - reach {
+        let low = if low[axis] < reach { -1 } else { 0 };
+        let high = if high[axis] >= CHUNK_SIZE_I - reach {
             1
         } else {
             0

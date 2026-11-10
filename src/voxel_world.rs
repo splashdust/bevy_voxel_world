@@ -424,6 +424,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// Setting most of a chunk's voxels this way costs far less per voxel
     /// than calling `set_voxel` for each of them.
+    ///
+    /// The box is set chunk by chunk, and `voxel` may read this world's
+    /// voxels, such as through `get_voxel`. A system reading the world at the
+    /// same time can find part of the box set.
     pub fn set_voxels_in(
         &mut self,
         min: IVec3,
@@ -442,7 +446,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// The clear commits next `PreUpdate`, like a set. It removes the edits
     /// committed in the box and those set in it earlier this frame; voxels
     /// set after it in the same frame stay. Each chunk that loses an edit
-    /// moves its edit sequence on by the edits it lost, and reports its
+    /// moves its edit sequence on by the voxels its commit changed, the
+    /// edits it lost among them, and reports its
     /// [full delta](VoxelWorld::full_delta) in [`EditsCommitted`]: the edits
     /// it has left, none for a chunk cleared of all of them. Such a chunk
     /// stays in [`VoxelWorld::edited_chunks`], so the clear reaches worlds

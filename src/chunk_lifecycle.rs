@@ -11,7 +11,6 @@ use std::{
 };
 
 use bevy::{
-    math::I64Vec3,
     platform::collections::{HashMap, HashSet},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task},
@@ -19,17 +18,14 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{
-        chunk_containing, padding_depth, Chunk, ChunkKey, ChunkTask, LevelCounts,
-        CHUNK_SIZE_I,
-    },
+    chunk::{chunk_containing, padding_depth, Chunk, ChunkKey, ChunkTask, LevelCounts},
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::{FillHint, LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     pool_budget::{JobKind, PendingChunks, PoolBudget},
     prelude::default_chunk_meshing_delegate,
     streaming_policy::{CameraPosition, StartOrder},
-    voxel_edits::{chunks_including_box, ChangeSet, EditedBox, VoxelEdits},
+    voxel_edits::{chunks_including_box, ChangeSet, ChunkRange, EditedBox, VoxelEdits},
     voxel_world::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate, VoxelWorldCamera,
@@ -455,7 +451,13 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
     /// in the task that follows. It takes a shared borrow, so `VoxelWorld`
     /// can ask too; the next `apply_requests` picks the box up.
     pub(crate) fn regenerate(&self, min: IVec3, max: IVec3) {
-        self.regenerate.lock().unwrap().push(EditedBox { min, max });
+        self.regenerate_boxes([EditedBox { min, max }]);
+    }
+
+    /// Asks the chunks including a voxel of any of `boxes` to regenerate, as
+    /// [`regenerate`](Self::regenerate) does for one box.
+    pub(crate) fn regenerate_boxes(&self, boxes: impl IntoIterator<Item = EditedBox>) {
+        self.regenerate.lock().unwrap().extend(boxes);
     }
 }
 
@@ -500,22 +502,34 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
 
+        // The LOD levels with chunks, each with its padding depth, for the
+        // edits and regenerate requests, if there are any.
+        let asked = !requests.edited.is_empty()
+            || !requests.regenerate.get_mut().unwrap().is_empty();
+        let levels: Vec<(LodLevel, IVec3)> = index
+            .levels_in_use()
+            .filter(|_| asked)
+            .map(|lod_level| {
+                let shape = configuration.chunk_data_shape(lod_level);
+                (lod_level, padding_depth(shape, lod_level))
+            })
+            .collect();
         let mut stale: HashSet<ChunkKey> = HashSet::new();
-        if !requests.edited.is_empty() {
-            let levels: Vec<_> = index
-                .levels_in_use()
-                .map(|lod_level| {
-                    let shape = configuration.chunk_data_shape(lod_level);
-                    (lod_level, padding_depth(shape, lod_level))
-                })
-                .collect();
-            for set in requests.edited.drain(..) {
-                for voxels in set.stale_boxes() {
-                    for &(lod_level, padding) in &levels {
-                        stale.extend(chunks_including_box(
-                            voxels.min, voxels.max, lod_level, padding,
-                        ));
-                    }
+        for set in requests.edited.drain(..) {
+            // A set that changed no voxel moved only its chunk's edit
+            // sequence, as two applied deltas setting a voxel and back do.
+            // Light holds the chunk's inputs at the edit stamp it read them
+            // at, and treats them as stale once the stamp moves, so the
+            // level-0 chunk takes a new task, which reads them at the new one.
+            #[cfg(feature = "light_propagation")]
+            if set.voxels.is_empty() {
+                stale.insert(ChunkKey::new(set.chunk, 0));
+            }
+            for voxels in set.stale_boxes() {
+                for &(lod_level, padding) in &levels {
+                    stale.extend(chunks_including_box(
+                        voxels.min, voxels.max, lod_level, padding,
+                    ));
                 }
             }
         }
@@ -523,7 +537,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             requests,
             &mut index,
             &mut chunks,
-            &configuration,
+            &levels,
             &mut stale,
             ev_update,
         );
@@ -824,7 +838,7 @@ fn regenerate_requested<C: VoxelWorldConfig>(
     requests: &mut ChunkRequests<C>,
     index: &mut ChunkIndex<C>,
     chunks: &mut Query<&mut ChunkStateOf<C>>,
-    configuration: &C,
+    levels: &[(LodLevel, IVec3)],
     stale: &mut HashSet<ChunkKey>,
     ev_update: &mut MessageWriter<ChunkWillUpdate<C>>,
 ) {
@@ -832,35 +846,32 @@ fn regenerate_requested<C: VoxelWorldConfig>(
     if boxes.is_empty() {
         return;
     }
-    let levels: Vec<(LodLevel, IVec3)> = index
-        .levels_in_use()
-        .map(|lod_level| {
-            let shape = configuration.chunk_data_shape(lod_level);
-            (lod_level, padding_depth(shape, lod_level))
-        })
-        .collect();
-    let padding_at = |lod_level: LodLevel| {
-        levels
-            .iter()
-            .find(|(level, _)| *level == lod_level)
-            .map_or(IVec3::ZERO, |(_, padding)| *padding)
-    };
     let mut reached: HashSet<ChunkKey> = HashSet::new();
     for voxels in boxes {
+        let ranges: Vec<(LodLevel, ChunkRange)> = levels
+            .iter()
+            .map(|&(lod_level, padding)| {
+                let range =
+                    ChunkRange::including_box(voxels.min, voxels.max, lod_level, padding);
+                (lod_level, range)
+            })
+            .collect();
         // A box can reach far more chunk positions than there are chunks, as
         // one asking every chunk to regenerate does, so such a box is checked
         // against each chunk instead.
-        let positions = levels
+        let positions = ranges
             .iter()
-            .map(|&(lod_level, padding)| box_chunk_count(voxels, lod_level, padding))
+            .map(|(_, range)| range.chunk_count())
             .fold(0, i64::saturating_add);
         if positions > index.entities.len() as i64 {
             reached.extend(index.entities.keys().copied().filter(|key| {
-                padded_chunk_includes(*key, padding_at(key.lod_level), voxels)
+                ranges.iter().any(|(lod_level, range)| {
+                    *lod_level == key.lod_level && range.contains(*key)
+                })
             }));
             continue;
         }
-        for &(lod_level, padding) in &levels {
+        for &(lod_level, padding) in levels {
             reached.extend(
                 chunks_including_box(voxels.min, voxels.max, lod_level, padding)
                     .filter(|key| index.contains(*key)),
@@ -878,29 +889,6 @@ fn regenerate_requested<C: VoxelWorldConfig>(
             ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
         }
     }
-}
-
-/// Whether the voxels of the chunk `key`, with its padding `padding` deep,
-/// include a voxel of `voxels`. Sums are widened so none overflows.
-fn padded_chunk_includes(key: ChunkKey, padding: IVec3, voxels: EditedBox) -> bool {
-    let padding = padding.as_i64vec3();
-    let min = key.min_voxel().as_i64vec3() - padding;
-    let max = min + (key.voxel_extent() as i64 - 1) + 2 * padding;
-    min.cmple(voxels.max.as_i64vec3()).all() && max.cmpge(voxels.min.as_i64vec3()).all()
-}
-
-/// How many chunk positions at `lod_level` [`chunks_including_box`] visits
-/// for `voxels` with padding `padding` deep, saturating rather than
-/// overflowing.
-fn box_chunk_count(voxels: EditedBox, lod_level: LodLevel, padding: IVec3) -> i64 {
-    let extent = (CHUNK_SIZE_I as i64) << lod_level;
-    let padding = padding.as_i64vec3();
-    let low = (voxels.min.as_i64vec3() - padding - extent)
-        .div_euclid(I64Vec3::splat(extent))
-        + 1;
-    let high = (voxels.max.as_i64vec3() + padding).div_euclid(I64Vec3::splat(extent));
-    let size = (high - low + 1).max(I64Vec3::ZERO);
-    size.x.saturating_mul(size.y).saturating_mul(size.z)
 }
 
 /// The Pending chunks of the voxel world `C`, as the [`PoolBudget`] starts
