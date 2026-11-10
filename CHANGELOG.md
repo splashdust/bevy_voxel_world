@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Syncing and saving voxel edits
+
+- Add `EditDelta`, the voxel edits of one level-0 chunk that changed in one commit with the chunk's edit sequence after it, and `EditsCommitted<C>`, the message each commit writes per level-0 chunk whose edits changed. A server forwards these to clients; a single-player game reads them to learn what changed.
+
+- Add `VoxelWorld::apply_delta`, which applies another world's delta if it continues from the chunk's edit sequence and returns an `EditGap` if it doesn't, and `VoxelWorld::full_delta` and `VoxelWorld::edited_chunks`, which export a chunk's edits for a joining client or a save file. The `edits` module docs describe the continuation rule, the channel it assumes, and the gap, join and heartbeat flows a game builds on it.
+
+- Add `VoxelWorld::clear_voxels_in` and `VoxelWorld::clear_edits`, which remove edits so the generated voxels show again and reach other worlds as full deltas, and `VoxelWorld::forget_edits`, which drops every edit and edit sequence without telling anyone, before loading a save or joining a server again.
+
+- Add `VoxelWorld::regenerate_chunks`, which makes every spawned chunk look up its voxels again, for example after switching to a new seed. Chunks that showed a removed edit regenerate on their own.
+
+- Add the `serde` feature: `Serialize` and `Deserialize` on `WorldVoxel`, `EditDelta` and its voxel forms in `edits`, in any format. The layout carries no version; the `edits` module docs describe it.
+
+- Add `VoxelWorld::set_voxels_in`, which sets the voxels of a box from a closure, at far less cost per voxel than `set_voxel` when it covers most of a chunk. The `voxel_animation` example uses it.
+
+- Add the `multiplayer_loopback` example, a server and two clients in one app syncing edits over a fake network with faults on a key, and the `save_load` example, which saves edits and the seed to a file and loads them back. Both need the `serde` feature.
+
 ## 0.19.2
 
 Add `light_propagation` feature
