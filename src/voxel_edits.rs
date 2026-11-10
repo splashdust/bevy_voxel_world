@@ -355,8 +355,10 @@ pub(crate) struct ChangeSet<I> {
     /// Whether the edit sequence before the commit can't be worked out from
     /// the one after it and the voxels' count. That is so where the commit
     /// replaced the chunk's edits rather than changing some of them, and
-    /// where voxels set before an applied edit delta committed with it. The
-    /// chunk's message then carries its full delta.
+    /// where an applied edit delta's sequence doesn't match the voxels that
+    /// changed: voxels set before the delta committed with it, or the delta
+    /// set voxels to the edits already committed. The chunk's message then
+    /// carries its full delta.
     pub replaced: bool,
     /// The chunk's edit sequence after the commit.
     pub seq: u64,
@@ -751,9 +753,11 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             sets.push(ChangeSet {
                 chunk,
                 // Local sets before an applied delta count towards its
-                // voxels but not its sequence, so the sequence before can't
-                // be worked out from the voxels.
-                replaced: pending_bucket.replaced || seq < counted,
+                // voxels but not its sequence, and a delta's voxels equal to
+                // the committed edits count towards its sequence but not its
+                // voxels. Either way the sequence before can't be worked out
+                // from the voxels.
+                replaced: pending_bucket.replaced || seq != counted,
                 seq,
                 voxels: changes,
             });

@@ -283,6 +283,39 @@ fn two_deltas_for_one_chunk_in_one_frame_are_not_a_gap() {
 }
 
 #[test]
+fn deltas_setting_a_voxel_and_back_in_one_frame_report_a_delta_that_continues() {
+    let mut app = sync_app();
+    let position = IVec3::new(1, 1, 1);
+    let first = send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Solid(1));
+    });
+    assert_eq!(apply(&mut app, first), vec![Ok(())]);
+    app.update();
+    take_committed::<Receiver>(&mut app);
+    let mut there_and_back = send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Solid(2));
+    });
+    there_and_back.extend(send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Solid(1));
+    }));
+
+    assert_eq!(apply(&mut app, there_and_back), vec![Ok(()), Ok(())]);
+    app.update();
+
+    // The receiver's voxel ends where it was, but its sequence moved from 1
+    // to 3, so a world it forwards to must be able to follow.
+    let committed = take_committed::<Receiver>(&mut app);
+    assert_eq!(committed.len(), 1);
+    let delta = &committed[0];
+    assert_eq!(delta.seq, 3);
+    assert!(
+        delta.full || delta.seq - delta.len() as u64 == 1,
+        "{delta:?} doesn't continue from sequence 1"
+    );
+    assert_eq!(get_voxel::<Receiver>(&mut app, position), WorldVoxel::Solid(1));
+}
+
+#[test]
 fn a_full_delta_replaces_the_edits_and_sets_before_it_but_not_after() {
     let mut app = sync_app();
     update_until(&mut app, "the receiver's origin chunk to be ready", |app| {
