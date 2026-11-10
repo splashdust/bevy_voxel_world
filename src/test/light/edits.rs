@@ -309,15 +309,15 @@ fn edits_to_remove() -> Vec<(IVec3, WorldVoxel)> {
     edits
 }
 
-/// Streams [`cavern`], sets [`edits_to_remove`], then runs `remove` and
-/// checks that light settles back on the unedited cavern.
+/// Streams [`cavern`], sets `edits`, then runs `remove` and checks that
+/// light settles back on the unedited cavern.
 fn remove_edits(
     what: &str,
+    edits: Vec<(IVec3, WorldVoxel)>,
     remove: impl FnMut(VoxelWorld<LampWorld>) + Send + Sync + 'static,
 ) {
     let mut app = app(world());
     settle(&mut app, "the world to stream in");
-    let edits = edits_to_remove();
     set_voxels(&mut app, &edits);
     settle(&mut app, "light to settle after the edits");
     let after = reference(&[IVec3::ZERO], edited(&edits));
@@ -335,15 +335,33 @@ fn remove_edits(
 
 #[test]
 fn clearing_edits_matches_the_reference() {
-    remove_edits("clearing the edits", |mut voxel_world| {
+    remove_edits("clearing the edits", edits_to_remove(), |mut voxel_world| {
         voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(64));
     });
 }
 
 #[test]
 fn forgetting_edits_matches_the_reference() {
-    remove_edits("forgetting the edits", |mut voxel_world| {
+    remove_edits("forgetting the edits", edits_to_remove(), |mut voxel_world| {
         voxel_world.forget_edits();
+    });
+}
+
+#[test]
+fn clearing_a_block_of_thousands_of_edits_matches_the_reference() {
+    // Stone filling the cavern from the floor up 8 voxels, over 24 x 16
+    // voxels of the origin chunk, and the floor lamp put out.
+    let (min, max) = (IVec3::new(0, 4, 0), IVec3::new(24, 12, 16));
+    let mut edits: Vec<_> = (min.z..max.z)
+        .flat_map(|z| {
+            (min.y..max.y)
+                .flat_map(move |y| (min.x..max.x).map(move |x| place(IVec3::new(x, y, z))))
+        })
+        .collect();
+    edits.push(place(FLOOR_LAMP));
+    remove_edits("clearing the block", edits, move |mut voxel_world| {
+        voxel_world.clear_voxels_in(min, max);
+        voxel_world.clear_voxels_in(FLOOR_LAMP, FLOOR_LAMP + 1);
     });
 }
 

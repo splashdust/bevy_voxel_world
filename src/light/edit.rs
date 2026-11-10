@@ -43,6 +43,14 @@
 //! [`VoxelEdits::stamp_has_edits`], tells a position with edits, whose fill
 //! hint light ignores.
 //!
+//! A removed edit leaves the voxel the world generates there, which light
+//! looks up for a chunk that lost a few edits, so that, for instance, a
+//! cleared dig closes its columns at once. A chunk that lost more, as a clear
+//! or forget of a dense chunk does, has its removed voxels read as unset
+//! rather than make thousands of lookups on the main thread. Light can then
+//! be wrong about them only for a moment: such a chunk regenerates, and its
+//! chunk task works out its inputs and solves its light again.
+//!
 //! An edit is worked out against what light held before the commit, at the
 //! stamp after it less the number of voxels the commit changed. A commit that
 //! replaced a chunk's edits, a clear, a forget or an applied full delta,
@@ -82,6 +90,13 @@ const CEILING_DEPTH: i32 = 64;
 
 /// How far from an edit, in voxels, chunks relight for sky fill.
 const FILL_RUN_REACH: i32 = 8;
+
+/// A chunk losing at most this many edits in a commit has the voxels left
+/// in their place looked up; past it, they read as unset.
+///
+/// The lookups run on the main thread, one per voxel, and a clear or forget
+/// of a whole chunk would make thousands of them.
+const LOOKED_UP_REMOVALS: usize = 64;
 
 /// The six steps to a voxel's face neighbours.
 const STEPS: [IVec3; 6] = [
@@ -135,15 +150,17 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let quiet = work.is_settled();
     let reader = edits.reader();
     // A removed edit leaves the voxel the world generates there, which only
-    // the world's voxel lookup knows.
+    // the world's voxel lookup knows. It is looked up for a chunk that lost
+    // at most `LOOKED_UP_REMOVALS` edits.
     let mut generated = HashMap::new();
     for set in &requests.edited {
-        let mut removed = set
+        let removed: Vec<_> = set
             .voxels
             .iter()
             .filter(|(p, voxel)| voxel.is_none() && reader.get(*p).is_none())
-            .peekable();
-        if removed.peek().is_none() {
+            .take(LOOKED_UP_REMOVALS + 1)
+            .collect();
+        if removed.is_empty() || removed.len() > LOOKED_UP_REMOVALS {
             continue;
         }
         let mut lookup = (configuration.voxel_lookup_delegate())(set.chunk, 0, None);
