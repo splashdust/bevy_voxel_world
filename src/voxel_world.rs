@@ -403,8 +403,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         self.reset_light();
     }
 
-    /// Set the voxel at the given position. It replaces the generated voxel there for
-    /// as long as the world exists, and `get_voxel` returns it right away. Setting a
+    /// Set the voxel at the given position. It replaces the generated voxel there
+    /// until it is cleared or forgotten, and `get_voxel` returns it right away. Setting a
     /// voxel doesn't spawn a chunk: a spawned chunk that contains it remeshes to show
     /// it, and a chunk spawned later shows it from the start. When the same position
     /// is set more than once, the last voxel set wins.
@@ -431,6 +431,65 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         voxel: impl FnMut(IVec3) -> Option<WorldVoxel<C::MaterialIndex>>,
     ) {
         self.voxel_edits.set_region(min, max, voxel);
+    }
+
+    /// Clears the voxel edits in the box from `min` inclusive to `max`
+    /// exclusive, so its voxels show what the world generates there again.
+    /// A box that is empty or inverted along any axis clears nothing. Clear
+    /// a chunk by passing its extent as the box, and one voxel with a box
+    /// one voxel wide.
+    ///
+    /// The clear commits next `PreUpdate`, like a set. It removes the edits
+    /// committed in the box and those set in it earlier this frame; voxels
+    /// set after it in the same frame stay. Each chunk that loses an edit
+    /// moves its edit sequence on by the edits it lost, and reports its
+    /// [full delta](VoxelWorld::full_delta) in [`EditsCommitted`]: the edits
+    /// it has left, none for a chunk cleared of all of them. Such a chunk
+    /// stays in [`VoxelWorld::edited_chunks`], so the clear reaches worlds
+    /// that join or load later.
+    ///
+    /// A cleared voxel reads the voxel its chunk last published until the
+    /// chunk regenerates, since the voxel world can't run the world's
+    /// generator for one voxel. A set voxel reads back at once; a cleared one
+    /// does not. Chunks that showed a removed edit regenerate, and
+    /// [`ChunkPublished`] says when one has.
+    ///
+    /// A clear removes edits in front of the player, and other worlds see it.
+    /// A world receiving another world's edits never clears to catch up
+    /// with it, since that moves its sequences past the sender's, and the
+    /// sender's next deltas are then skipped as already applied: it forgets
+    /// with [`VoxelWorld::forget_edits`] instead.
+    ///
+    /// [`EditsCommitted`]: crate::prelude::EditsCommitted
+    pub fn clear_voxels_in(&mut self, min: IVec3, max: IVec3) {
+        self.voxel_edits.clear_region(min, max);
+    }
+
+    /// Clears every voxel edit in the world, as
+    /// [`VoxelWorld::clear_voxels_in`] does for a box: each edited chunk
+    /// reports an empty full delta and regenerates.
+    pub fn clear_edits(&mut self) {
+        self.voxel_edits.clear_all();
+    }
+
+    /// Forgets every voxel edit and every chunk's edit sequence, at once:
+    /// edits set this frame go too, and [`VoxelWorld::edited_chunks`] is
+    /// empty right after. Chunks that showed an edit regenerate. Nothing is
+    /// reported in `EditsCommitted`, so no other world hears of it.
+    ///
+    /// Forget makes room for another world's edits: before loading a save,
+    /// before joining a server again, or before switching to a new seed. A
+    /// chunk with no sequence takes the next full delta it is given, and
+    /// reads the next incremental one as a gap, so the other world's edits
+    /// arrive whole. Loading a save into a world that has edits is forget,
+    /// then [`VoxelWorld::apply_delta`] of each saved full delta: the saved
+    /// sequences become the world's. Clearing first instead would leave
+    /// sequences newer than the saved ones, which would then be skipped.
+    ///
+    /// To remove edits in front of the player, so other worlds see them go,
+    /// use [`VoxelWorld::clear_voxels_in`] or [`VoxelWorld::clear_edits`].
+    pub fn forget_edits(&mut self) {
+        self.voxel_edits.forget();
     }
 
     /// Applies an edit delta from another world, if it continues from the

@@ -100,13 +100,35 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             .map(|n| n + set.voxels.len() as u64);
     }
     let sequence_before =
-        |position: IVec3| moved[&position].map(|n| edits.edit_sequence(position) - n);
+        |position: IVec3| moved[&position].map(|n| edits.edit_stamp(position) - n);
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
     settings.walks.lock().unwrap().clear();
     let quiet = work.is_settled();
     let reader = edits.reader();
-    let voxel = |p: IVec3| reader.get(p).unwrap_or(WorldVoxel::Unset);
+    // A removed edit leaves the voxel the world generates there, which only
+    // the world's voxel lookup knows.
+    let mut generated = HashMap::new();
+    for set in &requests.edited {
+        let mut removed = set
+            .voxels
+            .iter()
+            .filter(|(p, voxel)| voxel.is_none() && reader.get(*p).is_none())
+            .peekable();
+        if removed.peek().is_none() {
+            continue;
+        }
+        let mut lookup = (configuration.voxel_lookup_delegate())(set.chunk, 0, None);
+        for (p, _) in removed {
+            generated.insert(*p, lookup(*p, None));
+        }
+    }
+    let voxel = |p: IVec3| {
+        reader
+            .get(p)
+            .or_else(|| generated.get(&p).copied())
+            .unwrap_or(WorldVoxel::Unset)
+    };
     let emission = &settings.task.emission;
     let level_of = |voxel: WorldVoxel<C::MaterialIndex>| match voxel {
         WorldVoxel::Solid(material) => emission
@@ -180,7 +202,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let mut columns: Vec<(IVec3, usize, usize)> = Vec::new();
     let mut old_occupancy = HashMap::new();
     for (position, voxels) in &by_chunk {
-        let count = edits.edit_sequence(*position);
+        let count = edits.edit_stamp(*position);
         let before = sequence_before(*position);
         if view.is_air(*position) {
             // Hinted air's voxels are its hint with the edits over them.
@@ -312,7 +334,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             }
         }
         for (position, mask) in &masks {
-            let count = edits.edit_sequence(*position);
+            let count = edits.edit_stamp(*position);
             if current.contains(position) {
                 let occupancy = &view.inputs(*position).unwrap().occupancy;
                 let open = record.keeps_cells().then(|| open_cells(occupancy));
@@ -342,7 +364,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         drop(record);
 
         let status = |view: &View, above: IVec3, x: usize, z: usize| -> Option<bool> {
-            let count = edits.edit_sequence(above);
+            let count = edits.edit_stamp(above);
             if let Some(chunk) = view.get(&above).filter(|chunk| chunk.edits == count) {
                 return Some(column_blocked_in(&chunk.light.inputs, x, z));
             }

@@ -265,7 +265,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             });
         }
 
-        if fresh && edits.edit_sequence(position) == found.own_edits {
+        if fresh && edits.edit_stamp(position) == found.own_edits {
             let mask = inputs.occupancy.solid_columns();
             let open = record.keeps_cells().then(|| open_cells(&inputs.occupancy));
             record.insert(position, &mask, open, found.own_edits);
@@ -566,7 +566,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                     .probe_lookups
                     .fetch_add(read.lookups, Ordering::Relaxed);
                 if probe.generation != record.generation()
-                    || edits.edit_sequence(probe.position) != probe.edits
+                    || edits.edit_stamp(probe.position) != probe.edits
                 {
                     counters.probes_discarded.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -648,7 +648,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             probes.probing.insert(position);
             probes.running.push(Probe {
                 position,
-                edits: edits.edit_sequence(position),
+                edits: edits.edit_stamp(position),
                 generation,
                 task,
             });
@@ -717,7 +717,7 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
                 *position,
                 &occupancy.solid_columns(),
                 open,
-                edits.edit_sequence(*position),
+                edits.edit_stamp(*position),
             );
         }
         view.iter()
@@ -761,7 +761,7 @@ fn edit_counts<C, I: Copy + PartialEq>(
     count: usize,
 ) -> Vec<u64> {
     (1..=count as i32)
-        .map(|y| edits.edit_sequence(position + IVec3::Y * y))
+        .map(|y| edits.edit_stamp(position + IVec3::Y * y))
         .collect()
 }
 

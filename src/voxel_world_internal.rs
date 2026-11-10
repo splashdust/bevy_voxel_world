@@ -189,7 +189,8 @@ where
     ///
     /// A chunk whose edits were replaced reports its full delta, and the
     /// chunks showing an edit that was removed regenerate, since their
-    /// published voxels have it baked in.
+    /// published voxels have it baked in. Edits forgotten since the last
+    /// frame make their chunks regenerate too, with no message.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -205,11 +206,15 @@ where
                 EditDelta::from_change_set(set)
             },
         }));
-        for set in sets.iter().filter(|set| set.replaced) {
+        // Forgotten edits change chunks as removed edits do, but no other
+        // world hears of them.
+        let forgotten = voxel_edits.take_forgotten();
+        for set in sets.iter().chain(&forgotten).filter(|set| set.replaced) {
             if let Some((min, max)) = set.removed_box() {
                 requests.regenerate(min, max);
             }
         }
+        requests.edited.extend(forgotten);
         requests.edited.extend(sets);
     }
 

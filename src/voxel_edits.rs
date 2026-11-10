@@ -1,4 +1,4 @@
-//! Every voxel edit of a voxel world, kept for as long as the world exists,
+//! Every voxel edit of a voxel world, kept until it is cleared or forgotten,
 //! and which chunks each voxel edit makes stale.
 //!
 //! Voxel edits can be set from systems running in parallel, and are committed
@@ -24,6 +24,13 @@
 //! sequence rather than count towards it. A full delta marks the chunk's
 //! pending bucket replaced: the commit then drops the chunk's committed edits
 //! that the bucket lacks, and reports them as removed.
+//!
+//! A clear takes the same path. It marks the pending bucket of each chunk it
+//! reaches replaced, filled with the chunk's committed edits under those set
+//! earlier in the frame, less the edits in its box. Forgetting is immediate
+//! instead: it drops every bucket with its edit sequence, and hands the
+//! removed edits to the next commit apart from its change sets, since no
+//! other world hears of them.
 
 use std::{
     marker::PhantomData,
@@ -177,6 +184,82 @@ impl<I: Copy + PartialEq> Bucket<I> {
         }
     }
 
+    /// Whether the bucket holds an edit in the box from `min` to `max`, both
+    /// inclusive and within the bucket's chunk.
+    fn any_within(&self, min: IVec3, max: IVec3) -> bool {
+        match &self.store {
+            Store::Sparse(voxels) => voxels
+                .keys()
+                .any(|position| position.cmpge(min).all() && position.cmple(max).all()),
+            Store::Dense { count: 0, .. } => false,
+            Store::Dense { .. } => {
+                box_positions(min, max).any(|position| self.get(position).is_some())
+            }
+        }
+    }
+
+    /// Removes every edit in the box from `min` to `max`, both inclusive and
+    /// within the bucket's chunk. Returns how many it removed.
+    fn remove_within(&mut self, min: IVec3, max: IVec3) -> u64 {
+        let chunk_max = self.min + CHUNK_SIZE_I - 1;
+        if min == self.min && max == chunk_max {
+            let count = match &self.store {
+                Store::Sparse(voxels) => voxels.len(),
+                Store::Dense { count, .. } => *count,
+            };
+            self.clear();
+            return count as u64;
+        }
+        let bucket_min = self.min;
+        match &mut self.store {
+            Store::Sparse(voxels) => {
+                let before = voxels.len();
+                voxels.retain(|position, _| {
+                    !(position.cmpge(min).all() && position.cmple(max).all())
+                });
+                (before - voxels.len()) as u64
+            }
+            Store::Dense { voxels, count } => {
+                let mut removed = 0;
+                for position in box_positions(min, max) {
+                    if voxels[voxel_index(position - bucket_min)].take().is_some() {
+                        removed += 1;
+                    }
+                }
+                *count -= removed;
+                removed as u64
+            }
+        }
+    }
+
+    /// Clears the edits in the box from `min` to `max`, both inclusive and
+    /// within the bucket's chunk, from this pending bucket. `committed` is the
+    /// chunk's committed bucket, if it has one. Called only where one of the
+    /// two holds an edit in the box.
+    ///
+    /// The bucket becomes replaced, holding the committed edits under those
+    /// set earlier this frame, so the commit drops the edits in the box from
+    /// both. Voxels set after the clear go over it as usual.
+    fn clear_within(&mut self, committed: Option<&Bucket<I>>, min: IVec3, max: IVec3) {
+        if !self.replaced {
+            let committed_store = committed.map_or_else(
+                || Store::Sparse(Voxels::default()),
+                |committed| committed.store.clone(),
+            );
+            let earlier = std::mem::replace(&mut self.store, committed_store);
+            self.replaced = true;
+            let earlier = Bucket {
+                store: earlier,
+                ..Bucket::new(chunk_containing(self.min))
+            };
+            for (position, voxel) in earlier.iter() {
+                self.insert(position, voxel);
+            }
+        }
+        let removed = self.remove_within(min, max);
+        self.count_sets(removed);
+    }
+
     /// Turns a sparse bucket dense, for a region write that will fill it.
     pub fn make_dense(&mut self) {
         if let Store::Sparse(sparse) = &self.store {
@@ -246,6 +329,14 @@ impl<I: Copy + PartialEq> Bucket<I> {
         changes.extend(self.changes_from(pending));
         changes
     }
+}
+
+/// Every position in the box from `min` to `max`, both inclusive.
+fn box_positions(min: IVec3, max: IVec3) -> impl Iterator<Item = IVec3> {
+    (min.z..=max.z).flat_map(move |z| {
+        (min.y..=max.y)
+            .flat_map(move |y| (min.x..=max.x).map(move |x| IVec3::new(x, y, z)))
+    })
 }
 
 /// The edited voxels of one chunk, shared with the chunk tasks that read them.
@@ -344,6 +435,12 @@ pub struct VoxelEdits<C, I> {
     /// when an edit is set while a reader holds it.
     pending: Mutex<Arc<BucketMap<I>>>,
     committed: Committed<I>,
+    /// A change set for each chunk whose edits were forgotten since the last
+    /// commit, every edit it held removed.
+    forgotten: Mutex<Vec<ChangeSet<I>>>,
+    /// For each chunk position whose edits were ever forgotten, how far its
+    /// [`edit_stamp`](Self::edit_stamp) runs ahead of its edit sequence.
+    stamp_offsets: RwLock<HashMap<IVec3, u64>>,
     _marker: PhantomData<C>,
 }
 
@@ -352,6 +449,8 @@ impl<C, I> Default for VoxelEdits<C, I> {
         Self {
             pending: Mutex::default(),
             committed: Arc::default(),
+            forgotten: Mutex::default(),
+            stamp_offsets: RwLock::default(),
             _marker: PhantomData,
         }
     }
@@ -407,6 +506,110 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                 }
             }
         }
+    }
+
+    /// Clears the edits in the box from `min` inclusive to `max` exclusive:
+    /// the next commit removes the committed ones and those set earlier this
+    /// frame. A box that is empty or inverted along any axis clears nothing.
+    pub(crate) fn clear_region(&self, min: IVec3, max: IVec3) {
+        if (max - min).cmple(IVec3::ZERO).any() {
+            return;
+        }
+        let max = max - 1;
+        let (chunk_min, chunk_max) = (chunk_containing(min), chunk_containing(max));
+        self.clear_chunks(
+            |chunk| chunk.cmpge(chunk_min).all() && chunk.cmple(chunk_max).all(),
+            |chunk| {
+                let chunk_min = chunk * CHUNK_SIZE_I;
+                (chunk_min.max(min), (chunk_min + CHUNK_SIZE_I - 1).min(max))
+            },
+        );
+    }
+
+    /// Clears every edit: the next commit removes them all.
+    pub(crate) fn clear_all(&self) {
+        self.clear_chunks(
+            |_| true,
+            |chunk| {
+                let chunk_min = chunk * CHUNK_SIZE_I;
+                (chunk_min, chunk_min + CHUNK_SIZE_I - 1)
+            },
+        );
+    }
+
+    /// Clears the edits of each chunk holding pending or committed edits
+    /// that `reached` accepts, within the box `within` gives for it, both
+    /// corners inclusive.
+    fn clear_chunks(
+        &self,
+        reached: impl Fn(IVec3) -> bool,
+        within: impl Fn(IVec3) -> (IVec3, IVec3),
+    ) {
+        let mut pending = self.pending.lock().unwrap();
+        let committed = self.committed.read().unwrap();
+        let holds = |bucket: Option<&EditBucket<I>>, (min, max)| {
+            bucket.is_some_and(|bucket| bucket.any_within(min, max))
+        };
+        let mut chunks: Vec<IVec3> = committed
+            .keys()
+            .chain(pending.keys())
+            .copied()
+            .filter(|chunk| reached(*chunk))
+            .filter(|chunk| {
+                holds(committed.get(chunk), within(*chunk))
+                    || holds(pending.get(chunk), within(*chunk))
+            })
+            .collect();
+        if chunks.is_empty() {
+            return;
+        }
+        chunks.sort_unstable_by_key(|chunk| chunk.to_array());
+        chunks.dedup();
+        let map = Arc::make_mut(&mut pending);
+        for chunk in chunks {
+            let (min, max) = within(chunk);
+            bucket_mut(map, chunk).clear_within(
+                committed.get(&chunk).map(|b| &**b),
+                min,
+                max,
+            );
+        }
+    }
+
+    /// Drops every edit and every edit sequence at once, pending edits
+    /// included. The next commit hands the removed edits to
+    /// [`take_forgotten`](Self::take_forgotten) rather than reporting them.
+    pub(crate) fn forget(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        match Arc::get_mut(&mut pending) {
+            Some(map) => map.clear(),
+            None => *pending = Arc::default(),
+        }
+        let mut buckets = self.committed.write().unwrap();
+        if buckets.is_empty() {
+            return;
+        }
+        let mut offsets = self.stamp_offsets.write().unwrap();
+        let mut forgotten = self.forgotten.lock().unwrap();
+        for (chunk, bucket) in buckets.drain() {
+            let offset = offsets.entry(chunk).or_default();
+            *offset += bucket.seq + 1;
+            forgotten.push(ChangeSet {
+                chunk,
+                replaced: true,
+                seq: 0,
+                voxels: bucket
+                    .iter()
+                    .map(|(position, _)| (position, None))
+                    .collect(),
+            });
+        }
+    }
+
+    /// A change set for each chunk whose edits were forgotten since this was
+    /// last called, with every edit it held removed.
+    pub(crate) fn take_forgotten(&self) -> Vec<ChangeSet<I>> {
+        std::mem::take(&mut self.forgotten.lock().unwrap())
     }
 
     /// Applies `delta` if it continues from the edit sequence its chunk
@@ -612,14 +815,36 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     }
 
     /// The edit sequence of the level-0 chunk at `position`: 0 for a chunk
-    /// with no edits. Work that reads the chunk's voxels notes it when it
-    /// starts, and its result is stale if the sequence has moved since.
+    /// with no edits.
     pub(crate) fn edit_sequence(&self, position: IVec3) -> u64 {
         let buckets = self.committed.read().unwrap();
         if buckets.is_empty() {
             return 0;
         }
         buckets.get(&position).map_or(0, |bucket| bucket.seq)
+    }
+
+    /// A stamp of the voxel edits of the level-0 chunk at `position`. Work
+    /// that reads the chunk's voxels notes it when it starts, and its result
+    /// is stale if the stamp has moved since. A later stamp is larger.
+    ///
+    /// It is the chunk's edit sequence, plus an offset that grows each time
+    /// the chunk's edits are forgotten. Forgetting sets the sequence back to
+    /// 0, and the offset keeps the stamp from ever going back to a value it
+    /// had, when the chunk's edits may have been different.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn edit_stamp(&self, position: IVec3) -> u64 {
+        let buckets = self.committed.read().unwrap();
+        let offsets = self.stamp_offsets.read().unwrap();
+        let offset = if offsets.is_empty() {
+            0
+        } else {
+            offsets.get(&position).copied().unwrap_or(0)
+        };
+        if buckets.is_empty() {
+            return offset;
+        }
+        offset + buckets.get(&position).map_or(0, |bucket| bucket.seq)
     }
 
     /// Whether edits have been set since the last commit.
@@ -734,8 +959,14 @@ pub(crate) struct VoxelEditReader<I> {
 impl<I: Copy + PartialEq> VoxelEditReader<I> {
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
         let chunk = chunk_containing(position);
-        if let Some(voxel) = self.pending.get(&chunk).and_then(|b| b.get(position)) {
-            return Some(voxel);
+        if let Some(bucket) = self.pending.get(&chunk) {
+            if let Some(voxel) = bucket.get(position) {
+                return Some(voxel);
+            }
+            // The commit replaces the committed edits with this bucket's.
+            if bucket.replaced {
+                return None;
+            }
         }
         let buckets = self.committed.read().unwrap();
         buckets.get(&chunk)?.get(position)
@@ -880,6 +1111,87 @@ mod tests {
         );
         assert_eq!(sets[0].removed_box(), Some((removed, removed)));
         assert_eq!(edits.reader().get(removed), None);
+    }
+
+    #[test]
+    fn a_clear_commits_as_replaced_with_the_edits_it_removed() {
+        let edits = Edits::default();
+        let (inside, outside) = (IVec3::new(1, 1, 1), IVec3::new(9, 1, 1));
+        edits.set(inside, WorldVoxel::Solid(1));
+        edits.set(outside, WorldVoxel::Solid(1));
+        edits.commit();
+
+        edits.clear_region(IVec3::ZERO, IVec3::splat(4));
+        // The cleared edit is gone from the reader before the commit too.
+        assert_eq!(edits.reader().get(inside), None);
+        let sets = edits.commit();
+
+        assert_eq!(
+            sets,
+            vec![ChangeSet {
+                chunk: IVec3::ZERO,
+                replaced: true,
+                seq: 3,
+                voxels: vec![(inside, None)],
+            }]
+        );
+        assert_eq!(edits.reader().get(outside), Some(WorldVoxel::Solid(1)));
+    }
+
+    #[test]
+    fn a_clear_in_a_dense_bucket_removes_only_the_edits_in_its_box() {
+        let edits = Edits::default();
+        let full = IVec3::splat(CHUNK_SIZE_I);
+        edits.set_region(IVec3::ZERO, full, |_| Some(WorldVoxel::Solid(1)));
+        edits.commit();
+
+        edits.clear_region(IVec3::new(0, 0, 0), IVec3::new(2, 1, 1));
+        let sets = edits.commit();
+
+        assert_eq!(changed_voxels(&sets), vec![IVec3::ZERO, IVec3::X]);
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), CHUNK_VOXELS as u64 + 2);
+        assert_eq!(edits.full_delta(IVec3::ZERO).len(), CHUNK_VOXELS - 2);
+    }
+
+    #[test]
+    fn forgetting_hands_on_every_edit_removed_and_reports_none() {
+        let edits = Edits::default();
+        edits.set(IVec3::ONE, WorldVoxel::Solid(1));
+        edits.commit();
+        edits.set(IVec3::splat(2), WorldVoxel::Solid(1));
+
+        edits.forget();
+
+        assert!(edits.commit().is_empty());
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 0);
+        assert_eq!(edits.reader().get(IVec3::splat(2)), None);
+        assert_eq!(
+            edits.take_forgotten(),
+            vec![ChangeSet {
+                chunk: IVec3::ZERO,
+                replaced: true,
+                seq: 0,
+                voxels: vec![(IVec3::ONE, None)],
+            }]
+        );
+        assert!(edits.take_forgotten().is_empty());
+    }
+
+    #[cfg(feature = "light_propagation")]
+    #[test]
+    fn a_forgotten_chunks_edit_stamp_never_returns_to_a_value_it_had() {
+        let edits = Edits::default();
+        edits.set(IVec3::ONE, WorldVoxel::Solid(1));
+        edits.commit();
+        let before = edits.edit_stamp(IVec3::ZERO);
+
+        edits.forget();
+        assert!(edits.edit_stamp(IVec3::ZERO) > before);
+        edits.set(IVec3::ONE, WorldVoxel::Solid(2));
+        edits.commit();
+        assert_eq!(edits.edit_sequence(IVec3::ZERO), 1);
+        assert!(edits.edit_stamp(IVec3::ZERO) > before + 1);
+        assert_eq!(edits.edit_stamp(IVec3::X), 0);
     }
 
     #[test]

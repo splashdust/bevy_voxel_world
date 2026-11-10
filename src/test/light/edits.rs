@@ -294,6 +294,59 @@ fn a_regenerated_chunk_is_solved_again_and_matches_the_reference() {
     assert_matches(&mut app, &[IVec3::ZERO], &after, "after regenerating");
 }
 
+/// Edits across the origin chunk and the chunk above it: a placed stone and
+/// a dug floor where light is, a torch, the floor lamp turned to stone, and
+/// the shaft capped, and a second shaft dug through the roof.
+fn edits_to_remove() -> Vec<(IVec3, WorldVoxel)> {
+    let mut edits = vec![
+        place(IVec3::new(2, 10, 3)),
+        dig(IVec3::new(14, 3, 12)),
+        (IVec3::new(16, 10, 28), WorldVoxel::Solid(LAMP)),
+        place(FLOOR_LAMP),
+        place(IVec3::new(8, 39, 8)),
+    ];
+    edits.extend((16..40).map(|y| dig(IVec3::new(-4, y, -4))));
+    edits
+}
+
+/// Streams [`cavern`], sets [`edits_to_remove`], then runs `remove` and
+/// checks that light settles back on the unedited cavern.
+fn remove_edits(
+    what: &str,
+    remove: impl FnMut(VoxelWorld<LampWorld>) + Send + Sync + 'static,
+) {
+    let mut app = app(world());
+    settle(&mut app, "the world to stream in");
+    let edits = edits_to_remove();
+    set_voxels(&mut app, &edits);
+    settle(&mut app, "light to settle after the edits");
+    let after = reference(&[IVec3::ZERO], edited(&edits));
+    assert_matches(&mut app, &[IVec3::ZERO], &after, "after the edits");
+
+    app.world_mut().run_system_once(remove).unwrap();
+    settle(&mut app, &format!("light to settle after {what}"));
+    assert_matches(
+        &mut app,
+        &[IVec3::ZERO],
+        origin_reference(),
+        &format!("after {what}"),
+    );
+}
+
+#[test]
+fn clearing_edits_matches_the_reference() {
+    remove_edits("clearing the edits", |mut voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(64));
+    });
+}
+
+#[test]
+fn forgetting_edits_matches_the_reference() {
+    remove_edits("forgetting the edits", |mut voxel_world| {
+        voxel_world.forget_edits();
+    });
+}
+
 /// The edit deltas the sender world of
 /// [`a_receiver_of_edit_deltas_settles_on_the_reference`] committed.
 #[derive(Resource, Default)]

@@ -1516,7 +1516,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     let answer = match (probes.as_mut(), record.as_mut()) {
                         (Some(probes), Some(record)) => {
                             let own = landing.solved.own_edits;
-                            if edits.edit_sequence(position) == own {
+                            if edits.edit_stamp(position) == own {
                                 let occupancy = &landing.solved.light.inputs.occupancy;
                                 let open =
                                     record.keeps_cells().then(|| open_cells(occupancy));

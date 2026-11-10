@@ -430,3 +430,255 @@ fn the_export_methods_read_committed_edits_only() {
         vec![(IVec3::ZERO, 32768)]
     );
 }
+
+/// Waits until the receiver's origin chunk is Ready.
+fn origin_ready(app: &mut App) {
+    update_until(app, "the receiver's origin chunk to be ready", |app| {
+        chunk_status::<Receiver>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+    });
+}
+
+/// Runs `edit` on the receiver, in one system.
+fn on_receiver<T: Send + 'static>(
+    app: &mut App,
+    mut edit: impl FnMut(&mut VoxelWorld<Receiver>) -> T + Send + Sync + 'static,
+) -> T {
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<Receiver>| {
+            edit(&mut voxel_world)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_clear_reaches_a_receiver_as_an_empty_full_delta() {
+    let mut app = sync_app();
+    origin_ready(&mut app);
+    // A voxel placed in the air and one dug out of the floor.
+    let (placed, dug) = (IVec3::new(3, 2, 3), IVec3::new(5, -2, 5));
+    let deltas = send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(placed, WorldVoxel::Solid(5));
+        voxel_world.set_voxel(dug, WorldVoxel::Air);
+        voxel_world.set_voxel(IVec3::new(6, 2, 6), WorldVoxel::Solid(6));
+    });
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(apply(&mut app, deltas), vec![Ok(()); 2]);
+    app.update();
+    published(&mut app, placed, WorldVoxel::Solid(5));
+    published(&mut app, dug, WorldVoxel::Air);
+
+    let cleared = send(&mut app, |voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::splat(-32), IVec3::splat(32));
+    });
+
+    // Both chunks moved on by the edits they lost, and carry none.
+    let empty = |chunk: IVec3, seq| EditDelta {
+        chunk,
+        seq,
+        full: true,
+        voxels: Voxels::Sparse(vec![]),
+    };
+    assert_eq!(cleared, vec![empty(IVec3::NEG_Y, 2), empty(IVec3::ZERO, 4)]);
+    assert_eq!(
+        edited_chunks::<Sender>(&mut app),
+        vec![(IVec3::NEG_Y, 2), (IVec3::ZERO, 4)]
+    );
+
+    assert_eq!(apply(&mut app, cleared), vec![Ok(()); 2]);
+    app.update();
+    published(&mut app, placed, WorldVoxel::Air);
+    published(&mut app, dug, WorldVoxel::Solid(1));
+    assert_eq!(get_voxel::<Receiver>(&mut app, placed), WorldVoxel::Air);
+    assert_eq!(get_voxel::<Receiver>(&mut app, dug), WorldVoxel::Solid(1));
+    assert_eq!(
+        edited_chunks::<Receiver>(&mut app),
+        vec![(IVec3::NEG_Y, 2), (IVec3::ZERO, 4)]
+    );
+}
+
+#[test]
+fn a_partial_clear_sends_the_edits_left_at_the_new_sequence() {
+    let mut app = sync_app();
+    send(&mut app, |voxel_world| {
+        for x in 1..=4 {
+            voxel_world.set_voxel(IVec3::new(x, 1, 1), WorldVoxel::Solid(x as u8));
+        }
+    });
+
+    let cleared = send(&mut app, |voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::new(1, 0, 0), IVec3::new(3, 32, 32));
+    });
+
+    assert_eq!(cleared.len(), 1);
+    assert!(cleared[0].full);
+    assert_eq!(cleared[0].seq, 6);
+    let mut left: Vec<_> = cleared[0].iter().collect();
+    left.sort_by_key(|(position, _)| position.x);
+    assert_eq!(
+        left,
+        vec![
+            (IVec3::new(3, 1, 1), WorldVoxel::Solid(3)),
+            (IVec3::new(4, 1, 1), WorldVoxel::Solid(4)),
+        ]
+    );
+    // A box holding no edits clears nothing.
+    let nothing = send(&mut app, |voxel_world| {
+        voxel_world.clear_voxels_in(IVec3::new(0, 10, 0), IVec3::new(32, 20, 32));
+        voxel_world.clear_voxels_in(IVec3::new(64, 0, 0), IVec3::new(96, 32, 32));
+    });
+    assert_eq!(nothing, vec![]);
+}
+
+#[test]
+fn a_clear_drops_the_voxels_set_before_it_in_its_frame_but_not_after() {
+    let mut app = sync_app();
+    origin_ready(&mut app);
+    let (committed, set_before, set_after, outside) = (
+        IVec3::new(1, 2, 1),
+        IVec3::new(2, 2, 1),
+        IVec3::new(3, 2, 1),
+        IVec3::new(20, 2, 1),
+    );
+    on_receiver(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(committed, WorldVoxel::Solid(9));
+        voxel_world.set_voxel(outside, WorldVoxel::Solid(9));
+    });
+    published(&mut app, committed, WorldVoxel::Solid(9));
+    take_committed::<Receiver>(&mut app);
+
+    let read_back = on_receiver(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(set_before, WorldVoxel::Solid(2));
+        voxel_world.clear_voxels_in(IVec3::ZERO, IVec3::new(10, 10, 10));
+        voxel_world.set_voxel(set_after, WorldVoxel::Solid(3));
+        // A cleared voxel reads what its chunk last published.
+        (
+            voxel_world.get_voxel(committed),
+            voxel_world.get_voxel(set_before),
+        )
+    });
+    assert_eq!(read_back, (WorldVoxel::Solid(9), WorldVoxel::Air));
+    app.update();
+
+    published(&mut app, committed, WorldVoxel::Air);
+    published(&mut app, set_after, WorldVoxel::Solid(3));
+    assert_eq!(get_voxel::<Receiver>(&mut app, set_before), WorldVoxel::Air);
+    assert_eq!(
+        get_voxel::<Receiver>(&mut app, outside),
+        WorldVoxel::Solid(9)
+    );
+    // Two edits, then one removed and one set.
+    assert_eq!(edited_chunks::<Receiver>(&mut app), vec![(IVec3::ZERO, 4)]);
+    let reported = take_committed::<Receiver>(&mut app);
+    assert_eq!(reported.len(), 1);
+    let mut carried: Vec<_> = reported[0].iter().collect();
+    carried.sort_by_key(|(position, _)| position.x);
+    assert_eq!(
+        carried,
+        vec![
+            (set_after, WorldVoxel::Solid(3)),
+            (outside, WorldVoxel::Solid(9))
+        ]
+    );
+}
+
+#[test]
+fn clearing_every_edit_leaves_each_edited_chunk_empty() {
+    let mut app = sync_app();
+    send(&mut app, |voxel_world| {
+        voxel_world.set_voxel(IVec3::new(1, 1, 1), WorldVoxel::Solid(1));
+        voxel_world.set_voxels_in(IVec3::new(0, 0, 384), IVec3::new(32, 32, 416), |_| {
+            Some(WorldVoxel::Solid(2))
+        });
+    });
+
+    let cleared = send(&mut app, |voxel_world| voxel_world.clear_edits());
+
+    assert!(cleared.iter().all(|delta| delta.full && delta.is_empty()));
+    assert_eq!(
+        edited_chunks::<Sender>(&mut app),
+        vec![(IVec3::ZERO, 2), (IVec3::new(0, 0, 12), 65536)]
+    );
+}
+
+/// The full delta of every chunk the receiver has edits in, as a save holds
+/// them.
+fn save(app: &mut App) -> Vec<EditDelta<u8>> {
+    edited_chunks::<Receiver>(app)
+        .into_iter()
+        .map(|(chunk, _)| full_delta::<Receiver>(app, chunk))
+        .collect()
+}
+
+#[test]
+fn forgetting_then_applying_a_save_restores_its_sequences() {
+    let mut app = sync_app();
+    origin_ready(&mut app);
+    let (kept, later) = (IVec3::new(1, 1, 1), IVec3::new(-3, 1, 1));
+    on_receiver(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(kept, WorldVoxel::Solid(4));
+    });
+    app.update();
+    let saved = save(&mut app);
+    let saved_chunks = edited_chunks::<Receiver>(&mut app);
+    assert_eq!(saved_chunks, vec![(IVec3::ZERO, 1)]);
+
+    // More edits after the save, in the saved chunk and in another one.
+    on_receiver(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(kept, WorldVoxel::Solid(5));
+        voxel_world.set_voxel(kept + IVec3::X, WorldVoxel::Solid(5));
+        voxel_world.set_voxel(later, WorldVoxel::Solid(6));
+    });
+    published(&mut app, later, WorldVoxel::Solid(6));
+    take_committed::<Receiver>(&mut app);
+
+    let applied = on_receiver(&mut app, move |voxel_world| {
+        voxel_world.forget_edits();
+        saved
+            .iter()
+            .map(|delta| voxel_world.apply_delta(delta.clone()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(applied, vec![Ok(())]);
+    app.update();
+
+    assert_eq!(edited_chunks::<Receiver>(&mut app), saved_chunks);
+    published(&mut app, later, WorldVoxel::Air);
+    published(&mut app, kept + IVec3::X, WorldVoxel::Air);
+    assert_eq!(get_voxel::<Receiver>(&mut app, kept), WorldVoxel::Solid(4));
+}
+
+#[test]
+fn forgetting_edits_reports_nothing_and_leaves_no_sequence() {
+    let mut app = sync_app();
+    origin_ready(&mut app);
+    let position = IVec3::new(2, -1, 2);
+    on_receiver(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Air);
+    });
+    published(&mut app, position, WorldVoxel::Air);
+    take_committed::<Receiver>(&mut app);
+
+    on_receiver(&mut app, |voxel_world| voxel_world.forget_edits());
+    app.update();
+
+    assert_eq!(take_committed::<Receiver>(&mut app), vec![]);
+    assert_eq!(edited_chunks::<Receiver>(&mut app), vec![]);
+    assert_eq!(full_delta::<Receiver>(&mut app, IVec3::NEG_Y).seq, 0);
+    published(&mut app, position, WorldVoxel::Solid(1));
+    // The next incremental delta for the chunk now reads as a gap.
+    send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position, WorldVoxel::Air);
+        voxel_world.set_voxel(position + IVec3::X, WorldVoxel::Air);
+    });
+    let after = send(&mut app, move |voxel_world| {
+        voxel_world.set_voxel(position + IVec3::Z, WorldVoxel::Air);
+    });
+    assert_eq!(
+        apply(&mut app, after),
+        vec![Err(EditGap {
+            chunk: IVec3::NEG_Y,
+            local: 0,
+            received: 3,
+        })]
+    );
+}
