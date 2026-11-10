@@ -86,6 +86,13 @@ required-features = ["light_propagation"]
 # Its tests check that the config it prints is the Rust that builds it.
 test = true
 
+[[example]]
+name = "save_load"
+path = "examples/save_load.rs"
+required-features = ["serde"]
+# Its tests check the save file's envelope.
+test = true
+
 # Pixel checks that need a GPU, run by hand: see the file's docs.
 [[test]]
 name = "light_render"
