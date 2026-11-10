@@ -10,7 +10,8 @@
 //! commit. A bucket starts as a map from position to voxel and turns into an
 //! array of every voxel in the chunk once it holds many edits, so that setting
 //! most of a chunk, as an animation does every frame, costs an array write per
-//! voxel rather than a hash map insert.
+//! voxel rather than a hash map insert. A commit that leaves an array few
+//! edits turns it back into a map.
 //!
 //! A commit reports a [`ChangeSet`] per level-0 chunk whose edits changed: the
 //! voxels whose committed edit changed, with their new edits. The chunk
@@ -56,6 +57,14 @@ type Voxels<I> = HashMap<IVec3, WorldVoxel<I>>;
 /// a chunk with fewer edits stays a map and one with more is as small as an
 /// array.
 const DENSE_AT: usize = 2048;
+
+/// An array bucket that a commit leaves holding fewer edits than this turns
+/// back into a map.
+///
+/// Only a commit that replaces a chunk's edits, a clear or an applied full
+/// delta, can leave fewer. Half of [`DENSE_AT`] keeps a chunk whose edits
+/// hover around that count from turning back and forth every commit.
+const SPARSE_BELOW: usize = DENSE_AT / 2;
 
 /// A chunk with more changed voxels than this in one commit is marked stale as
 /// the one box around them, rather than voxel by voxel.
@@ -281,6 +290,17 @@ impl<I: Copy + PartialEq> Bucket<I> {
             }
             let count = sparse.len();
             self.store = Store::Dense { voxels, count };
+        }
+    }
+
+    /// The bucket's edits, as the map they fit in once fewer than
+    /// [`SPARSE_BELOW`], else as they are.
+    fn compacted_store(&self) -> Store<I> {
+        match &self.store {
+            Store::Dense { count, .. } if *count < SPARSE_BELOW => {
+                Store::Sparse(self.iter().collect())
+            }
+            store => store.clone(),
         }
     }
 
@@ -749,7 +769,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     .or_insert_with(|| Arc::new(Bucket::new(chunk))),
             );
             if pending_bucket.replaced {
-                committed.store = pending_bucket.store.clone();
+                committed.store = pending_bucket.compacted_store();
             } else {
                 if changes.len() >= DENSE_AT {
                     committed.make_dense();
@@ -1182,6 +1202,40 @@ mod tests {
         assert_eq!(changed_voxels(&sets), vec![IVec3::ZERO, IVec3::X]);
         assert_eq!(edits.edit_sequence(IVec3::ZERO), CHUNK_VOXELS as u64 + 2);
         assert_eq!(edits.full_delta(IVec3::ZERO).len(), CHUNK_VOXELS - 2);
+    }
+
+    /// Whether the committed bucket of the chunk at `chunk` is an array.
+    fn is_dense(edits: &Edits, chunk: IVec3) -> bool {
+        matches!(
+            edits.committed.read().unwrap()[&chunk].store,
+            Store::Dense { .. }
+        )
+    }
+
+    #[test]
+    fn a_dense_bucket_cleared_of_most_of_its_edits_turns_back_into_a_map() {
+        let edits = Edits::default();
+        let full = IVec3::splat(CHUNK_SIZE_I);
+        edits.set_region(IVec3::ZERO, full, |_| Some(WorldVoxel::Solid(1)));
+        edits.commit();
+        assert!(is_dense(&edits, IVec3::ZERO));
+
+        // Clearing a few edits keeps the array.
+        edits.clear_region(IVec3::ZERO, IVec3::new(2, 1, 1));
+        edits.commit();
+        assert!(is_dense(&edits, IVec3::ZERO));
+
+        // All but the bottom slab of 32 x 32 voxels.
+        edits.clear_region(IVec3::new(0, 1, 0), full);
+        edits.commit();
+        assert!(!is_dense(&edits, IVec3::ZERO));
+        assert_eq!(edits.full_delta(IVec3::ZERO).len(), 32 * 32 - 2);
+        assert_eq!(edits.reader().get(IVec3::new(5, 0, 5)), Some(WorldVoxel::Solid(1)));
+
+        edits.clear_all();
+        edits.commit();
+        assert!(!is_dense(&edits, IVec3::ZERO));
+        assert_eq!(edits.full_delta(IVec3::ZERO).len(), 0);
     }
 
     #[test]
