@@ -103,6 +103,17 @@ enum Store<I> {
     },
 }
 
+impl<I> Bucket<I> {
+    /// Whether the bucket holds no edit, as one left by a clear does.
+    #[inline]
+    fn is_empty(&self) -> bool {
+        match &self.store {
+            Store::Sparse(voxels) => voxels.is_empty(),
+            Store::Dense { count, .. } => *count == 0,
+        }
+    }
+}
+
 impl<I: Copy + PartialEq> Bucket<I> {
     fn new(chunk_pos: IVec3) -> Self {
         Self {
@@ -771,6 +782,8 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// The edits the chunk task of the chunk at `key` reads: those within the
     /// chunk's extent and its padding. `padding` is the chunk's [`padding_depth`].
+    /// A bucket left empty by a clear is left out, so a chunk whose reach
+    /// holds no edit reads none.
     ///
     /// [`padding_depth`]: crate::chunk::padding_depth
     pub(crate) fn chunk_edits(&self, key: ChunkKey, padding: IVec3) -> ChunkEdits<I> {
@@ -782,7 +795,10 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             let mut around: [Option<EditBucket<I>>; 27] = std::array::from_fn(|_| None);
             if !buckets.is_empty() {
                 for (i, bucket) in around.iter_mut().enumerate() {
-                    *bucket = buckets.get(&(chunk_pos + around_offset(i))).cloned();
+                    *bucket = buckets
+                        .get(&(chunk_pos + around_offset(i)))
+                        .filter(|bucket| !bucket.is_empty())
+                        .cloned();
                 }
             }
             return ChunkEdits {
@@ -794,8 +810,10 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         let (min, max) = buckets_read_by(key, padding);
         let within = buckets
             .iter()
-            .filter(|(position, _)| {
-                position.cmpge(min).all() && position.cmplt(max).all()
+            .filter(|(position, bucket)| {
+                position.cmpge(min).all()
+                    && position.cmplt(max).all()
+                    && !bucket.is_empty()
             })
             .map(|(position, bucket)| (*position, bucket.clone()))
             .collect();
@@ -806,7 +824,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     }
 
     /// The committed edits in each level-0 chunk at `positions`, in order, or
-    /// `None` for a chunk with none.
+    /// `None` for a chunk with none, a bucket left empty by a clear included.
     #[cfg(feature = "light_propagation")]
     pub(crate) fn buckets(
         &self,
@@ -814,7 +832,12 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     ) -> Vec<Option<EditBucket<I>>> {
         let buckets = self.committed.read().unwrap();
         positions
-            .map(|position| buckets.get(&position).cloned())
+            .map(|position| {
+                buckets
+                    .get(&position)
+                    .filter(|bucket| !bucket.is_empty())
+                    .cloned()
+            })
             .collect()
     }
 
@@ -871,7 +894,8 @@ impl<I> CommittedEdits<'_, I> {
     /// at `key` reads, within its extent or reached by its padding.
     ///
     /// Such an edit may change the chunk's voxels, so the chunk's fill hint
-    /// can't be trusted. `padding` is the chunk's [`padding_depth`].
+    /// can't be trusted. A bucket left empty by a clear holds no edit.
+    /// `padding` is the chunk's [`padding_depth`].
     ///
     /// [`padding_depth`]: crate::chunk::padding_depth
     pub fn reach(&self, key: ChunkKey, padding: IVec3) -> bool {
@@ -880,13 +904,16 @@ impl<I> CommittedEdits<'_, I> {
             return false;
         }
         if key.lod_level == 0 {
-            return (0..27)
-                .any(|i| buckets.contains_key(&(key.position + around_offset(i))));
+            return (0..27).any(|i| {
+                buckets
+                    .get(&(key.position + around_offset(i)))
+                    .is_some_and(|bucket| !bucket.is_empty())
+            });
         }
         let (min, max) = buckets_read_by(key, padding);
-        buckets
-            .keys()
-            .any(|position| position.cmpge(min).all() && position.cmplt(max).all())
+        buckets.iter().any(|(position, bucket)| {
+            position.cmpge(min).all() && position.cmplt(max).all() && !bucket.is_empty()
+        })
     }
 }
 
@@ -1714,6 +1741,22 @@ mod tests {
         assert!(
             !committed.reach(ChunkKey::new(IVec3::new(2, 0, 0), 1), default_padding(1))
         );
+    }
+
+    #[test]
+    fn a_chunk_cleared_of_its_edits_reaches_no_chunk_task() {
+        let edits = Edits::default();
+        commit_one(&edits, IVec3::new(-1, 5, 5), WorldVoxel::Solid(1));
+        edits.clear_all();
+        edits.commit();
+        // The chunk keeps its sequence, so the clear reaches later worlds.
+        assert_eq!(edits.edited_chunks(), vec![(IVec3::new(-1, 0, 0), 2)]);
+
+        for key in [ChunkKey::new(IVec3::ZERO, 0), ChunkKey::new(IVec3::ZERO, 1)] {
+            let padding = default_padding(key.lod_level);
+            assert!(!edits.committed().reach(key, padding), "{key:?}");
+            assert!(edits.chunk_edits(key, padding).is_empty(), "{key:?}");
+        }
     }
 
     #[test]
