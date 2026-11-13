@@ -1,7 +1,11 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use std::sync::{Arc, RwLock};
 
-use crate::{chunk::Chunk, configuration::VoxelWorldConfig, prelude::VoxelWorld};
+use crate::{
+    chunk::{Chunk, ChunkKey},
+    configuration::{LodLevel, VoxelWorldConfig},
+    prelude::VoxelWorld,
+};
 
 #[derive(Default)]
 pub struct VoxelWorldDebugDrawPlugin<C: VoxelWorldConfig> {
@@ -205,8 +209,6 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
     voxel_world: VoxelWorld<C>,
 ) {
     for (chunk, transform) in chunks.iter() {
-        let extent = chunk.key().voxel_extent() as f32;
-        let size = Vec3::ONE * extent;
         let color = Srgba::new(0.0, 1.0, 0.0, 1.0);
 
         let Some(chunk_data) = voxel_world.get_chunk_data(chunk.key()) else {
@@ -217,13 +219,23 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
             continue;
         }
 
-        gizmos.cube(
-            Transform::from(*transform)
-                .with_scale(size)
-                .with_translation(transform.translation() + (extent / 2.0) + 1.0),
-            color,
-        );
+        gizmos.cube(chunk_box(transform, chunk.lod_level()), color);
     }
+}
+
+/// Places the box `debug_draw_chunks` draws around a chunk, as the transform
+/// that takes a unit cube centred on the origin onto the chunk's voxels.
+///
+/// A chunk's transform sits one voxel below its minimum corner, so in the
+/// chunk's own space its voxels fill 1 to `1 + voxel_extent` on each axis, at
+/// every LOD level. The box is placed in that space and then taken through
+/// the chunk's whole `GlobalTransform`, so it turns, scales and moves with
+/// the chunk.
+fn chunk_box(transform: &GlobalTransform, lod_level: LodLevel) -> GlobalTransform {
+    let extent = ChunkKey::new(IVec3::ZERO, lod_level).voxel_extent() as f32;
+    *transform
+        * Transform::from_translation(Vec3::splat(1.0 + extent / 2.0))
+            .with_scale(Vec3::splat(extent))
 }
 
 #[cfg(test)]
@@ -308,5 +320,71 @@ mod tests {
             assert!((circle.radius - 0.9).abs() < 1e-4);
         }
         assert_one_circle_per_face(&circles, 1.0);
+    }
+
+    /// The eight corners of the box `chunk_box` draws, in world space.
+    fn box_corners(transform: &GlobalTransform, lod_level: LodLevel) -> Vec<Vec3> {
+        let placement = chunk_box(transform, lod_level);
+        (0..8)
+            .map(|corner: i32| {
+                let unit = IVec3::new(corner & 1, (corner >> 1) & 1, corner >> 2);
+                placement.transform_point(unit.as_vec3() - 0.5)
+            })
+            .collect()
+    }
+
+    fn assert_same_corners(actual: Vec<Vec3>, xs: [f32; 2], ys: [f32; 2], zs: [f32; 2]) {
+        for x in xs {
+            for y in ys {
+                for z in zs {
+                    let expected = Vec3::new(x, y, z);
+                    assert!(
+                        actual.iter().any(|c| c.abs_diff_eq(expected, 1e-3)),
+                        "no corner at {expected} in {actual:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_box_follows_a_rotated_and_scaled_chunk_transform() {
+        // A level-0 chunk's voxels fill chunk-local 1 to 33. A quarter turn
+        // about +Y maps (x, y, z) to (z, y, -x), then the scale doubles it
+        // and the translation moves it, so local 1 lands at (12, 22, 28) and
+        // local 33 at (76, 86, -36).
+        let transform = GlobalTransform::from(
+            Transform::from_translation(Vec3::new(10.0, 20.0, 30.0))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(2.0)),
+        );
+        assert_same_corners(
+            box_corners(&transform, 0),
+            [12.0, 76.0],
+            [22.0, 86.0],
+            [28.0, -36.0],
+        );
+    }
+
+    #[test]
+    fn chunk_box_under_the_identity_matches_the_chunk_extent() {
+        // The level-0 chunk at (1, 0, -2) sits at (31, -1, -65), one voxel
+        // below its minimum corner, and fills (32, 0, -64) to (64, 32, -32).
+        let level_0 = GlobalTransform::from_translation(Vec3::new(31.0, -1.0, -65.0));
+        assert_same_corners(
+            box_corners(&level_0, 0),
+            [32.0, 64.0],
+            [0.0, 32.0],
+            [-64.0, -32.0],
+        );
+
+        // The level-2 chunk at (4, 0, 0) fills (128, 0, 0) to (256, 128, 128).
+        let level_2 = GlobalTransform::from_translation(Vec3::new(127.0, -1.0, -1.0));
+        assert_same_corners(
+            box_corners(&level_2, 2),
+            [128.0, 256.0],
+            [0.0, 128.0],
+            [0.0, 128.0],
+        );
     }
 }

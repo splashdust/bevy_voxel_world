@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix voxel gizmos so all six circles sit on the faces of the voxel they mark. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
+- Fix `debug_draw_chunks` so each chunk's box goes through the chunk's whole transform and stays on the chunk under a rotated or scaled `WorldRoot`.
 
 ## 0.19.3
 
