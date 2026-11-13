@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix voxel gizmos so all six circles sit on the faces of the voxel they mark. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
+
 ## 0.19.3
 
 ### Syncing and saving voxel edits
