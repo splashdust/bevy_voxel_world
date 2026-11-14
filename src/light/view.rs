@@ -169,20 +169,39 @@ impl LightView {
     }
 }
 
+/// How a solve reads a chunk position around its chunk that the world view
+/// holds nothing at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Missing {
+    /// Every voxel is solid: no light passes through it. A world solve
+    /// always reads missing chunks this way.
+    Solid,
+    /// Every voxel is open, with no direct sky and no emissive voxel, so
+    /// light passes through it but nothing starts there.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no solve reads missing chunks as air yet")
+    )]
+    Air,
+}
+
 /// What a solve read of the chunks around it: their inputs for the solver, and
 /// the light of its face neighbours for comparing with its own.
 pub(crate) struct Snapshot {
     pub neighbours: Neighbourhood,
     /// Each face neighbour's light and its version, by [`Face`].
     pub faces: [Option<(Arc<ChunkLight>, u64)>; 6],
+    /// How the solve reads the positions of `neighbours` that hold nothing.
+    pub missing: Missing,
 }
 
 impl Snapshot {
     /// Reads the chunks around the chunk at `key` from `view`, on its own
     /// grid, leaving the chunk's own inputs out. Hinted air reads as its
     /// inputs, and is a face neighbour to compare light with only where it
-    /// holds a light entry.
-    pub fn read(view: &ViewMaps, key: GridKey) -> Self {
+    /// holds a light entry. A position holding nothing reads as `missing`
+    /// says.
+    pub fn read(view: &ViewMaps, key: GridKey, missing: Missing) -> Self {
         let neighbours = std::array::from_fn(|index| {
             let index = index as i32;
             let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
@@ -196,7 +215,11 @@ impl Snapshot {
             Some((chunk.light.clone(), chunk.version))
         });
         debug_assert!(neighbours[neighbour_index(IVec3::ZERO)].is_none());
-        Self { neighbours, faces }
+        Self {
+            neighbours,
+            faces,
+            missing,
+        }
     }
 }
 
@@ -262,7 +285,7 @@ mod tests {
         let own = GridKey::level_0(GridId::new(1), position);
         view.chunks.insert(own + IVec3::X, chunk(Occupancy::Open));
 
-        let snapshot = Snapshot::read(&view, own);
+        let snapshot = Snapshot::read(&view, own, Missing::Solid);
 
         let read: Vec<IVec3> = offsets()
             .filter(|offset| snapshot.neighbours[neighbour_index(*offset)].is_some())

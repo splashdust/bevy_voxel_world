@@ -23,9 +23,9 @@ use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
-use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel};
+use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel, DirectSky};
 use super::solver::{ChannelLight, ChunkLight};
-use super::view::{in_world, Snapshot};
+use super::view::{in_world, Missing, Snapshot};
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::configuration::VoxelWorldConfig;
@@ -650,7 +650,7 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
     let view = settings.view.read();
     let mut boxes = Vec::new();
     for (position, chunk) in view.world_chunks() {
-        let mut snapshot = Snapshot::read(&view, in_world(position));
+        let mut snapshot = Snapshot::read(&view, in_world(position), Missing::Solid);
         snapshot.neighbours[neighbour_index(IVec3::ZERO)] =
             Some(chunk.light.inputs.clone());
         boxes.push(snapshot.neighbours);
@@ -661,13 +661,20 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
         if let Some(sky_scale) = &task.sky_scale {
             black_box(solve_sky(
                 neighbours,
+                Missing::Solid,
+                DirectSky::Columns,
                 sky_scale,
                 task.shape,
                 None,
                 &task.counters,
             ));
         }
-        black_box(solve_voxel(neighbours, &task.voxel_scale, task.shape));
+        black_box(solve_voxel(
+            neighbours,
+            Missing::Solid,
+            &task.voxel_scale,
+            task.shape,
+        ));
     }
     (boxes.len(), start.elapsed().as_secs_f64() * 1000.0)
 }
