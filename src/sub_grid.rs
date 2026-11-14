@@ -11,6 +11,11 @@
 //! voxel, and a position with no solid reads air. Its edits commit in the
 //! next `PreUpdate`, with the world's.
 //!
+//! [`VoxelWorld::lift`](crate::prelude::VoxelWorld::lift) moves the solid
+//! voxels a game picks out of any grid into a new sub-grid, which shows them
+//! where they were, and leaves air behind. Lifting from a sub-grid cuts it
+//! in two. [`Lifted`] says when the move has landed.
+//!
 //! # Chunks
 //!
 //! A sub-grid shows through chunks of its own, built by the world's chunk
@@ -151,6 +156,11 @@ use crate::{
     voxel_world::voxel_at,
     voxel_world_internal::WorldRoot,
 };
+
+mod lift;
+
+pub(crate) use lift::{lift, LiftParts};
+pub use lift::{LiftError, Lifted};
 
 /// Names a grid of a voxel world: its streamed voxels, or one of its
 /// sub-grids by the sub-grid's entity.
@@ -793,14 +803,45 @@ pub(crate) mod world {
         commands: &mut Commands,
         transform: Transform,
     ) -> Entity {
+        let root = sub_grids.root();
+        spawn_under(sub_grids, commands, root, transform, transform.into()).0
+    }
+
+    /// Spawns a sub-grid at `transform` under `parent`, whose pose against
+    /// the world's root is `pose` until the next snapshot. Returns its
+    /// entity and id.
+    pub fn spawn_under<C: VoxelWorldConfig>(
+        sub_grids: &SubGrids<C>,
+        commands: &mut Commands,
+        parent: Entity,
+        transform: Transform,
+        pose: GlobalTransform,
+    ) -> (Entity, GridId) {
         let entity = commands.spawn_empty().id();
-        let marker = sub_grids.add(entity, GlobalTransform::from(transform));
-        commands.entity(entity).try_insert((
-            marker,
-            transform,
-            ChildOf(sub_grids.root()),
-        ));
-        entity
+        let marker = sub_grids.add(entity, pose);
+        let grid = marker.grid;
+        commands
+            .entity(entity)
+            .try_insert((marker, transform, ChildOf(parent)));
+        (entity, grid)
+    }
+
+    /// The parent entity, id and pose of the grid `grid` names, or `None`
+    /// for an entity that isn't a live sub-grid: the world's root, its id and
+    /// the identity for the world.
+    pub fn place<C: VoxelWorldConfig>(
+        sub_grids: &SubGrids<C>,
+        grid: Grid,
+    ) -> Option<(Entity, GridId, GlobalTransform)> {
+        match grid {
+            Grid::World => {
+                Some((sub_grids.root(), GridId::WORLD, GlobalTransform::IDENTITY))
+            }
+            Grid::SubGrid(entity) => {
+                let (id, pose) = sub_grids.live(entity)?;
+                Some((entity, id, pose))
+            }
+        }
     }
 
     /// Makes `entity` a sub-grid, leaving its parent alone.

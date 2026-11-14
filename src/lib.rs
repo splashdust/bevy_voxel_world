@@ -55,7 +55,9 @@ pub mod prelude {
     #[cfg(feature = "sub_grids")]
     pub use crate::snap::GridRotation;
     #[cfg(feature = "sub_grids")]
-    pub use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrid};
+    pub use crate::sub_grid::{
+        Grid, GridVoxels, GridVoxelsMut, LiftError, Lifted, SubGrid,
+    };
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,

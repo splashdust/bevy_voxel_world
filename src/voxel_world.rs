@@ -15,14 +15,14 @@ mod raycast;
 pub use grid_raycast::{GridRaycastFn, GridRaycastHit};
 
 #[cfg(feature = "sub_grids")]
-use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrids};
+use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, LiftError, SubGrids};
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::VoxelWorldConfig,
     edits::{EditDelta, EditGap},
-    level_0_reader::{edit_step, hint_step, Level0Reader},
+    level_0_reader::{edit_step, hint_step},
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
 };
@@ -358,6 +358,77 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     pub fn grid_mut(&mut self, grid: Grid) -> Option<GridVoxelsMut<'_, C>> {
         self.grid(grid).map(GridVoxelsMut::new)
     }
+
+    /// Lifts the solid voxels `pick` chooses in the box from `min` inclusive
+    /// to `max` exclusive out of `source` into a new sub-grid, and returns
+    /// the sub-grid's entity.
+    ///
+    /// `pick` sees each position of the box with its voxel as the screen
+    /// shows it up close, never a coarse chunk's sample: the voxel edit, else
+    /// the voxel in the published level-0 chunk holding it, else that chunk's
+    /// [fill hint](VoxelWorldConfig::chunk_fill_hint), else the world's voxel
+    /// lookup. In a sub-grid it sees the sub-grid's voxels, those set this
+    /// frame included, and air. Only solid voxels lift: a chosen air or
+    /// `WorldVoxel::Unset` voxel gets no edit in either grid.
+    ///
+    /// The new sub-grid's grid origin sits one voxel below the minimum
+    /// corner of the lifted voxels, so that corner is at (1, 1, 1) and the
+    /// sub-grid spans the fewest chunks. It spawns as a child of the source
+    /// grid's entity, the world's root or the source sub-grid, with that
+    /// offset as its translation, no rotation and scale 1, so nothing looks
+    /// different until it moves. Its [`pose`](GridVoxels::pose) is the
+    /// source's pose followed by the offset from the call on. Under the
+    /// world's root, it picks up the `RenderLayers` the root propagates
+    /// until the game gives it another parent. Despawning a source sub-grid
+    /// before re-parenting the new one despawns the new one too, as its
+    /// child.
+    ///
+    /// The source is left with air: the world gets air edits at the lifted
+    /// positions, and a sub-grid loses the lifted voxels. A sub-grid lifted
+    /// bare lives on with no [`bounds`](GridVoxels::bounds).
+    ///
+    /// The sub-grid is live at once, so the same system can edit it and lift
+    /// from it. Both grids' edits commit together in the next
+    /// `PreUpdate`, as one handover: every chunk the lift touches, in both
+    /// grids, keeps showing what it showed until all of them publish in the
+    /// same frame. [`Lifted`](crate::prelude::Lifted) is written in that
+    /// frame, which is when a game typically re-parents the sub-grid,
+    /// keeping its world pose, and starts its physics.
+    ///
+    /// A lift has no size limit. Its cost grows with the box, and with the
+    /// chunk positions it covers that have no published level-0 chunk and no
+    /// uniform fill hint, as where no chunk is loaded: at each, the world's
+    /// voxel lookup runs on the caller's thread. Every chunk the lift
+    /// touches joins its handover, so a larger lift holds more chunks back
+    /// until they can all publish.
+    ///
+    /// # Errors
+    ///
+    /// [`LiftError::NoSolid`] when `pick` chose no solid voxel: no sub-grid
+    /// spawns and nothing is edited. [`LiftError::NoSuchGrid`] when `source`
+    /// names an entity that isn't a live sub-grid of this world.
+    pub fn lift(
+        &mut self,
+        source: Grid,
+        min: IVec3,
+        max: IVec3,
+        pick: impl FnMut(IVec3, WorldVoxel<C::MaterialIndex>) -> bool,
+    ) -> Result<Entity, LiftError> {
+        crate::sub_grid::lift(
+            crate::sub_grid::LiftParts {
+                sub_grids: &self.sub_grids,
+                edits: &self.voxel_edits,
+                chunk_map: &self.chunk_map,
+                configuration: &self.configuration.0,
+                handovers: &self.handovers,
+                commands: &mut self.commands,
+            },
+            source,
+            min,
+            max,
+            pick,
+        )
+    }
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -398,12 +469,13 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         &self.chunk_map
     }
 
-    /// A read session of the [level-0 reader](Level0Reader), which reads
-    /// voxels as the screen shows them up close, running the world's
-    /// generator on the caller's thread where no level-0 chunk is published.
-    #[allow(dead_code)]
-    pub(crate) fn level_0_reader(&self) -> Level0Reader<C> {
-        Level0Reader::new(
+    /// A read session of the [level-0 reader](crate::level_0_reader::Level0Reader),
+    /// which reads voxels as the screen shows them up close, running the
+    /// world's generator on the caller's thread where no level-0 chunk is
+    /// published.
+    #[cfg(test)]
+    pub(crate) fn level_0_reader(&self) -> crate::level_0_reader::Level0Reader<C> {
+        crate::level_0_reader::Level0Reader::new(
             self.configuration.0.clone(),
             self.voxel_edits.reader(),
             self.chunk_map.get_map(),

@@ -3872,6 +3872,8 @@ mod edits;
 #[cfg(feature = "sub_grids")]
 mod handover;
 mod level_0_reader;
+#[cfg(feature = "sub_grids")]
+mod lift;
 mod light;
 #[cfg(feature = "sub_grids")]
 mod sub_grid_chunks;

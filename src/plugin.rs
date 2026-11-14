@@ -340,6 +340,7 @@ where
         #[cfg(feature = "sub_grids")]
         {
             use crate::sub_grid::SubGrids;
+            app.add_message::<crate::sub_grid::Lifted<C>>();
             app.add_systems(
                 PreUpdate,
                 (
@@ -350,6 +351,10 @@ where
                     SubGrids::<C>::plan_chunks
                         .after(Internals::<C>::commit_voxel_edits)
                         .before(ChunkLifecycle::<C>::apply_requests),
+                    // After the handovers land and form, so a lift's
+                    // `Lifted` arrives in the frame its chunks publish.
+                    crate::chunk_lifecycle::handover::Handovers::<C>::write_lifted
+                        .after(ChunkLifecycle::<C>::apply_requests),
                 )
                     .in_set(VoxelWorldSet::<C>::default()),
             )
