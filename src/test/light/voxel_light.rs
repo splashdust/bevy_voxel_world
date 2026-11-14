@@ -13,6 +13,7 @@ use super::reference::Reference;
 use crate::chunk_map::ChunkMap;
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::voxel_edits::VoxelEdits;
 
 pub(super) const STONE: u8 = 1;
 pub(super) const LAMP: u8 = 2;
@@ -535,6 +536,21 @@ pub(super) fn chunk_voxel_light(
         .unwrap()
 }
 
+/// The edit stamp of the level-0 chunk at `chunk` that its light in the world
+/// view reflects, or `None` if none of its light has landed.
+///
+/// A chunk's light lands after the chunk publishes, and later still when the
+/// frame's landing budget runs out first. Only light that has landed is in
+/// the world view the chunk tasks around it read.
+fn landed_stamp(app: &App, chunk: IVec3) -> Option<u64> {
+    app.world()
+        .resource::<LightSettings<LampWorld>>()
+        .view
+        .read()
+        .get(&chunk)
+        .map(|landed| landed.edits)
+}
+
 #[derive(Resource, Default)]
 struct OriginPublishes(usize);
 
@@ -566,13 +582,14 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         })
         .filter(|offset| *offset != IVec3::ZERO)
         .collect();
-    update_until(&mut app, "the held chunk's neighbours to be ready", |app| {
+    update_until(&mut app, "the held chunk's neighbours' light to land", |app| {
         neighbours.iter().all(|chunk| {
             chunk_status::<LampWorld>(app, *chunk) == Some(ChunkStatus::Ready)
+                && landed_stamp(app, *chunk).is_some()
         })
     });
     // An edit while the held task runs starts a new task once it lands, after
-    // every neighbour has published.
+    // the light of every neighbour has landed.
     let edited = IVec3::new(5, 5, 5);
     app.world_mut()
         .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
@@ -580,9 +597,15 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         })
         .unwrap();
     app.update();
+    let stamp = app
+        .world()
+        .resource::<VoxelEdits<LampWorld, u8>>()
+        .edit_stamp(IVec3::ZERO);
     hold.release();
-    update_until(&mut app, "the follow-up task to publish", |app| {
+    // The held task's light reflects the stamp before the edit.
+    update_until(&mut app, "the follow-up task's light to land", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
+            && landed_stamp(app, IVec3::ZERO) == Some(stamp)
     });
 
     let reference = reference(IVec3::splat(-32), IVec3::splat(64));
