@@ -86,6 +86,7 @@ use super::LightSettings;
 use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::ChunkRequests;
 use crate::configuration::VoxelWorldConfig;
+use crate::grid::GridId;
 use crate::level_0_reader::{edit_step, ChunkLookups, Hinted};
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::VoxelEdits;
@@ -130,7 +131,15 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     mut probes: Option<ResMut<SkyProbes<C>>>,
     configuration: Res<C>,
 ) {
-    if requests.edited.is_empty() {
+    // Light holds only the world's voxels, so a sub-grid's edits change none
+    // of it.
+    let world_sets = || {
+        requests
+            .edited
+            .iter()
+            .filter(|set| set.grid == GridId::WORLD)
+    };
+    if world_sets().next().is_none() {
         return;
     }
     #[cfg(feature = "trace")]
@@ -140,7 +149,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     // then a commit, takes the last one's.
     let mut changed: HashMap<IVec3, Option<WorldVoxel<C::MaterialIndex>>> =
         HashMap::new();
-    for set in &requests.edited {
+    for set in world_sets() {
         changed.extend(set.voxels.iter().copied());
     }
     let mut by_chunk: HashMap<IVec3, Vec<IVec3>> = HashMap::new();
@@ -152,7 +161,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     // can't be told and light takes the path for a chunk it has no inputs
     // for.
     let mut moved: HashMap<IVec3, Option<u64>> = HashMap::new();
-    for set in &requests.edited {
+    for set in world_sets() {
         let n = moved.entry(set.chunk).or_insert(Some(0));
         *n = n
             .filter(|_| !set.replaced)

@@ -35,6 +35,8 @@ mod sky_light;
 mod sky_record;
 #[cfg(feature = "light_propagation")]
 mod slots;
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod sub_grid_edits;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;
 #[cfg(feature = "light_propagation")]

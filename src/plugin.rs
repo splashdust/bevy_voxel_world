@@ -334,6 +334,21 @@ where
             .add_message::<ChunkWillUpdate<C>>()
             .add_message::<EditsCommitted<C>>();
 
+        #[cfg(feature = "sub_grids")]
+        {
+            use crate::sub_grid::SubGrids;
+            app.add_systems(
+                PreUpdate,
+                SubGrids::<C>::forget_despawned
+                    .before(Internals::<C>::commit_voxel_edits)
+                    .in_set(VoxelWorldSet::<C>::default()),
+            )
+            .add_systems(
+                PostUpdate,
+                SubGrids::<C>::snapshot_poses.after(TransformSystems::Propagate),
+            );
+        }
+
         // Spawning of meshes is optional, mainly to simplify testing.
         // This makes voxel_world work with a MinimalPlugins setup.
         if self.spawn_meshes {

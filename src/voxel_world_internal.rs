@@ -11,7 +11,7 @@ use crate::{
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     edits::{EditDelta, EditsCommitted},
-    grid::GridKey,
+    grid::{GridId, GridKey},
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
@@ -126,6 +126,8 @@ where
                 Transform::default(),
             ))
             .id();
+        #[cfg(feature = "sub_grids")]
+        commands.insert_resource(crate::sub_grid::SubGrids::<C>::new(world_root));
         configuration.init_root(commands, world_root)
     }
 
@@ -193,9 +195,10 @@ where
             .extend(plan.retire.into_iter().map(GridKey::world));
     }
 
-    /// Commits the voxel edits set since the last frame, writes an
-    /// [`EditsCommitted`] for each level-0 chunk whose edits changed, and
-    /// requests that the chunks they make stale be updated.
+    /// Commits the voxel edits of every grid set since the last frame, writes
+    /// an [`EditsCommitted`] for each of the world's level-0 chunks whose
+    /// edits changed, and requests that the chunks they make stale be
+    /// updated.
     ///
     /// A chunk whose edits were replaced reports its full delta, and the
     /// chunks showing an edit that was removed regenerate, since their
@@ -208,8 +211,11 @@ where
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        let sets = voxel_edits.commit();
-        committed.write_batch(sets.iter().map(|set| EditsCommitted {
+        let sets = voxel_edits.commit_all();
+        // Only the world's chunks have a message here; a sub-grid's edits
+        // never reach `EditsCommitted`.
+        let world_sets = sets.iter().filter(|set| set.grid == GridId::WORLD);
+        committed.write_batch(world_sets.map(|set| EditsCommitted {
             delta: if set.replaced {
                 voxel_edits.full_delta(set.chunk)
             } else {

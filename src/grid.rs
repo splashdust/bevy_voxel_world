@@ -74,6 +74,39 @@ impl GridId {
 #[cfg(not(feature = "sub_grids"))]
 const _: () = assert!(size_of::<GridId>() == 0);
 
+/// Hands out the ids of a world's sub-grids, and takes them back to hand out
+/// again.
+///
+/// An id is free again only once it is released, which the crate does once
+/// the despawned sub-grid's entries are gone from every table, so a new
+/// sub-grid never finds an old one's voxel edits.
+#[cfg(feature = "sub_grids")]
+#[derive(Default)]
+pub(crate) struct GridIds {
+    /// The highest id handed out so far.
+    highest: u16,
+    /// Released ids, handed out again before any higher one.
+    free: Vec<GridId>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl GridIds {
+    /// A free id, or `None` when every id but the world's is in use.
+    pub fn allocate(&mut self) -> Option<GridId> {
+        if let Some(id) = self.free.pop() {
+            return Some(id);
+        }
+        self.highest = self.highest.checked_add(1)?;
+        Some(GridId(self.highest))
+    }
+
+    /// Frees `id`, which a sub-grid held until its entries were gone.
+    pub fn release(&mut self, id: GridId) {
+        debug_assert!(id != GridId::WORLD && id.0 <= self.highest);
+        self.free.push(id);
+    }
+}
+
 /// Finds a chunk in the crate's tables: the chunk's grid and its chunk key.
 ///
 /// It holds the chunk key's fields beside the grid rather than a `ChunkKey`,
@@ -552,6 +585,21 @@ mod tests {
             vec![2]
         );
         assert!(table.holds_only(GridId::WORLD));
+    }
+
+    #[test]
+    fn ids_run_out_past_the_last_sub_grid_and_a_released_id_comes_back() {
+        let mut ids = GridIds::default();
+        let first = ids.allocate().unwrap();
+        assert_ne!(first, GridId::WORLD);
+        for _ in 1..u16::MAX {
+            assert!(ids.allocate().is_some());
+        }
+        assert_eq!(ids.allocate(), None);
+
+        ids.release(first);
+        assert_eq!(ids.allocate(), Some(first));
+        assert_eq!(ids.allocate(), None);
     }
 
     #[test]

@@ -33,8 +33,15 @@
 //! removed edits to the next commit apart from its change sets, since no
 //! other world hears of them.
 //!
-//! Buckets are kept by grid and level-0 chunk, and a commit, a clear or a
-//! forget acts on one grid. The methods that name no grid act on the world's.
+//! Buckets are kept by grid and level-0 chunk, and a clear or a forget acts
+//! on one grid. The methods that name no grid act on the world's.
+//!
+//! A sub-grid has no generator, so its edits are exactly its solid voxels.
+//! A voxel that isn't solid, set in a sub-grid's pending bucket, removes the
+//! edit there: the commit drops the committed edit, if there is one, and
+//! reports it removed, without replacing the chunk's other edits. A
+//! sub-grid's committed buckets each keep the box around their edits, so
+//! the box around all of a sub-grid's solids reads one box per chunk.
 
 use std::{
     marker::PhantomData,
@@ -99,6 +106,11 @@ pub(crate) struct Bucket<I> {
     /// The edit sequence that the last edit delta applied since the last
     /// commit assigned. Only pending buckets keep it.
     assigned: Option<Assigned>,
+    /// The box around the bucket's edits, both corners inclusive, or `None`
+    /// for a bucket with none. Only a sub-grid's committed buckets keep it,
+    /// for [`VoxelEdits::solid_bounds_in`].
+    #[cfg(feature = "sub_grids")]
+    solids: Option<(IVec3, IVec3)>,
 }
 
 /// The edit sequence an applied edit delta assigned to a pending bucket.
@@ -140,6 +152,8 @@ impl<I: Copy + PartialEq> Bucket<I> {
             seq: 0,
             replaced: false,
             assigned: None,
+            #[cfg(feature = "sub_grids")]
+            solids: None,
         }
     }
 
@@ -182,6 +196,64 @@ impl<I: Copy + PartialEq> Bucket<I> {
                 *slot = Some(voxel);
                 true
             }
+        }
+    }
+
+    /// Removes the edit at `position`, if there is one.
+    fn remove(&mut self, position: IVec3) {
+        let index = self.index(position);
+        match &mut self.store {
+            Store::Sparse(voxels) => {
+                voxels.remove(&position);
+            }
+            Store::Dense { voxels, count } => {
+                if voxels[index].take().is_some() {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+
+    /// The positions of the edits in the box from `min` to `max`, both
+    /// inclusive and within the bucket's chunk.
+    #[cfg(feature = "sub_grids")]
+    fn positions_within(&self, min: IVec3, max: IVec3) -> Vec<IVec3> {
+        match &self.store {
+            Store::Sparse(voxels) => voxels
+                .keys()
+                .copied()
+                .filter(|position| position.cmpge(min).all() && position.cmple(max).all())
+                .collect(),
+            Store::Dense { count: 0, .. } => Vec::new(),
+            Store::Dense { .. } => box_positions(min, max)
+                .filter(|position| self.get(*position).is_some())
+                .collect(),
+        }
+    }
+
+    /// Updates the box around this committed bucket's edits after a commit
+    /// made `changes`, replacing the bucket's edits if `replaced`. Edits only
+    /// set grow the box; a removal or a replace works it out again from every
+    /// edit, so its cost grows with the bucket's edits.
+    #[cfg(feature = "sub_grids")]
+    fn update_solids(
+        &mut self,
+        changes: &[(IVec3, Option<WorldVoxel<I>>)],
+        replaced: bool,
+    ) {
+        let grow = |around: Option<(IVec3, IVec3)>, position: IVec3| {
+            Some(around.map_or((position, position), |(min, max)| {
+                (min.min(position), max.max(position))
+            }))
+        };
+        if !replaced && changes.iter().all(|(_, voxel)| voxel.is_some()) {
+            self.solids = changes
+                .iter()
+                .fold(self.solids, |around, (position, _)| grow(around, *position));
+        } else {
+            self.solids = self
+                .iter()
+                .fold(None, |around, (position, _)| grow(around, position));
         }
     }
 
@@ -497,6 +569,39 @@ fn bucket_mut<I: Copy + PartialEq>(
     Arc::make_mut(map.get_or_insert_with(key, || Arc::new(Bucket::new(key.position()))))
 }
 
+/// Turns the changes a sub-grid's commit found against its `committed` bucket
+/// into the changes to its solids: a voxel set to one that isn't solid
+/// removes the committed edit there, and changes nothing where there is none.
+#[cfg(feature = "sub_grids")]
+#[cold]
+fn sub_grid_removals<I: Copy + PartialEq>(
+    changes: &mut Vec<(IVec3, Option<WorldVoxel<I>>)>,
+    committed: &Bucket<I>,
+) {
+    changes.retain_mut(|(position, voxel)| match voxel {
+        Some(solid) if solid.is_solid() => true,
+        Some(_) => {
+            *voxel = None;
+            committed.get(*position).is_some()
+        }
+        None => true,
+    });
+}
+
+/// Drops `grid`'s pending edits, copying the others' only when a reader still
+/// holds them.
+fn clear_pending<I: Clone>(pending: &mut Arc<BucketMap<I>>, grid: GridId) {
+    if let Some(map) = Arc::get_mut(pending) {
+        map.clear_grid(grid);
+    } else if pending.holds_only(grid) {
+        *pending = Arc::default();
+    } else {
+        let mut map = (**pending).clone();
+        map.clear_grid(grid);
+        *pending = Arc::new(map);
+    }
+}
+
 /// Every voxel edit of the voxel world `C`, of every grid.
 ///
 /// Edits set since the last commit are pending: they are readable right away,
@@ -554,16 +659,29 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         bucket_mut(Arc::make_mut(&mut pending), key).set(position, voxel);
     }
 
-    /// Sets the voxels in the box from `min` inclusive to `max` exclusive for
-    /// which `voxel` returns one. A chunk given many voxels gets a dense
-    /// bucket up front.
+    /// Sets the world's voxels in the box from `min` inclusive to `max`
+    /// exclusive for which `voxel` returns one, as
+    /// [`set_region_in`](Self::set_region_in) does for any grid.
+    pub(crate) fn set_region(
+        &self,
+        min: IVec3,
+        max: IVec3,
+        voxel: impl FnMut(IVec3) -> Option<WorldVoxel<I>>,
+    ) {
+        self.set_region_in(GridId::WORLD, min, max, voxel);
+    }
+
+    /// Sets `grid`'s voxels in the box from `min` inclusive to `max`
+    /// exclusive for which `voxel` returns one. A chunk given many voxels
+    /// gets a dense bucket up front.
     ///
     /// It works chunk by chunk: it asks `voxel` for a chunk's voxels, then
     /// sets them with the pending edits locked. `voxel` runs unlocked, so it
     /// can read this world's voxels, and other systems setting or reading
     /// voxels don't wait for it.
-    pub(crate) fn set_region(
+    pub(crate) fn set_region_in(
         &self,
+        grid: GridId,
         min: IVec3,
         max: IVec3,
         mut voxel: impl FnMut(IVec3) -> Option<WorldVoxel<I>>,
@@ -600,7 +718,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     let mut pending = self.pending.lock().unwrap();
                     let bucket = bucket_mut(
                         Arc::make_mut(&mut pending),
-                        GridKey::level_0(GridId::WORLD, chunk),
+                        GridKey::level_0(grid, chunk),
                     );
                     if voxels.len() >= DENSE_AT {
                         bucket.make_dense();
@@ -692,6 +810,65 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
+    /// Removes `grid`'s edits in the box from `min` inclusive to `max`
+    /// exclusive, one voxel at a time: each committed or pending edit in the
+    /// box is set to air, which the commit of a sub-grid takes as removing
+    /// it. Unlike a clear, the commit doesn't replace the chunk's edits. Its
+    /// cost grows with `grid`'s chunks holding edits and with the edits in
+    /// the box, or with the box's voxels in a chunk holding many edits.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn remove_region_in(&self, grid: GridId, min: IVec3, max: IVec3) {
+        if max.cmple(min).any() {
+            return;
+        }
+        let max = max - 1;
+        let (chunk_min, chunk_max) = (chunk_containing(min), chunk_containing(max));
+        let mut pending = self.pending.lock().unwrap();
+        let committed = self.committed.read().unwrap();
+        let mut chunks: Vec<GridKey> = committed
+            .grid_keys(grid)
+            .chain(pending.grid_keys(grid))
+            .filter(|chunk| {
+                chunk.position().cmpge(chunk_min).all()
+                    && chunk.position().cmple(chunk_max).all()
+            })
+            .collect();
+        chunks.sort_unstable_by_key(|chunk| chunk.position().to_array());
+        chunks.dedup();
+        for chunk in chunks {
+            let chunk_first = chunk.position() * CHUNK_SIZE_I;
+            let (lo, hi) = (
+                chunk_first.max(min),
+                (chunk_first + CHUNK_SIZE_I - 1).min(max),
+            );
+            let mut positions: Vec<IVec3> = [committed.get(&chunk), pending.get(&chunk)]
+                .into_iter()
+                .flatten()
+                .flat_map(|bucket| bucket.positions_within(lo, hi))
+                .collect();
+            if positions.is_empty() {
+                continue;
+            }
+            positions.sort_unstable_by_key(|position| position.to_array());
+            positions.dedup();
+            let bucket = bucket_mut(Arc::make_mut(&mut pending), chunk);
+            for position in positions {
+                bucket.set(position, WorldVoxel::Air);
+            }
+        }
+    }
+
+    /// Drops every edit of `grid` at once, pending and committed, with their
+    /// edit sequences, and reports nothing: for a sub-grid that is gone. Its
+    /// cost grows with every grid's pending edits when a reader still holds
+    /// them.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn drop_grid(&self, grid: GridId) {
+        let mut pending = self.pending.lock().unwrap();
+        clear_pending(&mut pending, grid);
+        self.committed.write().unwrap().clear_grid(grid);
+    }
+
     /// Drops every edit of the world and every edit sequence at once, pending
     /// edits included. The next commit hands the removed edits to
     /// [`take_forgotten`](Self::take_forgotten) rather than reporting them.
@@ -705,15 +882,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// a reader still holds them.
     pub(crate) fn forget_in(&self, grid: GridId) {
         let mut pending = self.pending.lock().unwrap();
-        if let Some(map) = Arc::get_mut(&mut pending) {
-            map.clear_grid(grid);
-        } else if pending.holds_only(grid) {
-            *pending = Arc::default();
-        } else {
-            let mut map = (**pending).clone();
-            map.clear_grid(grid);
-            *pending = Arc::new(map);
-        }
+        clear_pending(&mut pending, grid);
         let mut buckets = self.committed.write().unwrap();
         if buckets.is_empty() {
             return;
@@ -831,6 +1000,56 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             .collect()
     }
 
+    /// The box around `grid`'s solid edits, pending ones included, both
+    /// corners inclusive, or `None` if it has none. For a sub-grid, whose
+    /// edits are its solids.
+    ///
+    /// A committed chunk with no pending edits gives the box its commit kept.
+    /// A chunk with pending edits is worked out from them, and also from its
+    /// committed edits where a pending one removes a voxel, so the cost grows
+    /// with the edits of the chunks edited since the last commit.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn solid_bounds_in(&self, grid: GridId) -> Option<(IVec3, IVec3)> {
+        let pending = self.pending.lock().unwrap();
+        let committed = self.committed.read().unwrap();
+        let mut around: Option<(IVec3, IVec3)> = None;
+        let mut grow = |min: IVec3, max: IVec3| {
+            around = Some(
+                around.map_or((min, max), |(low, high)| (low.min(min), high.max(max))),
+            );
+        };
+        for (key, bucket) in committed.grid_entries(grid) {
+            if let (false, Some((min, max))) = (pending.contains(&key), bucket.solids) {
+                grow(min, max);
+            }
+        }
+        for (key, bucket) in pending.grid_entries(grid) {
+            let mut removes = false;
+            for (position, voxel) in bucket.iter() {
+                if voxel.is_solid() {
+                    grow(position, position);
+                } else {
+                    removes = true;
+                }
+            }
+            let Some(committed) = committed.get(&key).filter(|_| !bucket.replaced) else {
+                continue;
+            };
+            if !removes {
+                if let Some((min, max)) = committed.solids {
+                    grow(min, max);
+                }
+                continue;
+            }
+            for (position, _) in committed.iter() {
+                if bucket.get(position).is_none_or(|voxel| voxel.is_solid()) {
+                    grow(position, position);
+                }
+            }
+        }
+        around
+    }
+
     /// Returns a reader of the world's edits that works from any thread.
     ///
     /// The reader sees the pending edits as they were when it was made, and the
@@ -849,15 +1068,24 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Commits the world's pending edits. Returns a change set for each
-    /// level-0 chunk whose committed edits or edit sequence changed.
+    /// Commits the world's pending edits, and leaves other grids' pending.
+    /// Returns a change set for each of the world's level-0 chunks whose
+    /// committed edits or edit sequence changed.
+    #[cfg(test)]
     pub(crate) fn commit(&self) -> Vec<ChangeSet<I>> {
         self.commit_in(GridId::WORLD)
     }
 
-    /// Commits `grid`'s pending edits, and leaves other grids' pending.
-    /// Returns a change set for each of `grid`'s level-0 chunks whose
-    /// committed edits or edit sequence changed.
+    /// Commits `grid`'s pending edits, and leaves other grids' pending, as
+    /// [`commit_all`](Self::commit_all) does for every grid.
+    #[cfg(test)]
+    pub(crate) fn commit_in(&self, grid: GridId) -> Vec<ChangeSet<I>> {
+        self.commit_where(Some(grid))
+    }
+
+    /// Commits every grid's pending edits. Returns a change set for each
+    /// level-0 chunk of any grid whose committed edits or edit sequence
+    /// changed.
     ///
     /// A chunk's edit sequence moves on by the number of voxels in its change
     /// set. Where an edit delta was applied, it takes the delta's sequence
@@ -870,7 +1098,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// A chunk's committed edits are copied only when a running chunk task
     /// still holds them, and the edits that replace them only when a reader
     /// still holds those.
-    pub(crate) fn commit_in(&self, grid: GridId) -> Vec<ChangeSet<I>> {
+    pub(crate) fn commit_all(&self) -> Vec<ChangeSet<I>> {
+        self.commit_where(None)
+    }
+
+    /// Commits the pending edits of `grid`, or of every grid for `None`.
+    ///
+    /// In a sub-grid, which holds only solid voxels, a pending voxel that
+    /// isn't solid removes the chunk's committed edit there, if it has one,
+    /// with no replace.
+    fn commit_where(&self, grid: Option<GridId>) -> Vec<ChangeSet<I>> {
         // The pending edits stay locked until they are committed, so a reader
         // made during the commit finds each edit either pending or committed.
         let mut pending = self.pending.lock().unwrap();
@@ -887,13 +1124,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         // back.
         let all = std::mem::take(&mut *pending);
         let mut all = Arc::try_unwrap(all).unwrap_or_else(|shared| (*shared).clone());
-        let taken = all.take_grid(grid);
-        if !all.is_empty() {
-            *pending = Arc::new(all);
-        }
+        let taken = match grid {
+            Some(grid) => {
+                let taken = all.take_grid(grid);
+                if !all.is_empty() {
+                    *pending = Arc::new(all);
+                }
+                taken
+            }
+            None => all,
+        };
         let mut sets = Vec::new();
         for (key, pending_bucket) in taken.into_entries() {
-            let chunk = key.position();
+            let (grid, chunk) = (key.grid(), key.position());
             let empty;
             let committed = match buckets.get(&key) {
                 Some(committed) => committed,
@@ -903,11 +1146,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                 }
             };
             let replaced = pending_bucket.replaced;
-            let changes = if replaced {
+            #[allow(unused_mut)]
+            let mut changes = if replaced {
                 committed.replaced_by(&pending_bucket)
             } else {
                 committed.changes_from(&pending_bucket)
             };
+            #[cfg(feature = "sub_grids")]
+            if grid != GridId::WORLD {
+                sub_grid_removals(&mut changes, committed);
+            }
             let before = committed.seq;
             let counted = before + changes.len() as u64;
             let seq = pending_bucket
@@ -924,10 +1172,17 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     committed.make_dense();
                 }
                 for &(position, voxel) in &changes {
-                    if let Some(voxel) = voxel {
-                        committed.insert(position, voxel);
+                    match voxel {
+                        Some(voxel) => {
+                            committed.insert(position, voxel);
+                        }
+                        None => committed.remove(position),
                     }
                 }
+            }
+            #[cfg(feature = "sub_grids")]
+            if grid != GridId::WORLD {
+                committed.update_solids(&changes, replaced);
             }
             committed.seq = seq;
             sets.push(ChangeSet {
@@ -1609,6 +1864,41 @@ mod tests {
         // sequence before can't be worked out from them.
         assert_eq!(sets[0].voxels.len(), 3);
         assert_eq!((sets[0].seq, sets[0].replaced), (1, true));
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_sub_grid_commits_air_unset_and_a_removed_box_as_removals_without_a_replace() {
+        let edits = Edits::default();
+        let grid = GridId::new(1);
+        let (air, unset, boxed, kept) = (IVec3::X, IVec3::Y, IVec3::Z, IVec3::splat(9));
+        for position in [air, unset, boxed, kept] {
+            edits.set_in(grid, position, WorldVoxel::Solid(1));
+        }
+        edits.commit_all();
+
+        edits.set_in(grid, air, WorldVoxel::Air);
+        edits.set_in(grid, unset, WorldVoxel::Unset);
+        edits.remove_region_in(grid, boxed, boxed + 1);
+        // Air where the sub-grid holds nothing removes nothing.
+        edits.set_in(grid, IVec3::splat(5), WorldVoxel::Air);
+        let mut sets = edits.commit_all();
+        sets[0]
+            .voxels
+            .sort_by_key(|(position, _)| position.to_array());
+
+        assert_eq!(
+            sets,
+            vec![ChangeSet {
+                grid,
+                chunk: IVec3::ZERO,
+                replaced: false,
+                seq: 7,
+                voxels: vec![(boxed, None), (unset, None), (air, None)],
+            }]
+        );
+        assert_eq!(edits.edited_chunks_in(grid), vec![(IVec3::ZERO, 7)]);
+        assert_eq!(edits.solid_bounds_in(grid), Some((kept, kept)));
     }
 
     #[test]

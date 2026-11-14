@@ -7,6 +7,8 @@ use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
+#[cfg(feature = "sub_grids")]
+use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrids};
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
@@ -220,6 +222,70 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     light_route: Option<Res<'w, crate::light::route::LightRoute<C>>>,
     #[cfg(feature = "light_propagation")]
     sky_fill: Option<Res<'w, crate::light::fill::driver::SkyFillWork<C>>>,
+    #[cfg(feature = "sub_grids")]
+    sub_grids: Res<'w, SubGrids<C>>,
+    #[cfg(feature = "sub_grids")]
+    commands: Commands<'w, 's>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
+    /// Spawns a sub-grid of this world at `transform`, as a child of the
+    /// world's root, and returns its entity.
+    ///
+    /// The sub-grid is live at once: the same system can fill it through
+    /// [`grid_mut`](Self::grid_mut). Its entity gets [`SubGrid<C>`](crate::prelude::SubGrid),
+    /// `transform` and `Visibility` when the system's commands apply, and
+    /// takes components of the game's own through `Commands` like any other
+    /// entity. Its [`pose`](GridVoxels::pose) is `transform` until the
+    /// frame's transforms have propagated.
+    ///
+    /// # Panics
+    ///
+    /// When this world has 65,535 live sub-grids, the most it can hold.
+    pub fn spawn_sub_grid(&mut self, transform: Transform) -> Entity {
+        crate::sub_grid::world::spawn(&self.sub_grids, &mut self.commands, transform)
+    }
+
+    /// Makes `entity` a sub-grid of this world, leaving its parent and its
+    /// transform alone. An entity that is a sub-grid of this world already
+    /// stays as it is.
+    ///
+    /// The sub-grid is live at once, as with
+    /// [`spawn_sub_grid`](Self::spawn_sub_grid), and its entity gets
+    /// [`SubGrid<C>`](crate::prelude::SubGrid) when the system's commands apply, with a `Transform`
+    /// and `Visibility` if it has none. Its [`pose`](GridVoxels::pose) is
+    /// the identity until the frame's transforms have propagated.
+    ///
+    /// # Panics
+    ///
+    /// When this world has 65,535 live sub-grids, the most it can hold.
+    pub fn insert_sub_grid(&mut self, entity: Entity) {
+        crate::sub_grid::world::insert(&self.sub_grids, &mut self.commands, entity);
+    }
+
+    /// Reads `grid`: the world's voxels, or a sub-grid's. Returns `None` for
+    /// an entity that isn't a live sub-grid of this world, such as one
+    /// despawned, or a sub-grid of another world.
+    ///
+    /// [`Grid::World`] reads what this world's own methods read.
+    pub fn grid(&self, grid: Grid) -> Option<GridVoxels<'_, C>> {
+        GridVoxels::new(
+            grid,
+            &self.sub_grids,
+            &self.voxel_edits,
+            &self.chunk_map,
+            &self.configuration.0,
+        )
+    }
+
+    /// Reads and edits `grid`, as [`grid`](Self::grid) reads it. Returns
+    /// `None` for an entity that isn't a live sub-grid of this world.
+    ///
+    /// [`Grid::World`] edits what this world's own methods edit.
+    pub fn grid_mut(&mut self, grid: Grid) -> Option<GridVoxelsMut<'_, C>> {
+        self.grid(grid).map(GridVoxelsMut::new)
+    }
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -789,7 +855,7 @@ fn bounds_exit(start: Vec3, direction: Vec3, bounds: &Aabb3d) -> Vec3 {
 /// The voxel at `position`: its voxel edit if it has one, else its voxel in the
 /// published data of the finest chunk covering it, else the voxel the fill hint
 /// of its level-0 chunk says is everywhere in it.
-fn voxel_at<C: VoxelWorldConfig>(
+pub(crate) fn voxel_at<C: VoxelWorldConfig>(
     voxel_edits: &VoxelEditReader<C::MaterialIndex>,
     chunk_map: &RwLock<ChunkMapData<C::MaterialIndex>>,
     configuration: &C,

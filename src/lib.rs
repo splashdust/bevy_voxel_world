@@ -19,6 +19,8 @@ mod pool_budget;
 #[cfg(feature = "sub_grids")]
 mod snap;
 mod streaming_policy;
+#[cfg(feature = "sub_grids")]
+mod sub_grid;
 mod voxel;
 mod voxel_edits;
 mod voxel_material;
@@ -45,6 +47,8 @@ pub mod prelude {
     pub use crate::plugin::VoxelWorldPlugin;
     #[cfg(feature = "sub_grids")]
     pub use crate::snap::GridRotation;
+    #[cfg(feature = "sub_grids")]
+    pub use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrid};
     pub use crate::voxel::{VoxelFace, WorldVoxel, VOXEL_SIZE};
     pub use crate::voxel_world::{
         get_chunk_voxel_position, VoxelRaycastResult, VoxelWorld, VoxelWorldCamera,
