@@ -76,6 +76,10 @@ mod fill_worlds;
 #[cfg(feature = "light_propagation")]
 use fill_worlds::FILL_SCENES;
 
+#[cfg(feature = "sub_grids")]
+#[path = "common/vehicle_hull.rs"]
+mod vehicle_hull;
+
 /// Pool sizes are pinned so the machine's core count can't skew comparisons, and
 /// kept, with the main thread, below the M1 Max's 8 performance cores so
 /// background work has room to run beside the benchmark rather than on top of it.
@@ -2476,6 +2480,360 @@ fn scenario_fragments() -> Metrics {
     metrics
 }
 
+/// Frames in each of `vehicle`'s phases: upright flight, tumbling, and
+/// tumbling while edited. The flight is one lap of its circle.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_PHASE_FRAMES: u32 = 600;
+
+/// The centre of the circle the hull's centre flies around, high enough
+/// above the sine terrain that the tumbling hull never reaches it.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_ORBIT_CENTRE: Vec3 = Vec3::new(16.0, 220.0, 16.0);
+
+#[cfg(feature = "sub_grids")]
+const VEHICLE_ORBIT_RADIUS: f32 = 160.0;
+
+/// How far the tumbling hull turns each frame about its x, y and z axes,
+/// in radians.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_TUMBLE_RATES: Vec3 = Vec3::new(0.011, 0.019, 0.027);
+
+/// The first of the materials `vehicle` sets at the hull's edit sites, a
+/// different one at each visit to a site. The hull uses none of them, so a
+/// publish showing one can only come from its edit.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_EDIT: u8 = 10;
+
+/// The most frames `vehicle` runs after its edited phase, still tumbling,
+/// for its last edits to publish.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_DRAIN_FRAMES: u32 = 120;
+
+/// The hull a scenario moves, and the frame of its motion.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct VehicleMotion {
+    hull: Option<Entity>,
+    tumbling: bool,
+    frame: u32,
+}
+
+/// The hull's transform at `frame` of its flight, or of its tumbling when
+/// `tumbling`.
+///
+/// In flight the hull stays upright and circles `VEHICLE_ORBIT_CENTRE`,
+/// facing along its path. Tumbling, it turns about its centre at the point
+/// where the flight starts and ends.
+#[cfg(feature = "sub_grids")]
+fn vehicle_pose(tumbling: bool, frame: u32) -> Transform {
+    let (centre, rotation) = if tumbling {
+        let angles = VEHICLE_TUMBLE_RATES * frame as f32;
+        (
+            VEHICLE_ORBIT_CENTRE + VEHICLE_ORBIT_RADIUS * Vec3::X,
+            Quat::from_euler(EulerRot::XYZ, angles.x, angles.y, angles.z),
+        )
+    } else {
+        let angle = std::f32::consts::TAU * frame as f32 / VEHICLE_PHASE_FRAMES as f32;
+        (
+            VEHICLE_ORBIT_CENTRE
+                + VEHICLE_ORBIT_RADIUS * Vec3::new(angle.cos(), 0.0, angle.sin()),
+            Quat::from_rotation_y(-angle),
+        )
+    };
+    Transform {
+        translation: centre - rotation * vehicle_hull::CENTRE,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// Sets the hull's transform from the frame of its motion, then moves on a
+/// frame. Driven per frame, not by wall-clock time, so every run shows the
+/// same poses.
+#[cfg(feature = "sub_grids")]
+fn move_vehicle(
+    mut motion: ResMut<VehicleMotion>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let Some(hull) = motion.hull else {
+        return;
+    };
+    if let Ok(mut transform) = transforms.get_mut(hull) {
+        *transform = vehicle_pose(motion.tumbling, motion.frame);
+    }
+    motion.frame += 1;
+}
+
+/// The chunk positions of the hull's chunks published since the scenario
+/// last took them.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct HullPublishes {
+    hull: Option<Entity>,
+    chunks: Vec<IVec3>,
+}
+
+#[cfg(feature = "sub_grids")]
+fn record_hull_publishes<C: VoxelWorldConfig>(
+    mut publishes: ResMut<HullPublishes>,
+    mut messages: MessageReader<PublishMessage<C>>,
+) {
+    let Some(hull) = publishes.hull else {
+        messages.read().for_each(drop);
+        return;
+    };
+    let published: Vec<IVec3> = messages
+        .read()
+        .filter(|message| message.grid == Grid::SubGrid(hull))
+        .map(|message| message.chunk_key.position)
+        .collect();
+    publishes.chunks.extend(published);
+}
+
+/// Spawns a sub-grid at `transform` and builds the vehicle hull in it, with
+/// lamp voxels of the material `lamp` when given. Returns the sub-grid's
+/// entity and what the hull holds. The hull commits in the next frame.
+#[cfg(feature = "sub_grids")]
+fn spawn_hull<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    transform: Transform,
+    lamp: Option<u8>,
+) -> (Entity, vehicle_hull::Hull) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+            let hull = voxel_world.spawn_sub_grid(transform);
+            let mut grid = voxel_world.grid_mut(Grid::SubGrid(hull)).unwrap();
+            (hull, vehicle_hull::build(&mut grid, lamp))
+        })
+        .unwrap()
+}
+
+/// How many chunks the sub-grid `hull` has, and how many of them are Ready.
+#[cfg(feature = "sub_grids")]
+fn hull_chunks<C: VoxelWorldConfig>(app: &mut App, hull: Entity) -> (usize, usize) {
+    let world = app.world_mut();
+    let keys: Vec<ChunkKey> = world
+        .query::<(&Chunk<C>, &ChildOf)>()
+        .iter(world)
+        .filter(|(_, parent)| parent.parent() == hull)
+        .map(|(chunk, _)| chunk.key())
+        .collect();
+    let mut state = SystemState::<VoxelWorld<C>>::new(world);
+    let voxel_world = state.get(world).unwrap();
+    let grid = voxel_world.grid(Grid::SubGrid(hull)).unwrap();
+    let ready = keys
+        .iter()
+        .filter(|key| grid.chunk_state(**key) == Some(ChunkStatus::Ready))
+        .count();
+    (keys.len(), ready)
+}
+
+/// Runs frames until every chunk of the sub-grid `hull` has been Ready for
+/// `SETTLE_FRAMES` frames in a row, or for at most `MAX_FRAMES`, and
+/// returns how many of its chunks are Ready.
+#[cfg(feature = "sub_grids")]
+fn settle_hull<C: VoxelWorldConfig>(app: &mut App, hull: Entity) -> usize {
+    let mut settled = 0;
+    for _ in 0..MAX_FRAMES {
+        app.update();
+        let (chunks, ready) = hull_chunks::<C>(app, hull);
+        settled = if chunks > 0 && ready == chunks {
+            settled + 1
+        } else {
+            0
+        };
+        if settled >= SETTLE_FRAMES {
+            break;
+        }
+    }
+    hull_chunks::<C>(app, hull).1
+}
+
+/// A voxel `vehicle` set in the hull that hasn't published yet.
+#[cfg(feature = "sub_grids")]
+struct PendingEdit {
+    position: IVec3,
+    voxel: WorldVoxel<u8>,
+    set_at: Instant,
+    frames: u32,
+}
+
+/// A large, editable sub-grid that moves: the vehicle hull, built by voxel
+/// edits before timing starts, flies upright for `VEHICLE_PHASE_FRAMES`
+/// over the streamed sine world, tumbles on all three axes for as many, and
+/// tumbles for as many again while one voxel of it is set or dug every
+/// frame. The camera stays still, so the world's chunks stay put.
+///
+/// The edits visit `vehicle_hull::edit_sites`, one in each hull chunk, in
+/// turn, setting a material from `VEHICLE_EDIT` up on even frames and
+/// digging on odd ones, so each site alternates between the two. An edit
+/// has published on the first frame its chunk's `ChunkPublished` arrives
+/// with data holding it or a later edit at its site: a chunk task that
+/// starts after several edits publishes them all at once. A dug site reads
+/// air whichever dig it shows, so air counts as the earliest dig waiting.
+///
+/// Reports the hull's solid voxels and its Ready level-0 chunks, frame
+/// metrics for each phase, and the median and worst frames and time from
+/// setting an edit to its publish. An edit that hasn't published
+/// `VEHICLE_DRAIN_FRAMES` after the phase, which keeps tumbling with no
+/// edits, counts as unpublished. Timings have no threshold.
+#[cfg(feature = "sub_grids")]
+fn scenario_vehicle() -> Metrics {
+    let prefix = "vehicle";
+    let mut app = build_app(SineWorld::default());
+    app.init_resource::<VehicleMotion>()
+        .init_resource::<HullPublishes>()
+        .add_systems(Update, move_vehicle)
+        .add_systems(Last, record_hull_publishes::<SineWorld>);
+    stream_in::<SineWorld>(&mut app);
+
+    let (hull, built) = spawn_hull::<SineWorld>(&mut app, vehicle_pose(false, 0), None);
+    let ready = settle_hull::<SineWorld>(&mut app, hull);
+    if ready != built.chunks.len() {
+        eprintln!(
+            "{prefix}: {ready} hull chunks are Ready, but the hull should have {}",
+            built.chunks.len()
+        );
+    }
+    let mut metrics = Metrics::new();
+    metrics.insert(format!("{prefix}.solid_voxels"), built.solid_voxels as f64);
+    metrics.insert(format!("{prefix}.ready_chunks"), ready as f64);
+
+    *app.world_mut().resource_mut::<VehicleMotion>() = VehicleMotion {
+        hull: Some(hull),
+        tumbling: false,
+        frame: 0,
+    };
+    let times = timed_frames(&mut app, VEHICLE_PHASE_FRAMES as usize, |_| {});
+    frame_metrics(&format!("{prefix}.flight"), &times, &mut metrics);
+
+    *app.world_mut().resource_mut::<VehicleMotion>() = VehicleMotion {
+        hull: Some(hull),
+        tumbling: true,
+        frame: 0,
+    };
+    let times = timed_frames(&mut app, VEHICLE_PHASE_FRAMES as usize, |_| {});
+    frame_metrics(&format!("{prefix}.tumble"), &times, &mut metrics);
+
+    let sites = vehicle_hull::edit_sites();
+    let site_in_chunk: HashMap<IVec3, IVec3> = sites
+        .iter()
+        .map(|site| (vehicle_hull::chunk_of(*site), *site))
+        .collect();
+    *app.world_mut().resource_mut::<HullPublishes>() = HullPublishes {
+        hull: Some(hull),
+        chunks: Vec::new(),
+    };
+    let mut state = SystemState::<VoxelWorld<SineWorld>>::new(app.world_mut());
+    let mut pending: Vec<PendingEdit> = Vec::new();
+    let mut frames_to_publish = Vec::new();
+    let mut times_to_publish = Vec::new();
+    let mut times = Vec::new();
+    for frame in 0..VEHICLE_PHASE_FRAMES + VEHICLE_DRAIN_FRAMES {
+        if frame < VEHICLE_PHASE_FRAMES {
+            let position = sites[frame as usize % sites.len()];
+            let visit = frame as usize / sites.len();
+            let voxel = if frame % 2 == 0 {
+                WorldVoxel::Solid(VEHICLE_EDIT + (visit % 200) as u8)
+            } else {
+                WorldVoxel::Air
+            };
+            let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+            voxel_world
+                .grid_mut(Grid::SubGrid(hull))
+                .unwrap()
+                .set_voxel(position, voxel);
+            state.apply(app.world_mut());
+            pending.push(PendingEdit {
+                position,
+                voxel,
+                set_at: Instant::now(),
+                frames: 0,
+            });
+        } else if pending.is_empty() {
+            break;
+        }
+
+        let start = Instant::now();
+        app.update();
+        if frame < VEHICLE_PHASE_FRAMES {
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let mut published =
+            std::mem::take(&mut app.world_mut().resource_mut::<HullPublishes>().chunks);
+        published.sort_by_key(|chunk| chunk.to_array());
+        published.dedup();
+        let voxel_world = state.get(app.world()).unwrap();
+        let grid = voxel_world.grid(Grid::SubGrid(hull)).unwrap();
+        let mut landed = vec![false; pending.len()];
+        for chunk in published {
+            let Some(site) = site_in_chunk.get(&chunk) else {
+                continue;
+            };
+            let Some(shown) = grid
+                .get_chunk_data(ChunkKey::new(chunk, 0))
+                .and_then(|data| data.get_voxel_at_world_position(*site))
+            else {
+                continue;
+            };
+            // The site's waiting edits, oldest first: the data holds the
+            // first one that matches what it shows, and every one before.
+            let waiting: Vec<usize> = (0..pending.len())
+                .filter(|index| pending[*index].position == *site)
+                .collect();
+            if let Some(shown) = waiting
+                .iter()
+                .position(|index| pending[*index].voxel == shown)
+            {
+                for index in &waiting[..=shown] {
+                    landed[*index] = true;
+                }
+            }
+        }
+        let mut landed = landed.into_iter();
+        pending.retain_mut(|edit| {
+            edit.frames += 1;
+            let landed = landed.next().unwrap();
+            if landed {
+                frames_to_publish.push(edit.frames as f64);
+                times_to_publish.push(edit.set_at.elapsed().as_secs_f64() * 1000.0);
+            }
+            !landed
+        });
+    }
+    let unpublished = pending.len();
+
+    let edited = format!("{prefix}.edited");
+    frame_metrics(&edited, &times, &mut metrics);
+    metrics.insert(format!("{edited}.edits"), VEHICLE_PHASE_FRAMES as f64);
+    metrics.insert(format!("{edited}.sites"), sites.len() as f64);
+    metrics.insert(format!("{edited}.unpublished_edits"), unpublished as f64);
+    if frames_to_publish.is_empty() {
+        eprintln!("{prefix}: no edit published");
+        frames_to_publish.push(f64::INFINITY);
+        times_to_publish.push(f64::INFINITY);
+    }
+    metrics.insert(
+        format!("{edited}.frames_to_publish"),
+        percentile(&frames_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{edited}.max_frames_to_publish"),
+        percentile(&frames_to_publish, 1.0),
+    );
+    metrics.insert(
+        format!("{edited}.time_to_publish_ms"),
+        percentile(&times_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{edited}.max_time_to_publish_ms"),
+        percentile(&times_to_publish, 1.0),
+    );
+    metrics
+}
+
 /// Combines repeated samples of the same metrics into one, key by key.
 fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
     samples[0]
@@ -2675,6 +3033,8 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("settings_lit", RUNS, &scenario_settings_lit);
     #[cfg(feature = "dislodged_fragments")]
     step("fragments", FRAGMENT_RUNS, &scenario_fragments);
+    #[cfg(feature = "sub_grids")]
+    step("vehicle", RUNS, &scenario_vehicle);
     metrics
 }
 
@@ -2705,6 +3065,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
         || key.starts_with("fragments")
+        || key.starts_with("vehicle")
     {
         return Gate::ReportOnly;
     }
