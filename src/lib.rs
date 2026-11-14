@@ -4,6 +4,7 @@ mod chunk_map;
 mod configuration;
 mod debug_draw;
 pub mod edits;
+mod grid;
 #[cfg(feature = "light_propagation")]
 mod light;
 #[cfg(not(feature = "light_propagation"))]

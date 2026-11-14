@@ -18,6 +18,7 @@ use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, SpawnRequest},
     chunk_map::ChunkMap,
+    grid::GridKey,
     prelude::VoxelWorldCamera,
     voxel_world::*,
 };
@@ -701,14 +702,14 @@ fn a_spawn_request_places_its_chunk_and_its_priority_starts_it_first() {
         for x in 0..others {
             let key = ChunkKey::new(IVec3::new(x, 0, 0), 0);
             requests.spawn.push(SpawnRequest {
-                key,
+                key: GridKey::world(key),
                 parent: None,
                 priority: false,
                 transform: Transform::from_translation(key.world_position() - 1.0),
             });
         }
         requests.spawn.push(SpawnRequest {
-            key: first,
+            key: GridKey::world(first),
             parent: Some(parent),
             priority: true,
             transform,
@@ -3865,4 +3866,6 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
 
 mod edits;
 mod light;
+#[cfg(feature = "sub_grids")]
+mod sub_grids;
 mod sync;

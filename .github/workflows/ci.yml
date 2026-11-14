@@ -16,8 +16,9 @@ jobs:
   # Run the library tests and doc tests for each feature set in its own job,
   # so the sets run side by side. No code depends on serde and light
   # propagation together, so serde is tested on its own; Clippy checks the
-  # pair. Only the examples with tests are built here: Clippy checks the
-  # rest, and the benchmarks, without linking them.
+  # pair. Sub-grids and dislodged fragments are tested on their own and
+  # together with light propagation. Only the examples with tests are built
+  # here: Clippy checks the rest, and the benchmarks, without linking them.
   test:
     name: Test Suite (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -29,6 +30,9 @@ jobs:
           - { name: default, flags: "", examples: "" }
           - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning" }
           - { name: serde, flags: "--features serde", examples: "--example save_load" }
+          - { name: sub_grids, flags: "--features sub_grids", examples: "" }
+          - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "" }
+          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "" }
     env:
       RUSTFLAGS: "-C debuginfo=0"
     steps:

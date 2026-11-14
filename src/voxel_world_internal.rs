@@ -11,6 +11,7 @@ use crate::{
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     edits::{EditDelta, EditsCommitted},
+    grid::GridKey,
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
@@ -187,7 +188,9 @@ where
                 .into_iter()
                 .map(|key| SpawnRequest::streamed(key, root)),
         );
-        requests.retire.extend(plan.retire);
+        requests
+            .retire
+            .extend(plan.retire.into_iter().map(GridKey::world));
     }
 
     /// Commits the voxel edits set since the last frame, writes an

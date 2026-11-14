@@ -24,6 +24,7 @@ use crate::{
     },
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::{FillHint, LodLevel, VoxelWorldConfig},
+    grid::{GridId, GridKey, GridTable, PerGrid},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     pool_budget::{JobKind, PendingChunks, PoolBudget},
     prelude::default_chunk_meshing_delegate,
@@ -256,17 +257,20 @@ pub(crate) type ChunkTaskHandle<C> =
 /// The chunk state component of the voxel world `C`.
 pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 
-/// The live chunks of the voxel world `C` by chunk key, from spawning until
+/// The live chunks of the voxel world `C` by grid key, from spawning until
 /// despawning.
+///
+/// The methods that take a `ChunkKey` or a voxel position read the world's
+/// grid.
 ///
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
 pub struct ChunkIndex<C> {
-    entities: HashMap<ChunkKey, Entity>,
-    /// The chunk key of every live chunk.
-    keys: HashMap<Entity, ChunkKey>,
-    /// How many chunks there are at each LOD level.
-    levels: LevelCounts,
+    entities: GridTable<Entity>,
+    /// The grid key of every live chunk.
+    keys: HashMap<Entity, GridKey>,
+    /// How many chunks each grid has at each LOD level.
+    levels: PerGrid<LevelCounts>,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
     /// Pending chunks with priority, oldest first. May hold chunks that have
@@ -285,9 +289,9 @@ pub struct ChunkIndex<C> {
 impl<C> Default for ChunkIndex<C> {
     fn default() -> Self {
         Self {
-            entities: HashMap::new(),
+            entities: GridTable::default(),
             keys: HashMap::new(),
-            levels: LevelCounts::new(),
+            levels: PerGrid::new(LevelCounts::new()),
             priority: VecDeque::new(),
             pending: HashMap::new(),
             generating: HashSet::new(),
@@ -300,23 +304,30 @@ impl<C> Default for ChunkIndex<C> {
 
 impl<C> ChunkIndex<C> {
     pub fn get(&self, key: ChunkKey) -> Option<Entity> {
+        self.get_in(GridKey::world(key))
+    }
+
+    pub(crate) fn get_in(&self, key: GridKey) -> Option<Entity> {
         self.entities.get(&key).copied()
     }
 
     pub fn contains(&self, key: ChunkKey) -> bool {
-        self.entities.contains_key(&key)
+        self.contains_in(GridKey::world(key))
+    }
+
+    pub(crate) fn contains_in(&self, key: GridKey) -> bool {
+        self.entities.contains(&key)
     }
 
     /// The chunk key of every live chunk of the world.
     pub(crate) fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ {
-        self.entities.keys().copied()
+        self.entities.grid_keys(GridId::WORLD).map(|key| key.key())
     }
 
-    /// Whether the chunk at `key` exists and is Retiring.
+    /// Whether the world's chunk at `key` exists and is Retiring.
     pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
-        self.entities
-            .get(&key)
-            .is_some_and(|entity| self.retiring.contains(entity))
+        self.get(key)
+            .is_some_and(|entity| self.retiring.contains(&entity))
     }
 
     /// The key of the finest chunk that covers the voxel at `voxel_position`,
@@ -325,38 +336,67 @@ impl<C> ChunkIndex<C> {
         self.covering_chunk(chunk_containing(voxel_position))
     }
 
-    /// The key of the finest chunk that covers the level-0 chunk at
+    /// The key of the world's finest chunk that covers the level-0 chunk at
     /// `chunk_position`, if any chunk does.
     pub(crate) fn covering_chunk(&self, chunk_position: IVec3) -> Option<ChunkKey> {
-        self.levels.in_use().find_map(|lod_level| {
-            let key = ChunkKey::containing_chunk(chunk_position, lod_level);
-            self.entities.contains_key(&key).then_some(key)
+        self.covering_chunk_in(GridId::WORLD, chunk_position)
+            .map(|key| key.key())
+    }
+
+    /// The key of `grid`'s finest chunk that covers the level-0 chunk at
+    /// `chunk_position`, if any chunk does.
+    pub(crate) fn covering_chunk_in(
+        &self,
+        grid: GridId,
+        chunk_position: IVec3,
+    ) -> Option<GridKey> {
+        self.levels_in_use_in(grid).find_map(|lod_level| {
+            let key =
+                GridKey::new(grid, ChunkKey::containing_chunk(chunk_position, lod_level));
+            self.entities.contains(&key).then_some(key)
         })
     }
 
-    /// The LOD levels with chunks, finest first.
-    pub(crate) fn levels_in_use(&self) -> impl Iterator<Item = LodLevel> {
-        self.levels.in_use()
+    /// The world's LOD levels with chunks, finest first.
+    pub(crate) fn levels_in_use(&self) -> impl Iterator<Item = LodLevel> + '_ {
+        self.levels_in_use_in(GridId::WORLD)
+    }
+
+    /// `grid`'s LOD levels with chunks, finest first.
+    pub(crate) fn levels_in_use_in(
+        &self,
+        grid: GridId,
+    ) -> impl Iterator<Item = LodLevel> + '_ {
+        self.levels.get(grid).unwrap_or(&LevelCounts::NONE).in_use()
+    }
+
+    /// How many live chunks `grid` has.
+    fn chunk_count(&self, grid: GridId) -> usize {
+        self.levels.get(grid).map_or(0, LevelCounts::total)
     }
 
     /// Adds a chunk that spawned Pending, with or without `priority`.
-    fn spawned(&mut self, key: ChunkKey, entity: Entity, priority: bool) {
+    fn spawned(&mut self, key: GridKey, entity: Entity, priority: bool) {
         self.entities.insert(key, entity);
         self.keys.insert(entity, key);
-        self.levels.add(key.lod_level);
+        self.levels
+            .get_or_insert_with(key.grid(), LevelCounts::new)
+            .add(key.lod_level());
         if priority {
             self.priority.push_back(entity);
         } else {
-            self.pending.insert(entity, key);
+            self.pending.insert(entity, key.key());
         }
     }
 
     /// Removes the chunk from the index, so its key can spawn again. Returns its
-    /// chunk key, or `None` if the index no longer holds it.
-    fn despawned(&mut self, entity: Entity) -> Option<ChunkKey> {
+    /// grid key, or `None` if the index no longer holds it.
+    fn despawned(&mut self, entity: Entity) -> Option<GridKey> {
         let key = self.keys.remove(&entity)?;
         self.entities.remove(&key);
-        self.levels.remove(key.lod_level);
+        self.levels
+            .get_or_insert_with(key.grid(), LevelCounts::new)
+            .remove(key.lod_level());
         self.pending.remove(&entity);
         self.generating.remove(&entity);
         self.retiring.remove(&entity);
@@ -422,7 +462,7 @@ impl<C> ChunkIndex<C> {
 /// A chunk to spawn, and where and how it starts.
 #[derive(Clone, Copy, Debug)]
 pub struct SpawnRequest {
-    pub key: ChunkKey,
+    pub(crate) key: GridKey,
     /// The entity the chunk spawns as a child of, if any.
     pub parent: Option<Entity>,
     /// Whether the chunk's first task starts ahead of the chunks without
@@ -438,7 +478,7 @@ impl SpawnRequest {
     /// to it.
     pub(crate) fn streamed(key: ChunkKey, root: Option<Entity>) -> Self {
         Self {
-            key,
+            key: GridKey::world(key),
             parent: root,
             priority: false,
             transform: Transform::from_translation(key.world_position() - 1.0),
@@ -462,7 +502,7 @@ pub struct ChunkRequests<C: VoxelWorldConfig> {
     /// Chunks to spawn.
     pub spawn: Vec<SpawnRequest>,
     /// Chunks to despawn.
-    pub retire: Vec<ChunkKey>,
+    pub(crate) retire: Vec<GridKey>,
     /// Boxes of voxels whose chunks must regenerate: see
     /// [`regenerate`](Self::regenerate).
     regenerate: Mutex<Vec<EditedBox>>,
@@ -482,9 +522,9 @@ impl<C: VoxelWorldConfig> Default for ChunkRequests<C> {
 }
 
 impl<C: VoxelWorldConfig> ChunkRequests<C> {
-    /// Asks every spawned chunk, at any LOD level, whose padded voxels
-    /// include a voxel of the box from `min` to `max`, both inclusive, to
-    /// regenerate: its next chunk task starts with none of its published
+    /// Asks every spawned chunk of the world, at any LOD level, whose padded
+    /// voxels include a voxel of the box from `min` to `max`, both inclusive,
+    /// to regenerate: its next chunk task starts with none of its published
     /// voxel data, so it publishes the generator's voxels with the voxel
     /// edits over them.
     ///
@@ -492,11 +532,12 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
     /// in the task that follows. It takes a shared borrow, so `VoxelWorld`
     /// can ask too; the next `apply_requests` picks the box up.
     pub(crate) fn regenerate(&self, min: IVec3, max: IVec3) {
-        self.regenerate_boxes([EditedBox { min, max }]);
+        self.regenerate_boxes([EditedBox::world(min, max)]);
     }
 
-    /// Asks the chunks including a voxel of any of `boxes` to regenerate, as
-    /// [`regenerate`](Self::regenerate) does for one box.
+    /// Asks the chunks of each box's grid including a voxel of any of `boxes`
+    /// to regenerate, as [`regenerate`](Self::regenerate) does for one box of
+    /// the world.
     pub(crate) fn regenerate_boxes(&self, boxes: impl IntoIterator<Item = EditedBox>) {
         self.regenerate.lock().unwrap().extend(boxes);
     }
@@ -542,19 +583,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
 
-        // The LOD levels with chunks, each with its padding depth, for the
-        // edits and regenerate requests, if there are any.
-        let asked = !requests.edited.is_empty()
-            || !requests.regenerate.get_mut().unwrap().is_empty();
-        let levels: Vec<(LodLevel, IVec3)> = index
-            .levels_in_use()
-            .filter(|_| asked)
-            .map(|lod_level| {
-                let shape = configuration.chunk_data_shape(lod_level);
-                (lod_level, padding_depth(shape, lod_level))
-            })
-            .collect();
-        let mut stale: HashSet<ChunkKey> = HashSet::new();
+        let mut levels = GridLevels::default();
+        let mut stale: HashSet<GridKey> = HashSet::new();
         for set in requests.edited.drain(..) {
             // A set that changed no voxel moved only its chunk's edit
             // sequence, as two applied deltas setting a voxel and back do.
@@ -563,13 +593,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             // level-0 chunk takes a new task, which reads them at the new one.
             #[cfg(feature = "light_propagation")]
             if set.voxels.is_empty() {
-                stale.insert(ChunkKey::new(set.chunk, 0));
+                stale.insert(GridKey::level_0(set.grid, set.chunk));
             }
+            let levels = levels.of(set.grid, &index, configuration.as_ref());
             for voxels in set.stale_boxes() {
-                for &(lod_level, padding) in &levels {
-                    stale.extend(chunks_including_box(
-                        voxels.min, voxels.max, lod_level, padding,
-                    ));
+                for &(lod_level, padding) in levels {
+                    stale.extend(chunks_including_box(voxels, lod_level, padding));
                 }
             }
         }
@@ -577,23 +606,24 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             requests,
             &mut index,
             &mut chunks,
-            &levels,
+            &mut levels,
+            configuration.as_ref(),
             &mut stale,
             ev_update,
         );
         for key in stale {
-            let Some(entity) = index.get(key) else {
+            let Some(entity) = index.get_in(key) else {
                 continue;
             };
             if let Ok(mut state) = chunks.get_mut(entity) {
-                index.apply(entity, key, &mut state, ChunkEvent::Edited);
+                index.apply(entity, key.key(), &mut state, ChunkEvent::Edited);
             }
-            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+            ev_update.write(ChunkWillUpdate::<C>::new(key.key(), entity));
         }
 
         for request in requests.spawn.drain(..) {
             let key = request.key;
-            if index.contains(key) {
+            if index.contains_in(key) {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
@@ -605,10 +635,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             ));
             let entity = chunk_entity.id();
             chunk_entity.insert(Chunk::<C>::new(
-                key,
+                key.key(),
                 entity,
-                configuration.chunk_data_shape(key.lod_level),
-                configuration.chunk_meshing_shape(key.lod_level),
+                configuration.chunk_data_shape(key.lod_level()),
+                configuration.chunk_meshing_shape(key.lod_level()),
             ));
             if let Some(parent) = request.parent {
                 commands.entity(parent).add_child(entity);
@@ -617,16 +647,16 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         }
 
         for key in requests.retire.drain(..) {
-            let Some(entity) = index.get(key) else {
+            let Some(entity) = index.get_in(key) else {
                 continue;
             };
             let Ok(mut state) = chunks.get_mut(entity) else {
                 continue;
             };
-            if index.apply(entity, key, &mut state, ChunkEvent::Retire)
+            if index.apply(entity, key.key(), &mut state, ChunkEvent::Retire)
                 == Effect::AnnounceRetiring
             {
-                ev_despawn.write(ChunkWillDespawn::<C>::new(key, entity));
+                ev_despawn.write(ChunkWillDespawn::<C>::new(key.key(), entity));
             }
         }
         // Retiring a chunk drops its running task.
@@ -863,8 +893,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 == Effect::Despawn
             {
                 commands.entity(entity).despawn();
-                index.despawned(entity);
-                chunk_map_remove_buffer.push((chunk.key, entity));
+                if let Some(key) = index.despawned(entity) {
+                    chunk_map_remove_buffer.push((key, entity));
+                }
             }
         }
     }
@@ -881,56 +912,89 @@ fn regenerate_requested<C: VoxelWorldConfig>(
     requests: &mut ChunkRequests<C>,
     index: &mut ChunkIndex<C>,
     chunks: &mut Query<&mut ChunkStateOf<C>>,
-    levels: &[(LodLevel, IVec3)],
-    stale: &mut HashSet<ChunkKey>,
+    levels: &mut GridLevels,
+    configuration: &C,
+    stale: &mut HashSet<GridKey>,
     ev_update: &mut MessageWriter<ChunkWillUpdate<C>>,
 ) {
     let boxes = std::mem::take(requests.regenerate.get_mut().unwrap());
     if boxes.is_empty() {
         return;
     }
-    let mut reached: HashSet<ChunkKey> = HashSet::new();
+    let mut reached: HashSet<GridKey> = HashSet::new();
     for voxels in boxes {
+        let levels = levels.of(voxels.grid, index, configuration);
         let ranges: Vec<(LodLevel, ChunkRange)> = levels
             .iter()
             .map(|&(lod_level, padding)| {
-                let range =
-                    ChunkRange::including_box(voxels.min, voxels.max, lod_level, padding);
-                (lod_level, range)
+                (
+                    lod_level,
+                    ChunkRange::including_box(voxels, lod_level, padding),
+                )
             })
             .collect();
-        // A box can reach far more chunk positions than there are chunks, as
-        // one asking every chunk to regenerate does, so such a box is checked
-        // against each chunk instead.
+        // A box can reach far more chunk positions than its grid has chunks,
+        // as one asking every chunk to regenerate does, so such a box is
+        // checked against each of the grid's chunks instead.
         let positions = ranges
             .iter()
             .map(|(_, range)| range.chunk_count())
             .fold(0, i64::saturating_add);
-        if positions > index.entities.len() as i64 {
-            reached.extend(index.entities.keys().copied().filter(|key| {
+        if positions > index.chunk_count(voxels.grid) as i64 {
+            reached.extend(index.entities.grid_keys(voxels.grid).filter(|key| {
                 ranges.iter().any(|(lod_level, range)| {
-                    *lod_level == key.lod_level && range.contains(*key)
+                    *lod_level == key.lod_level() && range.contains(*key)
                 })
             }));
             continue;
         }
         for &(lod_level, padding) in levels {
             reached.extend(
-                chunks_including_box(voxels.min, voxels.max, lod_level, padding)
-                    .filter(|key| index.contains(*key)),
+                chunks_including_box(voxels, lod_level, padding)
+                    .filter(|key| index.contains_in(*key)),
             );
         }
     }
     for key in reached {
-        let Some(entity) = index.get(key) else {
+        let Some(entity) = index.get_in(key) else {
             continue;
         };
         if let Ok(mut state) = chunks.get_mut(entity) {
-            index.apply(entity, key, &mut state, ChunkEvent::Regenerate);
+            index.apply(entity, key.key(), &mut state, ChunkEvent::Regenerate);
         }
         if !stale.contains(&key) {
-            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+            ev_update.write(ChunkWillUpdate::<C>::new(key.key(), entity));
         }
+    }
+}
+
+/// The LOD levels in use on each grid that edits or regenerate requests
+/// reached this frame, each with its padding depth, worked out once per grid.
+#[derive(Default)]
+struct GridLevels(Vec<(GridId, Vec<(LodLevel, IVec3)>)>);
+
+impl GridLevels {
+    fn of<C: VoxelWorldConfig>(
+        &mut self,
+        grid: GridId,
+        index: &ChunkIndex<C>,
+        configuration: &C,
+    ) -> &[(LodLevel, IVec3)] {
+        let at = match self.0.iter().position(|(seen, _)| *seen == grid) {
+            Some(at) => at,
+            None => {
+                let levels = index
+                    .levels_in_use_in(grid)
+                    .map(|lod_level| {
+                        let shape = configuration.chunk_data_shape(lod_level);
+                        (lod_level, padding_depth(shape, lod_level))
+                    })
+                    .collect();
+                self.0.push((grid, levels));
+                self.0.len() - 1
+            }
+        };
+        &self.0[at].1
     }
 }
 
@@ -1012,7 +1076,7 @@ pub(crate) fn publish<C: VoxelWorldConfig>(
     if let (Some(work), Some(solved)) = (light_work, solved_light) {
         work.arrive(key, entity, solved);
     }
-    chunk_map_update_buffer.push((key, chunk_data, entity));
+    chunk_map_update_buffer.push((GridKey::world(key), chunk_data, entity));
 }
 
 /// The Pending chunks of the voxel world `C`, as the [`PoolBudget`] starts

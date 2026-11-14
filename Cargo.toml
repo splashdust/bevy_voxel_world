@@ -27,6 +27,10 @@ trace = ["bevy/trace"]
 trace_tracy = ["trace", "bevy/trace_tracy"]
 # `Serialize` and `Deserialize` on voxels and edit deltas, in any format.
 serde = ["dep:serde"]
+# Sub-grids: sets of voxels on grids of their own that move freely in the world.
+sub_grids = []
+# Dislodged fragments: finding the voxels an edit cuts off from the rest of a grid.
+dislodged_fragments = []
 
 [[example]]
 name = "fast_traversal_ray"

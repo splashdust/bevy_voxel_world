@@ -32,6 +32,9 @@
 //! instead: it drops every bucket with its edit sequence, and hands the
 //! removed edits to the next commit apart from its change sets, since no
 //! other world hears of them.
+//!
+//! Buckets are kept by grid and level-0 chunk, and a commit, a clear or a
+//! forget acts on one grid. The methods that name no grid act on the world's.
 
 use std::{
     marker::PhantomData,
@@ -49,6 +52,7 @@ use crate::{
     edits::{
         voxel_index, voxel_local, EditDelta, EditGap, Voxels as DeltaVoxels, CHUNK_VOXELS,
     },
+    grid::{GridId, GridKey, GridTable},
     voxel::WorldVoxel,
 };
 
@@ -386,7 +390,8 @@ fn box_positions(min: IVec3, max: IVec3) -> impl Iterator<Item = IVec3> {
 /// The edited voxels of one chunk, shared with the chunk tasks that read them.
 pub(crate) type EditBucket<I> = Arc<Bucket<I>>;
 
-type BucketMap<I> = HashMap<IVec3, EditBucket<I>>;
+/// Edits by grid and level-0 chunk: a key's LOD level is always 0.
+type BucketMap<I> = GridTable<EditBucket<I>>;
 
 /// Committed edits, by chunk.
 type Committed<I> = Arc<RwLock<BucketMap<I>>>;
@@ -394,7 +399,9 @@ type Committed<I> = Arc<RwLock<BucketMap<I>>>;
 /// The voxels of one level-0 chunk whose committed edits changed in a commit.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChangeSet<I> {
-    /// The level-0 chunk position.
+    /// The chunk's grid.
+    pub grid: GridId,
+    /// The level-0 chunk position on the grid.
     pub chunk: IVec3,
     /// Whether the edit sequence before the commit can't be worked out from
     /// the one after it and the voxels' count. That is so where the commit
@@ -416,7 +423,7 @@ impl<I> ChangeSet<I> {
     /// around them when there are more than [`BOXED_AT`].
     /// [`chunks_including_box`] gives the chunks each box makes stale.
     pub fn stale_boxes(&self) -> impl Iterator<Item = EditedBox> + '_ {
-        boxes_holding(self.voxels.iter().map(|(position, _)| *position))
+        boxes_holding(self.grid, self.voxels.iter().map(|(position, _)| *position))
     }
 
     /// Boxes holding every voxel whose edit was removed, in the same way as
@@ -424,6 +431,7 @@ impl<I> ChangeSet<I> {
     /// removed edit, and regenerate.
     pub fn removed_boxes(&self) -> impl Iterator<Item = EditedBox> + '_ {
         boxes_holding(
+            self.grid,
             self.voxels
                 .iter()
                 .filter(|(_, voxel)| voxel.is_none())
@@ -432,54 +440,72 @@ impl<I> ChangeSet<I> {
     }
 }
 
-/// Boxes holding every voxel at `positions`: one box per voxel, or the one
-/// box around them when there are more than [`BOXED_AT`].
+/// Boxes on `grid` holding every voxel at `positions`: one box per voxel, or
+/// the one box around them when there are more than [`BOXED_AT`].
 fn boxes_holding(
+    grid: GridId,
     positions: impl Iterator<Item = IVec3> + Clone,
 ) -> impl Iterator<Item = EditedBox> {
     let many = positions.clone().take(BOXED_AT + 1).count() > BOXED_AT;
     let around = many.then(|| {
         positions.clone().fold(
             EditedBox {
+                grid,
                 min: IVec3::MAX,
                 max: IVec3::MIN,
             },
             |around, position| EditedBox {
+                grid,
                 min: around.min.min(position),
                 max: around.max.max(position),
             },
         )
     });
-    let one_by_one = (!many).then_some(positions.map(|position| EditedBox {
+    let one_by_one = (!many).then_some(positions.map(move |position| EditedBox {
+        grid,
         min: position,
         max: position,
     }));
     around.into_iter().chain(one_by_one.into_iter().flatten())
 }
 
-/// A box of voxels, from `min` to `max`, both inclusive.
+/// A box of voxels on `grid`, from `min` to `max`, both inclusive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EditedBox {
+    pub grid: GridId,
     pub min: IVec3,
     pub max: IVec3,
 }
 
-fn bucket_mut<I: Copy + PartialEq>(
-    map: &mut BucketMap<I>,
-    chunk: IVec3,
-) -> &mut Bucket<I> {
-    Arc::make_mut(
-        map.entry(chunk)
-            .or_insert_with(|| Arc::new(Bucket::new(chunk))),
-    )
+impl EditedBox {
+    /// The box of the world's voxels from `min` to `max`, both inclusive.
+    pub fn world(min: IVec3, max: IVec3) -> Self {
+        Self {
+            grid: GridId::WORLD,
+            min,
+            max,
+        }
+    }
 }
 
-/// Every voxel edit of the voxel world `C`.
+/// The pending or committed bucket of the level-0 chunk at `key`, made empty
+/// first if there is none.
+fn bucket_mut<I: Copy + PartialEq>(
+    map: &mut BucketMap<I>,
+    key: GridKey,
+) -> &mut Bucket<I> {
+    Arc::make_mut(map.get_or_insert_with(key, || Arc::new(Bucket::new(key.position()))))
+}
+
+/// Every voxel edit of the voxel world `C`, of every grid.
 ///
 /// Edits set since the last commit are pending: they are readable right away,
 /// and only the last voxel set at a position is committed. Committed edits are
-/// grouped by chunk, so a chunk task takes the edits it reads when it starts and
-/// holds no lock while it runs.
+/// grouped by grid and level-0 chunk, so a chunk task takes the edits it reads
+/// when it starts and holds no lock while it runs.
+///
+/// The methods that take no grid read and write the world's grid. Light's
+/// calls name voxel positions and so read the world's grid too.
 ///
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
@@ -514,12 +540,18 @@ impl<C, I> Default for VoxelEdits<C, I> {
 }
 
 impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
-    /// Sets the voxel at `position`, replacing any voxel set there since the
-    /// last commit.
+    /// Sets the world's voxel at `position`, replacing any voxel set there
+    /// since the last commit.
     pub(crate) fn set(&self, position: IVec3, voxel: WorldVoxel<I>) {
-        let chunk = chunk_containing(position);
+        self.set_in(GridId::WORLD, position, voxel);
+    }
+
+    /// Sets `grid`'s voxel at `position`, replacing any voxel set there since
+    /// the last commit.
+    pub(crate) fn set_in(&self, grid: GridId, position: IVec3, voxel: WorldVoxel<I>) {
+        let key = GridKey::level_0(grid, chunk_containing(position));
         let mut pending = self.pending.lock().unwrap();
-        bucket_mut(Arc::make_mut(&mut pending), chunk).set(position, voxel);
+        bucket_mut(Arc::make_mut(&mut pending), key).set(position, voxel);
     }
 
     /// Sets the voxels in the box from `min` inclusive to `max` exclusive for
@@ -566,7 +598,10 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                         continue;
                     }
                     let mut pending = self.pending.lock().unwrap();
-                    let bucket = bucket_mut(Arc::make_mut(&mut pending), chunk);
+                    let bucket = bucket_mut(
+                        Arc::make_mut(&mut pending),
+                        GridKey::level_0(GridId::WORLD, chunk),
+                    );
                     if voxels.len() >= DENSE_AT {
                         bucket.make_dense();
                     }
@@ -590,6 +625,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         let max = max - 1;
         let (chunk_min, chunk_max) = (chunk_containing(min), chunk_containing(max));
         self.clear_chunks(
+            GridId::WORLD,
             |chunk| chunk.cmpge(chunk_min).all() && chunk.cmple(chunk_max).all(),
             |chunk| {
                 let chunk_min = chunk * CHUNK_SIZE_I;
@@ -598,9 +634,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         );
     }
 
-    /// Clears every edit: the next commit removes them all.
+    /// Clears every edit of the world: the next commit removes them all.
     pub(crate) fn clear_all(&self) {
+        self.clear_all_in(GridId::WORLD);
+    }
+
+    /// Clears every edit of `grid`: the next commit of `grid` removes them
+    /// all.
+    pub(crate) fn clear_all_in(&self, grid: GridId) {
         self.clear_chunks(
+            grid,
             |_| true,
             |chunk| {
                 let chunk_min = chunk * CHUNK_SIZE_I;
@@ -609,11 +652,13 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         );
     }
 
-    /// Clears the edits of each chunk holding pending or committed edits
-    /// that `reached` accepts, within the box `within` gives for it, both
-    /// corners inclusive.
+    /// Clears the edits of each of `grid`'s chunks holding pending or
+    /// committed edits that `reached` accepts, within the box `within` gives
+    /// for it, both corners inclusive. Its cost grows with the chunks holding
+    /// edits in every grid.
     fn clear_chunks(
         &self,
+        grid: GridId,
         reached: impl Fn(IVec3) -> bool,
         within: impl Fn(IVec3) -> (IVec3, IVec3),
     ) {
@@ -622,24 +667,23 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         let holds = |bucket: Option<&EditBucket<I>>, (min, max)| {
             bucket.is_some_and(|bucket| bucket.any_within(min, max))
         };
-        let mut chunks: Vec<IVec3> = committed
-            .keys()
-            .chain(pending.keys())
-            .copied()
-            .filter(|chunk| reached(*chunk))
+        let mut chunks: Vec<GridKey> = committed
+            .grid_keys(grid)
+            .chain(pending.grid_keys(grid))
+            .filter(|chunk| reached(chunk.position()))
             .filter(|chunk| {
-                holds(committed.get(chunk), within(*chunk))
-                    || holds(pending.get(chunk), within(*chunk))
+                holds(committed.get(chunk), within(chunk.position()))
+                    || holds(pending.get(chunk), within(chunk.position()))
             })
             .collect();
         if chunks.is_empty() {
             return;
         }
-        chunks.sort_unstable_by_key(|chunk| chunk.to_array());
+        chunks.sort_unstable_by_key(|chunk| chunk.position().to_array());
         chunks.dedup();
         let map = Arc::make_mut(&mut pending);
         for chunk in chunks {
-            let (min, max) = within(chunk);
+            let (min, max) = within(chunk.position());
             bucket_mut(map, chunk).clear_within(
                 committed.get(&chunk).map(|b| &**b),
                 min,
@@ -648,14 +692,26 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Drops every edit and every edit sequence at once, pending edits
-    /// included. The next commit hands the removed edits to
+    /// Drops every edit of the world and every edit sequence at once, pending
+    /// edits included. The next commit hands the removed edits to
     /// [`take_forgotten`](Self::take_forgotten) rather than reporting them.
     pub(crate) fn forget(&self) {
+        self.forget_in(GridId::WORLD);
+    }
+
+    /// Drops every edit of `grid` and every edit sequence at once, as
+    /// [`forget`](Self::forget) does for the world. Its cost grows with the
+    /// chunks holding edits in every grid.
+    pub(crate) fn forget_in(&self, grid: GridId) {
         let mut pending = self.pending.lock().unwrap();
-        match Arc::get_mut(&mut pending) {
-            Some(map) => map.clear(),
-            None => *pending = Arc::default(),
+        if let Some(map) = Arc::get_mut(&mut pending) {
+            map.clear_grid(grid);
+        } else if pending.holds_only(grid) {
+            *pending = Arc::default();
+        } else {
+            let mut map = (**pending).clone();
+            map.clear_grid(grid);
+            *pending = Arc::new(map);
         }
         let mut buckets = self.committed.write().unwrap();
         if buckets.is_empty() {
@@ -663,15 +719,22 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
         let mut forgotten = self.forgotten.lock().unwrap();
         // The new epoch is past every stamp handed out so far: the old epoch
-        // plus the largest sequence any chunk reached since.
+        // plus the largest sequence any chunk reached since. Only the world's
+        // edits are stamped, so forgetting another grid leaves the epoch.
         #[cfg(feature = "light_propagation")]
-        let highest = buckets.values().map(|bucket| bucket.seq).max().unwrap_or(0);
-        #[cfg(feature = "light_propagation")]
-        self.forget_epoch.fetch_add(highest + 1, Ordering::Relaxed);
+        if grid == GridId::WORLD {
+            if let Some(highest) = buckets.grid_entries(grid).map(|(_, b)| b.seq).max() {
+                self.forget_epoch.fetch_add(highest + 1, Ordering::Relaxed);
+            }
+        }
         // A bucket left empty by a clear removes no voxel a chunk shows.
-        for (chunk, bucket) in buckets.drain().filter(|(_, bucket)| !bucket.is_empty()) {
+        for (key, bucket) in buckets
+            .drain_grid(grid)
+            .filter(|(_, bucket)| !bucket.is_empty())
+        {
             forgotten.push(ChangeSet {
-                chunk,
+                grid,
+                chunk: key.position(),
                 replaced: true,
                 seq: 0,
                 voxels: bucket
@@ -697,15 +760,16 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// them. A full delta first drops the chunk's pending edits and has the
     /// commit replace its committed edits.
     pub(crate) fn apply(&self, delta: EditDelta<I>) -> Result<(), EditGap> {
+        let key = GridKey::level_0(GridId::WORLD, delta.chunk);
         let mut pending = self.pending.lock().unwrap();
-        let local = match pending.get(&delta.chunk).and_then(|b| b.assigned) {
+        let local = match pending.get(&key).and_then(|b| b.assigned) {
             Some(assigned) => assigned.seq,
             None => self.edit_sequence(delta.chunk),
         };
         if !delta.applies_at(local)? {
             return Ok(());
         }
-        let bucket = bucket_mut(Arc::make_mut(&mut pending), delta.chunk);
+        let bucket = bucket_mut(Arc::make_mut(&mut pending), key);
         if delta.full {
             bucket.clear();
             bucket.replaced = true;
@@ -723,11 +787,11 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         Ok(())
     }
 
-    /// The full delta of the level-0 chunk at `chunk`, from its committed
-    /// edits: an empty one at sequence 0 for a chunk with no bucket.
+    /// The full delta of the world's level-0 chunk at `chunk`, from its
+    /// committed edits: an empty one at sequence 0 for a chunk with no bucket.
     pub(crate) fn full_delta(&self, chunk: IVec3) -> EditDelta<I> {
         let buckets = self.committed.read().unwrap();
-        let Some(bucket) = buckets.get(&chunk) else {
+        let Some(bucket) = buckets.get(&GridKey::level_0(GridId::WORLD, chunk)) else {
             return EditDelta::new(chunk, 0, true, Vec::new());
         };
         match &bucket.store {
@@ -749,29 +813,51 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// Every level-0 chunk position holding committed edits, or an empty
-    /// bucket left by removing them, with its edit sequence.
+    /// Every level-0 chunk position of the world holding committed edits, or
+    /// an empty bucket left by removing them, with its edit sequence.
     pub(crate) fn edited_chunks(&self) -> Vec<(IVec3, u64)> {
+        self.edited_chunks_in(GridId::WORLD)
+    }
+
+    /// Every level-0 chunk position of `grid` holding committed edits, or an
+    /// empty bucket left by removing them, with its edit sequence. Its cost
+    /// grows with the chunks holding edits in every grid.
+    pub(crate) fn edited_chunks_in(&self, grid: GridId) -> Vec<(IVec3, u64)> {
         let buckets = self.committed.read().unwrap();
         buckets
-            .iter()
-            .map(|(&chunk, bucket)| (chunk, bucket.seq))
+            .grid_entries(grid)
+            .map(|(key, bucket)| (key.position(), bucket.seq))
             .collect()
     }
 
-    /// Returns a reader that works from any thread.
+    /// Returns a reader of the world's edits that works from any thread.
     ///
     /// The reader sees the pending edits as they were when it was made, and the
     /// committed edits as they are at the time of each read.
     pub(crate) fn reader(&self) -> VoxelEditReader<I> {
+        self.reader_in(GridId::WORLD)
+    }
+
+    /// Returns a reader of `grid`'s edits, as [`reader`](Self::reader) does
+    /// for the world.
+    pub(crate) fn reader_in(&self, grid: GridId) -> VoxelEditReader<I> {
         VoxelEditReader {
+            grid,
             pending: self.pending.lock().unwrap().clone(),
             committed: self.committed.clone(),
         }
     }
 
-    /// Commits the pending edits. Returns a change set for each level-0 chunk
-    /// whose committed edits or edit sequence changed.
+    /// Commits the world's pending edits. Returns a change set for each
+    /// level-0 chunk whose committed edits or edit sequence changed.
+    pub(crate) fn commit(&self) -> Vec<ChangeSet<I>> {
+        self.commit_in(GridId::WORLD)
+    }
+
+    /// Commits `grid`'s pending edits, and leaves other grids' pending.
+    /// Returns a change set for each of `grid`'s level-0 chunks whose
+    /// committed edits or edit sequence changed. Sorting out `grid`'s pending
+    /// edits costs a visit to each pending chunk of every grid.
     ///
     /// A chunk's edit sequence moves on by the number of voxels in its change
     /// set. Where an edit delta was applied, it takes the delta's sequence
@@ -784,7 +870,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// A chunk's committed edits are copied only when a running chunk task
     /// still holds them, and the edits that replace them only when a reader
     /// still holds those.
-    pub(crate) fn commit(&self) -> Vec<ChangeSet<I>> {
+    pub(crate) fn commit_in(&self, grid: GridId) -> Vec<ChangeSet<I>> {
         // The pending edits stay locked until they are committed, so a reader
         // made during the commit finds each edit either pending or committed.
         let mut pending = self.pending.lock().unwrap();
@@ -797,13 +883,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             self.committed.write().unwrap()
         };
         // Taken whole, so a pending bucket no reader holds moves into the
-        // committed edits rather than being copied.
-        let taken = std::mem::take(&mut *pending);
-        let taken = Arc::try_unwrap(taken).unwrap_or_else(|shared| (*shared).clone());
+        // committed edits rather than being copied. Other grids' buckets go
+        // back.
+        let all = std::mem::take(&mut *pending);
+        let mut all = Arc::try_unwrap(all).unwrap_or_else(|shared| (*shared).clone());
+        let taken = all.take_grid(grid);
+        if !all.is_empty() {
+            *pending = Arc::new(all);
+        }
         let mut sets = Vec::new();
-        for (chunk, pending_bucket) in taken {
+        for (key, pending_bucket) in taken {
+            let chunk = key.position();
             let empty;
-            let committed = match buckets.get(&chunk) {
+            let committed = match buckets.get(&key) {
                 Some(committed) => committed,
                 None => {
                     empty = Bucket::new(chunk);
@@ -824,11 +916,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             if changes.is_empty() && seq == before {
                 continue;
             }
-            let committed = Arc::make_mut(
-                buckets
-                    .entry(chunk)
-                    .or_insert_with(|| Arc::new(Bucket::new(chunk))),
-            );
+            let committed = bucket_mut(&mut buckets, key);
             if replaced {
                 committed.store = Bucket::compacted_store(pending_bucket);
             } else {
@@ -843,6 +931,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             }
             committed.seq = seq;
             sets.push(ChangeSet {
+                grid,
                 chunk,
                 // Local sets before an applied delta count towards its
                 // voxels but not its sequence, and a delta's voxels equal to
@@ -857,23 +946,31 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         sets
     }
 
-    /// The edits the chunk task of the chunk at `key` reads: those within the
-    /// chunk's extent and its padding. `padding` is the chunk's [`padding_depth`].
-    /// A bucket left empty by a clear is left out, so a chunk whose reach
-    /// holds no edit reads none.
+    /// The edits the chunk task of the world's chunk at `key` reads: those
+    /// within the chunk's extent and its padding. `padding` is the chunk's
+    /// [`padding_depth`]. A bucket left empty by a clear is left out, so a
+    /// chunk whose reach holds no edit reads none.
     ///
     /// [`padding_depth`]: crate::chunk::padding_depth
     pub(crate) fn chunk_edits(&self, key: ChunkKey, padding: IVec3) -> ChunkEdits<I> {
+        self.chunk_edits_in(GridKey::world(key), padding)
+    }
+
+    /// The edits the chunk task of the chunk at `key` reads, from the chunk's
+    /// grid, as [`chunk_edits`](Self::chunk_edits) gives them for the world.
+    /// Above level 0 its cost grows with the chunks holding edits in every
+    /// grid.
+    pub(crate) fn chunk_edits_in(&self, key: GridKey, padding: IVec3) -> ChunkEdits<I> {
         let buckets = self.committed.read().unwrap();
-        let chunk_pos = key.position;
+        let (grid, chunk_pos) = (key.grid(), key.position());
         // The padding of a level-0 chunk is at most its extent deep, so it stays
         // within the 27 level-0 chunks around it, whatever the chunk's shape.
-        if key.lod_level == 0 {
+        if key.lod_level() == 0 {
             let mut around: [Option<EditBucket<I>>; 27] = std::array::from_fn(|_| None);
             if !buckets.is_empty() {
                 for (i, bucket) in around.iter_mut().enumerate() {
                     *bucket = buckets
-                        .get(&(chunk_pos + around_offset(i)))
+                        .get(&GridKey::level_0(grid, chunk_pos + around_offset(i)))
                         .filter(|bucket| !bucket.is_empty())
                         .cloned();
                 }
@@ -884,15 +981,15 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             };
         }
 
-        let (min, max) = buckets_read_by(key, padding);
+        let (min, max) = buckets_read_by(key.key(), padding);
         let within = buckets
-            .iter()
-            .filter(|(position, bucket)| {
-                position.cmpge(min).all()
-                    && position.cmplt(max).all()
+            .grid_entries(grid)
+            .filter(|(key, bucket)| {
+                key.position().cmpge(min).all()
+                    && key.position().cmplt(max).all()
                     && !bucket.is_empty()
             })
-            .map(|(position, bucket)| (*position, bucket.clone()))
+            .map(|(key, bucket)| (key.position(), bucket.clone()))
             .collect();
         ChunkEdits {
             chunk_pos,
@@ -900,8 +997,9 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
     }
 
-    /// The committed edits in each level-0 chunk at `positions`, in order, or
-    /// `None` for a chunk with none, a bucket left empty by a clear included.
+    /// The committed edits in each of the world's level-0 chunks at
+    /// `positions`, in order, or `None` for a chunk with none, a bucket left
+    /// empty by a clear included.
     #[cfg(feature = "light_propagation")]
     pub(crate) fn buckets(
         &self,
@@ -911,24 +1009,26 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         positions
             .map(|position| {
                 buckets
-                    .get(&position)
+                    .get(&GridKey::level_0(GridId::WORLD, position))
                     .filter(|bucket| !bucket.is_empty())
                     .cloned()
             })
             .collect()
     }
 
-    /// The edit sequence of the level-0 chunk at `position`: 0 for a chunk
-    /// with no edits.
+    /// The edit sequence of the world's level-0 chunk at `position`: 0 for a
+    /// chunk with no edits.
     pub(crate) fn edit_sequence(&self, position: IVec3) -> u64 {
         let buckets = self.committed.read().unwrap();
         if buckets.is_empty() {
             return 0;
         }
-        buckets.get(&position).map_or(0, |bucket| bucket.seq)
+        buckets
+            .get(&GridKey::level_0(GridId::WORLD, position))
+            .map_or(0, |bucket| bucket.seq)
     }
 
-    /// A stamp of the voxel edits of the level-0 chunk at `position`. Work
+    /// A stamp of the voxel edits of the world's level-0 chunk at `position`. Work
     /// that reads the chunk's voxels notes it when it starts, and its result
     /// is stale if the stamp has moved since. A later stamp is larger.
     ///
@@ -944,7 +1044,10 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         if buckets.is_empty() {
             return epoch;
         }
-        epoch + buckets.get(&position).map_or(0, |bucket| bucket.seq)
+        epoch
+            + buckets
+                .get(&GridKey::level_0(GridId::WORLD, position))
+                .map_or(0, |bucket| bucket.seq)
     }
 
     /// Whether `stamp`, an [`edit_stamp`](Self::edit_stamp) read since the
@@ -973,8 +1076,9 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 pub(crate) struct CommittedEdits<'a, I>(RwLockReadGuard<'a, BucketMap<I>>);
 
 impl<I> CommittedEdits<'_, I> {
-    /// Whether an edit lies in a level-0 chunk that the chunk task of the chunk
-    /// at `key` reads, within its extent or reached by its padding.
+    /// Whether an edit lies in a level-0 chunk that the chunk task of the
+    /// world's chunk at `key` reads, within its extent or reached by its
+    /// padding.
     ///
     /// Such an edit may change the chunk's voxels, so the chunk's fill hint
     /// can't be trusted. A bucket left empty by a clear holds no edit.
@@ -989,13 +1093,18 @@ impl<I> CommittedEdits<'_, I> {
         if key.lod_level == 0 {
             return (0..27).any(|i| {
                 buckets
-                    .get(&(key.position + around_offset(i)))
+                    .get(&GridKey::level_0(
+                        GridId::WORLD,
+                        key.position + around_offset(i),
+                    ))
                     .is_some_and(|bucket| !bucket.is_empty())
             });
         }
         let (min, max) = buckets_read_by(key, padding);
-        buckets.iter().any(|(position, bucket)| {
-            position.cmpge(min).all() && position.cmplt(max).all() && !bucket.is_empty()
+        buckets.grid_entries(GridId::WORLD).any(|(key, bucket)| {
+            key.position().cmpge(min).all()
+                && key.position().cmplt(max).all()
+                && !bucket.is_empty()
         })
     }
 }
@@ -1021,8 +1130,8 @@ fn buckets_read_by(key: ChunkKey, padding: IVec3) -> (IVec3, IVec3) {
     )
 }
 
-/// The chunks at `lod_level` whose padded voxel data includes the voxel at
-/// `position`.
+/// The world's chunks at `lod_level` whose padded voxel data includes the
+/// voxel at `position`.
 ///
 /// That is the chunk containing the voxel, plus each neighbouring chunk across
 /// a face, edge or corner that the voxel lies within `padding` voxels of along
@@ -1035,34 +1144,40 @@ pub(crate) fn chunks_including(
     lod_level: LodLevel,
     padding: IVec3,
 ) -> impl Iterator<Item = ChunkKey> {
-    chunks_including_box(position, position, lod_level, padding)
+    chunks_including_box(EditedBox::world(position, position), lod_level, padding)
+        .map(|key| key.key())
 }
 
-/// The chunks at `lod_level` whose padded voxel data includes any voxel of the
-/// box from `min` to `max`, both inclusive. See [`ChunkRange`].
+/// The chunks at `lod_level` of the box's grid whose padded voxel data
+/// includes any voxel of `voxels`. See [`ChunkRange`].
 pub(crate) fn chunks_including_box(
-    min: IVec3,
-    max: IVec3,
+    voxels: EditedBox,
     lod_level: LodLevel,
     padding: IVec3,
-) -> impl Iterator<Item = ChunkKey> {
-    let range = ChunkRange::including_box(min, max, lod_level, padding);
+) -> impl Iterator<Item = GridKey> {
+    let range = ChunkRange::including_box(voxels, lod_level, padding);
+    let grid = range.grid;
     // Within the chunks holding `i32` voxel positions, so within `i32`.
     let (low, high) = (range.low.as_ivec3(), range.high.as_ivec3());
     let extent = 1 << lod_level;
     (low.z..=high.z).flat_map(move |z| {
         (low.y..=high.y).flat_map(move |y| {
-            (low.x..=high.x).map(move |x| ChunkKey {
-                position: IVec3::new(x, y, z) * extent,
-                lod_level,
+            (low.x..=high.x).map(move |x| {
+                GridKey::new(
+                    grid,
+                    ChunkKey {
+                        position: IVec3::new(x, y, z) * extent,
+                        lod_level,
+                    },
+                )
             })
         })
     })
 }
 
-/// The chunks at one LOD level whose padded voxel data includes any voxel of
-/// a box: on each axis, the chunk coordinates from `low` to `high`, both
-/// inclusive, counted in chunks of that level. An axis on which `low` is
+/// The chunks of `grid` at one LOD level whose padded voxel data includes any
+/// voxel of a box: on each axis, the chunk coordinates from `low` to `high`,
+/// both inclusive, counted in chunks of that level. An axis on which `low` is
 /// past `high` holds none.
 ///
 /// A chunk at chunk coordinate `c` along an axis holds the padded voxels from
@@ -1072,20 +1187,17 @@ pub(crate) fn chunks_including_box(
 /// the voxel positions overflows nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChunkRange {
+    pub grid: GridId,
     pub low: I64Vec3,
     pub high: I64Vec3,
 }
 
 impl ChunkRange {
-    /// The chunks at `lod_level`, whose padding is `padding` deep, whose
-    /// padded voxel data includes any voxel of the box from `min` to `max`,
-    /// both inclusive.
-    pub fn including_box(
-        min: IVec3,
-        max: IVec3,
-        lod_level: LodLevel,
-        padding: IVec3,
-    ) -> Self {
+    /// The chunks at `lod_level` of the box's grid, whose padding is
+    /// `padding` deep, whose padded voxel data includes any voxel of
+    /// `voxels`.
+    pub fn including_box(voxels: EditedBox, lod_level: LodLevel, padding: IVec3) -> Self {
+        let EditedBox { grid, min, max } = voxels;
         let extent = I64Vec3::splat((CHUNK_SIZE_I as i64) << lod_level);
         let padding = padding.as_i64vec3();
         let low = (min.as_i64vec3() - padding - extent).div_euclid(extent) + 1;
@@ -1093,6 +1205,7 @@ impl ChunkRange {
         let first = I64Vec3::splat(i32::MIN as i64).div_euclid(extent);
         let last = I64Vec3::splat(i32::MAX as i64).div_euclid(extent);
         Self {
+            grid,
             low: low.max(first),
             high: high.min(last),
         }
@@ -1106,21 +1219,24 @@ impl ChunkRange {
 
     /// Whether the range holds the chunk at `key`, which is at the range's
     /// LOD level.
-    pub fn contains(&self, key: ChunkKey) -> bool {
-        let coordinate = (key.position >> i32::from(key.lod_level)).as_i64vec3();
-        coordinate.cmpge(self.low).all() && coordinate.cmple(self.high).all()
+    pub fn contains(&self, key: GridKey) -> bool {
+        let coordinate = (key.position() >> i32::from(key.lod_level())).as_i64vec3();
+        key.grid() == self.grid
+            && coordinate.cmpge(self.low).all()
+            && coordinate.cmple(self.high).all()
     }
 }
 
-/// Reads voxel edits from any thread.
+/// Reads one grid's voxel edits from any thread.
 pub(crate) struct VoxelEditReader<I> {
+    grid: GridId,
     pending: Arc<BucketMap<I>>,
     committed: Committed<I>,
 }
 
 impl<I: Copy + PartialEq> VoxelEditReader<I> {
     pub fn get(&self, position: IVec3) -> Option<WorldVoxel<I>> {
-        let chunk = chunk_containing(position);
+        let chunk = GridKey::level_0(self.grid, chunk_containing(position));
         if let Some(bucket) = self.pending.get(&chunk) {
             if let Some(voxel) = bucket.get(position) {
                 return Some(voxel);
@@ -1265,6 +1381,7 @@ mod tests {
         assert_eq!(
             sets,
             vec![ChangeSet {
+                grid: GridId::WORLD,
                 chunk: IVec3::ZERO,
                 replaced: true,
                 seq: 10,
@@ -1274,6 +1391,7 @@ mod tests {
         assert_eq!(
             sets[0].removed_boxes().collect::<Vec<_>>(),
             vec![EditedBox {
+                grid: GridId::WORLD,
                 min: removed,
                 max: removed
             }]
@@ -1295,7 +1413,7 @@ mod tests {
         let reached: HashSet<ChunkKey> = sets[0]
             .removed_boxes()
             .flat_map(|removed| {
-                chunks_including_box(removed.min, removed.max, 0, padding)
+                chunks_including_box(removed, 0, padding).map(|key| key.key())
             })
             .collect();
 
@@ -1320,6 +1438,7 @@ mod tests {
         assert_eq!(
             sets,
             vec![ChangeSet {
+                grid: GridId::WORLD,
                 chunk: IVec3::ZERO,
                 replaced: true,
                 seq: 3,
@@ -1347,7 +1466,13 @@ mod tests {
     /// Whether the committed bucket of the chunk at `chunk` is an array.
     fn is_dense(edits: &Edits, chunk: IVec3) -> bool {
         matches!(
-            edits.committed.read().unwrap()[&chunk].store,
+            edits
+                .committed
+                .read()
+                .unwrap()
+                .get(&GridKey::level_0(GridId::WORLD, chunk))
+                .unwrap()
+                .store,
             Store::Dense { .. }
         )
     }
@@ -1396,6 +1521,7 @@ mod tests {
         assert_eq!(
             edits.take_forgotten(),
             vec![ChangeSet {
+                grid: GridId::WORLD,
                 chunk: IVec3::ZERO,
                 replaced: true,
                 seq: 0,
@@ -1689,6 +1815,7 @@ mod tests {
         assert_eq!(
             boxes_for_voxels_in_a_row(BOXED_AT as i32 + 1),
             vec![EditedBox {
+                grid: GridId::WORLD,
                 min: IVec3::new(0, 0, 7),
                 max: IVec3::new(LAST, 2, 7)
             }]
@@ -1923,14 +2050,17 @@ mod tests {
 
     #[test]
     fn the_chunks_including_every_voxel_position_are_counted_without_overflowing() {
-        let range =
-            ChunkRange::including_box(IVec3::MIN, IVec3::MAX, 3, default_padding(3));
+        let range = ChunkRange::including_box(
+            EditedBox::world(IVec3::MIN, IVec3::MAX),
+            3,
+            default_padding(3),
+        );
         // Level-3 chunks are 256 voxels wide, so 2^24 of them span an axis.
         assert_eq!(range.low, I64Vec3::splat(-(1 << 23)));
         assert_eq!(range.high, I64Vec3::splat((1 << 23) - 1));
         assert_eq!(range.chunk_count(), i64::MAX);
         for corner in [IVec3::MIN, IVec3::MAX] {
-            assert!(range.contains(ChunkKey::containing(corner, 3)));
+            assert!(range.contains(GridKey::world(ChunkKey::containing(corner, 3))));
         }
     }
 
