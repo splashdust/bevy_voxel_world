@@ -330,7 +330,7 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// [`Grid::World`] reads what this world's own methods read.
     pub fn grid(&self, grid: Grid) -> Option<GridVoxels<'_, C>> {
-        GridVoxels::new(
+        let voxels = GridVoxels::new(
             grid,
             &self.sub_grids,
             &self.voxel_edits,
@@ -338,7 +338,17 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             &self.chunk_index,
             &self.chunk_states,
             &self.configuration.0,
-        )
+        )?;
+        #[cfg(feature = "light_propagation")]
+        let voxels =
+            voxels.with_light(self.light.as_deref().zip(self.light_work.as_deref()).map(
+                |(settings, work)| crate::light::LightReads {
+                    settings,
+                    work,
+                    route: self.light_route.as_deref(),
+                },
+            ));
+        Some(voxels)
     }
 
     /// Reads and edits `grid`, as [`grid`](Self::grid) reads it. Returns
@@ -462,7 +472,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// A voxel edit makes it false from when it is set until its light has
     /// landed, including the light of chunks re-meshed for it, which waits
-    /// for their new meshes.
+    /// for their new meshes. With the `sub_grids` feature that holds for a
+    /// sub-grid's edits too, and the first light of the chunks they spawn.
     ///
     /// A change of light settings that relights makes it false from the frame
     /// the change is applied until the light of every chunk it relights has

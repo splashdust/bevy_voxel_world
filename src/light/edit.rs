@@ -80,7 +80,7 @@ use super::inputs::LightInputs;
 use super::probe::SkyProbes;
 use super::relight::LightWork;
 use super::sky::{walkable, Columns, SkyRule};
-use super::solver::ChunkLight;
+use super::solver::{ChunkLight, LightTaskSettings};
 use super::view::{in_world, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -131,8 +131,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     mut probes: Option<ResMut<SkyProbes<C>>>,
     configuration: Res<C>,
 ) {
-    // Light holds only the world's voxels, so a sub-grid's edits change none
-    // of it.
+    // The world's light holds only the world's voxels. A sub-grid's edits
+    // change only its own light, which the sub-grid module works out.
     let world_sets = || {
         requests
             .edited
@@ -214,12 +214,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             .map(|(_, level)| *level),
         _ => None,
     };
-    let reach = settings
-        .task
-        .sky_scale
-        .as_ref()
-        .map_or(0, |scale| scale.reach())
-        .max(settings.task.voxel_scale.reach()) as i32;
+    let reach = reach_of(&settings.task);
 
     let mut relight: HashSet<IVec3> = HashSet::new();
     let mut view = settings.view.write();
@@ -690,9 +685,19 @@ fn column_looked_up<I: Copy + PartialEq>(
     })
 }
 
+/// How far, in voxels, a change can move light under `settings`: the longer
+/// of the two channels' reaches.
+pub(super) fn reach_of<I>(settings: &LightTaskSettings<I>) -> i32 {
+    settings
+        .sky_scale
+        .as_ref()
+        .map_or(0, |scale| scale.reach())
+        .max(settings.voxel_scale.reach()) as i32
+}
+
 /// The chunk positions whose light a change at the voxel `p` can reach: those
 /// whose box, `reach` past each face, holds it.
-fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> {
+pub(super) fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> {
     within_reach_of_box(p, p, reach)
 }
 

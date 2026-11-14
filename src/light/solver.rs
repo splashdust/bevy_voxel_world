@@ -253,11 +253,28 @@ pub(crate) enum DirectSky {
     /// In these cells, worked out before the solve, which can give a voxel
     /// direct sky from any side. Every cell set must be open. A column answer
     /// adds nothing to them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no solve takes direct cells yet")
-    )]
     Cells(Box<DirectCells>),
+}
+
+/// How a solve of the chunk at `key`, whose own inputs are `inputs`, reads its
+/// box: how it reads positions holding nothing, where it finds direct sky,
+/// and whether it takes sky fill.
+///
+/// A world chunk reads missing chunks as solid, takes direct sky from column
+/// answers and takes sky fill. A sub-grid's chunk reads its grid's missing
+/// chunks as air, takes no sky fill, and has direct sky at every open voxel
+/// of its own, so its own sky is the top level everywhere.
+fn reading(key: GridKey, inputs: &LightInputs) -> (Missing, DirectSky, bool) {
+    if key.is_world() {
+        return (Missing::Solid, DirectSky::Columns, true);
+    }
+    let mut own: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    for (index, column) in own.iter_mut().enumerate() {
+        *column = !inputs.occupancy.solid_column(index % CHUNK, index / CHUNK);
+    }
+    let mut cells: Box<DirectCells> = Box::new(std::array::from_fn(|_| None));
+    cells[neighbour_index(IVec3::ZERO)] = Some(own);
+    (Missing::Air, DirectSky::Cells(cells), false)
 }
 
 pub(crate) fn neighbour_index(offset: IVec3) -> usize {
@@ -355,15 +372,10 @@ impl<I: Copy + PartialEq> LightTask<I> {
                 .fetch_add(1, Ordering::Relaxed);
         }
         let key = GridKey::new(self.grid, chunk.key);
-        let seeding = seeding(settings, &inputs, key, true);
-        let snapshot = read_snapshot(&self.view, key, Missing::Solid, settings);
-        let mut solved = solve(
-            snapshot,
-            Arc::new(inputs),
-            settings,
-            seeding,
-            DirectSky::Columns,
-        );
+        let (missing, direct, take_fill) = reading(key, &inputs);
+        let seeding = seeding(settings, &inputs, key, take_fill);
+        let snapshot = read_snapshot(&self.view, key, missing, settings);
+        let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding, direct);
         solved.sky = found;
         solved.own_edits = self.own_edits;
         solved.edit_frame = self.edit_frame;
@@ -412,7 +424,8 @@ impl<I> KeptTask<I> {
 }
 
 /// Solves the light of the chunk at `key` again from the world view, as a
-/// relight does, reading the chunks around it on its grid. Returns `None` if the chunk is no longer in the view.
+/// relight does, reading the chunks around it on its grid. Returns `None` if
+/// the chunk is no longer in the view.
 ///
 /// With `rescan`, it first finds the chunk's emissive voxels again under the
 /// world's emissive list, for a chunk whose emissive voxels were found under
@@ -438,7 +451,8 @@ pub(crate) fn relight<I: Copy + PartialEq>(
         }
         None => (read, None),
     };
-    let seeding = seeding(settings, &inputs, key, true);
+    let (missing, direct, take_fill) = reading(key, &inputs);
+    let seeding = seeding(settings, &inputs, key, take_fill);
     if let (Some(seeding), Some(solved_from)) = (&seeding, unless_seeds) {
         if seeding.hash == solved_from && rescanned.is_none() {
             settings
@@ -448,8 +462,8 @@ pub(crate) fn relight<I: Copy + PartialEq>(
             return None;
         }
     }
-    let snapshot = read_snapshot(view, key, Missing::Solid, settings);
-    let mut solved = solve(snapshot, inputs, settings, seeding, DirectSky::Columns);
+    let snapshot = read_snapshot(view, key, missing, settings);
+    let mut solved = solve(snapshot, inputs, settings, seeding, direct);
     solved.rescanned = rescanned;
     Some(solved)
 }

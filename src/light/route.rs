@@ -1782,20 +1782,16 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
 pub(crate) fn tag_chunk<C: VoxelWorldConfig>(chunk: &mut EntityCommands) {
     chunk.queue(|mut chunk: EntityWorldMut| {
         let entity = chunk.id();
-        // A sub-grid's chunks stay out of the world's light, and keep no tag.
-        let world_chunk = chunk
-            .get::<Chunk<C>>()
-            .filter(|chunk| chunk.grid_key().is_world());
-        let Some((key, coarse)) = world_chunk.map(|chunk| {
-            let key = chunk.key();
-            (key, takes_coarse_path(key, chunk.data_shape()))
+        let Some((key, coarse)) = chunk.get::<Chunk<C>>().map(|chunk| {
+            let key = chunk.grid_key();
+            (key, takes_coarse_path(key.key(), chunk.data_shape()))
         }) else {
             return;
         };
         chunk.world_scope(|world| {
             world.resource_scope::<LightRoute<C>, _>(|world, mut route| {
                 route.set_device(world.get_resource::<RenderDevice>());
-                let tag = route.show(entity, GridKey::world(key), coarse);
+                let tag = route.show(entity, key, coarse);
                 for (changed, tag) in route.take_changed_tags() {
                     if let Ok(mut changed) = world.get_entity_mut(changed) {
                         changed.insert(MeshTag::new(tag));

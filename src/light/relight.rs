@@ -53,6 +53,10 @@
 //! passes on through it to the chunks beside it: see
 //! [`hinted`](super::hinted).
 //!
+//! A sub-grid's chunks relight with the world's, but never from arrivals or
+//! ripples: the commit that changes a sub-grid relights every chunk of it
+//! whose light can change. See the `sub_grid` module.
+//!
 //! A chunk that retires relights nothing, unless it had provisional columns.
 //! Its neighbours keep the light it gave them, which was the truth while it
 //! was loaded, and their next solve reads it as solid. A chunk with provisional
@@ -408,7 +412,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 data.data_shape,
                 world,
                 edits,
-                delegate,
+                Some(delegate),
                 false,
             ) else {
                 continue;
@@ -601,6 +605,27 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
+    /// Adds the sub-grid chunk `entity` at `key`, whose inputs the world view
+    /// holds, and queues its first solve as a relight that starts at once,
+    /// ahead of the pool budget.
+    #[cfg(feature = "sub_grids")]
+    pub fn add_sub_grid_chunk(&mut self, key: GridKey, entity: Entity) {
+        if let Some(old) = self.chunks.get(&key).map(|chunk| chunk.entity) {
+            self.positions.remove(&old);
+        }
+        self.chunks.insert(
+            key,
+            LightChunk {
+                entity,
+                state: LightState::Clean,
+                urgent: false,
+                cause: Cause::Other,
+            },
+        );
+        self.positions.insert(entity, key);
+        self.trigger_edited(key);
+    }
+
     /// Whether the light entry at `key` is still there, so light solved
     /// for it lands.
     fn has_entry(&self, key: GridKey) -> bool {
@@ -712,6 +737,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     ///
     /// A chunk task's light solved under settings older than `generation`
     /// lands, and the chunk is marked for the settings relight.
+    ///
+    /// A sub-grid's chunk relights none of its neighbours as its light
+    /// lands, except where its emissive voxels were found again: see
+    /// [`passes_light_on`].
     fn land(
         &mut self,
         landing: Landing,
@@ -785,7 +814,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         return None;
                     }
                     for face in Face::ALL {
-                        if !fresh && chunk.faces.differs_at(&solved.faces, face) {
+                        if !fresh
+                            && passes_light_on(key)
+                            && chunk.faces.differs_at(&solved.faces, face)
+                        {
                             triggers.push(key + face.offset());
                         }
                     }
@@ -833,7 +865,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     if changed_across_air(&view, key, &solved.read) {
                         triggers.push(key);
                     }
-                    for face in Face::ALL {
+                    for face in Face::ALL.into_iter().filter(|_| passes_light_on(key)) {
                         let beside = key + face.offset();
                         if view.is_air(beside) {
                             if passes_into_air(
@@ -969,7 +1001,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 return;
             }
             for face in Face::ALL {
-                if chunk.faces.differs_at(&landing.solved.faces, face) {
+                if passes_light_on(key)
+                    && chunk.faces.differs_at(&landing.solved.faces, face)
+                {
                     triggers.push(key + face.offset());
                 }
             }
@@ -1113,7 +1147,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     }
 
     /// Starts relights for the Ready chunks of `queue`, nearest a camera
-    /// first, as many as `budget` leaves room for under the cap `cap`.
+    /// first, as many as `budget` leaves room for under the cap `cap`. Each
+    /// chunk's middle is placed by its grid's pose in `poses`.
     #[allow(clippy::too_many_arguments)]
     fn start_nearest(
         &mut self,
@@ -1124,6 +1159,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         rescans: &Rescans<'_, C>,
         states: &Query<&ChunkStateOf<C>>,
         cameras: &Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
+        poses: &Poses<'_, C>,
     ) {
         let keys = match queue {
             Queue::Arrivals => &self.queue,
@@ -1152,8 +1188,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 })
             })
             .map(|key| {
-                let distance =
-                    distance_to_nearest(*key, &GlobalTransform::IDENTITY, &cameras);
+                let distance = distance_to_nearest(*key, &poses.pose_of(*key), &cameras);
                 (distance, *key)
             })
             .collect();
@@ -1644,6 +1679,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
         configuration: Res<C>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        #[cfg(feature = "sub_grids")] sub_grids: Option<
+            Res<crate::sub_grid::SubGrids<C>>,
+        >,
     ) {
         if work.queue.is_empty() {
             return;
@@ -1655,6 +1693,10 @@ impl<C: VoxelWorldConfig> Relights<C> {
             chunk_map: &chunk_map,
             edits: &edits,
         };
+        #[cfg(feature = "sub_grids")]
+        let poses = Poses::of(sub_grids.as_deref());
+        #[cfg(not(feature = "sub_grids"))]
+        let poses = Poses::world();
         // Urgent relights go straight to the pool. On the main thread they
         // start within the budget, edited chunks first, then nearest a camera
         // first.
@@ -1666,11 +1708,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
             .filter(|key| work.chunks[*key].urgent)
             .map(|key| {
                 let later = !work.edited.contains(key);
-                let distance = distance_to_nearest(
-                    *key,
-                    &GlobalTransform::IDENTITY,
-                    &camera_positions,
-                );
+                let distance =
+                    distance_to_nearest(*key, &poses.pose_of(*key), &camera_positions);
                 (later, distance, *key)
             })
             .collect();
@@ -1692,6 +1731,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
             &rescans,
             &states,
             &cameras,
+            &poses,
         );
         work.add_frame_time(started);
     }
@@ -1722,6 +1762,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
         };
         let cap = configuration.max_active_chunk_threads();
         let before = settings.counters().relights.load(Ordering::Relaxed);
+        // Only the world has sky fill.
         work.start_nearest(
             Queue::Fill,
             &settings,
@@ -1730,6 +1771,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
             &rescans,
             &states,
             &cameras,
+            &Poses::world(),
         );
         let started_now = settings.counters().relights.load(Ordering::Relaxed) - before;
         settings
@@ -1753,6 +1795,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
         configuration: Res<C>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        #[cfg(feature = "sub_grids")] sub_grids: Option<
+            Res<crate::sub_grid::SubGrids<C>>,
+        >,
     ) {
         if !work.settings_queue.is_empty() {
             #[cfg(feature = "trace")]
@@ -1762,6 +1807,10 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 chunk_map: &chunk_map,
                 edits: &edits,
             };
+            #[cfg(feature = "sub_grids")]
+            let poses = Poses::of(sub_grids.as_deref());
+            #[cfg(not(feature = "sub_grids"))]
+            let poses = Poses::world();
             let cap = configuration.max_active_chunk_threads();
             work.start_nearest(
                 Queue::Settings,
@@ -1771,6 +1820,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 &rescans,
                 &states,
                 &cameras,
+                &poses,
             );
             work.add_frame_time(started);
         }
@@ -1844,6 +1894,18 @@ fn around(key: GridKey) -> impl Iterator<Item = GridKey> {
     })
 }
 
+/// Whether light landing for the chunk at `key` relights the chunks beside
+/// it where it could light them differently: its arrival, and its relight
+/// ripple.
+///
+/// Only a world chunk does. A sub-grid's chunk solves with every chunk of
+/// its grid present, and a voxel edit relights every chunk of the grid whose
+/// solve box holds an edited voxel (see the `sub_grid` module), so its light
+/// has nothing to pass on.
+fn passes_light_on(key: GridKey) -> bool {
+    key.is_world()
+}
+
 /// Moves a relight's light onto the inputs the world view holds for its chunk
 /// now, if voxel edits gave the chunk new inputs while the relight ran and no
 /// other light has landed for it since. Its light is then a step behind the
@@ -1874,6 +1936,67 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         voxel: light.voxel.clone(),
         precision: light.precision,
     });
+}
+
+/// The pose of each grid, which places its chunks for the order relights
+/// start in: the identity for the world, and a sub-grid's last pose against
+/// the world's root.
+///
+/// The sub-grids' poses are read once, the first time a sub-grid's chunk
+/// asks, so a frame starting only world relights reads none.
+struct Poses<'a, C> {
+    #[cfg(feature = "sub_grids")]
+    sub_grids: Option<&'a crate::sub_grid::SubGrids<C>>,
+    #[cfg(feature = "sub_grids")]
+    read: std::cell::OnceCell<HashMap<crate::grid::GridId, GlobalTransform>>,
+    _world: PhantomData<&'a C>,
+}
+
+impl<'a, C: VoxelWorldConfig> Poses<'a, C> {
+    /// Poses that place every chunk as a world chunk, for relights of world
+    /// chunks alone.
+    fn world() -> Self {
+        Self {
+            #[cfg(feature = "sub_grids")]
+            sub_grids: None,
+            #[cfg(feature = "sub_grids")]
+            read: std::cell::OnceCell::new(),
+            _world: PhantomData,
+        }
+    }
+
+    /// The poses of the world and its live `sub_grids`.
+    #[cfg(feature = "sub_grids")]
+    fn of(sub_grids: Option<&'a crate::sub_grid::SubGrids<C>>) -> Self {
+        Self {
+            sub_grids,
+            read: std::cell::OnceCell::new(),
+            _world: PhantomData,
+        }
+    }
+
+    /// The pose of the grid of the chunk at `key`. A sub-grid that has ended
+    /// reads the identity.
+    fn pose_of(&self, key: GridKey) -> GlobalTransform {
+        #[cfg(feature = "sub_grids")]
+        if !key.is_world() {
+            let poses = self.read.get_or_init(|| {
+                self.sub_grids.map_or_else(HashMap::new, |sub_grids| {
+                    sub_grids
+                        .live_grids()
+                        .into_iter()
+                        .map(|(_, grid, pose)| (grid, pose))
+                        .collect()
+                })
+            });
+            return poses
+                .get(&key.grid())
+                .copied()
+                .unwrap_or(GlobalTransform::IDENTITY);
+        }
+        let _ = key;
+        GlobalTransform::IDENTITY
+    }
 }
 
 /// How far the middle of the level-0 chunk at `key`, placed by its grid's

@@ -14,6 +14,10 @@
 //! A world that shows its light draws its chunks with its material wrapped in
 //! the crate's own extension ([`material`]), and gets its light to the shader
 //! through a texture of slots and a tag on each chunk ([`route`]).
+//!
+//! With the `sub_grids` feature, each sub-grid chunk holds light of its own,
+//! from the sub-grid's emissive voxels, which the world's light never sees:
+//! see the `sub_grid` module.
 
 mod census;
 mod coarse;
@@ -39,6 +43,8 @@ pub(crate) mod sky;
 pub(crate) mod slot;
 pub(crate) mod solver;
 #[cfg(feature = "sub_grids")]
+mod sub_grid;
+#[cfg(feature = "sub_grids")]
 pub(crate) mod tag_map;
 pub(crate) mod view;
 
@@ -50,6 +56,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::AssetEventSystems;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::log::warn_once;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
@@ -137,8 +145,12 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// With sky light on, a world chunk's task gets the world's lookup
     /// `delegate` to walk the chunk positions above the chunk, and the fill
     /// hints and voxel edits of those positions, read now. Only the world has
-    /// a sky record, fill hints and hinted air, so another grid's chunk walks
-    /// nothing and adds no hinted air around it.
+    /// a sky record, fill hints and hinted air, so another grid's chunk, which
+    /// gets no `delegate`, walks nothing and adds no hinted air around it.
+    ///
+    /// A sub-grid's chunk normally keeps its light: the commit that changed
+    /// its voxels wrote its inputs into the world view, naming the chunk, and
+    /// started its solve: see the `sub_grid` module.
     #[allow(clippy::too_many_arguments)]
     pub fn task_for(
         &self,
@@ -147,15 +159,15 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         data_shape: UVec3,
         world: &C,
         edits: &VoxelEdits<C, C::MaterialIndex>,
-        delegate: VoxelLookupDelegate<C::MaterialIndex>,
+        delegate: Option<VoxelLookupDelegate<C::MaterialIndex>>,
         from_scratch: bool,
     ) -> Option<TaskLight<C::MaterialIndex>> {
         if takes_coarse_path(key.key(), data_shape) {
             return Some(TaskLight::Coarse(CoarseTask {
                 settings: self.task.clone(),
-                walk: self
-                    .sky_rule
-                    .map(|rule| CoarseWalk::new(key.key(), rule, world, edits, delegate)),
+                walk: self.sky_rule.zip(delegate).map(|(rule, delegate)| {
+                    CoarseWalk::new(key.key(), rule, world, edits, delegate)
+                }),
             }));
         }
         let in_world = view::world_position(&key);
@@ -179,7 +191,8 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 edit_frame: self.edit_frame.load(Ordering::Relaxed),
             }));
         }
-        let walk = in_world.zip(self.sky_rule).map(|(position, rule)| {
+        let walk = in_world.zip(self.sky_rule).zip(delegate);
+        let walk = walk.map(|((position, rule), delegate)| {
             let window = rule.window(position.y);
             let positions =
                 (1..=sky::walkable(window) as i32).map(|y| position + IVec3::Y * y);
@@ -478,6 +491,14 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     }
 }
 
+/// What reading the light of world `C` needs beside its voxels and edits.
+#[cfg(feature = "sub_grids")]
+pub(crate) struct LightReads<'a, C: VoxelWorldConfig> {
+    pub settings: &'a LightSettings<C>,
+    pub work: &'a LightWork<C>,
+    pub route: Option<&'a route::LightRoute<C>>,
+}
+
 /// The brighter of `a` and `b` in each channel.
 fn brighter(a: LightLevels, b: LightLevels) -> LightLevels {
     LightLevels {
@@ -573,7 +594,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             (
                 Relights::<C>::forget_despawned,
                 Relights::<C>::collect,
-                edit::relight_edits::<C>,
+                edit_systems::<C>(),
                 SkyProbes::<C>::collect.run_if(resource_exists::<SkyProbes<C>>),
                 probe::reset_light::<C>,
                 Relights::<C>::land,
@@ -608,6 +629,30 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
             .run_if(resource_changed::<C>)
             .before(AssetEventSystems),
     );
+    #[cfg(feature = "sub_grids")]
+    app.init_resource::<sub_grid::NewChunks<C>>().add_systems(
+        PreUpdate,
+        sub_grid::name_new_chunks::<C>
+            .after(ChunkLifecycle::<C>::apply_requests)
+            .before(Relights::<C>::start)
+            .in_set(VoxelWorldSet::<C>::default()),
+    );
+}
+
+/// The system that takes this frame's committed voxel edits into light.
+#[cfg(not(feature = "sub_grids"))]
+fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
+    edit::relight_edits::<C>.into_configs()
+}
+
+/// The systems that take this frame's committed voxel edits into light: the
+/// world's, then the sub-grids', once the commit has planned the sub-grids'
+/// chunks.
+#[cfg(feature = "sub_grids")]
+fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
+    (edit::relight_edits::<C>, sub_grid::relight_edits::<C>)
+        .chain()
+        .after(crate::sub_grid::SubGrids::<C>::plan_chunks)
 }
 
 /// Compares world `C`'s light config and emissive list with what it last
@@ -843,14 +888,10 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         commands.insert_resource(probes);
     }
     if precision_changed {
-        let positions: Vec<IVec3> = settings
-            .view
-            .read()
-            .world_chunks()
-            .map(|(position, _)| position)
-            .collect();
-        for position in positions {
-            work.trigger_settings(in_world(position));
+        // Every grid's chunks, sub-grids' included.
+        let keys: Vec<GridKey> = settings.view.read().chunks.keys().copied().collect();
+        for key in keys {
+            work.trigger_settings(key);
         }
         work.solve_coarse_again();
     } else {
@@ -876,6 +917,10 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
 /// and that relights it. A solid chunk has no open voxel, and relights only
 /// when `emission_changed`, to find its emissive voxels again for its
 /// neighbours' solves.
+///
+/// Every sub-grid chunk with an open voxel relights too, and a solid one
+/// when `emission_changed`. A sub-grid has a chunk only where its padded
+/// voxels hold a solid, so each of its chunks of air lies beside one.
 fn relight_settings<C: VoxelWorldConfig>(
     settings: &LightSettings<C>,
     work: &mut LightWork<C>,
@@ -903,6 +948,23 @@ fn relight_settings<C: VoxelWorldConfig>(
         .collect();
     for position in marked {
         work.trigger_settings(in_world(position));
+    }
+    #[cfg(feature = "sub_grids")]
+    {
+        let marked: Vec<GridKey> = settings
+            .view
+            .read()
+            .chunks
+            .iter()
+            .filter(|(key, chunk)| {
+                !key.is_world()
+                    && (emission_changed || chunk.light.inputs.occupancy.has_open_voxel())
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in marked {
+            work.trigger_settings(key);
+        }
     }
     // Hinted air holding no light entry whose direct sky changed passes the
     // change on to the chunks around it.

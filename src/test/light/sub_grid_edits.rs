@@ -65,4 +65,24 @@ fn filling_a_sub_grid_inside_loaded_world_chunks_leaves_the_worlds_light_alone()
 
     let after = places.map(|place| light_at(&mut app, place));
     assert_eq!(after, before);
+
+    // Moved, turned and edited, with lamps of its own lit, it still leaves
+    // the world's light alone.
+    app.world_mut().entity_mut(entity).insert(
+        Transform::from_xyz(3.0, 2.0, -4.0).with_rotation(Quat::from_rotation_y(0.7)),
+    );
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
+            let mut grid = voxel_world.grid_mut(Grid::SubGrid(entity)).unwrap();
+            grid.set_voxel(IVec3::new(8, 8, 8), WorldVoxel::Solid(LAMP));
+            grid.set_voxel(places[1], WorldVoxel::Air);
+        })
+        .unwrap();
+    settle(
+        &mut app,
+        "light to settle after the sub-grid moved and was edited",
+    );
+
+    let moved = places.map(|place| light_at(&mut app, place));
+    assert_eq!(moved, before);
 }

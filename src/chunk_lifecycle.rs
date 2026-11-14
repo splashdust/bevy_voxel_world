@@ -1282,9 +1282,10 @@ pub(crate) fn publish<C: VoxelWorldConfig>(
             ));
         }
     }
-    // A sub-grid's chunk has no light task, so it never has light to land.
+    // A sub-grid's chunk arrives too, so the light its commit's relight
+    // holds for its mesh lands with it.
     #[cfg(feature = "light_propagation")]
-    if let (Some(work), Some(solved), true) = (light_work, solved_light, key.is_world()) {
+    if let (Some(work), Some(solved)) = (light_work, solved_light) {
         work.arrive(key, entity, solved);
     }
     chunk_map_update_buffer.push((key, chunk_data, entity));
@@ -1410,10 +1411,10 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
 
         #[cfg(not(feature = "light_propagation"))]
         let _ = lookup_delegate;
-        // A sub-grid's chunks stay out of the world's light: such a chunk has
-        // no lookup delegate, and gets no light task.
+        // A sub-grid's chunk has no lookup delegate, which only the world's
+        // sky walks need.
         #[cfg(feature = "light_propagation")]
-        if let (Some(light), Some(lookup_delegate)) = (self.light, lookup_delegate) {
+        if let Some(light) = self.light {
             chunk_task.light = light.task_for(
                 grid_key,
                 entity,

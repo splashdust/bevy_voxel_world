@@ -28,9 +28,17 @@
 //! [`max_active_chunk_threads`](crate::prelude::VoxelWorldConfig::max_active_chunk_threads)
 //! with the world's own. A commit's cost grows with the chunks its edits
 //! reach, not with the sub-grid's size. Moving the camera never retires them,
-//! and [`VoxelWorld::regenerate_chunks`] leaves them alone. In a world with
-//! light propagation, they stay out of the world's light: they don't change
-//! what the world's chunks read, and have no light of their own yet.
+//! and [`VoxelWorld::regenerate_chunks`] leaves them alone.
+//!
+//! # Light
+//!
+//! In a world with light propagation, a sub-grid's voxels stay out of the
+//! world's light: they block none of its light and spread none into it.
+//! A sub-grid's emissive voxels light the sub-grid itself, with the world's
+//! voxel reach, precision and shape, and `GridVoxels::light_at` reads that
+//! light on top of the world's light where the sub-grid is. Only voxel edits
+//! to the sub-grid and changes of light settings solve its light again:
+//! moving it costs no solve.
 //!
 //! Each chunk is a child of the sub-grid's entity, placed by its chunk key as
 //! the world's chunks are under the world's root, so it moves with the
@@ -481,6 +489,9 @@ pub struct GridVoxels<'a, C: VoxelWorldConfig> {
     chunk_index: &'a ChunkIndex<C>,
     chunk_states: &'a Query<'a, 'a, &'static ChunkStateOf<C>>,
     configuration: &'a Arc<C>,
+    /// The world's light, in a world with light propagation.
+    #[cfg(feature = "light_propagation")]
+    light: Option<crate::light::LightReads<'a, C>>,
     target: Target,
 }
 
@@ -510,8 +521,19 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
             chunk_index,
             chunk_states,
             configuration,
+            #[cfg(feature = "light_propagation")]
+            light: None,
             target,
         })
+    }
+
+    /// This view, reading the world's light through `light`.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn with_light(
+        self,
+        light: Option<crate::light::LightReads<'a, C>>,
+    ) -> Self {
+        Self { light, ..self }
     }
 
     /// The id this view's grid is kept under.
@@ -633,6 +655,47 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
             Target::World => GlobalTransform::IDENTITY,
             Target::SubGrid { pose, .. } => pose,
         }
+    }
+
+    /// The light a face of this grid shows at the voxel at `position`, as
+    /// levels from 0 to 15.
+    ///
+    /// For the world, it reads what
+    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) does.
+    /// In a sub-grid, it reads the world's light at the world voxel holding
+    /// the voxel's centre, placed by [`pose`](Self::pose), with the
+    /// sub-grid's own voxel light, from its emissive voxels, taking the
+    /// brighter of the two. Sky light is the world's. A lamp on a sub-grid
+    /// lights only the sub-grid: the world's light never shows it.
+    ///
+    /// Returns `None` when the world has no light propagation, or where the
+    /// world's `light_at` says nothing of the world voxel.
+    #[cfg(feature = "light_propagation")]
+    pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
+        let light = self.light.as_ref()?;
+        let world_light_at = |position: IVec3| {
+            light.settings.light_at(
+                &self.chunk_map.get_read_lock(),
+                light.work,
+                light.route,
+                self.configuration.as_ref(),
+                self.edits,
+                position,
+            )
+        };
+        let (grid, pose) = match self.target {
+            Target::World => return world_light_at(position),
+            Target::SubGrid { grid, pose } => (grid, pose),
+        };
+        let centre = pose.transform_point(position.as_vec3() + 0.5);
+        let world = world_light_at(centre.floor().as_ivec3())?;
+        let Some(own) = light.settings.own_light_at(grid, position) else {
+            return Some(world);
+        };
+        Some(crate::light::LightLevels {
+            sky: world.sky,
+            voxel: world.voxel.max(own.voxel),
+        })
     }
 }
 

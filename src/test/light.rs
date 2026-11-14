@@ -42,6 +42,8 @@ mod slots;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 mod sub_grid_edits;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod sub_grid_light;
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 mod tag_map;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;

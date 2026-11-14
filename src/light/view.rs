@@ -177,11 +177,8 @@ pub(crate) enum Missing {
     /// always reads missing chunks this way.
     Solid,
     /// Every voxel is open, with no direct sky and no emissive voxel, so
-    /// light passes through it but nothing starts there.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no solve reads missing chunks as air yet")
-    )]
+    /// light passes through it but nothing starts there. A sub-grid's solve
+    /// reads its grid's missing chunks this way.
     Air,
 }
 
