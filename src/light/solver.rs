@@ -55,8 +55,9 @@ use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
-use super::view::{LightView, Snapshot};
+use super::view::{world_position, LightView, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
+use crate::grid::{GridId, GridKey};
 use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -293,6 +294,8 @@ impl Solved {
 /// and, with sky light on, what the chunk needs to work out its direct sky.
 pub(crate) struct LightTask<I> {
     pub settings: Arc<LightTaskSettings<I>>,
+    /// The grid of the chunk the task solves.
+    pub grid: GridId,
     pub view: LightView,
     pub walk: Option<SkyWalk<I>>,
     /// The edit stamp of the chunk's position when the task started.
@@ -326,8 +329,9 @@ impl<I: Copy + PartialEq> LightTask<I> {
                 .emissive_scans
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let seeding = seeding(settings, &inputs, chunk.key.position);
-        let snapshot = read_snapshot(&self.view, chunk.key.position, settings);
+        let key = GridKey::new(self.grid, chunk.key);
+        let seeding = seeding(settings, &inputs, key);
+        let snapshot = read_snapshot(&self.view, key, settings);
         let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding);
         solved.sky = found;
         solved.own_edits = self.own_edits;
@@ -376,8 +380,8 @@ impl<I> KeptTask<I> {
     }
 }
 
-/// Solves the light of the chunk at `position` again from the world view, as a
-/// relight does. Returns `None` if the chunk is no longer in the view.
+/// Solves the light of the chunk at `key` again from the world view, as a
+/// relight does, reading the chunks around it on its grid. Returns `None` if the chunk is no longer in the view.
 ///
 /// With `rescan`, it first finds the chunk's emissive voxels again under the
 /// world's emissive list, for a chunk whose emissive voxels were found under
@@ -385,11 +389,11 @@ impl<I> KeptTask<I> {
 pub(crate) fn relight<I: Copy + PartialEq>(
     settings: &LightTaskSettings<I>,
     view: &LightView,
-    position: IVec3,
+    key: GridKey,
     rescan: Option<Rescan<I>>,
     unless_seeds: Option<u64>,
 ) -> Option<Solved> {
-    let read = view.read().get(&position)?.light.inputs.clone();
+    let read = view.read().chunks.get(&key)?.light.inputs.clone();
     let (inputs, rescanned) = match rescan {
         Some(rescan) => {
             if !settings.emission.is_empty() {
@@ -398,12 +402,12 @@ pub(crate) fn relight<I: Copy + PartialEq>(
                     .emissive_scans
                     .fetch_add(1, Ordering::Relaxed);
             }
-            let inputs = read.rescanned(position, &rescan, &settings.emission);
+            let inputs = read.rescanned(key.position(), &rescan, &settings.emission);
             (Arc::new(inputs), Some(read))
         }
         None => (read, None),
     };
-    let seeding = seeding(settings, &inputs, position);
+    let seeding = seeding(settings, &inputs, key);
     if let (Some(seeding), Some(solved_from)) = (&seeding, unless_seeds) {
         if seeding.hash == solved_from && rescanned.is_none() {
             settings
@@ -413,20 +417,22 @@ pub(crate) fn relight<I: Copy + PartialEq>(
             return None;
         }
     }
-    let snapshot = read_snapshot(view, position, settings);
+    let snapshot = read_snapshot(view, key, settings);
     let mut solved = solve(snapshot, inputs, settings, seeding);
     solved.rescanned = rescanned;
     Some(solved)
 }
 
-/// The sky fill seeds of the chunk at `position` with `inputs`, for a chunk
-/// that takes sky fill in a world with sky light and sky fill on.
+/// The sky fill seeds of the chunk at `key` with `inputs`, for a chunk
+/// that takes sky fill in a world with sky light and sky fill on. Only the
+/// world has sky fill, so another grid's chunk takes none.
 fn seeding<I>(
     settings: &LightTaskSettings<I>,
     inputs: &LightInputs,
-    position: IVec3,
+    key: GridKey,
 ) -> Option<Seeding> {
     let (cells, scale) = (settings.fill.as_ref()?, settings.sky_scale.as_ref()?);
+    let position = world_position(&key)?;
     if !inputs.touches_solid() {
         return None;
     }
@@ -435,11 +441,11 @@ fn seeding<I>(
 
 fn read_snapshot<I>(
     view: &LightView,
-    position: IVec3,
+    key: GridKey,
     settings: &LightTaskSettings<I>,
 ) -> Snapshot {
     let started = Instant::now();
-    let snapshot = Snapshot::read(&view.read(), position);
+    let snapshot = Snapshot::read(&view.read(), key);
     settings
         .counters
         .snapshot_nanos

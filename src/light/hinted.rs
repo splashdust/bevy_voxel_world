@@ -44,10 +44,11 @@ use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::{ColumnAnswer, SkyRule};
 use super::solver::{neighbour_index, ChannelLight, ChunkLight, Neighbourhood};
-use super::view::{AirInputs, ViewChunk, ViewMaps, ENTRY};
+use super::view::{in_world, AirInputs, ViewChunk, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::configuration::{FillHint, VoxelWorldConfig};
+use crate::grid::GridKey;
 use crate::voxel_edits::VoxelEdits;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -198,7 +199,7 @@ pub(crate) fn add_air_around<C: VoxelWorldConfig>(
     let mut added = Vec::new();
     for neighbour in around(position) {
         if view.contains_key(&neighbour)
-            || view.air.contains_key(&neighbour)
+            || view.air.contains_key(&in_world(neighbour))
             || !is_hinted_air(world, neighbour)
         {
             continue;
@@ -210,7 +211,7 @@ pub(crate) fn add_air_around<C: VoxelWorldConfig>(
             _ => ColumnAnswer::none(),
         };
         let air = air_inputs(neighbour, edits, emission, columns);
-        view.air.insert(neighbour, air);
+        view.air.insert(in_world(neighbour), air);
         added.push(neighbour);
     }
     added
@@ -270,8 +271,8 @@ pub(crate) fn follow<C: VoxelWorldConfig>(
             }
             let mut dropped = Vec::new();
             for neighbour in around(position).chain(std::iter::once(position)) {
-                if view.is_air(neighbour) && touched(view, neighbour) {
-                    let air = view.air.remove(&neighbour).unwrap();
+                if view.is_air(in_world(neighbour)) && touched(view, neighbour) {
+                    let air = view.air.remove(&in_world(neighbour)).unwrap();
                     make_entry(
                         view,
                         &mut work,
@@ -292,17 +293,17 @@ pub(crate) fn follow<C: VoxelWorldConfig>(
                 } else if view.get(&neighbour).is_some_and(ViewChunk::is_entry)
                     && !touched(view, neighbour)
                 {
-                    let entry = view.remove(&neighbour).unwrap();
+                    let entry = view.chunks.remove(&in_world(neighbour)).unwrap();
                     view.air.insert(
-                        neighbour,
+                        in_world(neighbour),
                         AirInputs {
                             inputs: entry.light.inputs.clone(),
                             edits: entry.edits,
                         },
                     );
-                    work.forget_entry(neighbour);
+                    work.forget_entry(in_world(neighbour));
                     if let Some(route) = route.as_mut() {
-                        route.entry_dropped(neighbour);
+                        route.entry_dropped(in_world(neighbour));
                     }
                     dropped.push(neighbour);
                 }
@@ -312,8 +313,8 @@ pub(crate) fn follow<C: VoxelWorldConfig>(
                 .flat_map(|centre| around(centre).chain(std::iter::once(centre)))
                 .collect::<HashSet<IVec3>>();
             for neighbour in near {
-                if view.is_air(neighbour) && !read_around(view, neighbour) {
-                    view.air.remove(&neighbour);
+                if view.is_air(in_world(neighbour)) && !read_around(view, neighbour) {
+                    view.air.remove(&in_world(neighbour));
                     forgotten.push(neighbour);
                 }
             }
@@ -323,15 +324,17 @@ pub(crate) fn follow<C: VoxelWorldConfig>(
         if let Some(probes) = probes.as_mut() {
             probes.forget(position, ENTRY);
         }
-        work.fill_touch(position);
+        work.fill_touch(in_world(position));
     }
     for position in added {
         // Air a chunk has landed in since is the chunk's to answer for.
         let current = {
             let view = settings.view.read();
-            let hinted = view.is_air(position)
+            let hinted = view.is_air(in_world(position))
                 || view.get(&position).is_some_and(ViewChunk::is_entry);
-            hinted.then(|| view.inputs(position).cloned()).flatten()
+            hinted
+                .then(|| view.inputs(in_world(position)).cloned())
+                .flatten()
         };
         let Some(inputs) = current else {
             continue;
@@ -345,11 +348,11 @@ pub(crate) fn follow<C: VoxelWorldConfig>(
                 }
             }
         }
-        work.fill_touch(position);
+        work.fill_touch(in_world(position));
     }
     drop(record);
     for position in relight {
-        work.trigger(position);
+        work.trigger(in_world(position));
     }
 }
 
@@ -370,8 +373,8 @@ fn make_entry<C: VoxelWorldConfig>(
     });
     let light = Arc::new(known_light(&inputs, precision));
     let version = work.next_version();
-    view.insert(
-        position,
+    view.chunks.insert(
+        in_world(position),
         ViewChunk {
             entity: ENTRY,
             light,
@@ -385,12 +388,12 @@ fn make_entry<C: VoxelWorldConfig>(
             fill_seeds: None,
         },
     );
-    work.add_entry(position);
+    work.add_entry(in_world(position));
 }
 
 /// Whether the inputs of a chunk, light entry or hinted air that the chunk at
-/// `position` reaches through hinted air holding no light entry, within the
-/// 3×3×3 around it, are other than those its solve `read`.
+/// `key` reaches through hinted air holding no light entry, within the 3×3×3
+/// around it on its grid, are other than those its solve `read`.
 ///
 /// A face neighbour's change shows in the light versions a solve compares
 /// against, but one beyond hinted air changes no face neighbour's light, and
@@ -398,17 +401,18 @@ fn make_entry<C: VoxelWorldConfig>(
 /// chunk there to relight.
 pub(crate) fn changed_across_air(
     view: &ViewMaps,
-    position: IVec3,
+    key: GridKey,
     read: &Neighbourhood,
 ) -> bool {
-    let within = |at: IVec3| (at - position).abs().max_element() <= 1;
-    let mut next: Vec<IVec3> = Face::ALL
+    let offset = |at: GridKey| at.position() - key.position();
+    let within = |at: GridKey| offset(at).abs().max_element() <= 1;
+    let mut next: Vec<GridKey> = Face::ALL
         .iter()
-        .map(|face| position + face.offset())
+        .map(|face| key + face.offset())
         .filter(|beside| view.is_air(*beside))
         .collect();
-    let mut seen: HashSet<IVec3> = next.iter().copied().collect();
-    seen.insert(position);
+    let mut seen: HashSet<GridKey> = next.iter().copied().collect();
+    seen.insert(key);
     let mut checked = next.clone();
     while let Some(air) = next.pop() {
         for face in Face::ALL {
@@ -423,7 +427,7 @@ pub(crate) fn changed_across_air(
         }
     }
     checked.into_iter().any(|at| {
-        let was = &read[neighbour_index(at - position)];
+        let was = &read[neighbour_index(offset(at))];
         match (view.inputs(at), was) {
             (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
             (now, was) => now.is_some() != was.is_some(),

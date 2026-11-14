@@ -212,6 +212,20 @@ impl GridKey {
     }
 }
 
+/// The key of the chunk `offset` chunks of the same LOD level from this one,
+/// on the same grid: a chunk's neighbours are always on its own grid.
+impl std::ops::Add<IVec3> for GridKey {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, offset: IVec3) -> Self {
+        Self {
+            position: self.position + offset * (1 << self.lod_level),
+            ..self
+        }
+    }
+}
+
 /// The key of an entry within its grid's table in a [`GridTable`]: what is
 /// left of a [`GridKey`] once its grid has picked the table.
 pub(crate) trait KeyInGrid: Copy + Eq + Hash {

@@ -42,7 +42,7 @@ use super::record::SkyRecord;
 use super::relight::LightWork;
 use super::sky::{padding_row, proved, provisional, ColumnAnswer, Columns, SkyRule};
 use super::solver::{ChunkLight, Solved};
-use super::view::{LightView, ENTRY};
+use super::view::{in_world, LightView, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_map::ChunkMap;
@@ -575,7 +575,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
             }
         }
         for position in probes.take_relights() {
-            work.trigger_column(position);
+            work.trigger_column(in_world(position));
         }
         budget.set_finished_last_frame(JobKind::SkyProbe, finished);
         budget.set_running(JobKind::SkyProbe, probes.running.len());
@@ -692,10 +692,10 @@ pub(crate) fn reset_light<C: VoxelWorldConfig>(
     work.trigger_all();
 }
 
-/// Forgets every waiting chunk, records every loaded chunk's own mask, and
-/// works each one's column answer out again from its padding row, the fill
-/// hints and `record`, under the sky rule of `probes`. Chunks whose answer
-/// changed get it in the world view `view`.
+/// Forgets every waiting chunk, records every loaded world chunk's own mask,
+/// and works each one's column answer out again from its padding row, the
+/// fill hints and `record`, under the sky rule of `probes`. Chunks whose
+/// answer changed get it in the world view `view`.
 ///
 /// Returns the positions of the chunks whose direct sky changed.
 pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
@@ -709,27 +709,26 @@ pub(crate) fn answer_loaded_again<C: VoxelWorldConfig>(
     probes.clear();
     let loaded: Vec<(IVec3, Entity, ColumnAnswer)> = {
         let view = view.read();
-        for (position, chunk) in view.iter() {
+        for (position, chunk) in view.world_chunks() {
             let occupancy = &chunk.light.inputs.occupancy;
             let open = record.keeps_cells().then(|| open_cells(occupancy));
             record.insert(
-                *position,
+                position,
                 &occupancy.solid_columns(),
                 open,
-                edits.edit_stamp(*position),
+                edits.edit_stamp(position),
             );
         }
-        view.iter()
+        view.world_chunks()
             .map(|(position, chunk)| {
-                (*position, chunk.entity, chunk.light.inputs.columns.clone())
+                (position, chunk.entity, chunk.light.inputs.columns.clone())
             })
             .collect()
     };
     let air: Vec<(IVec3, Entity, ColumnAnswer)> = view
         .read()
-        .air
-        .iter()
-        .map(|(position, air)| (*position, ENTRY, air.inputs.columns.clone()))
+        .world_air()
+        .map(|(position, air)| (position, ENTRY, air.inputs.columns.clone()))
         .collect();
     let chunk_map = chunk_map.get_read_lock();
     let mut changed = Vec::new();
@@ -821,9 +820,9 @@ pub(crate) fn air_answer<C: VoxelWorldConfig>(
     }
 }
 
-/// Gives the chunk `entity` at `position` the column answer `answer` in the
-/// world view, keeping its light. Relights then read the new answer. With
-/// [`ENTRY`] it gives it to a light entry or to hinted air.
+/// Gives the world's chunk `entity` at `position` the column answer
+/// `answer` in the world view, keeping its light. Relights then read the new
+/// answer. With [`ENTRY`] it gives it to a light entry or to hinted air.
 pub(crate) fn replace_columns(
     view: &LightView,
     position: IVec3,
@@ -831,13 +830,15 @@ pub(crate) fn replace_columns(
     answer: ColumnAnswer,
 ) {
     let mut view = view.write();
-    if entity == ENTRY && view.is_air(position) {
-        let air = view.air.get_mut(&position).unwrap();
+    let key = in_world(position);
+    if entity == ENTRY && view.is_air(key) {
+        let air = view.air.get_mut(&key).unwrap();
         air.inputs = Arc::new(air.inputs.with_columns(answer));
         return;
     }
     let Some(chunk) = view
-        .get_mut(&position)
+        .chunks
+        .get_mut(&key)
         .filter(|chunk| chunk.entity == entity)
     else {
         return;

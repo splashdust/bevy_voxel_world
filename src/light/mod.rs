@@ -58,6 +58,7 @@ use crate::chunk::{ChunkKey, FillType};
 use crate::chunk_lifecycle::ChunkLifecycle;
 use crate::chunk_map::{ChunkMap, ChunkMapData};
 use crate::configuration::{VoxelLookupDelegate, VoxelWorldConfig};
+use crate::grid::GridKey;
 use crate::pool_budget::{JobKind, PoolBudget};
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::VoxelWorldSet;
@@ -73,7 +74,7 @@ use record::SkyRecord;
 use relight::{LightWork, Relights};
 use sky::{Above, ColumnAnswer, SkyFound, SkyRule, SkyWalk};
 use solver::{KeptLight, KeptTask, LightCounters, LightTask, LightTaskSettings, Solved};
-use view::LightView;
+use view::{in_world, LightView};
 
 /// The light settings of world `C` as last applied, with out-of-range values
 /// clamped. Only a world that returned a light config at plugin build has
@@ -131,13 +132,15 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// landing puts the chunk's new occupancy and emissive voxels in the
     /// world view.
     ///
-    /// With sky light on, the task gets the world's lookup `delegate` to walk
-    /// the chunk positions above the chunk, and the fill hints and voxel edits
-    /// of those positions, read now.
+    /// With sky light on, a world chunk's task gets the world's lookup
+    /// `delegate` to walk the chunk positions above the chunk, and the fill
+    /// hints and voxel edits of those positions, read now. Only the world has
+    /// a sky record, fill hints and hinted air, so another grid's chunk walks
+    /// nothing and adds no hinted air around it.
     #[allow(clippy::too_many_arguments)]
     pub fn task_for(
         &self,
-        key: ChunkKey,
+        key: GridKey,
         entity: Entity,
         data_shape: UVec3,
         world: &C,
@@ -145,20 +148,24 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         delegate: VoxelLookupDelegate<C::MaterialIndex>,
         from_scratch: bool,
     ) -> Option<TaskLight<C::MaterialIndex>> {
-        if takes_coarse_path(key, data_shape) {
+        if takes_coarse_path(key.key(), data_shape) {
             return Some(TaskLight::Coarse(CoarseTask {
                 settings: self.task.clone(),
                 walk: self
                     .sky_rule
-                    .map(|rule| CoarseWalk::new(key, rule, world, edits, delegate)),
+                    .map(|rule| CoarseWalk::new(key.key(), rule, world, edits, delegate)),
             }));
         }
-        self.add_air_around(key.position, world, edits);
-        let own_edits = edits.edit_stamp(key.position);
+        let in_world = view::world_position(&key);
+        if let Some(position) = in_world {
+            self.add_air_around(position, world, edits);
+        }
+        let own_edits = edits.edit_stamp_in(key);
         let kept = self
             .view
             .read()
-            .get(&key.position)
+            .chunks
+            .get(&key)
             .filter(|chunk| {
                 !from_scratch && chunk.entity == entity && chunk.edits == own_edits
             })
@@ -170,10 +177,10 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 edit_frame: self.edit_frame.load(Ordering::Relaxed),
             }));
         }
-        let walk = self.sky_rule.map(|rule| {
-            let window = rule.window(key.position.y);
+        let walk = in_world.zip(self.sky_rule).map(|(position, rule)| {
+            let window = rule.window(position.y);
             let positions =
-                (1..=sky::walkable(window) as i32).map(|y| key.position + IVec3::Y * y);
+                (1..=sky::walkable(window) as i32).map(|y| position + IVec3::Y * y);
             let counts: Vec<u64> = positions
                 .clone()
                 .map(|position| edits.edit_stamp(position))
@@ -192,13 +199,13 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
                 })
                 .collect();
             SkyWalk {
-                position: key.position,
+                position,
                 window,
                 above,
                 delegate,
                 found: SkyFound {
                     edits: counts,
-                    own_edits: edits.edit_stamp(key.position),
+                    own_edits: edits.edit_stamp(position),
                     generation: record.generation(),
                     ..default()
                 },
@@ -206,6 +213,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         });
         Some(TaskLight::Level0(LightTask {
             settings: self.task.clone(),
+            grid: key.grid(),
             view: self.view.clone(),
             walk,
             own_edits,
@@ -747,14 +755,13 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
                 }
                 let lit: Vec<(IVec3, Entity)> = {
                     let view = settings.view.read();
-                    view.iter()
+                    view.world_chunks()
                         .filter(|(_, chunk)| chunk.light.inputs.columns.has_sky())
-                        .map(|(position, chunk)| (*position, chunk.entity))
+                        .map(|(position, chunk)| (position, chunk.entity))
                         .chain(
-                            view.air
-                                .iter()
+                            view.world_air()
                                 .filter(|(_, air)| air.inputs.columns.has_sky())
-                                .map(|(position, _)| (*position, view::ENTRY)),
+                                .map(|(position, _)| (position, view::ENTRY)),
                         )
                         .collect()
                 };
@@ -838,9 +845,14 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         commands.insert_resource(probes);
     }
     if precision_changed {
-        let positions: Vec<IVec3> = settings.view.read().keys().copied().collect();
+        let positions: Vec<IVec3> = settings
+            .view
+            .read()
+            .world_chunks()
+            .map(|(position, _)| position)
+            .collect();
         for position in positions {
-            work.trigger_settings(position);
+            work.trigger_settings(in_world(position));
         }
         work.solve_coarse_again();
     } else {
@@ -854,9 +866,9 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     }
 }
 
-/// The settings relight: marks for a relight every chunk with an open voxel
-/// touching a solid by a face, an edge or a corner, counting the solids in
-/// its padding, and every chunk whose direct sky changed. Old light shows
+/// The settings relight: marks for a relight every world chunk with an open
+/// voxel touching a solid by a face, an edge or a corner, counting the solids
+/// in its padding, and every chunk whose direct sky changed. Old light shows
 /// until new light lands.
 ///
 /// A chunk with open and solid voxels always has such an open voxel, and a
@@ -877,22 +889,22 @@ fn relight_settings<C: VoxelWorldConfig>(
     let marked: Vec<IVec3> = settings
         .view
         .read()
-        .iter()
+        .world_chunks()
         .filter(|(position, chunk)| {
-            sky_changed_at.contains(*position)
+            sky_changed_at.contains(position)
                 || chunk.is_entry()
                 || match &chunk.light.inputs.occupancy {
                     Occupancy::Mixed(_) => true,
                     Occupancy::Solid => emission_changed,
                     Occupancy::Open => chunk_map
-                        .get(&ChunkKey::new(**position, 0))
+                        .get(&ChunkKey::new(*position, 0))
                         .is_some_and(|data| matches!(data.fill_type, FillType::Mixed)),
                 }
         })
-        .map(|(position, _)| *position)
+        .map(|(position, _)| position)
         .collect();
     for position in marked {
-        work.trigger_settings(position);
+        work.trigger_settings(in_world(position));
     }
     // Hinted air holding no light entry whose direct sky changed passes the
     // change on to the chunks around it.
@@ -900,12 +912,12 @@ fn relight_settings<C: VoxelWorldConfig>(
         let view = settings.view.read();
         sky_changed_at
             .iter()
-            .filter(|position| view.is_air(**position))
+            .filter(|position| view.is_air(in_world(**position)))
             .copied()
             .collect()
     };
     for position in air {
-        work.trigger(position);
+        work.trigger(in_world(position));
     }
 }
 

@@ -1259,11 +1259,22 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         &self,
         positions: impl Iterator<Item = IVec3>,
     ) -> Vec<Option<EditBucket<I>>> {
+        self.buckets_in(GridId::WORLD, positions)
+    }
+
+    /// The committed edits in each of `grid`'s level-0 chunks at `positions`,
+    /// as [`buckets`](Self::buckets) gives the world's.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn buckets_in(
+        &self,
+        grid: GridId,
+        positions: impl Iterator<Item = IVec3>,
+    ) -> Vec<Option<EditBucket<I>>> {
         let buckets = self.committed.read().unwrap();
         positions
             .map(|position| {
                 buckets
-                    .get(&GridKey::level_0(GridId::WORLD, position))
+                    .get(&GridKey::level_0(grid, position))
                     .filter(|bucket| !bucket.is_empty())
                     .cloned()
             })
@@ -1293,15 +1304,20 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// different. A forget moves the stamp of every position, edited or not.
     #[cfg(feature = "light_propagation")]
     pub(crate) fn edit_stamp(&self, position: IVec3) -> u64 {
+        self.edit_stamp_in(GridKey::level_0(GridId::WORLD, position))
+    }
+
+    /// A stamp of the voxel edits of the level-0 chunk at `key`, as
+    /// [`edit_stamp`](Self::edit_stamp) gives the world's. Only a forget of
+    /// the world raises the forget epoch.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn edit_stamp_in(&self, key: GridKey) -> u64 {
         let buckets = self.committed.read().unwrap();
         let epoch = self.forget_epoch.load(Ordering::Relaxed);
         if buckets.is_empty() {
             return epoch;
         }
-        epoch
-            + buckets
-                .get(&GridKey::level_0(GridId::WORLD, position))
-                .map_or(0, |bucket| bucket.seq)
+        epoch + buckets.get(&key).map_or(0, |bucket| bucket.seq)
     }
 
     /// Whether `stamp`, an [`edit_stamp`](Self::edit_stamp) read since the

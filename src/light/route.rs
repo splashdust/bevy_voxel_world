@@ -113,6 +113,7 @@ use super::solver::{ChannelLight, ChunkLight};
 use crate::chunk::{Chunk, ChunkKey};
 use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_U};
 use crate::configuration::VoxelWorldConfig;
+use crate::grid::GridKey;
 
 /// Texels along each side of a slot: a chunk and a shell one voxel deep.
 pub(crate) const SLOT_SIDE: u32 = CHUNK_SIZE_U + 2;
@@ -190,7 +191,7 @@ enum Upload {
 /// A level-0 chunk the route knows of: one whose light has landed, or which
 /// shows its mesh.
 struct RouteChunk {
-    position: IVec3,
+    key: GridKey,
     shown: bool,
     light: Option<Arc<ChunkLight>>,
     /// What the chunk's faces read from its own voxels.
@@ -259,11 +260,11 @@ pub(crate) struct LightRoute<C> {
     holders: HashMap<u32, Entity>,
     chunks: EntityHashMap<RouteChunk>,
     coarse: EntityHashMap<CoarseChunk>,
-    /// The chunk at each level-0 position whose light has landed.
-    at: HashMap<IVec3, Entity>,
+    /// The level-0 chunk at each grid key whose light has landed.
+    at: HashMap<GridKey, Entity>,
     /// The light of each light entry, which the shells of the chunks beside
     /// it read: see [`hinted`](super::hinted).
-    entries: HashMap<IVec3, Arc<ChunkLight>>,
+    entries: HashMap<GridKey, Arc<ChunkLight>>,
     /// Chunks needing a slot that have none.
     starved: EntityHashSet,
     /// The writes for each slot, taken by the render world each frame.
@@ -494,17 +495,17 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.warned_full
     }
 
-    /// Takes the light that landed for the chunk `entity` at the level-0
-    /// position `position`: what its faces read from its own voxels, and the
-    /// bytes its solve made of it, if any. `new_voxels` says whether its
-    /// voxels may have changed since its last landing.
+    /// Takes the light that landed for the level-0 chunk `entity` at `key`:
+    /// what its faces read from its own voxels, and the bytes its solve made
+    /// of it, if any. `new_voxels` says whether its voxels may have changed
+    /// since its last landing.
     ///
     /// A chunk showing its mesh gets its new tag and slot, and its face
     /// neighbours' shells and tags follow. Changed tags wait in
     /// [`take_changed_tags`](Self::take_changed_tags).
     pub fn light_landed(
         &mut self,
-        position: IVec3,
+        key: GridKey,
         entity: Entity,
         light: Arc<ChunkLight>,
         own: FacesSee,
@@ -522,15 +523,15 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let chunk = self
             .chunks
             .entry(entity)
-            .or_insert_with(|| RouteChunk::new(position, unlit));
+            .or_insert_with(|| RouteChunk::new(key, unlit));
         chunk.light = Some(light.clone());
         chunk.own = own;
         chunk.bytes = bytes;
-        self.at.insert(position, entity);
-        self.entries.remove(&position);
+        self.at.insert(key, entity);
+        self.entries.remove(&key);
         if first || new_voxels {
             let across = Face::ALL.map(|face| {
-                self.neighbour_light(position, face)
+                self.neighbour_light(key, face)
                     .map_or(FacesSee::default(), |neighbour| {
                         across(&light.inputs, face, &neighbour, self.precision)
                     })
@@ -538,32 +539,32 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             self.chunks.get_mut(&entity).unwrap().across = across;
         }
         self.settle(entity, None);
-        self.neighbours_follow(position, &light);
+        self.neighbours_follow(key, &light);
     }
 
-    /// Takes the light that landed for the light entry at `position`, which
+    /// Takes the light that landed for the light entry at `key`, which
     /// the chunks beside it read through their shells, as they read a
     /// chunk's.
-    pub fn entry_landed(&mut self, position: IVec3, light: Arc<ChunkLight>) {
-        if self.at.contains_key(&position) {
+    pub fn entry_landed(&mut self, key: GridKey, light: Arc<ChunkLight>) {
+        if self.at.contains_key(&key) {
             return;
         }
-        self.entries.insert(position, light.clone());
-        self.neighbours_follow(position, &light);
+        self.entries.insert(key, light.clone());
+        self.neighbours_follow(key, &light);
     }
 
-    /// Forgets the light entry at `position`. The shells beside it keep its
+    /// Forgets the light entry at `key`. The shells beside it keep its
     /// last planes, as they keep a despawned chunk's.
-    pub fn entry_dropped(&mut self, position: IVec3) {
-        self.entries.remove(&position);
+    pub fn entry_dropped(&mut self, key: GridKey) {
+        self.entries.remove(&key);
     }
 
-    /// Brings what the face neighbours of the chunk or light entry at
-    /// `position` read across their faces in line with its new `light`, and
-    /// their shells and tags with it.
-    fn neighbours_follow(&mut self, position: IVec3, light: &Arc<ChunkLight>) {
+    /// Brings what the face neighbours on its grid of the chunk or light
+    /// entry at `key` read across their faces in line with its new `light`,
+    /// and their shells and tags with it.
+    fn neighbours_follow(&mut self, key: GridKey, light: &Arc<ChunkLight>) {
         for face in Face::ALL {
-            let Some(&neighbour) = self.at.get(&(position + face.offset())) else {
+            let Some(&neighbour) = self.at.get(&(key + face.offset())) else {
                 continue;
             };
             let back = face.opposite();
@@ -583,26 +584,25 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// light that landed for it meanwhile. A chunk whose light hasn't landed
     /// gets the levels of a chunk with no light. `coarse` says whether it's a
     /// coarse chunk.
-    fn show(&mut self, entity: Entity, key: ChunkKey, coarse: bool) -> u32 {
+    fn show(&mut self, entity: Entity, key: GridKey, coarse: bool) -> u32 {
         if coarse {
             let unlit = (self.precision.of_whole(self.unlit_sky), 0);
             let precision = self.precision;
             let chunk = self
                 .coarse
                 .entry(entity)
-                .or_insert_with(|| CoarseChunk::new(key, unlit, precision));
+                .or_insert_with(|| CoarseChunk::new(key.key(), unlit, precision));
             if !chunk.shown {
                 chunk.shown = true;
                 self.settle_coarse(entity);
             }
             return self.coarse[&entity].tag;
         }
-        let position = key.position;
         let unlit = self.unlit_tag();
         let chunk = self
             .chunks
             .entry(entity)
-            .or_insert_with(|| RouteChunk::new(position, unlit));
+            .or_insert_with(|| RouteChunk::new(key, unlit));
         if !chunk.shown {
             chunk.shown = true;
             self.settle(entity, None);
@@ -622,8 +622,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(chunk) = self.chunks.remove(&entity) else {
             return;
         };
-        if self.at.get(&chunk.position) == Some(&entity) {
-            self.at.remove(&chunk.position);
+        if self.at.get(&chunk.key) == Some(&entity) {
+            self.at.remove(&chunk.key);
         }
         self.starved.remove(&entity);
         if let Some(slot) = chunk.slot {
@@ -742,7 +742,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let nearest = self
                 .starved
                 .iter()
-                .map(|entity| (self.distance(self.chunks[entity].position), *entity))
+                .map(|entity| (self.distance(self.chunks[entity].key), *entity))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, entity)| entity);
             let Some(entity) = nearest else {
@@ -769,7 +769,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return;
         };
         let sees = chunk.sees();
-        let (slot, position) = (chunk.slot, chunk.position);
+        let (slot, key) = (chunk.slot, chunk.key);
         self.starved.remove(&entity);
         let tag = if light.precision != self.precision {
             // Light solved before a change of precision shows flat until it
@@ -789,7 +789,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     self.write_full(entity, slot, &light);
                     HAS_SLOT | slot
                 }
-                (None, _) => match self.take_slot(entity, self.distance(position)) {
+                (None, _) => match self.take_slot(entity, self.distance(key)) {
                     Some(slot) => {
                         self.chunks.get_mut(&entity).unwrap().slot = Some(slot);
                         if face.is_some() {
@@ -825,7 +825,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Queues the whole slot of the chunk `entity`: its own voxels' light and
     /// its neighbours' border planes.
     fn write_full(&mut self, entity: Entity, slot: u32, light: &ChunkLight) {
-        let position = self.chunks[&entity].position;
+        let key = self.chunks[&entity].key;
         let mut bytes = self
             .chunks
             .get_mut(&entity)
@@ -835,7 +835,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .unwrap_or_else(|| slot_bytes(light));
         let mut shell = [None; 6];
         for face in Face::ALL {
-            if let Some(neighbour) = self.neighbour_light(position, face) {
+            if let Some(neighbour) = self.neighbour_light(key, face) {
                 let plane = border_plane(&neighbour, face.opposite(), self.precision);
                 write_shell(&mut bytes, face, Some(&plane), self.precision);
                 shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
@@ -849,8 +849,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Queues the shell plane of the chunk `entity` in front of `face`, if
     /// the neighbour's border plane there changed.
     fn write_plane(&mut self, entity: Entity, slot: u32, face: Face) {
-        let position = self.chunks[&entity].position;
-        let Some(neighbour) = self.neighbour_light(position, face) else {
+        let key = self.chunks[&entity].key;
+        let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
         let plane = border_plane(&neighbour, face.opposite(), self.precision);
@@ -955,27 +955,27 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         !self.free.is_empty() || self.next_slot < self.capacity
     }
 
-    /// The light of the chunk across `face` from the level-0 position
-    /// `position`, if its light has landed.
-    fn neighbour_light(&self, position: IVec3, face: Face) -> Option<Arc<ChunkLight>> {
-        let beside = position + face.offset();
+    /// The light of the chunk across `face` from the level-0 chunk at `key`,
+    /// on its grid, if its light has landed.
+    fn neighbour_light(&self, key: GridKey, face: Face) -> Option<Arc<ChunkLight>> {
+        let beside = key + face.offset();
         match self.at.get(&beside) {
             Some(entity) => self.chunks.get(entity)?.light.clone(),
             None => self.entries.get(&beside).cloned(),
         }
     }
 
-    /// How far the middle of the level-0 chunk at `position` is from the
+    /// How far the middle of the level-0 chunk at `key` is from the
     /// nearest camera.
-    fn distance(&self, position: IVec3) -> f32 {
-        self.distance_to((position.as_vec3() + 0.5) * CHUNK_SIZE_F)
+    fn distance(&self, key: GridKey) -> f32 {
+        self.distance_to((key.position().as_vec3() + 0.5) * CHUNK_SIZE_F)
     }
 
     /// How far the slot holder `holder` is from the nearest camera.
     fn holder_distance(&self, holder: Entity) -> f32 {
         match self.coarse.get(&holder) {
             Some(chunk) => self.distance_to(chunk.key.centre()),
-            None => self.distance(self.chunks[&holder].position),
+            None => self.distance(self.chunks[&holder].key),
         }
     }
 
@@ -999,9 +999,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 }
 
 impl RouteChunk {
-    fn new(position: IVec3, tag: u32) -> Self {
+    fn new(key: GridKey, tag: u32) -> Self {
         Self {
-            position,
+            key,
             shown: false,
             light: None,
             own: FacesSee::default(),
@@ -1047,7 +1047,7 @@ pub(crate) fn tag_chunk<C: VoxelWorldConfig>(chunk: &mut EntityCommands) {
         chunk.world_scope(|world| {
             world.resource_scope::<LightRoute<C>, _>(|world, mut route| {
                 route.set_device(world.get_resource::<RenderDevice>());
-                let tag = route.show(entity, key, coarse);
+                let tag = route.show(entity, GridKey::world(key), coarse);
                 for (changed, tag) in route.take_changed_tags() {
                     if let Ok(mut changed) = world.get_entity_mut(changed) {
                         changed.insert(MeshTag::new(tag));

@@ -25,7 +25,7 @@ use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
 use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel};
 use super::solver::{ChannelLight, ChunkLight};
-use super::view::Snapshot;
+use super::view::{in_world, Snapshot};
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::configuration::VoxelWorldConfig;
@@ -530,7 +530,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         let view = settings.view.read();
         let mut entries = 0;
         let mut bytes = 0;
-        for chunk in view.values().filter(|chunk| chunk.is_entry()) {
+        for chunk in view.chunks.values().filter(|chunk| chunk.is_entry()) {
             entries += 1;
             bytes += size_of::<FaceHashes>();
             let light = &chunk.light;
@@ -549,7 +549,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         let view = settings.view.read();
         let mut bytes = 0;
         let mut mixed = 0;
-        for chunk in view.values().filter(|chunk| !chunk.is_entry()) {
+        for chunk in view.chunks.values().filter(|chunk| !chunk.is_entry()) {
             let light = &chunk.light;
             for channel in [&light.sky, &light.voxel] {
                 if let ChannelLight::Planes(planes) = channel {
@@ -639,8 +639,9 @@ pub fn change_counts<C: VoxelWorldConfig>(world: &World) -> Option<ChangeCounts>
     work.census.as_ref().map(|census| census.counts)
 }
 
-/// Solves sky light and voxel light again for every level-0 chunk of world `C` with light,
-/// one after another on this thread, from the world view as it is now.
+/// Solves sky light and voxel light again for every level-0 chunk with light
+/// in world `C`'s streamed voxels, one after another on this thread, from the
+/// world view as it is now.
 /// Returns how many it solved and the time it took in milliseconds.
 pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f64) {
     let Some(settings) = world.get_resource::<LightSettings<C>>() else {
@@ -648,8 +649,8 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
     };
     let view = settings.view.read();
     let mut boxes = Vec::new();
-    for (position, chunk) in view.iter() {
-        let mut snapshot = Snapshot::read(&view, *position);
+    for (position, chunk) in view.world_chunks() {
+        let mut snapshot = Snapshot::read(&view, in_world(position));
         snapshot.neighbours[neighbour_index(IVec3::ZERO)] =
             Some(chunk.light.inputs.clone());
         boxes.push(snapshot.neighbours);

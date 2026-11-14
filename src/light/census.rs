@@ -26,6 +26,7 @@ use super::inputs::Occupancy;
 use super::solver::{ChannelLight, ChunkLight};
 use super::view::ViewMaps;
 use crate::chunk::CHUNK_SIZE_U;
+use crate::grid::GridKey;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
@@ -84,10 +85,10 @@ enum Batch {
 #[derive(Default)]
 pub(crate) struct ChangeCensus {
     frame: u64,
-    arrived: HashMap<IVec3, u64>,
-    changed: HashMap<IVec3, u64>,
-    own_visible: HashMap<IVec3, u64>,
-    visible: HashMap<IVec3, u64>,
+    arrived: HashMap<GridKey, u64>,
+    changed: HashMap<GridKey, u64>,
+    own_visible: HashMap<GridKey, u64>,
+    visible: HashMap<GridKey, u64>,
     pub counts: ChangeCounts,
 }
 
@@ -97,20 +98,20 @@ impl ChangeCensus {
         self.frame += 1;
     }
 
-    /// Notes that the chunk at `position` retired.
-    pub fn forget(&mut self, position: IVec3) {
-        self.arrived.remove(&position);
-        self.changed.remove(&position);
-        self.own_visible.remove(&position);
-        self.visible.remove(&position);
+    /// Notes that the chunk at `key` retired.
+    pub fn forget(&mut self, key: GridKey) {
+        self.arrived.remove(&key);
+        self.changed.remove(&key);
+        self.own_visible.remove(&key);
+        self.visible.remove(&key);
     }
 
-    /// Counts a level-0 chunk's light landing at `position`: `old` is the
+    /// Counts a level-0 chunk's light landing at `key`: `old` is the
     /// light it replaced, `None` on the chunk's arrival, and `cause` why it
     /// was solved again. `view` holds the chunks around it.
     pub fn landed(
         &mut self,
-        position: IVec3,
+        key: GridKey,
         old: Option<&ChunkLight>,
         new: &ChunkLight,
         cause: Cause,
@@ -118,7 +119,7 @@ impl ChangeCensus {
     ) {
         match old {
             None => {
-                self.arrived.insert(position, self.frame);
+                self.arrived.insert(key, self.frame);
                 self.counts.arrivals += 1;
                 if visible_voxels(&new.inputs.occupancy)
                     .iter()
@@ -132,17 +133,18 @@ impl ChangeCensus {
                     return;
                 }
                 self.counts.changed_relights += 1;
-                if self.is_new_batch(position, Batch::Changed) {
+                if self.is_new_batch(key, Batch::Changed) {
                     self.counts.changed_batches += 1;
                 }
                 if own_change_shows(old, new) {
-                    self.count_visible(position, Change::Own(cause));
+                    self.count_visible(key, Change::Own(cause));
                 }
             }
         }
         for face in Face::ALL {
-            let beside = position + face.offset();
-            let Some(neighbour) = view.get(&beside).filter(|chunk| !chunk.is_entry())
+            let beside = key + face.offset();
+            let Some(neighbour) =
+                view.chunks.get(&beside).filter(|chunk| !chunk.is_entry())
             else {
                 continue;
             };
@@ -153,10 +155,10 @@ impl ChangeCensus {
         }
     }
 
-    /// Whether this frame comes after the arrival of the chunk at `position`
+    /// Whether this frame comes after the arrival of the chunk at `key`
     /// and is the first with a change of `batch`'s kind.
-    fn is_new_batch(&mut self, position: IVec3, batch: Batch) -> bool {
-        let Some(arrived) = self.arrived.get(&position) else {
+    fn is_new_batch(&mut self, key: GridKey, batch: Batch) -> bool {
+        let Some(arrived) = self.arrived.get(&key) else {
             return false;
         };
         if *arrived == self.frame {
@@ -167,12 +169,12 @@ impl ChangeCensus {
             Batch::OwnVisible => &mut self.own_visible,
             Batch::Visible => &mut self.visible,
         };
-        last.insert(position, self.frame) != Some(self.frame)
+        last.insert(key, self.frame) != Some(self.frame)
     }
 
-    fn count_visible(&mut self, position: IVec3, change: Change) {
+    fn count_visible(&mut self, key: GridKey, change: Change) {
         if let Change::Own(cause) = change {
-            if self.is_new_batch(position, Batch::OwnVisible) {
+            if self.is_new_batch(key, Batch::OwnVisible) {
                 let counts = &mut self.counts;
                 *match cause {
                     Cause::Arrival => &mut counts.visible_from_arrival,
@@ -181,7 +183,7 @@ impl ChangeCensus {
                 } += 1;
             }
         }
-        if self.is_new_batch(position, Batch::Visible) {
+        if self.is_new_batch(key, Batch::Visible) {
             self.counts.visible_with_shells += 1;
             if change == Change::Shell {
                 self.counts.visible_from_shell += 1;

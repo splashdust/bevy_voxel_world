@@ -1076,7 +1076,7 @@ pub(crate) fn publish<C: VoxelWorldConfig>(
     }
     #[cfg(feature = "light_propagation")]
     if let (Some(work), Some(solved)) = (light_work, solved_light) {
-        work.arrive(key, entity, solved);
+        work.arrive(GridKey::world(key), entity, solved);
     }
     chunk_map_update_buffer.push((GridKey::world(key), chunk_data, entity));
 }
@@ -1185,7 +1185,7 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light {
             chunk_task.light = light.task_for(
-                key,
+                GridKey::world(key),
                 entity,
                 data_shape,
                 self.configuration,
