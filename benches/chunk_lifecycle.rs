@@ -3,25 +3,41 @@
 //! Runs scripted scenarios against a headless App (no window, no GPU) that still
 //! exercises the full chunk lifecycle: spawn, generate, mesh, publish, retire, despawn.
 //!
-//! Record a run:
-//!     cargo bench --bench chunk_lifecycle -- run <label>
+//! Record a run of every scenario, or only of those listed:
+//!     cargo bench --bench chunk_lifecycle -- run <label> [<scenario>,…]
 //! Compare recorded runs (exits non-zero if a gated metric regressed); each side
 //! may be a comma-separated list of labels, combined by their median:
 //!     cargo bench --bench chunk_lifecycle -- compare <before>[,<before>…] <after>[,<after>…]
+//! A metric found on one side only prints as `new` (after only) or `gone`
+//! (before only) and gates nothing, so a scenario one build lacks still shows.
+//! Ratio lines, listed in `RATIO_LINES`, print the ratio of two metrics within
+//! the before build and within the after build, and the change between them;
+//! they gate nothing either.
 //!
 //! Background load on a desktop drifts by more than the gates over minutes, so
 //! comparisons alternate the two builds instead of reusing an old recording:
 //!     cargo bench --bench chunk_lifecycle -- save-binary baseline   # on the baseline commit
-//!     cargo bench --bench chunk_lifecycle -- ab baseline            # on the candidate
+//!     cargo bench --bench chunk_lifecycle -- ab baseline [<scenario>,…]   # on the candidate
 //! `ab` runs the saved baseline binary and this build alternately, `AB_ROUNDS`
-//! times each, then compares them. Build both sides with one codegen unit:
-//!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- …
-//! The voxel world's generic code is compiled inside this crate, and how the
-//! default sixteen units group it has moved flat terrain's generation
-//! throughput by 15% between builds that differ only in code the bench never
-//! runs; one unit makes such builds identical.
+//! times each, then compares them. With a list, both builds run only the
+//! listed scenarios, and one the baseline doesn't know prints as `new`. A
+//! listed run is a quick check; the run without a list, over every scenario,
+//! is the binding one.
 //!
-//! Results and saved binaries are written to `target/bench/chunk_lifecycle/`.
+//! Results and saved binaries are written to `target/bench/chunk_lifecycle/`
+//! of the checkout the binary was built in, which it finds through
+//! `CARGO_MANIFEST_DIR`. A saved baseline binary keeps writing there when `ab`
+//! runs it from another checkout or worktree, so make that checkout's
+//! `target/bench/chunk_lifecycle` a link to the baseline's folder before
+//! running `ab` from it.
+//!
+//! `[profile.bench]` in Cargo.toml builds both sides with one codegen unit. The
+//! voxel world's generic code is compiled inside this crate, and how the
+//! default sixteen units group it has moved flat terrain's generation
+//! throughput by more than the gates between builds that differ only in code
+//! the bench never runs; one unit makes such builds identical. A baseline from
+//! a commit older than that setting needs it from the environment:
+//!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- save-binary baseline
 //!
 //! To see what a scenario's slow frames are doing, run it once under Tracy. Start
 //! the Tracy profiler (or `tracy-capture -o <file>.tracy`) first, then:
@@ -29,8 +45,8 @@
 //! The Tracy version must match the protocol of the `tracy-client` crate Bevy uses;
 //! see the version table in the `tracy-client` README.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -2044,6 +2060,9 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
 /// Repeated runs within one process. Interference only ever slows a run down, so
 /// whole-run totals take their best run; everything else, already summarised over
 /// many frames, takes the median.
+///
+/// `gate_failures` takes the worst run: a scenario's promise must hold in every
+/// run, and the median would read 0 for a promise broken in fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
@@ -2051,7 +2070,7 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
             "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
                 percentile(values, 0.0)
             }
-            "chunks_per_s" => percentile(values, 1.0),
+            "chunks_per_s" | "gate_failures" => percentile(values, 1.0),
             _ => percentile(values, 0.5),
         }
     })
@@ -2271,19 +2290,41 @@ fn gate(key: &str) -> Gate {
     }
 }
 
+/// The relative change from `b` to `a`, with no change between two zeros.
+fn relative_change(b: f64, a: f64) -> f64 {
+    match (b, a) {
+        (0.0, 0.0) => 0.0,
+        (0.0, _) => f64::INFINITY,
+        _ => (a - b) / b,
+    }
+}
+
+/// Prints every metric of either side, the on gate and the ratio lines, and
+/// returns whether no gated metric regressed.
+///
+/// A metric on one side only prints as `new` (after only) or `gone` (before
+/// only) and gates nothing, so a scenario one build lacks still shows.
 fn compare(before: &Metrics, after: &Metrics) -> bool {
     let mut ok = true;
     println!(
         "{:<38} {:>12} {:>12} {:>9}  gate",
         "metric", "before", "after", "change"
     );
-    for (key, b) in before {
-        let Some(a) = after.get(key) else { continue };
-        let change = match (*b, *a) {
-            (0.0, 0.0) => 0.0,
-            (0.0, _) => f64::INFINITY,
-            _ => (a - b) / b,
+    let keys: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for key in keys {
+        let (b, a) = match (before.get(key), after.get(key)) {
+            (Some(b), Some(a)) => (b, a),
+            (None, Some(a)) => {
+                println!("{key:<38} {:>12} {a:>12.3} {:>9}  report", "-", "new");
+                continue;
+            }
+            (Some(b), None) => {
+                println!("{key:<38} {b:>12.3} {:>12} {:>9}  report", "-", "gone");
+                continue;
+            }
+            (None, None) => unreachable!(),
         };
+        let change = relative_change(*b, *a);
         let verdict = match gate(key) {
             Gate::Lower(limit) if change > limit => "REGRESSED",
             Gate::LowerCount { limit, min } if change > limit && a - b > min => {
@@ -2318,8 +2359,33 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
             change * 100.0
         );
     }
+    for (top, bottom) in RATIO_LINES {
+        let ratio = |metrics: &Metrics| Some(metrics.get(top)? / metrics.get(bottom)?);
+        let (b, a) = (ratio(before), ratio(after));
+        let cell =
+            |ratio: Option<f64>| ratio.map_or("-".to_string(), |r| format!("{r:.3}"));
+        let change = match (b, a) {
+            (None, None) => continue,
+            (Some(b), Some(a)) => format!("{:+.1}%", relative_change(b, a) * 100.0),
+            _ => String::new(),
+        };
+        println!(
+            "{:<38} {:>12} {:>12} {change:>9}  ratio report",
+            format!("{top} / {bottom}"),
+            cell(b),
+            cell(a),
+        );
+    }
     ok
 }
+
+/// Ratio lines: two metrics of one build, as (numerator, denominator).
+/// `compare` prints the ratio within the before build and within the after
+/// build, and the change between them, and gates nothing.
+///
+/// A side lacking either metric prints `-`, so a ratio between scenarios only
+/// the after build runs still shows. A pair neither side has prints nothing.
+const RATIO_LINES: [(&str, &str); 0] = [];
 
 /// The on gate: a lit stream against the same stream unlit in the before
 /// build, `light-baseline` for the gate, as (unlit, lit, gated). The gate
@@ -2403,16 +2469,25 @@ fn save_binary(name: &str) {
     eprintln!("wrote {}", path.display());
 }
 
-fn run_binary(binary: &PathBuf, label: &str) {
+/// Runs `binary` as `run <label>`, passing `only` on as its scenario list.
+fn run_binary(binary: &Path, label: &str, only: Option<&str>) {
     eprintln!("== {} run {label}", binary.display());
-    let status = Command::new(binary).args(["run", label]).status().unwrap();
+    let status = Command::new(binary)
+        .args(["run", label])
+        .args(only)
+        .status()
+        .unwrap();
     assert!(status.success(), "{} failed: {status}", binary.display());
 }
 
 /// Runs the saved `baseline` binary and this build alternately, then compares them.
 /// The order flips every round (ABBAAB…) so drift over the session hits both sides
 /// alike.
-fn ab(baseline: &str) -> bool {
+///
+/// With `only`, a comma-separated list, both builds run only the listed
+/// scenarios. A scenario the baseline doesn't know records nothing there and
+/// prints as `new`.
+fn ab(baseline: &str, only: Option<&str>) -> bool {
     let baseline = binary_path(baseline);
     let this = std::env::current_exe().unwrap();
     let mut before = Vec::new();
@@ -2421,11 +2496,11 @@ fn ab(baseline: &str) -> bool {
         let before_label = format!("ab-before-{round}");
         let after_label = format!("ab-after-{round}");
         if round % 2 == 1 {
-            run_binary(&baseline, &before_label);
-            run_binary(&this, &after_label);
+            run_binary(&baseline, &before_label, only);
+            run_binary(&this, &after_label, only);
         } else {
-            run_binary(&this, &after_label);
-            run_binary(&baseline, &before_label);
+            run_binary(&this, &after_label, only);
+            run_binary(&baseline, &before_label, only);
         }
         before.push(before_label);
         after.push(after_label);
@@ -2469,8 +2544,8 @@ fn main() {
             }
         }
         ["save-binary", name] => save_binary(name),
-        ["ab", baseline] => {
-            if !ab(baseline) {
+        ["ab", baseline, rest @ ..] if rest.len() <= 1 => {
+            if !ab(baseline, rest.first().copied()) {
                 std::process::exit(1);
             }
         }
@@ -2478,7 +2553,12 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: chunk_lifecycle run <label> [<scenario>,…] | compare <before> <after> \
-                 | save-binary <name> | ab <baseline> | profile <scenario>"
+                 | save-binary <name> | ab <baseline> [<scenario>,…] | profile <scenario>\n\
+                 \n\
+                 `ab` with a scenario list runs only those scenarios in both builds, as a quick \
+                 check; the run without a list is the binding one. `compare` and `ab` print a \
+                 metric found in one build only as `new` (after only) or `gone` (before only), \
+                 and print the ratio lines in `RATIO_LINES`; neither kind gates anything."
             );
             std::process::exit(2);
         }
