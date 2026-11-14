@@ -503,6 +503,11 @@ fn filling_a_sub_grid_never_calls_the_worlds_voxel_lookup_or_fill_hint() {
         .map(level_0)
         .to_vec();
     until_ready::<CountingWorld>(&mut app, entity, &keys);
+    // The fill lands as one handover, so a chunk can be Ready before the
+    // last of the fill's chunks has finished and the data publishes.
+    update_until(&mut app, "the fill to publish", |app| {
+        data::<CountingWorld>(app, entity, level_0([1, 0, 0])).is_some()
+    });
     let published = data::<CountingWorld>(&mut app, entity, level_0([1, 0, 0])).unwrap();
     assert_eq!(
         published.get_voxel_at_world_position(IVec3::new(39, 3, 3)),

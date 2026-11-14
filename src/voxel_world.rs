@@ -255,6 +255,8 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     #[cfg(feature = "sub_grids")]
     sub_grids: Res<'w, SubGrids<C>>,
     #[cfg(feature = "sub_grids")]
+    handovers: Res<'w, crate::chunk_lifecycle::handover::Handovers<C>>,
+    #[cfg(feature = "sub_grids")]
     commands: Commands<'w, 's>,
 }
 
@@ -292,6 +294,34 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// When this world has 65,535 live sub-grids, the most it can hold.
     pub fn insert_sub_grid(&mut self, entity: Entity) {
         crate::sub_grid::world::insert(&self.sub_grids, &mut self.commands, entity);
+    }
+
+    /// Despawns the sub-grid `entity` of this world, with its voxels and
+    /// chunks, in step with the handover holding its chunks, if one does.
+    ///
+    /// With no handover holding its chunks, the sub-grid despawns when the
+    /// system's commands apply. While one holds them, it despawns in the
+    /// `PostUpdate` of the frame that handover lands, so its chunks show
+    /// until the chunks taking its voxels do. Edits of the sub-grid not yet
+    /// committed count as held, since their commit may form a handover: a
+    /// system that empties a sub-grid into another grid and despawns it
+    /// lands both in one frame.
+    ///
+    /// A client applying a server's edit deltas routes the server's despawn
+    /// of a sub-grid through this, so the sub-grid stays until the deltas
+    /// that emptied it land. Despawning the entity any other way despawns it
+    /// at once, and its chunks drop out of any handover.
+    ///
+    /// An entity that isn't a live sub-grid of this world is left alone.
+    pub fn despawn_sub_grid(&mut self, entity: Entity) {
+        let Some((grid, _)) = self.sub_grids.live(entity) else {
+            return;
+        };
+        if self.handovers.holds_grid(grid) || self.voxel_edits.has_pending_in(grid) {
+            self.handovers.despawn_after_landing(entity);
+        } else {
+            self.commands.entity(entity).try_despawn();
+        }
     }
 
     /// Reads `grid`: the world's voxels, or a sub-grid's. Returns `None` for

@@ -74,6 +74,39 @@
 //! # bevy::ecs::system::assert_is_system(rebuild_colliders);
 //! ```
 //!
+//! # Handovers
+//!
+//! Voxels moving from one grid to another never show twice or not at all. A
+//! commit that gives a sub-grid its first solid voxel, or takes its last,
+//! lands as one handover: every chunk the commit spawns or makes stale, in
+//! every grid, keeps showing what it showed, its mesh and its published
+//! voxel data, until all of them have a finished chunk task that includes
+//! the commit. Then all of them publish in the same frame, and the
+//! sub-grid's chunks the commit retires despawn in that frame. So a system
+//! that fills a new sub-grid and sets the same voxels to air in the world
+//! shows them move in one frame, and colliders rebuilt on
+//! [`ChunkPublished`](crate::prelude::ChunkPublished) swap in that frame
+//! too. A commit that fills or empties no sub-grid publishes each chunk as
+//! its task finishes.
+//!
+//! A held chunk's state turns Ready when its task finishes, before its
+//! result publishes, so a game waits for `ChunkPublished` rather than for
+//! Ready to read it. An edit made every frame in a held chunk doesn't hold
+//! the handover, since the task it supersedes started after the commit.
+//!
+//! Handovers that hold a chunk in common fold into one and land together.
+//! So lifting voxels from the same chunks every frame holds the folded
+//! handover until the lifting stops, and a sub-grid that flips between
+//! empty and not every frame, beside chunks edited every frame, keeps
+//! folding handovers and can hold its chunks back for as long. A grid
+//! despawned mid-handover drops out of it, and the other chunks land when
+//! they are ready.
+//! [`VoxelWorld::despawn_sub_grid`](crate::prelude::VoxelWorld::despawn_sub_grid)
+//! waits for the handover holding a sub-grid's chunks to land.
+//!
+//! A handover's cost grows with the chunks it holds. Each one keeps its
+//! newest finished chunk task until the handover lands.
+//!
 //! # Lifetime and pose
 //!
 //! The crate keeps a record of each world's live sub-grids, which a system
@@ -129,8 +162,10 @@ pub enum Grid {
 /// It is added by [`VoxelWorld::spawn_sub_grid`] and
 /// [`VoxelWorld::insert_sub_grid`], and has no public constructor. Removing
 /// it, or despawning its entity, ends the sub-grid and drops its voxels and
-/// chunks.
+/// chunks. [`VoxelWorld::despawn_sub_grid`] despawns it once the handover
+/// holding its chunks, if one does, has landed.
 ///
+/// [`VoxelWorld::despawn_sub_grid`]: crate::prelude::VoxelWorld::despawn_sub_grid
 /// [`VoxelWorld::spawn_sub_grid`]: crate::prelude::VoxelWorld::spawn_sub_grid
 /// [`VoxelWorld::insert_sub_grid`]: crate::prelude::VoxelWorld::insert_sub_grid
 #[derive(Component)]
@@ -233,7 +268,7 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     }
 
     /// The id and pose of the live sub-grid `entity`, if it is one.
-    fn live(&self, entity: Entity) -> Option<(GridId, GlobalTransform)> {
+    pub(crate) fn live(&self, entity: Entity) -> Option<(GridId, GlobalTransform)> {
         let record = self.record.lock().unwrap();
         record.live.get(&entity).map(|live| (live.grid, live.pose))
     }

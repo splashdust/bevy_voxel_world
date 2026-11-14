@@ -705,6 +705,16 @@ fn sub_grid_removals<I: Copy + PartialEq>(
     });
 }
 
+/// Whether the sub-grid `grid`'s committed edits in `buckets` hold a solid
+/// voxel. Its cost grows with the grid's chunks up to the first one holding
+/// a solid.
+#[cfg(feature = "sub_grids")]
+fn holds_solid<I>(buckets: &BucketMap<I>, grid: GridId) -> bool {
+    buckets
+        .grid_entries(grid)
+        .any(|(_, bucket)| bucket.solids.is_some())
+}
+
 /// Drops `grid`'s pending edits, copying the others' only when a reader still
 /// holds them.
 fn clear_pending<I: Clone>(pending: &mut Arc<BucketMap<I>>, grid: GridId) {
@@ -1231,7 +1241,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// [`commit_all`](Self::commit_all) does for every grid.
     #[cfg(test)]
     pub(crate) fn commit_in(&self, grid: GridId) -> Vec<ChangeSet<I>> {
-        self.commit_where(Some(grid))
+        self.commit_where(Some(grid), &mut Vec::new())
     }
 
     /// Commits every grid's pending edits. Returns a change set for each
@@ -1249,16 +1259,27 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// A chunk's committed edits are copied only when a running chunk task
     /// still holds them, and the edits that replace them only when a reader
     /// still holds those.
-    pub(crate) fn commit_all(&self) -> Vec<ChangeSet<I>> {
-        self.commit_where(None)
+    ///
+    /// Each sub-grid the commit gave its first solid voxel, or took its last
+    /// from, is pushed to `flipped`. Telling costs a look at the committed
+    /// edits of each sub-grid with pending edits, before and after, which
+    /// stops at the first chunk holding a solid.
+    pub(crate) fn commit_all(&self, flipped: &mut Vec<GridId>) -> Vec<ChangeSet<I>> {
+        self.commit_where(None, flipped)
     }
 
-    /// Commits the pending edits of `grid`, or of every grid for `None`.
+    /// Commits the pending edits of `grid`, or of every grid for `None`, and
+    /// pushes to `flipped` each sub-grid that went from no solid voxel to
+    /// some, or back.
     ///
     /// In a sub-grid, which holds only solid voxels, a pending voxel that
     /// isn't solid removes the chunk's committed edit there, if it has one,
     /// with no replace.
-    fn commit_where(&self, grid: Option<GridId>) -> Vec<ChangeSet<I>> {
+    fn commit_where(
+        &self,
+        grid: Option<GridId>,
+        flipped: &mut Vec<GridId>,
+    ) -> Vec<ChangeSet<I>> {
         // The pending edits stay locked until they are committed, so a reader
         // made during the commit finds each edit either pending or committed.
         let mut pending = self.pending.lock().unwrap();
@@ -1285,6 +1306,13 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             }
             None => all,
         };
+        #[cfg(feature = "sub_grids")]
+        let held_solid: Vec<(GridId, bool)> = taken
+            .sub_grid_ids()
+            .map(|grid| (grid, holds_solid(&buckets, grid)))
+            .collect();
+        #[cfg(not(feature = "sub_grids"))]
+        let _ = &flipped;
         let mut sets = Vec::new();
         for (key, pending_bucket) in taken.into_entries() {
             let (grid, chunk) = (key.grid(), key.position());
@@ -1353,6 +1381,13 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                 origin,
             });
         }
+        #[cfg(feature = "sub_grids")]
+        flipped.extend(
+            held_solid
+                .into_iter()
+                .filter(|&(grid, before)| holds_solid(&buckets, grid) != before)
+                .map(|(grid, _)| grid),
+        );
         sets
     }
 
@@ -1502,6 +1537,17 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     pub(crate) fn has_pending(&self) -> bool {
         !self.pending.lock().unwrap().is_empty()
             || !self.forgotten.lock().unwrap().is_empty()
+    }
+
+    /// Whether `grid` has edits set since the last commit.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn has_pending_in(&self, grid: GridId) -> bool {
+        self.pending
+            .lock()
+            .unwrap()
+            .grid_entries(grid)
+            .next()
+            .is_some()
     }
 
     /// The committed edits, read once for a frame.
@@ -2117,14 +2163,14 @@ mod tests {
         for position in [air, unset, boxed, kept] {
             edits.set_in(grid, position, WorldVoxel::Solid(1));
         }
-        edits.commit_all();
+        edits.commit_all(&mut Vec::new());
 
         edits.set_in(grid, air, WorldVoxel::Air);
         edits.set_in(grid, unset, WorldVoxel::Unset);
         edits.remove_region_in(grid, boxed, boxed + 1);
         // Air where the sub-grid holds nothing removes nothing.
         edits.set_in(grid, IVec3::splat(5), WorldVoxel::Air);
-        let mut sets = edits.commit_all();
+        let mut sets = edits.commit_all(&mut Vec::new());
         sets[0]
             .voxels
             .sort_by_key(|(position, _)| position.to_array());
@@ -2143,6 +2189,44 @@ mod tests {
         );
         assert_eq!(edits.edited_chunks_in(grid), vec![(IVec3::ZERO, 7)]);
         assert_eq!(edits.solid_bounds_in(grid), Some((kept, kept)));
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_commit_notes_the_sub_grids_it_fills_or_empties() {
+        let edits = Edits::default();
+        let (a, b) = (GridId::new(1), GridId::new(2));
+        let commit = |edits: &Edits| {
+            let mut flipped = Vec::new();
+            edits.commit_all(&mut flipped);
+            flipped.sort_by_key(|grid| *grid != a);
+            flipped
+        };
+        edits.set_in(a, IVec3::X, WorldVoxel::Solid(1));
+        edits.set_in(b, IVec3::X, WorldVoxel::Solid(1));
+        edits.set(IVec3::X, WorldVoxel::Solid(1));
+        assert_eq!(commit(&edits), vec![a, b], "the first solids");
+
+        edits.set_in(a, IVec3::new(70, 0, 0), WorldVoxel::Solid(1));
+        edits.set_in(b, IVec3::X, WorldVoxel::Air);
+        assert_eq!(commit(&edits), vec![b], "a second solid, and the last gone");
+
+        edits.set_in(b, IVec3::Y, WorldVoxel::Air);
+        edits.set(IVec3::X, WorldVoxel::Air);
+        assert_eq!(
+            commit(&edits),
+            vec![],
+            "air in an empty sub-grid, and the world"
+        );
+
+        edits.set_in(a, IVec3::X, WorldVoxel::Unset);
+        edits.set_in(b, IVec3::Y, WorldVoxel::Solid(1));
+        edits.set_in(b, IVec3::Y, WorldVoxel::Air);
+        assert_eq!(
+            commit(&edits),
+            vec![],
+            "one of two gone, and set and taken back"
+        );
     }
 
     #[test]

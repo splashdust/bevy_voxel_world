@@ -219,7 +219,18 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
             return;
         }
 
-        if let Ok(mut write_lock) = self.map.try_write() {
+        // A held read lock leaves the data for a later flush, while the
+        // chunks' meshes already show. A landing handover can't wait, since
+        // every chunk in it must be readable in the frame its mesh shows.
+        #[cfg(feature = "sub_grids")]
+        let lock = if std::mem::take(&mut update_buffer.must_land) {
+            Ok(self.map.write().unwrap())
+        } else {
+            self.map.try_write().map_err(|_| ())
+        };
+        #[cfg(not(feature = "sub_grids"))]
+        let lock = self.map.try_write();
+        if let Ok(mut write_lock) = lock {
             for (key, chunk_data, entity) in update_buffer.iter() {
                 // A sub-grid's chunk despawned while its data waited for the
                 // lock publishes nothing, so its grid holds no data once its
@@ -288,11 +299,19 @@ impl<C, I> Default for ChunkMap<C, I> {
     }
 }
 
+/// The published chunk data waiting for the chunk map, by grid key and
+/// entity.
 #[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I>(
-    #[deref] Vec<(GridKey, chunk::ChunkData<I>, Entity)>,
-    PhantomData<C>,
-);
+pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I> {
+    #[deref]
+    queued: Vec<(GridKey, chunk::ChunkData<I>, Entity)>,
+    /// Whether the next flush waits for the chunk map's lock rather than
+    /// trying it, so the queued data is readable in the frame its meshes
+    /// show. A landing handover sets it.
+    #[cfg(feature = "sub_grids")]
+    pub must_land: bool,
+    _world: PhantomData<C>,
+}
 
 /// The despawned chunks whose data is still to be removed, by grid key and
 /// entity.

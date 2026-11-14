@@ -38,6 +38,9 @@ use crate::{
     voxel_world_internal::{NeedsMaterial, SpawnMeshes},
 };
 
+#[cfg(feature = "sub_grids")]
+pub(crate) mod handover;
+
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChunkStatus {
@@ -46,6 +49,10 @@ pub enum ChunkStatus {
     /// The chunk's task is running.
     Generating,
     /// The chunk's latest task has been published. It may have no mesh.
+    ///
+    /// With `sub_grids`, a chunk a handover holds is Ready once its task has
+    /// finished, and its result is published when the handover lands, as
+    /// `ChunkPublished` tells.
     Ready,
     /// The chunk will be despawned on the next frame.
     Retiring,
@@ -610,6 +617,13 @@ pub struct ChunkRequests<C: VoxelWorldConfig> {
     /// Boxes of voxels whose chunks must regenerate: see
     /// [`regenerate`](Self::regenerate).
     regenerate: Mutex<Vec<EditedBox>>,
+    /// Whether this frame's commit lands as one handover.
+    #[cfg(feature = "sub_grids")]
+    handover: bool,
+    /// Whether the next commit lands as one handover whatever it changes:
+    /// see [`mark_handover`](Self::mark_handover).
+    #[cfg(feature = "sub_grids")]
+    handover_marked: std::sync::atomic::AtomicBool,
     _marker: PhantomData<C>,
 }
 
@@ -620,8 +634,32 @@ impl<C: VoxelWorldConfig> Default for ChunkRequests<C> {
             spawn: Vec::new(),
             retire: Vec::new(),
             regenerate: Mutex::default(),
+            #[cfg(feature = "sub_grids")]
+            handover: false,
+            #[cfg(feature = "sub_grids")]
+            handover_marked: Default::default(),
             _marker: PhantomData,
         }
+    }
+}
+
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> ChunkRequests<C> {
+    /// Makes the next commit land as one handover, as a commit that fills or
+    /// empties a sub-grid does, for an operation whose commit leaves every
+    /// sub-grid as full or empty as it was. It takes a shared borrow, so
+    /// `VoxelWorld` can mark its edits.
+    #[allow(dead_code)]
+    pub(crate) fn mark_handover(&self) {
+        self.handover_marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Notes this frame's commit, which `flipped` says filled or emptied a
+    /// sub-grid: it lands as one handover if it did, or if it was marked.
+    pub(crate) fn note_commit(&mut self, flipped: bool) {
+        let marked = std::mem::take(self.handover_marked.get_mut());
+        self.handover = flipped || marked;
     }
 }
 
@@ -669,6 +707,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 
     /// Applies this frame's requests: edits, then spawns and retirements.
+    ///
+    /// With `sub_grids`, the chunks a commit landing as a handover makes
+    /// stale, spawns or retires join that handover, and a sub-grid chunk it
+    /// retires keeps showing until the handover lands.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn apply_requests(
         mut commands: Commands,
@@ -681,11 +723,14 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             MessageWriter<ChunkWillUpdate<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
+        #[cfg(feature = "sub_grids")] mut handovers: ResMut<handover::Handovers<C>>,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("apply_requests").entered();
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
+        #[cfg(feature = "sub_grids")]
+        let mut joining = handovers.joining(std::mem::take(&mut requests.handover));
 
         let mut levels = GridLevels::default();
         let mut stale: HashSet<GridKey> = HashSet::new();
@@ -721,6 +766,13 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             };
             if let Ok(mut state) = chunks.get_mut(entity) {
                 index.apply(entity, key.key(), &mut state, ChunkEvent::Edited);
+                #[cfg(feature = "sub_grids")]
+                match state.status() {
+                    ChunkStatus::Retiring => {}
+                    status => {
+                        joining.stale(entity, key, status == ChunkStatus::Generating)
+                    }
+                }
             }
             if let Some(message) = index.message(key, entity) {
                 ev_update.write(message);
@@ -752,12 +804,24 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 chunk_entity.insert(ChildOf(parent));
             }
             index.spawned(key, entity, request.priority, request.parent);
+            // Only a commit spawns a sub-grid's chunks.
+            #[cfg(feature = "sub_grids")]
+            if !key.is_world() {
+                joining.spawned(entity, key);
+            }
         }
 
         for key in requests.retire.drain(..) {
             let Some(entity) = index.get_in(key) else {
                 continue;
             };
+            // Only a commit retires a sub-grid's chunks, so a handover holds
+            // them, where the streaming policy's retire of a world chunk
+            // takes it out of its handover.
+            #[cfg(feature = "sub_grids")]
+            if !key.is_world() && handovers.holds_retire(&mut joining, entity, key) {
+                continue;
+            }
             let Ok(mut state) = chunks.get_mut(entity) else {
                 continue;
             };
@@ -769,6 +833,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 }
             }
         }
+        #[cfg(feature = "sub_grids")]
+        handovers.join(joining);
         // Retiring a chunk drops its running task.
         index.report_running(&mut budget);
     }
@@ -828,6 +894,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     ///
     /// A task whose cached mesh expired before it finished isn't published: its
     /// chunk goes back to Pending to start again.
+    ///
+    /// With `sub_grids`, a chunk a handover holds keeps its task's result
+    /// unpublished, and each handover whose chunks are all ready lands here:
+    /// see the `handover` module.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn collect_chunk_tasks(
         mut commands: Commands,
@@ -844,9 +914,17 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         #[cfg(feature = "light_propagation")] mut light_work: Option<
             ResMut<crate::light::relight::LightWork<C>>,
         >,
+        #[cfg(feature = "sub_grids")] landing: (
+            ResMut<handover::Handovers<C>>,
+            ResMut<ChunkMapRemoveBuffer<C>>,
+            MessageWriter<ChunkWillDespawn<C>>,
+        ),
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
+        #[cfg(feature = "sub_grids")]
+        let (mut handovers, mut chunk_map_remove_buffer, mut ev_chunk_will_despawn) =
+            landing;
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
         let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
@@ -918,6 +996,8 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                             &mut state,
                             ChunkEvent::CachedMeshExpired,
                         );
+                        #[cfg(feature = "sub_grids")]
+                        handovers.task_dropped(entity);
                         continue;
                     };
                     match mesh_handle {
@@ -944,6 +1024,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                     #[cfg(feature = "light_propagation")]
                     solved_light: chunk_task.solved_light.take(),
                 };
+                // A chunk a handover holds keeps its result until the
+                // handover lands.
+                #[cfg(feature = "sub_grids")]
+                let Some(finished) = handovers.keep(finished) else {
+                    continue;
+                };
                 publish(
                     finished,
                     &mut commands,
@@ -953,6 +1039,16 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 );
             }
         }
+        #[cfg(feature = "sub_grids")]
+        handovers.land_ready(
+            &mut index,
+            &mut commands,
+            &mut chunk_map_update_buffer,
+            &mut chunk_map_remove_buffer,
+            &mut ev_chunk_will_despawn,
+            #[cfg(feature = "light_propagation")]
+            light_work.as_deref_mut(),
+        );
         // Also counts the tasks of chunks despawned since the last report.
         index.report_running(&mut budget);
     }

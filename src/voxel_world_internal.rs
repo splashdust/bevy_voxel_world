@@ -127,7 +127,10 @@ where
             ))
             .id();
         #[cfg(feature = "sub_grids")]
-        commands.insert_resource(crate::sub_grid::SubGrids::<C>::new(world_root));
+        {
+            commands.insert_resource(crate::sub_grid::SubGrids::<C>::new(world_root));
+            commands.init_resource::<crate::chunk_lifecycle::handover::Handovers<C>>();
+        }
         configuration.init_root(commands, world_root)
     }
 
@@ -204,6 +207,9 @@ where
     /// chunks showing an edit that was removed regenerate, since their
     /// published voxels have it baked in. Edits forgotten since the last
     /// frame make their chunks regenerate too, with no message.
+    ///
+    /// With `sub_grids`, a commit that gives a sub-grid its first solid voxel
+    /// or takes its last lands as one handover.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -211,7 +217,10 @@ where
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        let sets = voxel_edits.commit_all();
+        let mut flipped = Vec::new();
+        let sets = voxel_edits.commit_all(&mut flipped);
+        #[cfg(feature = "sub_grids")]
+        requests.note_commit(!flipped.is_empty());
         // Only the world's chunks have a message here; a sub-grid's edits
         // never reach `EditsCommitted`.
         let world_sets = sets.iter().filter(|set| set.grid == GridId::WORLD);

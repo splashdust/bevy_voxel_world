@@ -488,6 +488,12 @@ impl<K: KeyInGrid, V, S: BuildHasher> GridTable<K, V, S> {
         entries
     }
 
+    /// The id of every sub-grid with an entry, in no particular order.
+    #[cfg(feature = "sub_grids")]
+    pub fn sub_grid_ids(&self) -> impl Iterator<Item = GridId> + '_ {
+        self.sub_grids.keys().copied()
+    }
+
     /// Whether any sub-grid has an entry.
     #[inline]
     fn has_sub_grids(&self) -> bool {

@@ -3869,6 +3869,8 @@ mod debug_draw;
 #[cfg(feature = "dislodged_fragments")]
 mod dislodged_fragments;
 mod edits;
+#[cfg(feature = "sub_grids")]
+mod handover;
 mod level_0_reader;
 mod light;
 #[cfg(feature = "sub_grids")]

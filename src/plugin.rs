@@ -355,7 +355,13 @@ where
             )
             .add_systems(
                 PostUpdate,
-                SubGrids::<C>::snapshot_poses.after(TransformSystems::Propagate),
+                (
+                    // Before transforms propagate, so a sub-grid despawned in
+                    // the frame its handover lands is never drawn.
+                    crate::chunk_lifecycle::handover::Handovers::<C>::despawn_landed
+                        .before(TransformSystems::Propagate),
+                    SubGrids::<C>::snapshot_poses.after(TransformSystems::Propagate),
+                ),
             );
         }
 

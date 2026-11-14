@@ -1,7 +1,10 @@
 //! Just enough of sub-grids' and fragment detection's internals for the
 //! crate's benchmarks: `chunk_lifecycle` reports what fragment checks and
-//! the tag map cost. Not public API.
+//! the tag map cost, and how many handovers landed holding how many chunks.
+//! Not public API.
 
+#[cfg(feature = "sub_grids")]
+pub use crate::chunk_lifecycle::handover::{handover_stats, HandoverStats};
 #[cfg(feature = "dislodged_fragments")]
 pub use crate::dislodged_fragments::{fragment_stats, FragmentStats};
 
