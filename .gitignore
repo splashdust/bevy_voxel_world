@@ -3,6 +3,13 @@
 assets/.DS_Store
 .VSCodeCounter
 .idea
-# Local design notes and probes, never committed
-.scratch/
+# Local design notes and probes, never committed, except on this branch,
+# which carries the coloured-light map and its probes to another machine.
+.scratch/*
+!.scratch/coloured-light/
+.scratch/coloured-light/probe-tree/
+.scratch/coloured-light/prototype/
+!.scratch/probes/
+.scratch/probes/*
+!.scratch/probes/colour_look*
 .claude/launch.json
