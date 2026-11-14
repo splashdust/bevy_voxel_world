@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 use crate::{
     chunk::*,
-    chunk_lifecycle::{ChunkIndex, ChunkRequests},
+    chunk_lifecycle::{ChunkIndex, ChunkRequests, SpawnRequest},
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     edits::{EditDelta, EditsCommitted},
@@ -136,7 +136,7 @@ where
         budget: Res<PoolBudget<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
-        chunks: Query<&Chunk<C>>,
+        world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
@@ -173,13 +173,20 @@ where
         let plan = streaming_policy::plan(
             configuration.as_ref(),
             &cameras,
-            chunks.iter().map(|chunk| chunk.key),
+            index.keys(),
             &lookup,
             budget
                 .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),
             &mut rand::rng(),
         );
-        requests.spawn.extend(plan.spawn);
+        let root = configuration
+            .attach_chunks_to_root()
+            .then(|| world_root.single().unwrap());
+        requests.spawn.extend(
+            plan.spawn
+                .into_iter()
+                .map(|key| SpawnRequest::streamed(key, root)),
+        );
         requests.retire.extend(plan.retire);
     }
 

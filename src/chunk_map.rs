@@ -12,15 +12,25 @@ use crate::{
 use bevy::{math::Vec3A, prelude::*};
 use hashbrown::HashMap;
 
-#[derive(Deref, DerefMut)]
+/// The published data of chunks by chunk key, with the LOD levels in use and
+/// the bounds of the published chunks.
 pub struct ChunkMapData<I> {
-    #[deref]
     data: HashMap<ChunkKey, chunk::ChunkData<I>>,
     levels: LevelCounts,
     bounds: Aabb3d,
 }
 
 impl<I> ChunkMapData<I> {
+    /// The published data of the chunk at `key`, if it has any.
+    pub fn get(&self, key: &ChunkKey) -> Option<&chunk::ChunkData<I>> {
+        self.data.get(key)
+    }
+
+    /// Whether no chunk has published data.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     /// The published data of the finest chunk that covers the voxel at
     /// `voxel_position`, if any chunk does.
     pub fn finest_covering(&self, voxel_position: IVec3) -> Option<&chunk::ChunkData<I>> {
@@ -53,14 +63,14 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         key: &ChunkKey,
         read_lock: &RwLockReadGuard<ChunkMapData<I>>,
     ) -> Option<chunk::ChunkData<I>> {
-        read_lock.data.get(key).cloned()
+        read_lock.get(key).cloned()
     }
 
     pub fn contains_chunk(
         key: &ChunkKey,
         read_lock: &RwLockReadGuard<ChunkMapData<I>>,
     ) -> bool {
-        read_lock.data.contains_key(key)
+        read_lock.get(key).is_some()
     }
 
     /// Get the current bounding box of loaded chunks in this map.

@@ -18,7 +18,10 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{chunk_containing, padding_depth, Chunk, ChunkKey, ChunkTask, LevelCounts},
+    chunk::{
+        chunk_containing, padding_depth, Chunk, ChunkData, ChunkKey, ChunkTask,
+        LevelCounts,
+    },
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::{FillHint, LodLevel, VoxelWorldConfig},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
@@ -30,7 +33,7 @@ use crate::{
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate, VoxelWorldCamera,
     },
-    voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
+    voxel_world_internal::{NeedsMaterial, SpawnMeshes},
 };
 
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
@@ -52,9 +55,10 @@ pub enum ChunkStatus {
 #[derive(Component)]
 pub enum ChunkState<T: Send + Sync + 'static> {
     /// `priority` chunks start their chunk task before the others. They are
-    /// the follow-ups of superseded tasks, and chunks remeshing after a voxel
-    /// edit. A `from_scratch` chunk regenerates: its task starts with none of
-    /// the chunk's published voxel data.
+    /// the follow-ups of superseded tasks, chunks remeshing after a voxel
+    /// edit and chunks spawned with priority. A `from_scratch` chunk
+    /// regenerates: its task starts with none of the chunk's published voxel
+    /// data.
     Pending {
         priority: bool,
         from_scratch: bool,
@@ -303,6 +307,11 @@ impl<C> ChunkIndex<C> {
         self.entities.contains_key(&key)
     }
 
+    /// The chunk key of every live chunk of the world.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ {
+        self.entities.keys().copied()
+    }
+
     /// Whether the chunk at `key` exists and is Retiring.
     pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
         self.entities
@@ -330,11 +339,16 @@ impl<C> ChunkIndex<C> {
         self.levels.in_use()
     }
 
-    fn spawned(&mut self, key: ChunkKey, entity: Entity) {
+    /// Adds a chunk that spawned Pending, with or without `priority`.
+    fn spawned(&mut self, key: ChunkKey, entity: Entity, priority: bool) {
         self.entities.insert(key, entity);
         self.keys.insert(entity, key);
         self.levels.add(key.lod_level);
-        self.pending.insert(entity, key);
+        if priority {
+            self.priority.push_back(entity);
+        } else {
+            self.pending.insert(entity, key);
+        }
     }
 
     /// Removes the chunk from the index, so its key can spawn again. Returns its
@@ -405,6 +419,33 @@ impl<C> ChunkIndex<C> {
     }
 }
 
+/// A chunk to spawn, and where and how it starts.
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnRequest {
+    pub key: ChunkKey,
+    /// The entity the chunk spawns as a child of, if any.
+    pub parent: Option<Entity>,
+    /// Whether the chunk's first task starts ahead of the chunks without
+    /// priority. Chunks with priority start oldest first.
+    pub priority: bool,
+    /// The chunk's transform, relative to `parent`.
+    pub transform: Transform,
+}
+
+impl SpawnRequest {
+    /// A chunk the streaming policy spawns: no priority, placed by its chunk
+    /// key under `root`, the world's root when the world attaches its chunks
+    /// to it.
+    pub(crate) fn streamed(key: ChunkKey, root: Option<Entity>) -> Self {
+        Self {
+            key,
+            parent: root,
+            priority: false,
+            transform: Transform::from_translation(key.world_position() - 1.0),
+        }
+    }
+}
+
 /// What the rest of the crate asks of the chunk lifecycle this frame.
 ///
 /// Requests other than spawns are ignored for chunks that don't exist or are
@@ -419,7 +460,7 @@ pub struct ChunkRequests<C: VoxelWorldConfig> {
     /// voxel is now stale.
     pub(crate) edited: Vec<ChangeSet<C::MaterialIndex>>,
     /// Chunks to spawn.
-    pub spawn: Vec<ChunkKey>,
+    pub spawn: Vec<SpawnRequest>,
     /// Chunks to despawn.
     pub retire: Vec<ChunkKey>,
     /// Boxes of voxels whose chunks must regenerate: see
@@ -489,7 +530,6 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut requests: ResMut<ChunkRequests<C>>,
         mut index: ResMut<ChunkIndex<C>>,
         mut chunks: Query<&mut ChunkStateOf<C>>,
-        world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         mut budget: ResMut<PoolBudget<C>>,
         mut messages: (
@@ -551,18 +591,17 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
         }
 
-        let world_root = world_root.single().unwrap();
-        let attach_to_root = configuration.attach_chunks_to_root();
-        for key in requests.spawn.drain(..) {
+        for request in requests.spawn.drain(..) {
+            let key = request.key;
             if index.contains(key) {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
                 ChunkStateOf::<C>::Pending {
-                    priority: false,
+                    priority: request.priority,
                     from_scratch: false,
                 },
-                Transform::from_translation(key.world_position() - 1.0),
+                request.transform,
             ));
             let entity = chunk_entity.id();
             chunk_entity.insert(Chunk::<C>::new(
@@ -571,10 +610,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 configuration.chunk_data_shape(key.lod_level),
                 configuration.chunk_meshing_shape(key.lod_level),
             ));
-            if attach_to_root {
-                commands.entity(world_root).add_child(entity);
+            if let Some(parent) = request.parent {
+                commands.entity(parent).add_child(entity);
             }
-            index.spawned(key, entity);
+            index.spawned(key, entity, request.priority);
         }
 
         for key in requests.retire.drain(..) {
@@ -645,8 +684,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         budget.start_chunk_tasks(cap, &mut pending);
     }
 
-    /// Collects finished chunk tasks, queues their data for publishing and, when
-    /// the world spawns meshes, gives each chunk its mesh.
+    /// Collects finished chunk tasks and publishes each one.
+    ///
+    /// A task whose cached mesh expired before it finished isn't published: its
+    /// chunk goes back to Pending to start again.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn collect_chunk_tasks(
         mut commands: Commands,
@@ -705,69 +746,71 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 }
             }
 
-            if let Some(mesh_assets) = mesh_assets.as_mut() {
-                let hash = chunk_task.voxels_hash();
-                let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
-                    None
-                } else if let Some(mesh_handle) = mesh_cache.get_mesh_handle(&hash) {
-                    if let Some(user_bundle) = mesh_cache.get_user_bundle(&hash) {
-                        commands.entity(entity).insert(user_bundle);
-                    }
-                    Some(mesh_handle)
-                } else if let Some(mesh) = chunk_task.mesh.take() {
-                    // Bevy 0.19 mesh slab allocator can emit use-after-free
-                    // errors if zero-vertex meshes are uploaded.
-                    if mesh.count_vertices() == 0 {
+            let mut user_bundle = None;
+            let mesh = match mesh_assets.as_mut() {
+                None => MeshDecision::Unchanged,
+                Some(mesh_assets) => {
+                    let hash = chunk_task.voxels_hash();
+                    let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
                         None
-                    } else {
-                        let mesh_ref = Arc::new(mesh_assets.add(mesh));
-                        let user_bundle = chunk_task.user_bundle.take();
-                        mesh_cache_insert_buffer.push((
-                            hash,
-                            mesh_ref.clone(),
-                            user_bundle.clone(),
-                        ));
-                        if let Some(bundle) = user_bundle {
-                            commands.entity(entity).insert(bundle);
+                    } else if let Some(mesh_handle) = mesh_cache.get_mesh_handle(&hash) {
+                        user_bundle = mesh_cache.get_user_bundle(&hash);
+                        Some(mesh_handle)
+                    } else if let Some(mesh) = chunk_task.mesh.take() {
+                        // Bevy 0.19 mesh slab allocator can emit use-after-free
+                        // errors if zero-vertex meshes are uploaded.
+                        if mesh.count_vertices() == 0 {
+                            None
+                        } else {
+                            let mesh_ref = Arc::new(mesh_assets.add(mesh));
+                            user_bundle = chunk_task.user_bundle.take();
+                            mesh_cache_insert_buffer.push((
+                                hash,
+                                mesh_ref.clone(),
+                                user_bundle.clone(),
+                            ));
+                            Some(mesh_ref)
                         }
-                        Some(mesh_ref)
+                    } else {
+                        index.apply(
+                            entity,
+                            chunk.key,
+                            &mut state,
+                            ChunkEvent::CachedMeshExpired,
+                        );
+                        continue;
+                    };
+                    match mesh_handle {
+                        Some(mesh) => MeshDecision::Shown {
+                            mesh,
+                            transform: *transform,
+                        },
+                        None => MeshDecision::Hidden,
                     }
-                } else {
-                    index.apply(
-                        entity,
-                        chunk.key,
-                        &mut state,
-                        ChunkEvent::CachedMeshExpired,
-                    );
-                    continue;
-                };
-
-                if let Some(mesh_handle) = mesh_handle {
-                    commands.entity(entity).try_insert((
-                        *transform,
-                        MeshRef(mesh_handle),
-                        NeedsMaterial::<C>::new(),
-                    ));
-                } else {
-                    commands
-                        .entity(entity)
-                        .remove::<Mesh3d>()
-                        .remove::<MeshRef>()
-                        .remove::<NeedsMaterial<C>>()
-                        .remove::<C::ChunkUserBundle>();
                 }
-            }
+            };
 
+            // The transition comes before publishing, so a superseded task's
+            // follow-up starts whenever its result is published.
             if index.apply(entity, chunk.key, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
-                #[cfg(feature = "light_propagation")]
-                if let (Some(work), Some(solved)) =
-                    (light_work.as_mut(), chunk_task.solved_light.take())
-                {
-                    work.arrive(chunk.key, entity, solved);
-                }
-                chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
+                let finished = Finished::<C> {
+                    entity,
+                    key: chunk.key,
+                    chunk_data: chunk_task.chunk_data,
+                    mesh,
+                    user_bundle,
+                    #[cfg(feature = "light_propagation")]
+                    solved_light: chunk_task.solved_light.take(),
+                };
+                publish(
+                    finished,
+                    &mut commands,
+                    &mut chunk_map_update_buffer,
+                    #[cfg(feature = "light_propagation")]
+                    light_work.as_deref_mut(),
+                );
             }
         }
         // Also counts the tasks of chunks despawned since the last report.
@@ -889,6 +932,87 @@ fn regenerate_requested<C: VoxelWorldConfig>(
             ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
         }
     }
+}
+
+/// What publishing a finished chunk task does to the chunk's mesh.
+pub(crate) enum MeshDecision {
+    /// The world spawns no meshes, so the chunk's components stay as they are.
+    Unchanged,
+    /// The chunk shows no mesh: its voxels are all air or all solid, or they
+    /// meshed to no vertices.
+    Hidden,
+    /// The chunk shows `mesh` at `transform` once the world's material is
+    /// ready.
+    Shown {
+        mesh: Arc<Handle<Mesh>>,
+        transform: Transform,
+    },
+}
+
+/// A finished chunk task, collected and ready to publish.
+pub(crate) struct Finished<C: VoxelWorldConfig> {
+    pub entity: Entity,
+    pub key: ChunkKey,
+    /// The voxel data the chunk map takes for the chunk.
+    pub chunk_data: ChunkData<C::MaterialIndex>,
+    pub mesh: MeshDecision,
+    /// The components a shown mesh comes with, from the meshing delegate or
+    /// the mesh cache.
+    pub user_bundle: Option<C::ChunkUserBundle>,
+    /// The light the task solved, in a world with light propagation.
+    #[cfg(feature = "light_propagation")]
+    pub solved_light: Option<crate::light::SolvedLight>,
+}
+
+/// Publishes a finished chunk task: gives the chunk its mesh, lands its solved
+/// light with `light_work`, and queues its voxel data for the chunk map. The
+/// next `flush_chunk_map_buffers` makes the data readable and writes
+/// `ChunkPublished`.
+///
+/// This is the only place a chunk is published.
+pub(crate) fn publish<C: VoxelWorldConfig>(
+    finished: Finished<C>,
+    commands: &mut Commands,
+    chunk_map_update_buffer: &mut ChunkMapUpdateBuffer<C, C::MaterialIndex>,
+    #[cfg(feature = "light_propagation")] light_work: Option<
+        &mut crate::light::relight::LightWork<C>,
+    >,
+) {
+    let Finished {
+        entity,
+        key,
+        chunk_data,
+        mesh,
+        user_bundle,
+        #[cfg(feature = "light_propagation")]
+        solved_light,
+    } = finished;
+    match mesh {
+        MeshDecision::Unchanged => {}
+        MeshDecision::Hidden => {
+            commands
+                .entity(entity)
+                .remove::<Mesh3d>()
+                .remove::<MeshRef>()
+                .remove::<NeedsMaterial<C>>()
+                .remove::<C::ChunkUserBundle>();
+        }
+        MeshDecision::Shown { mesh, transform } => {
+            if let Some(bundle) = user_bundle {
+                commands.entity(entity).insert(bundle);
+            }
+            commands.entity(entity).try_insert((
+                transform,
+                MeshRef(mesh),
+                NeedsMaterial::<C>::new(),
+            ));
+        }
+    }
+    #[cfg(feature = "light_propagation")]
+    if let (Some(work), Some(solved)) = (light_work, solved_light) {
+        work.arrive(key, entity, solved);
+    }
+    chunk_map_update_buffer.push((key, chunk_data, entity));
 }
 
 /// The Pending chunks of the voxel world `C`, as the [`PoolBudget`] starts

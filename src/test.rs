@@ -16,7 +16,7 @@ use crate::voxel_material::{prepare_voxel_texture, ATTRIBUTE_TEX_INDEX};
 use crate::voxel_traversal::voxel_line_traversal;
 use crate::{
     chunk::{Chunk, ChunkData, CHUNK_SIZE_F, CHUNK_SIZE_I, PADDED_CHUNK_SIZE},
-    chunk_lifecycle::{ChunkIndex, ChunkStateOf},
+    chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, SpawnRequest},
     chunk_map::ChunkMap,
     prelude::VoxelWorldCamera,
     voxel_world::*,
@@ -259,6 +259,74 @@ fn chunk_status<C: VoxelWorldConfig>(
     chunk_pos: IVec3,
 ) -> Option<ChunkStatus> {
     chunk_status_of::<C>(app, ChunkKey::new(chunk_pos, 0))
+}
+
+/// A chunk message, such as `ChunkPublished<C>`, as [`record_chunk_messages`]
+/// records it.
+trait ChunkMessage: Message {
+    fn chunk_key(&self) -> ChunkKey;
+    fn copy(&self) -> Self;
+}
+
+impl<C: VoxelWorldConfig, E: ChunkEventType> ChunkMessage for ChunkEvent<C, E> {
+    fn chunk_key(&self) -> ChunkKey {
+        self.chunk_key
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+}
+
+/// The chunk messages `M` an app read, each with the frame it arrived in,
+/// since [`record_chunk_messages`] started recording them.
+#[derive(Resource)]
+struct Recorded<M> {
+    messages: Vec<(u32, M)>,
+}
+
+impl<M: ChunkMessage> Recorded<M> {
+    /// The chunk key of each message, with its frame, in the order they
+    /// arrived.
+    fn keys(&self) -> impl Iterator<Item = (u32, ChunkKey)> + '_ {
+        self.messages
+            .iter()
+            .map(|(frame, message)| (*frame, message.chunk_key()))
+    }
+
+    /// The frame of the first message about the chunk at `key`, if any came.
+    fn first_frame(&self, key: ChunkKey) -> Option<u32> {
+        self.keys()
+            .find_map(|(frame, recorded)| (recorded == key).then_some(frame))
+    }
+}
+
+/// Records every chunk message `M`, such as `ChunkPublished<C>`, with the
+/// frame it arrived in. [`recorded`] reads them back.
+///
+/// Frames are Bevy's `FrameCount`, so recorders of different messages agree
+/// on them. The messages are read in `Update`, so those the chunk lifecycle
+/// writes in `PreUpdate` count in the frame that wrote them.
+fn record_chunk_messages<M: ChunkMessage>(app: &mut App) {
+    app.insert_resource(Recorded::<M> {
+        messages: Vec::new(),
+    })
+    .add_systems(
+        Update,
+        |mut recorded: ResMut<Recorded<M>>,
+         mut messages: MessageReader<M>,
+         frame: Res<bevy::diagnostic::FrameCount>| {
+            let frame = frame.0;
+            recorded
+                .messages
+                .extend(messages.read().map(|message| (frame, message.copy())));
+        },
+    );
+}
+
+/// The chunk messages `M` recorded since [`record_chunk_messages`].
+fn recorded<M: ChunkMessage>(app: &App) -> &Recorded<M> {
+    app.world().resource::<Recorded<M>>()
 }
 
 /// The chunk state of the chunk with the given key.
@@ -558,8 +626,7 @@ fn start_order(key: ChunkKey, camera: Vec3, protected_distance: i32) -> (bool, f
 /// and returns the chunks in the order they were published, which is the order
 /// their tasks started, and the camera's position.
 fn chunks_in_publish_order<C: VoxelWorldConfig>(app: &mut App) -> (Vec<ChunkKey>, Vec3) {
-    app.init_resource::<LifecycleLog>()
-        .add_systems(Last, record_lifecycle::<C>);
+    record_chunk_messages::<ChunkPublished<C>>(app);
     update_until(app, "every chunk to be ready", |app| {
         let keys: Vec<ChunkKey> = app
             .world_mut()
@@ -573,12 +640,9 @@ fn chunks_in_publish_order<C: VoxelWorldConfig>(app: &mut App) -> (Vec<ChunkKey>
                 .all(|key| chunk_status_of::<C>(app, key) == Some(ChunkStatus::Ready))
     });
 
-    let published = app
-        .world()
-        .resource::<LifecycleLog>()
-        .published
-        .iter()
-        .map(|(_, key)| *key)
+    let published = recorded::<ChunkPublished<C>>(app)
+        .keys()
+        .map(|(_, key)| key)
         .collect();
     let camera = app
         .world_mut()
@@ -610,6 +674,67 @@ fn chunks_are_generated_around_the_camera_first_then_nearest_first() {
         order.windows(2).all(|pair| pair[0] <= pair[1]),
         "chunks published out of order: {order:?}"
     );
+}
+
+#[test]
+fn a_spawn_request_places_its_chunk_and_its_priority_starts_it_first() {
+    let mut app = App::new();
+    // No camera, so the streaming policy spawns nothing and the requests below
+    // are the only chunks.
+    app.add_plugins((
+        test_plugins(),
+        VoxelWorldPlugin::<ThrottledWorld>::minimal(),
+    ))
+    .insert_resource(ThrottledWorld { task_slots: 1 });
+    record_chunk_messages::<ChunkPublished<ThrottledWorld>>(&mut app);
+    app.update();
+
+    let parent = app.world_mut().spawn(Transform::default()).id();
+    let first = ChunkKey::new(IVec3::new(0, 4, 0), 0);
+    let transform = Transform::from_xyz(1.0, 2.0, 3.0);
+    let others = 8;
+    let requested = others as usize + 1;
+    {
+        let mut requests = app
+            .world_mut()
+            .resource_mut::<ChunkRequests<ThrottledWorld>>();
+        for x in 0..others {
+            let key = ChunkKey::new(IVec3::new(x, 0, 0), 0);
+            requests.spawn.push(SpawnRequest {
+                key,
+                parent: None,
+                priority: false,
+                transform: Transform::from_translation(key.world_position() - 1.0),
+            });
+        }
+        requests.spawn.push(SpawnRequest {
+            key: first,
+            parent: Some(parent),
+            priority: true,
+            transform,
+        });
+    }
+    update_until(&mut app, "every requested chunk to be published", |app| {
+        recorded::<ChunkPublished<ThrottledWorld>>(app)
+            .keys()
+            .count()
+            == requested
+    });
+
+    let order: Vec<ChunkKey> = recorded::<ChunkPublished<ThrottledWorld>>(&app)
+        .keys()
+        .map(|(_, key)| key)
+        .collect();
+    assert_eq!(order[0], first, "published in the order {order:?}");
+    let (child_of, chunk_transform) = app
+        .world_mut()
+        .query::<(&Chunk<ThrottledWorld>, &ChildOf, &Transform)>()
+        .iter(app.world())
+        .find(|(chunk, _, _)| chunk.key() == first)
+        .map(|(_, child_of, transform)| (child_of.parent(), *transform))
+        .expect("the chunk spawned under a parent");
+    assert_eq!(child_of, parent);
+    assert_eq!(chunk_transform, transform);
 }
 
 /// Solid ground below y = 0, streamed all around the camera to three chunks
@@ -1921,32 +2046,11 @@ fn an_edit_updates_the_coarse_chunk_covering_it() {
     assert!(app.world().resource::<UpdatedKeys>().0.contains(&COARSE));
 }
 
-/// The frame of each `ChunkPublished` and `ChunkWillDespawn`.
-#[derive(Resource, Default)]
-struct LifecycleLog {
-    frame: u32,
-    published: Vec<(u32, ChunkKey)>,
-    despawned: Vec<(u32, ChunkKey)>,
-}
-
-fn record_lifecycle<C: VoxelWorldConfig>(
-    mut log: ResMut<LifecycleLog>,
-    mut published: MessageReader<ChunkPublished<C>>,
-    mut despawned: MessageReader<ChunkWillDespawn<C>>,
-) {
-    log.frame += 1;
-    let frame = log.frame;
-    let keys: Vec<_> = published.read().map(|msg| (frame, msg.chunk_key)).collect();
-    log.published.extend(keys);
-    let keys: Vec<_> = despawned.read().map(|msg| (frame, msg.chunk_key)).collect();
-    log.despawned.extend(keys);
-}
-
 #[test]
 fn a_coarse_chunk_retires_once_the_finer_chunks_replacing_it_are_published() {
     let mut app = levels_world_app();
-    app.init_resource::<LifecycleLog>()
-        .add_systems(Update, record_lifecycle::<LevelsWorld>);
+    record_chunk_messages::<ChunkWillDespawn<LevelsWorld>>(&mut app);
+    record_chunk_messages::<ChunkPublished<LevelsWorld>>(&mut app);
 
     // Into the coarse chunk, which then wants level 0.
     move_cameras::<LevelsWorld>(
@@ -1957,17 +2061,13 @@ fn a_coarse_chunk_retires_once_the_finer_chunks_replacing_it_are_published() {
         chunk_status_of::<LevelsWorld>(app, COARSE).is_none()
     });
 
-    let log = app.world().resource::<LifecycleLog>();
-    let (retired_at, _) = log
-        .despawned
-        .iter()
-        .find(|(_, key)| *key == COARSE)
+    let retired_at = recorded::<ChunkWillDespawn<LevelsWorld>>(&app)
+        .first_frame(COARSE)
         .expect("the coarse chunk was retired");
+    let published = recorded::<ChunkPublished<LevelsWorld>>(&app);
     for child in COARSE.children() {
-        let (published_at, _) = log
-            .published
-            .iter()
-            .find(|(_, key)| *key == child)
+        let published_at = published
+            .first_frame(child)
             .unwrap_or_else(|| panic!("{child} was published"));
         // Chunk data is published before the streaming policy runs in a frame,
         // so the retirement can follow a publish within the same frame.
