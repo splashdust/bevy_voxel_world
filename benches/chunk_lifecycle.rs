@@ -58,12 +58,16 @@ use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
 #[path = "common/light_scene.rs"]
 mod light_scene;
 
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
 use light_scene::{SceneTable, SCENE_TOP};
+
+#[cfg(feature = "dislodged_fragments")]
+#[path = "common/fragment_sites.rs"]
+mod fragment_sites;
 
 #[cfg(feature = "light_propagation")]
 #[path = "common/fill_worlds.rs"]
@@ -588,6 +592,103 @@ impl VoxelWorldConfig for CaveWorld {
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
         vec![(LAMP, Emission::level(15.0))]
+    }
+}
+
+/// The light reference scene around `FRAGMENT_CAMERA`, unlit, with every
+/// solid voxel of one material. With `detect`, it detects dislodged
+/// fragments with the default settings and only reports them. Its voxels
+/// are read from [`fragment_table`].
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Resource, Clone, Default)]
+struct FragmentWorld {
+    detect: bool,
+}
+
+/// Where `fragments` starts its camera: beside the reference scene's slab,
+/// which sticks out of its mesa, looking up at the slab's edge.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_CAMERA: CameraStart = CameraStart {
+    at: Vec3::new(0.5, 50.0, 420.0),
+    target: Vec3::new(0.5, 78.0, 370.0),
+};
+
+/// The reference scene sampled around `FRAGMENT_CAMERA`, as [`cave_table`]
+/// samples it around `CAVE_CAMERA`. Sampled once per process, before the
+/// first `fragments` run.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_table() -> Arc<SceneTable> {
+    static TABLE: std::sync::OnceLock<Arc<SceneTable>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let started = Instant::now();
+            let camera = (FRAGMENT_CAMERA.at / 32.0).floor().as_ivec3();
+            let reach = IVec3::splat(SPAWNING_DISTANCE + 1);
+            let min = (camera - reach) * 32;
+            let max = ((camera + reach + IVec3::ONE) * 32).with_y(SCENE_TOP);
+            let table = SceneTable::new(min, max, 8);
+            eprintln!(
+                "sampled the reference scene from {min} to {max} in {:.1?}",
+                started.elapsed()
+            );
+            Arc::new(table)
+        })
+        .clone()
+}
+
+/// Where `fragments` digs and cuts, found in [`fragment_table`] once per
+/// process.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_sites() -> &'static fragment_sites::Sites {
+    static SITES: std::sync::OnceLock<fragment_sites::Sites> = std::sync::OnceLock::new();
+    SITES.get_or_init(|| {
+        let started = Instant::now();
+        let sites = fragment_sites::find(&fragment_table(), FRAGMENT_CAMERA.at);
+        let pieces: Vec<u32> = sites.cuts.iter().map(|cut| cut.piece).collect();
+        eprintln!(
+            "found {} digs, cuts around pieces of {pieces:?} voxels and a limit cut \
+             at {} in {:.1?}",
+            sites.digs.len(),
+            sites.limit_cut.min,
+            started.elapsed()
+        );
+        sites
+    })
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl VoxelWorldConfig for FragmentWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let table = fragment_table();
+        Box::new(move |_, _, _| {
+            let table = table.clone();
+            Box::new(move |pos: IVec3, _| {
+                if table.open(pos) {
+                    WorldVoxel::Air
+                } else {
+                    WorldVoxel::Solid(1)
+                }
+            })
+        })
+    }
+
+    fn detect_dislodged_fragments(&self) -> Option<FragmentDetection<u8>> {
+        self.detect.then(FragmentDetection::default)
     }
 }
 
@@ -2046,6 +2147,335 @@ fn scenario_edit_storm() -> Metrics {
     metrics
 }
 
+/// Runs of `fragments`, each of which streams the reference scene twice.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_RUNS: usize = 3;
+
+/// The most frames `fragments` waits for a cut's check to land.
+#[cfg(feature = "dislodged_fragments")]
+const CUT_FRAME_CAP: u32 = 600;
+
+/// Frames in a row with no change to a world's fragment counters, once a
+/// check has finished, after which `fragments` takes its checks to have
+/// landed.
+#[cfg(feature = "dislodged_fragments")]
+const QUIET_CHECK_FRAMES: u32 = 10;
+
+/// The threshold of `fragments`: the most voxels a check of a dig that cuts
+/// nothing may visit on average, about 20% above its first run. The digs
+/// and the order a check floods in are fixed, so machine load doesn't move
+/// it.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_DIG_VISITED_PER_CHECK: f64 = 22.0;
+
+/// Every dislodged fragment received so far, as its box's lowest corner,
+/// its box's highest corner, exclusive, and its voxel count.
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Resource, Default)]
+struct Dislodged(Vec<(IVec3, IVec3, u32)>);
+
+#[cfg(feature = "dislodged_fragments")]
+fn record_dislodged<C: VoxelWorldConfig>(
+    mut dislodged: ResMut<Dislodged>,
+    mut messages: MessageReader<FragmentDislodged<C>>,
+) {
+    dislodged.0.extend(
+        messages
+            .read()
+            .map(|fragment| (fragment.min, fragment.max, fragment.voxel_count)),
+    );
+}
+
+/// An app of `world`, recording the fragments it reports, streamed in
+/// around `FRAGMENT_CAMERA`.
+#[cfg(feature = "dislodged_fragments")]
+fn fragments_app(world: FragmentWorld) -> App {
+    let mut app = build_app(world);
+    app.insert_resource(FRAGMENT_CAMERA)
+        .init_resource::<Dislodged>()
+        .add_systems(Update, record_dislodged::<FragmentWorld>);
+    stream_in::<FragmentWorld>(&mut app);
+    app
+}
+
+/// The fragment counters of `app`'s world, all zero in a world that
+/// doesn't detect dislodged fragments.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_counters(app: &App) -> bevy_voxel_world::grid_bench::FragmentStats {
+    bevy_voxel_world::grid_bench::fragment_stats::<FragmentWorld>(app.world())
+        .unwrap_or_default()
+}
+
+/// What the counters counted from `before` to `after`.
+#[cfg(feature = "dislodged_fragments")]
+fn counted_since(
+    after: bevy_voxel_world::grid_bench::FragmentStats,
+    before: bevy_voxel_world::grid_bench::FragmentStats,
+) -> bevy_voxel_world::grid_bench::FragmentStats {
+    bevy_voxel_world::grid_bench::FragmentStats {
+        checks: after.checks - before.checks,
+        voxels_visited: after.voxels_visited - before.voxels_visited,
+        reruns: after.reruns - before.reruns,
+        task_micros: after.task_micros - before.task_micros,
+    }
+}
+
+/// Sets the voxels at `positions` to air, to commit in the next frame.
+#[cfg(feature = "dislodged_fragments")]
+fn dig_voxels(app: &mut App, positions: &[IVec3]) {
+    let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+    let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+    for position in positions {
+        voxel_world.set_voxel(*position, WorldVoxel::Air);
+    }
+}
+
+/// Runs frames until the fragment counters have not changed for
+/// `QUIET_CHECK_FRAMES` in a row, or for at most `CUT_FRAME_CAP` frames.
+#[cfg(feature = "dislodged_fragments")]
+fn settle_fragment_checks(app: &mut App) {
+    let mut last = fragment_counters(app);
+    let mut quiet = 0;
+    for _ in 0..CUT_FRAME_CAP {
+        app.update();
+        let now = fragment_counters(app);
+        quiet = if now == last { quiet + 1 } else { 0 };
+        last = now;
+        if quiet >= QUIET_CHECK_FRAMES {
+            return;
+        }
+    }
+}
+
+/// Part 1 of `fragments`: digs at `digs`, one a frame, then waits for the
+/// checks to land. Reports, as `name`, the frames' metrics, the checks run,
+/// the voxels visited and task µs per check, the reruns, and how many digs
+/// wrote a `FragmentDislodged` within a voxel of the fragment's box.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_digs(app: &mut App, name: &str, digs: &[IVec3], metrics: &mut Metrics) {
+    let before = fragment_counters(app);
+    let seen = app.world().resource::<Dislodged>().0.len();
+    dig_voxels(app, &digs[..1]);
+    let mut next = 1;
+    let times = timed_frames(app, digs.len(), |app| {
+        if let Some(position) = digs.get(next) {
+            dig_voxels(app, &[*position]);
+            next += 1;
+        }
+    });
+    settle_fragment_checks(app);
+    let counted = counted_since(fragment_counters(app), before);
+    let written = &app.world().resource::<Dislodged>().0[seen..];
+    let dislodging = digs
+        .iter()
+        .filter(|dig| {
+            written.iter().any(|(min, max, _)| {
+                dig.cmpge(*min - 1).all() && dig.cmplt(*max + 1).all()
+            })
+        })
+        .count();
+
+    frame_metrics(name, &times, metrics);
+    let checks = counted.checks.max(1) as f64;
+    let mut put = |metric: &str, value: f64| {
+        metrics.insert(format!("{name}.{metric}"), value);
+    };
+    put("checks", counted.checks as f64);
+    put("reruns", counted.reruns as f64);
+    put(
+        "voxels_visited_per_check",
+        counted.voxels_visited as f64 / checks,
+    );
+    put("task_us_per_check", counted.task_micros as f64 / checks);
+    put("dislodging_digs", dislodging as f64);
+}
+
+/// What one cut of `fragments` did.
+#[cfg(feature = "dislodged_fragments")]
+struct CutReport {
+    /// Frames from the cut's frame to the one its check landed in.
+    frames: u32,
+    counted: bevy_voxel_world::grid_bench::FragmentStats,
+    /// The voxel count of each fragment it reported.
+    dislodged: Vec<u32>,
+    /// Whether its check hadn't landed after `CUT_FRAME_CAP` frames.
+    capped: bool,
+}
+
+/// Makes `cut` and runs frames until its check lands.
+///
+/// A check that reports a fragment has landed in the frame the report
+/// arrives. One that reports none is taken to have landed in the frame
+/// after the counters last changed, once they show it finished and stay
+/// unchanged for `QUIET_CHECK_FRAMES`.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cut(app: &mut App, cut: &fragment_sites::Cut) -> CutReport {
+    let before = fragment_counters(app);
+    let seen = app.world().resource::<Dislodged>().0.len();
+    dig_voxels(app, &cut.dug);
+    let mut last = before;
+    let mut changed_at = 0;
+    for frame in 1..=CUT_FRAME_CAP {
+        app.update();
+        let now = fragment_counters(app);
+        let written = &app.world().resource::<Dislodged>().0[seen..];
+        if !written.is_empty() {
+            return CutReport {
+                frames: frame,
+                counted: counted_since(now, before),
+                dislodged: written.iter().map(|(_, _, count)| *count).collect(),
+                capped: false,
+            };
+        }
+        if now != last {
+            last = now;
+            changed_at = frame;
+        }
+        let finished = now.voxels_visited > before.voxels_visited;
+        if finished && frame - changed_at >= QUIET_CHECK_FRAMES {
+            return CutReport {
+                frames: changed_at + 1,
+                counted: counted_since(now, before),
+                dislodged: Vec::new(),
+                capped: false,
+            };
+        }
+    }
+    CutReport {
+        frames: CUT_FRAME_CAP,
+        counted: counted_since(fragment_counters(app), before),
+        dislodged: Vec::new(),
+        capped: true,
+    }
+}
+
+/// Part 2 of `fragments`: makes each cut of `sites` in turn, waiting for its
+/// check to land, then the limit cut. Reports each cut as `cut_NN` and their
+/// sum as `cuts`: frames to land, the check's task µs, voxels visited and
+/// reruns, and the voxels dislodged. `cuts_without_report` counts the cuts
+/// that wrote no `FragmentDislodged`, and `limit_cut` reports the same as a
+/// cut. Returns how many cuts were capped.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cuts(
+    app: &mut App,
+    prefix: &str,
+    sites: &fragment_sites::Sites,
+    metrics: &mut Metrics,
+) -> usize {
+    let mut put = |name: &str, report: &CutReport| {
+        let mut put = |metric: &str, value: f64| {
+            metrics.insert(format!("{prefix}.{name}.{metric}"), value);
+        };
+        put("frames", report.frames as f64);
+        put("task_us", report.counted.task_micros as f64);
+        put("voxels_visited", report.counted.voxels_visited as f64);
+        put("reruns", report.counted.reruns as f64);
+        put(
+            "dislodged_voxels",
+            report.dislodged.iter().sum::<u32>() as f64,
+        );
+    };
+    let mut total = CutReport {
+        frames: 0,
+        counted: default(),
+        dislodged: Vec::new(),
+        capped: false,
+    };
+    let mut without_report = 0;
+    let mut capped = 0;
+    for (i, cut) in sites.cuts.iter().enumerate() {
+        let report = fragment_cut(app, cut);
+        if report.dislodged != [cut.piece] {
+            eprintln!(
+                "{prefix}: the cut at {} dislodged {:?} voxels, not its piece of {}",
+                cut.min, report.dislodged, cut.piece
+            );
+        }
+        put(&format!("cut_{:02}", i + 1), &report);
+        without_report += report.dislodged.is_empty() as usize;
+        capped += report.capped as usize;
+        total.frames += report.frames;
+        total.counted.task_micros += report.counted.task_micros;
+        total.counted.voxels_visited += report.counted.voxels_visited;
+        total.counted.reruns += report.counted.reruns;
+        total.dislodged.extend(report.dislodged);
+    }
+    put("cuts", &total);
+    let limit = fragment_cut(app, &sites.limit_cut);
+    if !limit.dislodged.is_empty() {
+        eprintln!(
+            "{prefix}: the limit cut dislodged {:?} voxels",
+            limit.dislodged
+        );
+    }
+    put("limit_cut", &limit);
+    capped += limit.capped as usize;
+    metrics.insert(
+        format!("{prefix}.cuts_without_report"),
+        without_report as f64,
+    );
+    capped
+}
+
+/// What detecting dislodged fragments costs in the light reference scene,
+/// unlit, in a world that detects them with the default settings and only
+/// reports them. `fragment_sites` finds where it digs and cuts.
+///
+/// 1. 200 digs that cut nothing, into slopes and cave walls, one a frame.
+///    `digs` reports their frames, the checks run, voxels visited and task
+///    µs per check, reruns, and the digs that wrote a `FragmentDislodged`.
+///    `digs_not_opted_in` reports the same digs in a fresh app of the same
+///    world not opted in, and `RATIO_LINES` prints the frame time of one
+///    against the other.
+/// 2. A dozen cuts, each around a piece of a few hundred to a few thousand
+///    voxels with air under it, as in a cave ceiling, an overhang or an
+///    arch, then a cut around more voxels than a check floods by default;
+///    see `fragment_cuts`.
+///
+/// Threshold, checked here and reported as `gate_failures`: voxels visited
+/// per check in `digs` at most `FRAGMENT_DIG_VISITED_PER_CHECK`. A cut whose
+/// check hasn't landed within `CUT_FRAME_CAP` frames also counts. Timings
+/// have no threshold.
+#[cfg(feature = "dislodged_fragments")]
+fn scenario_fragments() -> Metrics {
+    let prefix = "fragments";
+    let sites = fragment_sites();
+    let mut metrics = Metrics::new();
+
+    let mut app = fragments_app(FragmentWorld { detect: true });
+    fragment_digs(
+        &mut app,
+        &format!("{prefix}.digs"),
+        &sites.digs,
+        &mut metrics,
+    );
+    let capped = fragment_cuts(&mut app, prefix, sites, &mut metrics);
+    drop(app);
+
+    let mut app = fragments_app(FragmentWorld { detect: false });
+    fragment_digs(
+        &mut app,
+        &format!("{prefix}.digs_not_opted_in"),
+        &sites.digs,
+        &mut metrics,
+    );
+    drop(app);
+
+    let visited = metrics[&format!("{prefix}.digs.voxels_visited_per_check")];
+    let mut failures = capped;
+    if visited > FRAGMENT_DIG_VISITED_PER_CHECK {
+        eprintln!(
+            "{prefix}: voxels visited per check {visited} > {FRAGMENT_DIG_VISITED_PER_CHECK}"
+        );
+        failures += 1;
+    }
+    if capped > 0 {
+        eprintln!("{prefix}: {capped} cuts didn't land within {CUT_FRAME_CAP} frames");
+    }
+    metrics.insert(format!("{prefix}.gate_failures"), failures as f64);
+    metrics
+}
+
 /// Combines repeated samples of the same metrics into one, key by key.
 fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
     samples[0]
@@ -2243,6 +2673,8 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("edits_lit", RUNS, &scenario_edits_lit);
     #[cfg(feature = "light_propagation")]
     step("settings_lit", RUNS, &scenario_settings_lit);
+    #[cfg(feature = "dislodged_fragments")]
+    step("fragments", FRAGMENT_RUNS, &scenario_fragments);
     metrics
 }
 
@@ -2272,6 +2704,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("settings_lit")
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
+        || key.starts_with("fragments")
     {
         return Gate::ReportOnly;
     }
@@ -2385,7 +2818,10 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
 ///
 /// A side lacking either metric prints `-`, so a ratio between scenarios only
 /// the after build runs still shows. A pair neither side has prints nothing.
-const RATIO_LINES: [(&str, &str); 0] = [];
+const RATIO_LINES: [(&str, &str); 1] = [(
+    "fragments.digs.p50_ms",
+    "fragments.digs_not_opted_in.p50_ms",
+)];
 
 /// The on gate: a lit stream against the same stream unlit in the before
 /// build, `light-baseline` for the gate, as (unlit, lit, gated). The gate
