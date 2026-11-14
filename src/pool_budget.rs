@@ -30,6 +30,9 @@ pub(crate) enum JobKind {
     /// A fill probe, in a world with sky fill.
     #[cfg(feature = "light_propagation")]
     FillProbe,
+    /// A fragment check, in a world that detects dislodged fragments.
+    #[cfg(feature = "dislodged_fragments")]
+    FragmentCheck,
     Chunk,
     /// A stand-in for a second kind of job, in tests.
     #[cfg(test)]
@@ -37,8 +40,10 @@ pub(crate) enum JobKind {
 }
 
 impl JobKind {
-    const COUNT: usize =
-        1 + 3 * cfg!(feature = "light_propagation") as usize + cfg!(test) as usize;
+    const COUNT: usize = 1
+        + 3 * cfg!(feature = "light_propagation") as usize
+        + cfg!(feature = "dislodged_fragments") as usize
+        + cfg!(test) as usize;
 
     fn index(self) -> usize {
         self as usize

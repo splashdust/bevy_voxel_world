@@ -7,6 +7,11 @@ mod debug_draw;
 mod dislodged_fragments;
 pub mod edits;
 mod grid;
+/// Hooks for the crate's own sub-grid and fragment benchmarks. Not public
+/// API: it can change in any release.
+#[cfg(any(feature = "sub_grids", feature = "dislodged_fragments"))]
+#[doc(hidden)]
+pub mod grid_bench;
 mod level_0_reader;
 #[cfg(feature = "light_propagation")]
 mod light;
@@ -33,7 +38,9 @@ pub mod prelude {
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
     #[cfg(feature = "dislodged_fragments")]
-    pub use crate::dislodged_fragments::Connectivity;
+    pub use crate::dislodged_fragments::{
+        Connectivity, FragmentDetection, FragmentDislodged,
+    };
     pub use crate::edits::{EditDelta, EditGap, EditsCommitted};
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{

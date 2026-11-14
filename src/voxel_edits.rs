@@ -42,15 +42,22 @@
 //! reports it removed, without replacing the chunk's other edits. A
 //! sub-grid's committed buckets each keep the box around their edits, so
 //! the box around all of a sub-grid's solids reads one box per chunk.
+//!
+//! With the `dislodged_fragments` feature, a world that detects dislodged
+//! fragments also records where each change came from, a [`ChangeOrigin`]:
+//! a local set or clear, or an applied delta or a forget. Only local changes
+//! start a fragment check. A world that doesn't detect them records nothing.
 
 use std::{
     marker::PhantomData,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "dislodged_fragments")]
+use bevy::platform::collections::HashSet;
 use bevy::{math::I64Vec3, platform::collections::HashMap, prelude::*};
 
 use crate::{
@@ -111,6 +118,42 @@ pub(crate) struct Bucket<I> {
     /// for [`VoxelEdits::solid_bounds_in`].
     #[cfg(feature = "sub_grids")]
     solids: Option<(IVec3, IVec3)>,
+    /// What edit deltas applied since the last commit changed, in a world
+    /// that records it. Only pending buckets keep it.
+    #[cfg(feature = "dislodged_fragments")]
+    applied: Option<Box<AppliedVoxels>>,
+}
+
+/// What applied edit deltas changed in a pending bucket, so its commit can
+/// tell their changes from local ones.
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Clone, Default)]
+struct AppliedVoxels {
+    /// The positions an applied delta set that no local set has set since.
+    set: HashSet<IVec3>,
+    /// Whether an applied full delta replaced the chunk's edits. An edit
+    /// removed from the chunk was then removed by that delta, unless a clear
+    /// after it covers the position.
+    replaced: bool,
+    /// The boxes cleared since that full delta, both corners inclusive.
+    cleared: Vec<(IVec3, IVec3)>,
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl AppliedVoxels {
+    /// Whether a local edit made the change to `voxel` at `position`, where
+    /// `None` is a removed edit.
+    fn is_local<I>(&self, position: IVec3, voxel: &Option<WorldVoxel<I>>) -> bool {
+        match voxel {
+            Some(_) => !self.set.contains(&position),
+            None => {
+                !self.replaced
+                    || self.cleared.iter().any(|(min, max)| {
+                        position.cmpge(*min).all() && position.cmple(*max).all()
+                    })
+            }
+        }
+    }
 }
 
 /// The edit sequence an applied edit delta assigned to a pending bucket.
@@ -154,6 +197,8 @@ impl<I: Copy + PartialEq> Bucket<I> {
             assigned: None,
             #[cfg(feature = "sub_grids")]
             solids: None,
+            #[cfg(feature = "dislodged_fragments")]
+            applied: None,
         }
     }
 
@@ -263,6 +308,17 @@ impl<I: Copy + PartialEq> Bucket<I> {
     fn set(&mut self, position: IVec3, voxel: WorldVoxel<I>) {
         let changed = self.insert(position, voxel);
         self.count_sets(changed as u64);
+        self.note_local_set(position);
+    }
+
+    /// Notes that a local set, not an applied delta, set the voxel at
+    /// `position` last.
+    #[inline]
+    fn note_local_set(&mut self, _position: IVec3) {
+        #[cfg(feature = "dislodged_fragments")]
+        if let Some(applied) = &mut self.applied {
+            applied.set.remove(&_position);
+        }
     }
 
     /// Counts `changed` voxels changed by local sets towards the edit
@@ -359,6 +415,13 @@ impl<I: Copy + PartialEq> Bucket<I> {
         }
         let removed = self.remove_within(min, max);
         self.count_sets(removed);
+        #[cfg(feature = "dislodged_fragments")]
+        if let Some(applied) = &mut self.applied {
+            applied.set.retain(|position| {
+                !(position.cmpge(min).all() && position.cmple(max).all())
+            });
+            applied.cleared.push((min, max));
+        }
     }
 
     /// Turns a sparse bucket dense, for a region write that will fill it.
@@ -488,6 +551,60 @@ pub(crate) struct ChangeSet<I> {
     /// Each voxel whose committed edit changed, with its new edit, or `None`
     /// where its edit was removed.
     pub voxels: Vec<(IVec3, Option<WorldVoxel<I>>)>,
+    /// Which of `voxels` local edits changed.
+    #[cfg(feature = "dislodged_fragments")]
+    pub origin: ChangeOrigin,
+}
+
+/// Which of a change set's voxels local sets and clears changed, rather than
+/// applied edit deltas or a forget.
+///
+/// Only a world that records it, one that detects dislodged fragments, tells
+/// them apart. Any other world reports every commit as `Local`, and every
+/// forget as `Elsewhere`.
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ChangeOrigin {
+    /// Local edits changed every voxel.
+    Local,
+    /// Applied edit deltas or a forget changed every voxel.
+    Elsewhere,
+    /// Whether a local edit changed each voxel, in the order of `voxels`.
+    Mixed(Vec<bool>),
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl ChangeOrigin {
+    /// The origin of `changes`, a pending bucket's commit, given what applied
+    /// deltas changed in the bucket.
+    fn of<I>(
+        changes: &[(IVec3, Option<WorldVoxel<I>>)],
+        applied: Option<&AppliedVoxels>,
+    ) -> Self {
+        let Some(applied) = applied else {
+            return Self::Local;
+        };
+        let local: Vec<bool> = changes
+            .iter()
+            .map(|(position, voxel)| applied.is_local(*position, voxel))
+            .collect();
+        if local.iter().all(|&local| local) {
+            Self::Local
+        } else if local.iter().all(|&local| !local) {
+            Self::Elsewhere
+        } else {
+            Self::Mixed(local)
+        }
+    }
+
+    /// Whether a local edit changed the `i`th voxel of the change set.
+    pub fn is_local(&self, i: usize) -> bool {
+        match self {
+            Self::Local => true,
+            Self::Elsewhere => false,
+            Self::Mixed(local) => local[i],
+        }
+    }
 }
 
 impl<I> ChangeSet<I> {
@@ -626,8 +743,12 @@ pub struct VoxelEdits<C, I> {
     /// chunk's edit sequence. Changed only while the committed edits are
     /// locked for writing, so a stamp read with them locked for reading
     /// pairs the epoch with the sequences it belongs to.
-    #[cfg(feature = "light_propagation")]
-    forget_epoch: AtomicU64,
+    #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
+    forget_epoch: Arc<AtomicU64>,
+    /// Whether commits record where each change came from: see
+    /// [`ChangeOrigin`].
+    #[cfg(feature = "dislodged_fragments")]
+    tracks_origin: bool,
     _marker: PhantomData<C>,
 }
 
@@ -637,9 +758,23 @@ impl<C, I> Default for VoxelEdits<C, I> {
             pending: Mutex::default(),
             committed: Arc::default(),
             forgotten: Mutex::default(),
-            #[cfg(feature = "light_propagation")]
-            forget_epoch: AtomicU64::default(),
+            #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
+            forget_epoch: Arc::default(),
+            #[cfg(feature = "dislodged_fragments")]
+            tracks_origin: false,
             _marker: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl<C, I> VoxelEdits<C, I> {
+    /// No edits, in a world whose commits record where each change came
+    /// from, as a world that detects dislodged fragments needs.
+    pub(crate) fn tracking_origins() -> Self {
+        Self {
+            tracks_origin: true,
+            ..default()
         }
     }
 }
@@ -726,6 +861,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     let mut changed = 0;
                     for &(position, v) in &voxels {
                         changed += bucket.insert(position, v) as u64;
+                        bucket.note_local_set(position);
                     }
                     bucket.count_sets(changed);
                 }
@@ -891,7 +1027,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         // The new epoch is past every stamp handed out so far: the old epoch
         // plus the largest sequence any chunk reached since. Only the world's
         // edits are stamped, so forgetting another grid leaves the epoch.
-        #[cfg(feature = "light_propagation")]
+        #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
         if grid == GridId::WORLD {
             if let Some(highest) = buckets.grid_entries(grid).map(|(_, b)| b.seq).max() {
                 self.forget_epoch.fetch_add(highest + 1, Ordering::Relaxed);
@@ -911,6 +1047,8 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     .iter()
                     .map(|(position, _)| (position, None))
                     .collect(),
+                #[cfg(feature = "dislodged_fragments")]
+                origin: ChangeOrigin::Elsewhere,
             });
         }
     }
@@ -949,6 +1087,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         }
         for (position, voxel) in delta.iter() {
             bucket.insert(position, voxel);
+        }
+        #[cfg(feature = "dislodged_fragments")]
+        if self.tracks_origin {
+            let applied = bucket.applied.get_or_insert_default();
+            if delta.full {
+                **applied = AppliedVoxels {
+                    replaced: true,
+                    ..default()
+                };
+            }
+            applied
+                .set
+                .extend(delta.iter().map(|(position, _)| position));
         }
         bucket.assigned = Some(Assigned {
             seq: delta.seq,
@@ -1156,6 +1307,8 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             if grid != GridId::WORLD {
                 sub_grid_removals(&mut changes, committed);
             }
+            #[cfg(feature = "dislodged_fragments")]
+            let origin = ChangeOrigin::of(&changes, pending_bucket.applied.as_deref());
             let before = committed.seq;
             let counted = before + changes.len() as u64;
             let seq = pending_bucket
@@ -1196,6 +1349,8 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                 replaced: replaced || seq != counted,
                 seq,
                 voxels: changes,
+                #[cfg(feature = "dislodged_fragments")]
+                origin,
             });
         }
         sets
@@ -1302,7 +1457,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// the sequence back to 0, and the epoch keeps the stamp from ever going
     /// back to a value it had, when the chunk's edits may have been
     /// different. A forget moves the stamp of every position, edited or not.
-    #[cfg(feature = "light_propagation")]
+    #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
     pub(crate) fn edit_stamp(&self, position: IVec3) -> u64 {
         self.edit_stamp_in(GridKey::level_0(GridId::WORLD, position))
     }
@@ -1310,14 +1465,26 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// A stamp of the voxel edits of the level-0 chunk at `key`, as
     /// [`edit_stamp`](Self::edit_stamp) gives the world's. Only a forget of
     /// the world raises the forget epoch.
-    #[cfg(feature = "light_propagation")]
+    #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
     pub(crate) fn edit_stamp_in(&self, key: GridKey) -> u64 {
-        let buckets = self.committed.read().unwrap();
-        let epoch = self.forget_epoch.load(Ordering::Relaxed);
-        if buckets.is_empty() {
-            return epoch;
+        stamp_of(&self.committed, &self.forget_epoch, key)
+    }
+
+    /// A reader of the world's [edit stamps](Self::edit_stamp) that works
+    /// from any thread.
+    #[cfg(feature = "dislodged_fragments")]
+    pub(crate) fn stamps(&self) -> EditStamps<I> {
+        EditStamps {
+            committed: self.committed.clone(),
+            epoch: self.forget_epoch.clone(),
         }
-        epoch + buckets.get(&key).map_or(0, |bucket| bucket.seq)
+    }
+
+    /// The forget epoch, which moves on at each forget of the world's edits
+    /// and at nothing else.
+    #[cfg(feature = "dislodged_fragments")]
+    pub(crate) fn forget_epoch(&self) -> u64 {
+        self.forget_epoch.load(Ordering::Relaxed)
     }
 
     /// Whether `stamp`, an [`edit_stamp`](Self::edit_stamp) read since the
@@ -1339,6 +1506,36 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// The committed edits, read once for a frame.
     pub(crate) fn committed(&self) -> CommittedEdits<'_, I> {
         CommittedEdits(self.committed.read().unwrap())
+    }
+}
+
+/// The edit stamp of the level-0 chunk at `key`: its edit sequence in
+/// `committed`, plus `epoch`. The epoch is read with the edits locked, so it
+/// pairs with the sequences it belongs to.
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
+fn stamp_of<I>(committed: &Committed<I>, epoch: &AtomicU64, key: GridKey) -> u64 {
+    let buckets = committed.read().unwrap();
+    let epoch = epoch.load(Ordering::Relaxed);
+    if buckets.is_empty() {
+        return epoch;
+    }
+    epoch + buckets.get(&key).map_or(0, |bucket| bucket.seq)
+}
+
+/// Reads the world's [edit stamps](VoxelEdits::edit_stamp) from any thread,
+/// as they are at the time of each read.
+#[cfg(feature = "dislodged_fragments")]
+pub(crate) struct EditStamps<I> {
+    committed: Committed<I>,
+    epoch: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl<I> EditStamps<I> {
+    /// The edit stamp of the world's level-0 chunk at `position`.
+    pub fn get(&self, position: IVec3) -> u64 {
+        let key = GridKey::level_0(GridId::WORLD, position);
+        stamp_of(&self.committed, &self.epoch, key)
     }
 }
 
@@ -1656,6 +1853,9 @@ mod tests {
                 replaced: true,
                 seq: 10,
                 voxels: vec![(removed, None), (added, Some(WorldVoxel::Solid(1)))],
+                // This world doesn't record origins.
+                #[cfg(feature = "dislodged_fragments")]
+                origin: ChangeOrigin::Local,
             }]
         );
         assert_eq!(
@@ -1713,6 +1913,8 @@ mod tests {
                 replaced: true,
                 seq: 3,
                 voxels: vec![(inside, None)],
+                #[cfg(feature = "dislodged_fragments")]
+                origin: ChangeOrigin::Local,
             }]
         );
         assert_eq!(edits.reader().get(outside), Some(WorldVoxel::Solid(1)));
@@ -1796,6 +1998,8 @@ mod tests {
                 replaced: true,
                 seq: 0,
                 voxels: vec![(IVec3::ONE, None)],
+                #[cfg(feature = "dislodged_fragments")]
+                origin: ChangeOrigin::Elsewhere,
             }]
         );
         assert!(edits.take_forgotten().is_empty());
@@ -1911,6 +2115,8 @@ mod tests {
                 replaced: false,
                 seq: 7,
                 voxels: vec![(boxed, None), (unset, None), (air, None)],
+                #[cfg(feature = "dislodged_fragments")]
+                origin: ChangeOrigin::Local,
             }]
         );
         assert_eq!(edits.edited_chunks_in(grid), vec![(IVec3::ZERO, 7)]);
@@ -2544,5 +2750,84 @@ mod tests {
         assert!(chunks_including(in_padding, 2, padding).any(|stale| stale == key));
         // With the default data shape the padding doesn't reach that far.
         assert!(!edits.committed().reach(key, default_padding(2)));
+    }
+
+    /// Whether local edits changed each voxel of `sets`, sorted by position
+    /// with x first.
+    #[cfg(feature = "dislodged_fragments")]
+    fn local_voxels(sets: &[ChangeSet<u8>]) -> Vec<(IVec3, bool)> {
+        let mut voxels: Vec<(IVec3, bool)> = sets
+            .iter()
+            .flat_map(|set| {
+                set.voxels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (position, _))| (*position, set.origin.is_local(i)))
+            })
+            .collect();
+        voxels.sort_by_key(|(position, _)| position.to_array());
+        voxels
+    }
+
+    #[cfg(feature = "dislodged_fragments")]
+    #[test]
+    fn a_commit_tells_voxels_set_locally_from_those_an_applied_delta_set() {
+        let edits = Edits::tracking_origins();
+        let (applied, set_after, overridden) = (IVec3::X, IVec3::Y, IVec3::Z);
+        assert_eq!(edits.apply(delta(2, false, &[applied, overridden])), Ok(()));
+        edits.set(set_after, WorldVoxel::Solid(2));
+        edits.set(overridden, WorldVoxel::Solid(2));
+
+        assert_eq!(
+            local_voxels(&edits.commit()),
+            vec![(overridden, true), (set_after, true), (applied, false)]
+        );
+        // A chunk no delta reached commits as local whole.
+        edits.set(IVec3::ONE, WorldVoxel::Air);
+        assert_eq!(edits.commit()[0].origin, ChangeOrigin::Local);
+        assert_eq!(edits.apply(delta(6, false, &[IVec3::splat(3)])), Ok(()));
+        assert_eq!(edits.commit()[0].origin, ChangeOrigin::Elsewhere);
+    }
+
+    #[cfg(feature = "dislodged_fragments")]
+    #[test]
+    fn an_edit_a_full_delta_removed_is_local_only_if_cleared_after_it() {
+        let edits = Edits::tracking_origins();
+        let (dropped, cleared) = (IVec3::X, IVec3::new(9, 0, 0));
+        edits.set(dropped, WorldVoxel::Solid(1));
+        edits.set(cleared, WorldVoxel::Solid(1));
+        edits.commit();
+
+        // The full delta drops both, and the clear after it removes one again.
+        assert_eq!(edits.apply(delta(10, true, &[])), Ok(()));
+        edits.clear_region(cleared, cleared + 1);
+
+        assert_eq!(
+            local_voxels(&edits.commit()),
+            vec![(dropped, false), (cleared, true)]
+        );
+        // A clear with no delta is local.
+        edits.set(dropped, WorldVoxel::Solid(1));
+        edits.commit();
+        edits.clear_all();
+        assert_eq!(edits.commit()[0].origin, ChangeOrigin::Local);
+    }
+
+    #[cfg(feature = "dislodged_fragments")]
+    #[test]
+    fn a_world_not_tracking_origins_reports_applied_deltas_as_local() {
+        let edits = Edits::default();
+        assert_eq!(edits.apply(delta(1, false, &[IVec3::X])), Ok(()));
+        assert_eq!(edits.commit()[0].origin, ChangeOrigin::Local);
+    }
+
+    #[cfg(feature = "dislodged_fragments")]
+    #[test]
+    fn forgotten_edits_are_never_local() {
+        let edits = Edits::tracking_origins();
+        edits.set(IVec3::ONE, WorldVoxel::Solid(1));
+        edits.commit();
+        edits.forget();
+        assert_eq!(edits.take_forgotten()[0].origin, ChangeOrigin::Elsewhere);
     }
 }

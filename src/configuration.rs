@@ -2,6 +2,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkData, ChunkKey, VoxelArray, PADDED_CHUNK_SIZE};
+#[cfg(feature = "dislodged_fragments")]
+use crate::dislodged_fragments::FragmentDetection;
 #[cfg(feature = "light_propagation")]
 use crate::light::config::{Emission, LightPropagation};
 use crate::meshing::{generate_chunk_mesh_for_shape, scale_texture_coordinates};
@@ -358,6 +360,35 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     #[cfg(feature = "light_propagation")]
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
         Vec::new()
+    }
+
+    /// The world's settings for finding dislodged fragments, or `None` for
+    /// no detection, the default.
+    ///
+    /// Whether this returns `None` is read once at plugin build, and a world
+    /// that returns `None` gets no detection systems. The settings themselves
+    /// are read at each check, so they can change while the game runs.
+    ///
+    /// With detection on, each commit of local voxel edits that leaves a
+    /// voxel cleared, dug, or set to a material in
+    /// [`non_carrying`](FragmentDetection::non_carrying) starts a check of
+    /// what that cut off. A few frames later, a
+    /// [`FragmentDislodged`](crate::prelude::FragmentDislodged) arrives for
+    /// each dislodged fragment. Applied edit deltas, forgets and
+    /// regenerating chunks never start a check. A game without sub-grids
+    /// turns a fragment into debris by setting air wherever
+    /// [`contains`](crate::prelude::FragmentDislodged::contains) holds.
+    ///
+    /// A check's cost grows with its [`limit`](FragmentDetection::limit) and
+    /// with how many separate pieces a commit's digs touch. A region edited
+    /// in every frame holds its check back until the edits stop. In a
+    /// multiplayer game, opt in only the authority's world, so that clients
+    /// never disagree about what fell.
+    #[cfg(feature = "dislodged_fragments")]
+    fn detect_dislodged_fragments(
+        &self,
+    ) -> Option<FragmentDetection<Self::MaterialIndex>> {
+        None
     }
 }
 

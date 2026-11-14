@@ -42,7 +42,6 @@ use super::Connectivity;
 use crate::voxel::WorldVoxel;
 
 /// The rules a fragment check reads its grid by.
-#[allow(dead_code)]
 pub(crate) struct FragmentRules<'a, I> {
     /// A flood that has visited more voxels than this counts as attached.
     /// With `None`, every piece but the largest is flooded in full, as a
@@ -57,7 +56,7 @@ pub(crate) struct FragmentRules<'a, I> {
 impl<I: PartialEq> FragmentRules<'_, I> {
     /// Whether `voxel` holds up the voxels it touches. Air and `Unset` never
     /// do, and neither does a material in `non_carrying`.
-    fn carries(&self, voxel: &WorldVoxel<I>) -> bool {
+    pub fn carries(&self, voxel: &WorldVoxel<I>) -> bool {
         match voxel {
             WorldVoxel::Solid(material) => !self.non_carrying.contains(material),
             WorldVoxel::Air | WorldVoxel::Unset => false,
@@ -67,7 +66,6 @@ impl<I: PartialEq> FragmentRules<'_, I> {
 
 /// One dislodged fragment found by [`check_fragments`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct Fragment {
     /// The fragment's voxel positions, in [`position_order`].
     pub voxels: Vec<IVec3>,
@@ -81,7 +79,6 @@ pub(crate) struct Fragment {
 
 /// What one fragment check found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct FragmentCheck {
     /// The dislodged fragments, in [`position_order`] of their lowest voxel.
     pub fragments: Vec<Fragment>,
@@ -102,7 +99,6 @@ pub(crate) fn position_order(position: IVec3) -> (i32, i32, i32) {
 /// grid's voxel at a position. `read` is called at most once per position.
 ///
 /// Returns the dislodged fragments and how many voxels the floods visited.
-#[allow(dead_code)]
 pub(crate) fn check_fragments<I: PartialEq>(
     seeds: impl IntoIterator<Item = IVec3>,
     mut read: impl FnMut(IVec3) -> WorldVoxel<I>,

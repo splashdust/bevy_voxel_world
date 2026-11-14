@@ -209,7 +209,10 @@ where
     }
 
     /// [`minimal`](Self::minimal) with `config` in place of the default.
-    #[cfg(all(test, feature = "light_propagation"))]
+    #[cfg(all(
+        test,
+        any(feature = "light_propagation", feature = "dislodged_fragments")
+    ))]
     pub(crate) fn minimal_with_config(config: C) -> Self {
         Self {
             config,
@@ -369,6 +372,9 @@ where
 
         #[cfg(feature = "light_propagation")]
         crate::light::build(app, &self.config);
+
+        #[cfg(feature = "dislodged_fragments")]
+        crate::dislodged_fragments::build(app, &self.config);
 
         app.insert_resource(self.config.clone());
     }
