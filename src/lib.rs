@@ -3,6 +3,8 @@ mod chunk_lifecycle;
 mod chunk_map;
 mod configuration;
 mod debug_draw;
+#[cfg(feature = "dislodged_fragments")]
+mod dislodged_fragments;
 pub mod edits;
 mod grid;
 #[cfg(feature = "light_propagation")]
@@ -25,6 +27,8 @@ pub mod prelude {
     pub use crate::chunk::{Chunk, ChunkKey, MAX_LOD_LEVEL};
     pub use crate::chunk_lifecycle::ChunkStatus;
     pub use crate::configuration::*;
+    #[cfg(feature = "dislodged_fragments")]
+    pub use crate::dislodged_fragments::Connectivity;
     pub use crate::edits::{EditDelta, EditGap, EditsCommitted};
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{
