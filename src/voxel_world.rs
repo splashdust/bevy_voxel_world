@@ -7,6 +7,8 @@ use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
+mod raycast;
+
 #[cfg(feature = "sub_grids")]
 use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrids};
 use crate::{
@@ -16,7 +18,6 @@ use crate::{
     configuration::VoxelWorldConfig,
     edits::{EditDelta, EditGap},
     level_0_reader::{edit_step, hint_step, Level0Reader},
-    traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
 };
@@ -772,51 +773,21 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         let get_voxel = self.get_voxel_fn();
 
         Arc::new(move |ray, filter| {
-            let p = ray.origin;
-            let d = ray.direction;
-
-            let loaded_aabb = ChunkMap::<C, C::MaterialIndex>::get_world_bounds(
+            let bounds = ChunkMap::<C, C::MaterialIndex>::get_world_bounds(
                 &chunk_map.read().unwrap(),
             );
-            let trace_start = if p.cmplt(loaded_aabb.min.into()).any()
-                || p.cmpgt(loaded_aabb.max.into()).any()
-            {
-                {
-                    let trace_start_t = RayCast3d::from_ray(ray, f32::MAX)
-                        .aabb_intersection_at(&loaded_aabb)?;
-                    ray.get_point(trace_start_t)
-                }
-            } else {
-                p
-            };
-
-            let trace_end = bounds_exit(trace_start, *d, &loaded_aabb);
-
-            let mut raycast_result = None;
-            voxel_line_traversal(trace_start, trace_end, |voxel_coords, _time, face| {
-                let voxel = get_voxel(voxel_coords);
-
-                if !voxel.is_unset() && filter.call((voxel_coords.as_vec3(), voxel)) {
-                    if voxel.is_solid() {
-                        raycast_result = Some(VoxelRaycastResult {
-                            position: voxel_coords.as_vec3(),
-                            normal: face.try_into().ok(),
-                            voxel,
-                        });
-
-                        // Found solid voxel - stop traversing
-                        false
-                    } else {
-                        // Voxel is not solid - continue traversing
-                        true
-                    }
-                } else {
-                    // Ignoring this voxel bc of filter - continue traversing
-                    true
-                }
-            });
-
-            raycast_result
+            let hit = raycast::trace(
+                ray,
+                &bounds,
+                f32::MAX,
+                &*get_voxel,
+                |position, voxel| filter.call((position.as_vec3(), voxel)),
+            )?;
+            Some(VoxelRaycastResult {
+                position: hit.position.as_vec3(),
+                normal: hit.face.try_into().ok(),
+                voxel: hit.voxel,
+            })
         })
     }
 }
@@ -828,28 +799,6 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     let voxel_position = (position - chunk_position * CHUNK_SIZE_I).as_uvec3() + 1;
 
     (chunk_position, voxel_position)
-}
-
-/// Where a ray from `start`, a point within `bounds`, leaves them. `direction`
-/// must not be zero.
-///
-/// The ray stops at the nearest of the faces it heads towards. Measuring from
-/// `start` keeps the result precise however large the bounds are.
-fn bounds_exit(start: Vec3, direction: Vec3, bounds: &Aabb3d) -> Vec3 {
-    let (min, max) = (Vec3::from(bounds.min), Vec3::from(bounds.max));
-    let mut distance = f32::INFINITY;
-    for axis in 0..3 {
-        let face = if direction[axis] > 0.0 {
-            max[axis]
-        } else if direction[axis] < 0.0 {
-            min[axis]
-        } else {
-            continue;
-        };
-        distance = distance.min((face - start[axis]) / direction[axis]);
-    }
-    // Rounding can leave `start` just outside the bounds.
-    start + direction * distance.max(0.0)
 }
 
 /// The voxel at `position`: its voxel edit if it has one, else its voxel in the
