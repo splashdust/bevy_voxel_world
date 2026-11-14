@@ -25,6 +25,10 @@ pub(crate) mod hinted;
 mod inputs;
 mod kernel;
 mod levels;
+// Nothing reads the line record until sub-grid chunks solve their own sky.
+#[cfg(feature = "sub_grids")]
+#[allow(dead_code)]
+mod line_record;
 pub(crate) mod material;
 pub(crate) mod probe;
 pub(crate) mod record;
