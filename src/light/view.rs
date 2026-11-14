@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use super::faces::{Face, FaceHashes};
 use super::inputs::LightInputs;
 use super::solver::{neighbour_index, ChunkLight, Neighbourhood};
+use crate::chunk::CHUNK_SIZE_F;
 use crate::grid::{GridId, GridKey};
 
 /// A loaded chunk's entry in the world view.
@@ -143,6 +144,15 @@ pub(crate) fn in_world(position: IVec3) -> GridKey {
 #[inline]
 pub(crate) fn world_position(key: &GridKey) -> Option<IVec3> {
     (key.grid() == GridId::WORLD).then(|| key.position())
+}
+
+/// The middle of the level-0 chunk at `key`, placed by `pose`, the pose of
+/// its grid against the world's root.
+///
+/// The world's own chunks take [`GlobalTransform::IDENTITY`], which leaves
+/// the middle where the chunk sits in the world.
+pub(crate) fn chunk_centre(key: GridKey, pose: &GlobalTransform) -> Vec3 {
+    pose.transform_point((key.position().as_vec3() + 0.5) * CHUNK_SIZE_F)
 }
 
 /// The world view of one world.

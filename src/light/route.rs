@@ -80,11 +80,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::system::EntityCommands;
 use bevy::log::warn_once;
 use bevy::mesh::MeshTag;
-use bevy::platform::collections::HashMap;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::platform::hash::FixedHasher;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -110,8 +110,9 @@ use super::slot::{
     FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
 use super::solver::{ChannelLight, ChunkLight};
+use super::view::chunk_centre;
+use crate::chunk::CHUNK_SIZE_U;
 use crate::chunk::{Chunk, ChunkKey};
-use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_U};
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridKey;
 
@@ -188,11 +189,38 @@ enum Upload {
     Planes([Option<Box<ShellPlane>>; 6]),
 }
 
-/// A level-0 chunk the route knows of: one whose light has landed, or which
-/// shows its mesh.
+/// How the route names a level-0 chunk: by its entity, or by its grid key
+/// for a chunk with no entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RouteId {
+    Entity(Entity),
+    #[cfg_attr(not(test), expect(dead_code, reason = "made by tests"))]
+    Key(GridKey),
+}
+
+/// A chunk whose tag the route sets: a level-0 chunk or a coarse one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Tagged {
+    Chunk(RouteId),
+    Coarse(Entity),
+}
+
+/// What a chunk's tag shows: its slot, or one sky level and voxel level in
+/// steps of the route's precision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shows {
+    Slot(u32),
+    Levels(u8, u8),
+}
+
+/// A level-0 chunk the route knows of: one whose light has landed, which
+/// shows its mesh, or which is kept.
 struct RouteChunk {
     key: GridKey,
     shown: bool,
+    /// Whether its light is placed, with a slot if it needs one, whether or
+    /// not its mesh shows.
+    kept: bool,
     light: Option<Arc<ChunkLight>>,
     /// What the chunk's faces read from its own voxels.
     own: FacesSee,
@@ -222,14 +250,16 @@ struct CoarseChunk {
 }
 
 impl CoarseChunk {
-    fn new(key: ChunkKey, levels: (u8, u8), precision: LightPrecision) -> Self {
+    /// A coarse chunk with `key` showing `levels`, whose tag
+    /// [`retag`](LightRoute::retag) sets.
+    fn new(key: ChunkKey, levels: (u8, u8)) -> Self {
         Self {
             key,
             shown: false,
             levels,
             bytes: None,
             slot: None,
-            tag: tag_levels(levels.0, levels.1, precision),
+            tag: 0,
         }
     }
 }
@@ -257,16 +287,16 @@ pub(crate) struct LightRoute<C> {
     next_slot: u32,
     /// Slots given back, the last one first.
     free: Vec<u32>,
-    holders: HashMap<u32, Entity>,
-    chunks: EntityHashMap<RouteChunk>,
+    holders: HashMap<u32, Tagged>,
+    chunks: HashMap<RouteId, RouteChunk>,
     coarse: EntityHashMap<CoarseChunk>,
     /// The level-0 chunk at each grid key whose light has landed.
-    at: HashMap<GridKey, Entity>,
+    at: HashMap<GridKey, RouteId>,
     /// The light of each light entry, which the shells of the chunks beside
     /// it read: see [`hinted`](super::hinted).
     entries: HashMap<GridKey, Arc<ChunkLight>>,
-    /// Chunks needing a slot that have none.
-    starved: EntityHashSet,
+    /// Level-0 chunks needing a slot that have none.
+    starved: HashSet<RouteId>,
     /// The writes for each slot, taken by the render world each frame.
     uploads: HashMap<u32, Upload>,
     /// Tags changed for chunks, waiting to be set on them.
@@ -305,11 +335,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             next_slot: 0,
             free: Vec::new(),
             holders: HashMap::default(),
-            chunks: EntityHashMap::default(),
+            chunks: HashMap::default(),
             coarse: EntityHashMap::default(),
             at: HashMap::default(),
             entries: HashMap::default(),
-            starved: EntityHashSet::default(),
+            starved: HashSet::default(),
             uploads: HashMap::default(),
             changed_tags: Vec::new(),
             cameras: Vec::new(),
@@ -334,16 +364,82 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.unlit_sky = sky;
     }
 
-    /// The tag of a chunk with no light of its own.
-    fn unlit_tag(&self) -> u32 {
-        let sky = self.precision.of_whole(self.unlit_sky);
-        tag_levels(sky, 0, self.precision)
+    /// What a chunk with no light of its own shows.
+    fn unlit(&self) -> Shows {
+        Shows::Levels(self.precision.of_whole(self.unlit_sky), 0)
     }
 
-    /// The tag of a chunk showing `levels`, steps of `from`, with no slot.
-    fn flat_levels(&self, (sky, voxel): (u8, u8), from: LightPrecision) -> u32 {
+    /// What a chunk with no slot showing `levels`, steps of `from`, shows.
+    fn flat_levels(&self, (sky, voxel): (u8, u8), from: LightPrecision) -> Shows {
         let to = self.precision;
-        tag_levels(to.convert(sky, from), to.convert(voxel, from), to)
+        Shows::Levels(to.convert(sky, from), to.convert(voxel, from))
+    }
+
+    /// Sets the tag of `chunk` to show `shows`. Every tag the route gives a
+    /// chunk is set here. A changed tag of a chunk showing its mesh waits in
+    /// [`take_changed_tags`](Self::take_changed_tags).
+    fn retag(&mut self, chunk: Tagged, shows: Shows) {
+        let precision = self.precision;
+        let levels = |sky, voxel| tag_levels(sky, voxel, precision);
+        let (tag, shown, entity) = match chunk {
+            Tagged::Chunk(id) => {
+                let Some(chunk) = self.chunks.get_mut(&id) else {
+                    return;
+                };
+                let tag = match shows {
+                    Shows::Slot(slot) => HAS_SLOT | slot,
+                    Shows::Levels(sky, voxel) => levels(sky, voxel),
+                };
+                if chunk.tag == tag {
+                    return;
+                }
+                chunk.tag = tag;
+                let entity = match id {
+                    RouteId::Entity(entity) => Some(entity),
+                    RouteId::Key(_) => None,
+                };
+                (tag, chunk.shown, entity)
+            }
+            Tagged::Coarse(entity) => {
+                let Some(chunk) = self.coarse.get_mut(&entity) else {
+                    return;
+                };
+                let tag = match shows {
+                    Shows::Slot(slot) => {
+                        HAS_SLOT | (chunk.key.lod_level as u32) << LOD_SHIFT | slot
+                    }
+                    Shows::Levels(sky, voxel) => levels(sky, voxel),
+                };
+                if chunk.tag == tag {
+                    return;
+                }
+                chunk.tag = tag;
+                (tag, chunk.shown, Some(entity))
+            }
+        };
+        if let (true, Some(entity)) = (shown, entity) {
+            self.changed_tags.push((entity, tag));
+        }
+    }
+
+    /// Adds the level-0 chunk `id` at `key`, showing the levels of a chunk
+    /// with no light, unless the route knows of it.
+    fn add_chunk(&mut self, id: RouteId, key: GridKey) {
+        if self.chunks.contains_key(&id) {
+            return;
+        }
+        self.chunks.insert(id, RouteChunk::new(key));
+        self.retag(Tagged::Chunk(id), self.unlit());
+    }
+
+    /// Adds the coarse chunk `entity` with `key`, showing `levels`, steps of
+    /// the route's precision, unless the route knows of it.
+    fn add_coarse(&mut self, entity: Entity, key: ChunkKey, levels: (u8, u8)) {
+        if self.coarse.contains_key(&entity) {
+            return;
+        }
+        self.coarse.insert(entity, CoarseChunk::new(key, levels));
+        self.retag(Tagged::Coarse(entity), Shows::Levels(levels.0, levels.1));
     }
 
     /// Replaces the texture with one of `precision`'s format holding
@@ -371,12 +467,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.uploads.clear();
         self.starved.clear();
         self.warned_full = false;
-        let unlit = self.unlit_tag();
-        let entities: Vec<Entity> = self.chunks.keys().copied().collect();
-        for entity in entities {
-            let chunk = &self.chunks[&entity];
+        let unlit = self.unlit();
+        let ids: Vec<RouteId> = self.chunks.keys().copied().collect();
+        for id in ids {
+            let chunk = &self.chunks[&id];
             let had_slot = chunk.slot.is_some();
-            let tag = match &chunk.light {
+            let shows = match &chunk.light {
                 None => unlit,
                 Some(light) => {
                     let sees = chunk.sees();
@@ -392,7 +488,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .as_ref()
                 .is_some_and(|light| light.precision == precision);
             let starved = current && (had_slot || chunk.sees().needs_slot());
-            let chunk = self.chunks.get_mut(&entity).unwrap();
+            let chunk = self.chunks.get_mut(&id).unwrap();
             let convert = |seen: Seen| match seen {
                 Seen::One(level) => Seen::One(precision.convert(level, old)),
                 seen => seen,
@@ -404,15 +500,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             chunk.slot = None;
             chunk.shell = [None; 6];
             chunk.bytes = None;
-            if starved && chunk.shown {
-                self.starved.insert(entity);
+            if starved && chunk.placed() {
+                self.starved.insert(id);
             }
-            if chunk.tag != tag {
-                chunk.tag = tag;
-                if chunk.shown {
-                    self.changed_tags.push((entity, tag));
-                }
-            }
+            self.retag(Tagged::Chunk(id), shows);
         }
         let coarse: Vec<Entity> = self.coarse.keys().copied().collect();
         for entity in coarse {
@@ -426,13 +517,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .bytes
                 .take()
                 .map(|bytes| convert_texels(&bytes, old, precision));
-            let tag = tag_levels(chunk.levels.0, chunk.levels.1, precision);
-            if chunk.tag != tag {
-                chunk.tag = tag;
-                if chunk.shown {
-                    self.changed_tags.push((entity, tag));
-                }
-            }
+            let (sky, voxel) = chunk.levels;
+            self.retag(Tagged::Coarse(entity), Shows::Levels(sky, voxel));
             self.settle_coarse(entity);
         }
     }
@@ -512,22 +598,34 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         bytes: Option<Box<[u8]>>,
         new_voxels: bool,
     ) {
-        let unlit = self.unlit_tag();
+        let id = RouteId::Entity(entity);
+        self.landed(id, key, light, own, bytes, new_voxels);
+    }
+
+    /// Takes the light that landed for the level-0 chunk `id` at `key`, as
+    /// [`light_landed`](Self::light_landed) does.
+    fn landed(
+        &mut self,
+        id: RouteId,
+        key: GridKey,
+        light: Arc<ChunkLight>,
+        own: FacesSee,
+        bytes: Option<Box<[u8]>>,
+        new_voxels: bool,
+    ) {
         // A voxel edit gives a chunk new inputs without a chunk task.
-        let first = !self.chunks.get(&entity).is_some_and(|chunk| {
+        let first = !self.chunks.get(&id).is_some_and(|chunk| {
             chunk
                 .light
                 .as_ref()
                 .is_some_and(|old| Arc::ptr_eq(&old.inputs, &light.inputs))
         });
-        let chunk = self
-            .chunks
-            .entry(entity)
-            .or_insert_with(|| RouteChunk::new(key, unlit));
+        self.add_chunk(id, key);
+        let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.light = Some(light.clone());
         chunk.own = own;
         chunk.bytes = bytes;
-        self.at.insert(key, entity);
+        self.at.insert(key, id);
         self.entries.remove(&key);
         if first || new_voxels {
             let across = Face::ALL.map(|face| {
@@ -536,10 +634,51 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                         across(&light.inputs, face, &neighbour, self.precision)
                     })
             });
-            self.chunks.get_mut(&entity).unwrap().across = across;
+            self.chunks.get_mut(&id).unwrap().across = across;
         }
-        self.settle(entity, None);
+        self.settle(id, None);
         self.neighbours_follow(key, &light);
+    }
+
+    /// Makes the level-0 chunk `id` at `key` place its light while `kept`,
+    /// whether or not its mesh shows: it takes a slot if its light needs
+    /// one, and the slot's bytes are queued. A chunk with no entity that is
+    /// no longer kept is forgotten, and one with an entity whose mesh isn't
+    /// shown gives its slot back.
+    #[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
+    fn keep(&mut self, id: RouteId, key: GridKey, kept: bool) {
+        if kept {
+            self.add_chunk(id, key);
+        }
+        let Some(chunk) = self.chunks.get_mut(&id) else {
+            return;
+        };
+        if chunk.kept == kept {
+            return;
+        }
+        chunk.kept = kept;
+        if kept {
+            self.settle(id, None);
+            return;
+        }
+        if chunk.shown {
+            return;
+        }
+        if let RouteId::Key(_) = id {
+            self.forget_chunk(id);
+            return;
+        }
+        let light = chunk.light.clone();
+        let slot = chunk.slot.take();
+        chunk.bytes = None;
+        if let Some(slot) = slot {
+            self.free_slot(slot);
+        }
+        self.starved.remove(&id);
+        let shows = light.map_or(self.unlit(), |light| {
+            self.flat_levels(most_common(&light), light.precision)
+        });
+        self.retag(Tagged::Chunk(id), shows);
     }
 
     /// Takes the light that landed for the light entry at `key`, which
@@ -587,27 +726,22 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     fn show(&mut self, entity: Entity, key: GridKey, coarse: bool) -> u32 {
         if coarse {
             let unlit = (self.precision.of_whole(self.unlit_sky), 0);
-            let precision = self.precision;
-            let chunk = self
-                .coarse
-                .entry(entity)
-                .or_insert_with(|| CoarseChunk::new(key.key(), unlit, precision));
+            self.add_coarse(entity, key.key(), unlit);
+            let chunk = self.coarse.get_mut(&entity).unwrap();
             if !chunk.shown {
                 chunk.shown = true;
                 self.settle_coarse(entity);
             }
             return self.coarse[&entity].tag;
         }
-        let unlit = self.unlit_tag();
-        let chunk = self
-            .chunks
-            .entry(entity)
-            .or_insert_with(|| RouteChunk::new(key, unlit));
+        let id = RouteId::Entity(entity);
+        self.add_chunk(id, key);
+        let chunk = self.chunks.get_mut(&id).unwrap();
         if !chunk.shown {
             chunk.shown = true;
-            self.settle(entity, None);
+            self.settle(id, None);
         }
-        self.chunks[&entity].tag
+        self.chunks[&id].tag
     }
 
     /// Forgets the despawned chunk `entity`, freeing its slot. Its
@@ -619,13 +753,18 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
             return;
         }
-        let Some(chunk) = self.chunks.remove(&entity) else {
+        self.forget_chunk(RouteId::Entity(entity));
+    }
+
+    /// Forgets the level-0 chunk `id`, freeing its slot.
+    fn forget_chunk(&mut self, id: RouteId) {
+        let Some(chunk) = self.chunks.remove(&id) else {
             return;
         };
-        if self.at.get(&chunk.key) == Some(&entity) {
+        if self.at.get(&chunk.key) == Some(&id) {
             self.at.remove(&chunk.key);
         }
-        self.starved.remove(&entity);
+        self.starved.remove(&id);
         if let Some(slot) = chunk.slot {
             self.free_slot(slot);
         }
@@ -648,10 +787,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             to.convert(levels.1, precision),
         );
         let bytes = bytes.map(|bytes| convert_texels(&bytes, precision, to));
-        let chunk = self
-            .coarse
-            .entry(entity)
-            .or_insert_with(|| CoarseChunk::new(key, levels, to));
+        self.add_coarse(entity, key, levels);
+        let chunk = self.coarse.get_mut(&entity).unwrap();
         chunk.levels = levels;
         chunk.bytes = bytes;
         self.settle_coarse(entity);
@@ -690,7 +827,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let (key, wants_slot, held) = (chunk.key, chunk.bytes.is_some(), chunk.slot);
         let slot = match (wants_slot, held) {
             (true, Some(slot)) => Some(slot),
-            (true, None) => self.take_slot(entity, self.distance_to(key.centre())),
+            (true, None) => {
+                self.take_slot(Tagged::Coarse(entity), self.distance_to(key.centre()))
+            }
             (false, held) => {
                 if let Some(slot) = held {
                     self.free_slot(slot);
@@ -701,7 +840,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         };
         let chunk = self.coarse.get_mut(&entity).unwrap();
         chunk.slot = slot;
-        let tag = match slot {
+        let shows = match slot {
             Some(slot) => {
                 let bytes = chunk
                     .bytes
@@ -709,18 +848,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     .expect("a chunk taking a slot has bytes");
                 self.uploads.insert(slot, Upload::Full(bytes));
                 self.counters.full_writes += 1;
-                HAS_SLOT | (key.lod_level as u32) << LOD_SHIFT | slot
+                Shows::Slot(slot)
             }
             None => {
                 chunk.bytes = None;
-                tag_levels(chunk.levels.0, chunk.levels.1, self.precision)
+                Shows::Levels(chunk.levels.0, chunk.levels.1)
             }
         };
-        let chunk = self.coarse.get_mut(&entity).unwrap();
-        if chunk.tag != tag {
-            chunk.tag = tag;
-            self.changed_tags.push((entity, tag));
-        }
+        self.retag(Tagged::Coarse(entity), shows);
     }
 
     /// How many chunks need a slot and have none.
@@ -742,14 +877,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let nearest = self
                 .starved
                 .iter()
-                .map(|entity| (self.distance(self.chunks[entity].key), *entity))
+                .map(|id| (self.distance(self.chunks[id].key), *id))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(_, entity)| entity);
-            let Some(entity) = nearest else {
+                .map(|(_, id)| id);
+            let Some(id) = nearest else {
                 return;
             };
-            self.starved.remove(&entity);
-            self.settle(entity, None);
+            self.starved.remove(&id);
+            self.settle(id, None);
         }
     }
 
@@ -758,77 +893,77 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.changed_tags.drain(..)
     }
 
-    /// Brings the shown chunk `entity`'s slot and tag in line with its light.
-    /// With `face`, only the plane in front of that face changed, and the
-    /// slot is written again only there; otherwise it's written whole.
-    fn settle(&mut self, entity: Entity, face: Option<Face>) {
-        let Some(chunk) = self.chunks.get(&entity) else {
+    /// Brings the level-0 chunk `id`'s slot and tag in line with its light,
+    /// if it shows its mesh or is kept. With `face`, only the plane in front
+    /// of that face changed, and the slot is written again only there;
+    /// otherwise it's written whole.
+    fn settle(&mut self, id: RouteId, face: Option<Face>) {
+        let Some(chunk) = self.chunks.get(&id) else {
             return;
         };
-        let (true, Some(light)) = (chunk.shown, chunk.light.clone()) else {
+        let (true, Some(light)) = (chunk.placed(), chunk.light.clone()) else {
             return;
         };
         let sees = chunk.sees();
         let (slot, key) = (chunk.slot, chunk.key);
-        self.starved.remove(&entity);
-        let tag = if light.precision != self.precision {
+        self.starved.remove(&id);
+        let shows = if light.precision != self.precision {
             // Light solved before a change of precision shows flat until it
             // lands again at the new one.
             if let Some(slot) = slot {
-                self.chunks.get_mut(&entity).unwrap().slot = None;
+                self.chunks.get_mut(&id).unwrap().slot = None;
                 self.free_slot(slot);
             }
             self.flat_levels(most_common(&light), light.precision)
         } else if sees.needs_slot() {
             match (slot, face) {
                 (Some(slot), Some(face)) => {
-                    self.write_plane(entity, slot, face);
-                    HAS_SLOT | slot
+                    self.write_plane(id, slot, face);
+                    Shows::Slot(slot)
                 }
                 (Some(slot), None) => {
-                    self.write_full(entity, slot, &light);
-                    HAS_SLOT | slot
+                    self.write_full(id, slot, &light);
+                    Shows::Slot(slot)
                 }
-                (None, _) => match self.take_slot(entity, self.distance(key)) {
-                    Some(slot) => {
-                        self.chunks.get_mut(&entity).unwrap().slot = Some(slot);
-                        if face.is_some() {
-                            self.counters.late_allocations += 1;
+                (None, _) => {
+                    match self.take_slot(Tagged::Chunk(id), self.distance(key)) {
+                        Some(slot) => {
+                            self.chunks.get_mut(&id).unwrap().slot = Some(slot);
+                            if face.is_some() {
+                                self.counters.late_allocations += 1;
+                            }
+                            self.write_full(id, slot, &light);
+                            Shows::Slot(slot)
                         }
-                        self.write_full(entity, slot, &light);
-                        HAS_SLOT | slot
+                        None => {
+                            self.starved.insert(id);
+                            self.flat_levels(most_common(&light), light.precision)
+                        }
                     }
-                    None => {
-                        self.starved.insert(entity);
-                        self.flat_levels(most_common(&light), light.precision)
-                    }
-                },
+                }
             }
         } else {
             if let Some(slot) = slot {
-                self.chunks.get_mut(&entity).unwrap().slot = None;
+                self.chunks.get_mut(&id).unwrap().slot = None;
                 self.free_slot(slot);
                 self.counters.given_back += 1;
             }
             self.flat_levels(flat_tag(&sees, &light), light.precision)
         };
-        let chunk = self.chunks.get_mut(&entity).unwrap();
+        let chunk = self.chunks.get_mut(&id).unwrap();
         if chunk.slot.is_none() {
             chunk.bytes = None;
         }
-        if chunk.tag != tag {
-            chunk.tag = tag;
-            self.changed_tags.push((entity, tag));
-        }
+        self.retag(Tagged::Chunk(id), shows);
     }
 
-    /// Queues the whole slot of the chunk `entity`: its own voxels' light and
-    /// its neighbours' border planes.
-    fn write_full(&mut self, entity: Entity, slot: u32, light: &ChunkLight) {
-        let key = self.chunks[&entity].key;
+    /// Queues the whole slot of the level-0 chunk `id`: its own voxels' light
+    /// and its neighbours' border planes.
+    fn write_full(&mut self, id: RouteId, slot: u32, light: &ChunkLight) {
+        let key = self.chunks[&id].key;
         let mut bytes = self
             .chunks
-            .get_mut(&entity)
+            .get_mut(&id)
             .unwrap()
             .bytes
             .take()
@@ -841,21 +976,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
             }
         }
-        self.chunks.get_mut(&entity).unwrap().shell = shell;
+        self.chunks.get_mut(&id).unwrap().shell = shell;
         self.uploads.insert(slot, Upload::Full(bytes));
         self.counters.full_writes += 1;
     }
 
-    /// Queues the shell plane of the chunk `entity` in front of `face`, if
-    /// the neighbour's border plane there changed.
-    fn write_plane(&mut self, entity: Entity, slot: u32, face: Face) {
-        let key = self.chunks[&entity].key;
+    /// Queues the shell plane of the level-0 chunk `id` in front of `face`,
+    /// if the neighbour's border plane there changed.
+    fn write_plane(&mut self, id: RouteId, slot: u32, face: Face) {
+        let key = self.chunks[&id].key;
         let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
         let plane = border_plane(&neighbour, face.opposite(), self.precision);
         let hash = Some(FixedHasher.hash_one(&plane[..]));
-        let shell = &mut self.chunks.get_mut(&entity).unwrap().shell[face as usize];
+        let shell = &mut self.chunks.get_mut(&id).unwrap().shell[face as usize];
         if *shell == hash {
             return;
         }
@@ -874,10 +1009,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
-    /// A slot for the chunk `entity`, `near` from the cameras: a free one, or
-    /// one taken from the holder farthest from the cameras if it's farther
-    /// than this chunk.
-    fn take_slot(&mut self, entity: Entity, near: f32) -> Option<u32> {
+    /// A slot for `chunk`, `near` from the cameras: a free one, or one taken
+    /// from the holder farthest from the cameras if it's farther than this
+    /// chunk.
+    fn take_slot(&mut self, chunk: Tagged, near: f32) -> Option<u32> {
         if self.slots_per_axis.is_none() {
             let (capacity, axes) = texture_shape(self.capacity, self.max_side);
             if capacity < self.capacity {
@@ -899,7 +1034,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
             None => self.evict_for(near)?,
         };
-        self.holders.insert(slot, entity);
+        self.holders.insert(slot, chunk);
         self.counters.allocations += 1;
         self.counters.peak_held = self.counters.peak_held.max(self.holders.len() as u64);
         Some(slot)
@@ -927,22 +1062,24 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
         self.holders.remove(&slot);
         self.counters.evictions += 1;
-        if let Some(chunk) = self.coarse.get_mut(&holder) {
-            chunk.slot = None;
-            chunk.bytes = None;
-            chunk.tag = tag_levels(chunk.levels.0, chunk.levels.1, self.precision);
-            self.changed_tags.push((holder, chunk.tag));
-            return Some(slot);
+        match holder {
+            Tagged::Coarse(entity) => {
+                let chunk = self.coarse.get_mut(&entity).unwrap();
+                chunk.slot = None;
+                chunk.bytes = None;
+                let (sky, voxel) = chunk.levels;
+                self.retag(holder, Shows::Levels(sky, voxel));
+            }
+            Tagged::Chunk(id) => {
+                let light = self.chunks[&id].light.clone();
+                let shows = light.map_or(self.unlit(), |light| {
+                    self.flat_levels(most_common(&light), light.precision)
+                });
+                self.chunks.get_mut(&id).unwrap().slot = None;
+                self.retag(holder, shows);
+                self.starved.insert(id);
+            }
         }
-        let light = self.chunks[&holder].light.clone();
-        let tag = light.map_or(self.unlit_tag(), |light| {
-            self.flat_levels(most_common(&light), light.precision)
-        });
-        let chunk = self.chunks.get_mut(&holder).unwrap();
-        chunk.slot = None;
-        chunk.tag = tag;
-        self.changed_tags.push((holder, tag));
-        self.starved.insert(holder);
         Some(slot)
     }
 
@@ -966,16 +1103,17 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// How far the middle of the level-0 chunk at `key` is from the
-    /// nearest camera.
+    /// nearest camera, with its middle placed as a world chunk's: see
+    /// [`chunk_centre`].
     fn distance(&self, key: GridKey) -> f32 {
-        self.distance_to((key.position().as_vec3() + 0.5) * CHUNK_SIZE_F)
+        self.distance_to(chunk_centre(key, &GlobalTransform::IDENTITY))
     }
 
     /// How far the slot holder `holder` is from the nearest camera.
-    fn holder_distance(&self, holder: Entity) -> f32 {
-        match self.coarse.get(&holder) {
-            Some(chunk) => self.distance_to(chunk.key.centre()),
-            None => self.distance(self.chunks[&holder].key),
+    fn holder_distance(&self, holder: Tagged) -> f32 {
+        match holder {
+            Tagged::Coarse(entity) => self.distance_to(self.coarse[&entity].key.centre()),
+            Tagged::Chunk(id) => self.distance(self.chunks[&id].key),
         }
     }
 
@@ -999,18 +1137,26 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 }
 
 impl RouteChunk {
-    fn new(key: GridKey, tag: u32) -> Self {
+    /// A chunk at `key` with no light, whose tag
+    /// [`retag`](LightRoute::retag) sets.
+    fn new(key: GridKey) -> Self {
         Self {
             key,
             shown: false,
+            kept: false,
             light: None,
             own: FacesSee::default(),
             bytes: None,
             across: [FacesSee::default(); 6],
             slot: None,
             shell: [None; 6],
-            tag,
+            tag: 0,
         }
+    }
+
+    /// Whether its light is placed: it shows its mesh, or it's kept.
+    fn placed(&self) -> bool {
+        self.shown || self.kept
     }
 
     /// What its faces read, from its own voxels and across each face.
@@ -1206,6 +1352,83 @@ fn plane_texels(face: Face, plane: &ShellPlane, wide: usize) -> (UVec3, UVec3, V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configuration::DefaultWorld;
+    use crate::light::inputs::{LightInputs, Occupancy};
+    use crate::light::kernel::Plane;
+    use crate::light::sky::ColumnAnswer;
+    use crate::light::slot::own_faces_see;
+    use crate::light::view::in_world;
+
+    fn route() -> LightRoute<DefaultWorld> {
+        let mut images = Assets::<Image>::default();
+        LightRoute::new(&LightPropagation::default(), 15, &mut images)
+    }
+
+    /// The light of a chunk with one solid voxel, at its middle, with full
+    /// sky light above the middle and none below, so its faces see two sky
+    /// levels and it needs a slot.
+    fn light_needing_a_slot() -> (Arc<ChunkLight>, FacesSee) {
+        let precision = LightPropagation::default().precision;
+        let mut occupancy = Occupancy::Open;
+        occupancy.set(16, 16, 16, true);
+        occupancy.normalize();
+        let above: Plane = [!0 << 16; 32 * 32];
+        let light = ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Vec::new(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChannelLight::Planes(vec![above; precision.bits()].into_boxed_slice()),
+            voxel: ChannelLight::Uniform(0),
+            precision,
+        };
+        let own = own_faces_see(&light);
+        assert!(own.needs_slot());
+        (Arc::new(light), own)
+    }
+
+    #[test]
+    fn a_world_chunks_distance_is_from_its_middle() {
+        let mut route = route();
+        route.set_cameras([Vec3::new(48.0, -48.0, 26.0)].into_iter());
+        assert_eq!(route.distance(in_world(IVec3::new(1, -2, 0))), 10.0);
+    }
+
+    #[test]
+    fn a_kept_chunk_takes_a_slot_with_no_mesh() {
+        let mut route = route();
+        let (light, own) = light_needing_a_slot();
+        let world = in_world(IVec3::ZERO);
+        let entity = Entity::from_raw_u32(1).unwrap();
+        route.light_landed(world, entity, light.clone(), own, None, true);
+        // A chunk with no entity, far from the world chunk.
+        let far = in_world(IVec3::new(5, 0, 0));
+        let id = RouteId::Key(far);
+        route.landed(id, far, light.clone(), own, None, true);
+        assert!(route.holders.is_empty());
+
+        route.keep(id, far, true);
+
+        let tag = route.chunks[&id].tag;
+        assert_ne!(tag & HAS_SLOT, 0);
+        let queued = route.queued_upload(tag & 0xFF_FFFF).expect("bytes queued");
+        // It has no neighbours, so its shell is all 0.
+        assert_eq!(queued, &slot_bytes(&light)[..]);
+        assert_eq!(route.take_changed_tags().count(), 0);
+
+        // The world chunk takes a slot only once its mesh shows.
+        assert_eq!(route.holders.len(), 1);
+        let shown = route.show(entity, world, false);
+        assert_ne!(shown & HAS_SLOT, 0);
+        assert!(route.queued_upload(shown & 0xFF_FFFF).is_some());
+
+        route.keep(id, far, false);
+
+        assert!(!route.chunks.contains_key(&id));
+        assert_eq!(route.holders.len(), 1);
+    }
 
     #[test]
     fn the_texture_shape_follows_the_slot_count() {

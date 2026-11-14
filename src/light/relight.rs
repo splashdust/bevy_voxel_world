@@ -99,9 +99,11 @@ use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
 use super::solver::{relight, ChunkLight, KeptLight, Solved};
-use super::view::{in_world, world_position, AirInputs, LightView, ViewChunk, ENTRY};
+use super::view::{
+    chunk_centre, in_world, world_position, AirInputs, LightView, ViewChunk, ENTRY,
+};
 use super::{LightSettings, SolvedLight, TaskLight};
-use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_U};
+use crate::chunk::{ChunkKey, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::{ChunkState, ChunkStateOf};
 use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
@@ -1149,7 +1151,11 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         || matches!(states.get(chunk.entity), Ok(ChunkState::Ready))
                 })
             })
-            .map(|key| (distance_to_nearest(key.position(), &cameras), *key))
+            .map(|key| {
+                let distance =
+                    distance_to_nearest(*key, &GlobalTransform::IDENTITY, &cameras);
+                (distance, *key)
+            })
             .collect();
         for key in first_in_start_order(candidates, slots) {
             if !self.has_relight_time(settings) {
@@ -1660,7 +1666,11 @@ impl<C: VoxelWorldConfig> Relights<C> {
             .filter(|key| work.chunks[*key].urgent)
             .map(|key| {
                 let later = !work.edited.contains(key);
-                let distance = distance_to_nearest(key.position(), &camera_positions);
+                let distance = distance_to_nearest(
+                    *key,
+                    &GlobalTransform::IDENTITY,
+                    &camera_positions,
+                );
                 (later, distance, *key)
             })
             .collect();
@@ -1866,10 +1876,11 @@ fn rebase(landing: &mut Landing, view: &LightView) {
     });
 }
 
-/// How far the middle of the level-0 chunk at `position` is from the nearest
-/// of `cameras`, in whole voxels.
-fn distance_to_nearest(position: IVec3, cameras: &[Vec3]) -> u32 {
-    let middle = (position.as_vec3() + 0.5) * CHUNK_SIZE_F;
+/// How far the middle of the level-0 chunk at `key`, placed by its grid's
+/// `pose`, is from the nearest of `cameras`, in whole voxels. See
+/// [`chunk_centre`].
+fn distance_to_nearest(key: GridKey, pose: &GlobalTransform, cameras: &[Vec3]) -> u32 {
+    let middle = chunk_centre(key, pose);
     cameras
         .iter()
         .map(|camera| camera.distance(middle))
@@ -1881,6 +1892,28 @@ fn distance_to_nearest(position: IVec3, cameras: &[Vec3]) -> u32 {
 mod tests {
     use super::*;
     use crate::configuration::DefaultWorld;
+
+    #[test]
+    fn a_chunks_middle_follows_its_grids_pose() {
+        let key = in_world(IVec3::new(1, -2, 0));
+        let identity = GlobalTransform::IDENTITY;
+        assert_eq!(chunk_centre(key, &identity), Vec3::new(48.0, -48.0, 16.0));
+        let camera = [Vec3::new(48.0, -48.0, 26.0)];
+        assert_eq!(distance_to_nearest(key, &identity, &camera), 10);
+
+        // A quarter turn about y takes x to -z and z to x.
+        let pose = GlobalTransform::from(
+            Transform::from_xyz(100.0, 0.0, 0.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        );
+        let middle = chunk_centre(key, &pose);
+        assert!(
+            middle.abs_diff_eq(Vec3::new(116.0, -48.0, -48.0), 1e-3),
+            "{middle}"
+        );
+        let camera = [Vec3::new(116.0, -48.0, -37.5)];
+        assert_eq!(distance_to_nearest(key, &pose, &camera), 10);
+    }
 
     #[test]
     fn an_edit_where_no_chunk_has_light_marks_nothing_edited() {

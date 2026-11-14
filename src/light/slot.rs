@@ -484,11 +484,57 @@ pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
         Occupancy::Mixed(solid) => Some(touching_open(solid)),
         _ => None,
     };
-    let most_common_level = |channel: &ChannelLight| match (channel, &touching) {
+    let level = |channel| most_common_over(channel, touching.as_deref(), light.precision);
+    (level(&light.sky), level(&light.voxel))
+}
+
+/// The open voxels of a chunk of `occupancy`, as columns along z like a
+/// [`Plane`], or `None` for a chunk with none.
+fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
+    match occupancy {
+        Occupancy::Open => Some(Box::new([!0; CHUNK * CHUNK])),
+        Occupancy::Solid => None,
+        Occupancy::Mixed(solid) => Some(Box::new(solid.map(|column| !column))),
+    }
+}
+
+/// What every open voxel of the chunk lit by `light` holds, as sky light and
+/// voxel light. A chunk with no open voxel holds [`Seen::Nothing`].
+///
+/// Unlike [`own_faces_see`], it reads open voxels far from any solid too.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
+pub(crate) fn open_voxels_see(light: &ChunkLight) -> (Seen, Seen) {
+    let Some(open) = open_voxels(&light.inputs.occupancy) else {
+        return (Seen::Nothing, Seen::Nothing);
+    };
+    (seen_over(&light.sky, &open), seen_over(&light.voxel, &open))
+}
+
+/// The most common level per channel among every open voxel of the chunk lit
+/// by `light`, as sky and voxel light in steps of the light's precision.
+///
+/// Unlike [`most_common`], it counts open voxels far from any solid too, so
+/// an open chunk lit voxel by voxel gets its own most common level and not 0.
+/// Its cost grows with the chunk's open voxels.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
+pub(crate) fn most_common_open(light: &ChunkLight) -> (u8, u8) {
+    let open = open_voxels(&light.inputs.occupancy);
+    let level = |channel| most_common_over(channel, open.as_deref(), light.precision);
+    (level(&light.sky), level(&light.voxel))
+}
+
+/// The most common level of `channel`, steps of `precision`, among the voxels
+/// set in `voxels`. With no voxels, a channel held as planes gives 0.
+fn most_common_over(
+    channel: &ChannelLight,
+    voxels: Option<&Plane>,
+    precision: LightPrecision,
+) -> u8 {
+    match (channel, voxels) {
         (ChannelLight::Uniform(level), _) => *level,
-        (ChannelLight::Planes(_), Some(touching)) => {
+        (ChannelLight::Planes(_), Some(voxels)) => {
             let mut counts = [0u32; 256];
-            for (column, &these) in touching.iter().enumerate() {
+            for (column, &these) in voxels.iter().enumerate() {
                 let mut voxels = these;
                 while voxels != 0 {
                     let z = voxels.trailing_zeros() as usize;
@@ -497,16 +543,12 @@ pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
                     counts[level as usize] += 1;
                 }
             }
-            (0..=light.precision.top() as usize)
+            (0..=precision.top() as usize)
                 .max_by_key(|level| counts[*level])
                 .unwrap_or(0) as u8
         }
         (ChannelLight::Planes(_), None) => 0,
-    };
-    (
-        most_common_level(&light.sky),
-        most_common_level(&light.voxel),
-    )
+    }
 }
 
 /// A layer of a chunk's voxels as 32 rows of bits: bit `u` of row `v`.
@@ -560,6 +602,96 @@ mod tests {
                 assert_eq!(shell_cell(face, u, v), front, "{face:?} {u} {v}");
             }
         }
+    }
+
+    use std::sync::Arc;
+
+    use crate::light::sky::ColumnAnswer;
+
+    /// The light of a chunk of `occupancy` at 16 levels whose sky channel is
+    /// `sky` and whose voxel light is `voxel` everywhere.
+    fn light(occupancy: Occupancy, sky: ChannelLight, voxel: u8) -> ChunkLight {
+        ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Vec::new(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky,
+            voxel: ChannelLight::Uniform(voxel),
+            precision: LightPrecision::Steps16,
+        }
+    }
+
+    /// A channel at 16 levels holding `level` at every voxel, as planes.
+    fn planes_of(level: u8) -> Box<[Plane]> {
+        (0..4)
+            .map(|bit| [if level >> bit & 1 == 1 { !0 } else { 0 }; CHUNK * CHUNK])
+            .collect()
+    }
+
+    /// Sets the voxel at `x`, `y`, `z` of `planes` to `level`.
+    fn set_level(planes: &mut [Plane], (x, y, z): (usize, usize, usize), level: u8) {
+        for (bit, plane) in planes.iter_mut().enumerate() {
+            let column = &mut plane[x + y * CHUNK];
+            *column = *column & !(1 << z) | ((level >> bit & 1) as u32) << z;
+        }
+    }
+
+    /// One solid voxel at the chunk's middle.
+    fn one_solid() -> Occupancy {
+        let mut occupancy = Occupancy::Open;
+        occupancy.set(16, 16, 16, true);
+        occupancy.normalize();
+        occupancy
+    }
+
+    #[test]
+    fn a_chunk_whose_open_voxels_hold_one_level_reports_it() {
+        let held_whole = light(Occupancy::Open, ChannelLight::Uniform(9), 4);
+        assert_eq!(open_voxels_see(&held_whole), (Seen::One(9), Seen::One(4)));
+        assert_eq!(most_common_open(&held_whole), (9, 4));
+
+        for occupancy in [Occupancy::Open, one_solid()] {
+            let planes = light(occupancy, ChannelLight::Planes(planes_of(9)), 4);
+            assert_eq!(open_voxels_see(&planes), (Seen::One(9), Seen::One(4)));
+            assert_eq!(most_common_open(&planes), (9, 4));
+        }
+    }
+
+    #[test]
+    fn one_open_voxel_at_another_level_makes_the_chunk_mixed() {
+        let mut planes = planes_of(9);
+        set_level(&mut planes, (3, 30, 7), 8);
+        let light = light(one_solid(), ChannelLight::Planes(planes), 4);
+
+        assert_eq!(open_voxels_see(&light), (Seen::Mixed, Seen::One(4)));
+        assert_eq!(most_common_open(&light).0, 9);
+    }
+
+    #[test]
+    fn the_most_common_open_level_counts_voxels_far_from_solids() {
+        // The 26 open voxels around the solid one hold 5, and every other
+        // open voxel holds 9.
+        let mut planes = planes_of(9);
+        for z in 15..18 {
+            for y in 15..18 {
+                for x in 15..18 {
+                    set_level(&mut planes, (x, y, z), 5);
+                }
+            }
+        }
+        let light = light(one_solid(), ChannelLight::Planes(planes), 0);
+
+        assert_eq!(most_common(&light).0, 5);
+        assert_eq!(most_common_open(&light).0, 9);
+    }
+
+    #[test]
+    fn a_solid_chunk_has_no_open_voxel_to_report() {
+        let light = light(Occupancy::Solid, ChannelLight::Planes(planes_of(9)), 0);
+        assert_eq!(open_voxels_see(&light), (Seen::Nothing, Seen::Nothing));
     }
 
     #[test]
