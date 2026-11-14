@@ -128,6 +128,7 @@ use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridKey;
 #[cfg(feature = "sub_grids")]
 use {
+    super::tag_map::columns::{HintedColumns, Hinting},
     super::tag_map::{PendingWrites, Placed, TagMap, TagMapWrites},
     super::view::in_world,
     crate::chunk::MAX_LOD_LEVEL,
@@ -346,6 +347,8 @@ struct TagMapping {
     /// The kept chunks of air whose light reads the sky fill field's cells,
     /// with the cells their tags and slots were last made from.
     filled: HashMap<RouteId, Option<Arc<CellFill>>>,
+    /// The column answers of the hinted air the map holds.
+    columns: HintedColumns,
 }
 
 /// The world chunks showing their tags, by position, for a tag map.
@@ -804,13 +807,18 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return;
         }
         self.entries.insert(key, light.clone());
+        #[cfg(feature = "sub_grids")]
+        self.tag_map_touch(key);
         self.neighbours_follow(key, &light);
     }
 
     /// Forgets the light entry at `key`. The shells beside it keep its
     /// last planes, as they keep a despawned chunk's.
     pub fn entry_dropped(&mut self, key: GridKey) {
-        self.entries.remove(&key);
+        if self.entries.remove(&key).is_some() {
+            #[cfg(feature = "sub_grids")]
+            self.tag_map_touch(key);
+        }
     }
 
     /// Brings what the face neighbours on its grid of the chunk or light
@@ -1386,9 +1394,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// Brings the tag map in line with `bodies`, each sub-grid placed, and
-    /// with the chunks' tags as they are now.
+    /// with the chunks' tags as they are now. Positions of hinted air read
+    /// as `hinting` says, and take the answers of walks that finished.
     /// The tag map is made, with its texture added to `images`, once there
-    /// is a sub-grid.
+    /// is a sub-grid. Returns how many walks finished.
     ///
     /// The level-0 world chunk at each position the map comes to hold is
     /// kept, under the slot rule [`keep`](Self::keep) describes, and one at
@@ -1401,9 +1410,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// cost, and with the chunks of air near sub-grids whose light varies,
     /// whose slots' bytes are made from the light the world view stores.
     #[cfg(feature = "sub_grids")]
-    pub fn upkeep_tag_map(&mut self, bodies: &[Placed], images: &mut Assets<Image>) {
+    pub fn upkeep_tag_map(
+        &mut self,
+        bodies: &[Placed],
+        hinting: &Hinting,
+        images: &mut Assets<Image>,
+    ) -> usize {
         if self.tag_map.is_none() && bodies.is_empty() {
-            return;
+            return 0;
         }
         let started = Instant::now();
         if self.tag_map.is_none() {
@@ -1419,7 +1433,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
         self.follow_fill_cells();
         let mut mapping = self.tag_map.take().unwrap();
-        let mut touched: Vec<IVec3> = mapping.shown.touched.drain().collect();
+        mapping.columns.follow(hinting.generation);
+        mapping.columns.release(placement.removed.iter().copied());
+        let mut touched: Vec<IVec3> = Vec::new();
+        let map = &mapping.map;
+        let finished = mapping
+            .columns
+            .collect(|position| map.holds(position), &mut touched);
+        touched.extend(mapping.shown.touched.drain());
         for key in mapping.shown.touched_coarse.drain() {
             let (first, side) = (key.position, key.extent());
             if side.pow(3) as usize <= mapping.map.len() {
@@ -1442,8 +1463,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             mut map,
             shown,
             filled,
+            mut columns,
         } = mapping;
-        let answer = |position: IVec3| self.tag_at(&shown, position, nothing_known);
+        let answer = |position: IVec3| {
+            self.tag_at(&shown, &mut columns, hinting, position, nothing_known)
+        };
         map.write_entries(
             placement.added,
             touched.into_iter(),
@@ -1452,7 +1476,42 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             images,
         );
         map.counters.upkeep_nanos += started.elapsed().as_nanos() as u64;
-        self.tag_map = Some(TagMapping { map, shown, filled });
+        self.tag_map = Some(TagMapping {
+            map,
+            shown,
+            filled,
+            columns,
+        });
+        finished
+    }
+
+    /// Whether a position of hinted air in the tag map waits for a walk.
+    #[cfg(feature = "sub_grids")]
+    pub fn wants_hinted_walks(&self) -> bool {
+        self.tag_map
+            .as_ref()
+            .is_some_and(|mapping| mapping.columns.has_wanted())
+    }
+
+    /// How many walks of hinted air in the tag map are running.
+    #[cfg(feature = "sub_grids")]
+    pub fn hinted_walks_running(&self) -> usize {
+        self.tag_map
+            .as_ref()
+            .map_or(0, |mapping| mapping.columns.running())
+    }
+
+    /// Starts walks for up to `count` positions of hinted air in the tag
+    /// map that wait for one, each in the task `spawn` makes for it.
+    #[cfg(feature = "sub_grids")]
+    pub fn start_hinted_walks(
+        &mut self,
+        count: usize,
+        spawn: impl FnMut(IVec3) -> bevy::tasks::Task<bool>,
+    ) {
+        if let Some(mapping) = self.tag_map.as_mut() {
+            mapping.columns.start(count, spawn);
+        }
     }
 
     /// Keeps the level-0 world chunk at `position` while the tag map `held`
@@ -1497,6 +1556,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             map: TagMap::new(images),
             shown: ShownChunks::default(),
             filled: HashMap::default(),
+            columns: HintedColumns::default(),
         };
         for (id, chunk) in &self.chunks {
             if let (true, Some(position)) = (chunk.shown, world_position(&chunk.key)) {
@@ -1513,9 +1573,19 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// The tag the screen shows at the level-0 world chunk position
     /// `position`: the level-0 chunk's there, or else the finest coarse
-    /// chunk's covering it, or else `nothing_known`.
+    /// chunk's covering it. Hinted air that `hinting` holds shows the most
+    /// common level among its light entry's open voxels, or else its column
+    /// answer from `columns`, or `nothing_known` until that lands. Anywhere
+    /// else it's `nothing_known`.
     #[cfg(feature = "sub_grids")]
-    fn tag_at(&self, shown: &ShownChunks, position: IVec3, nothing_known: u32) -> u32 {
+    fn tag_at(
+        &self,
+        shown: &ShownChunks,
+        columns: &mut HintedColumns,
+        hinting: &Hinting,
+        position: IVec3,
+        nothing_known: u32,
+    ) -> u32 {
         if let Some(chunk) = shown
             .level_0
             .get(&position)
@@ -1536,7 +1606,34 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 return chunk.tag;
             }
         }
-        nothing_known
+        if !hinting.holds(position) {
+            return nothing_known;
+        }
+        let to = self.precision;
+        if let Some(light) = self.entries.get(&in_world(position)) {
+            let (sky, voxel) = most_common_open(light);
+            let from = light.precision;
+            return tag_levels(to.convert(sky, from), to.convert(voxel, from), to);
+        }
+        let dark = tag_levels(0, 0, to);
+        if !hinting.sky {
+            return dark;
+        }
+        match columns.answer(position) {
+            Some(false) => dark,
+            Some(true) | None => nothing_known,
+        }
+    }
+
+    /// Notes for the tag map that the tag at the world chunk at `key` may
+    /// have changed.
+    #[cfg(feature = "sub_grids")]
+    fn tag_map_touch(&mut self, key: GridKey) {
+        if let (Some(mapping), Some(position)) =
+            (self.tag_map.as_mut(), world_position(&key))
+        {
+            mapping.shown.touched.insert(position);
+        }
     }
 
     /// Notes for the tag map that the level-0 chunk `id` at `key` is gone,
@@ -1973,7 +2070,7 @@ mod tests {
             pose,
             bounds: Some((IVec3::ZERO, IVec3::new(159, 1, 1))),
         };
-        route.upkeep_tag_map(&[body], &mut images);
+        route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
 
         let map = route.tag_map().unwrap();
         assert_eq!(map.len(), 6);
@@ -1988,7 +2085,7 @@ mod tests {
 
         // The coarse chunk gives its slot back, and its tag changes.
         route.coarse_landed(coarse, key, (9, 0), LightPrecision::Steps16, None);
-        route.upkeep_tag_map(&[body], &mut images);
+        route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
         let flat = tag_levels(9, 0, LightPrecision::Steps16);
         let map = route.tag_map().unwrap();
         assert_eq!(map.answer(IVec3::new(2, 0, 0)), Some(flat));
@@ -1996,7 +2093,7 @@ mod tests {
 
         // Once it's gone, nothing is known where it was.
         route.forget(coarse);
-        route.upkeep_tag_map(&[body], &mut images);
+        route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
         assert_eq!(
             route.tag_map().unwrap().answer(IVec3::new(2, 0, 0)),
             Some(15)
@@ -2077,7 +2174,7 @@ mod tests {
         );
         let body = body_in(IVec3::new(3, 0, 0));
 
-        route.upkeep_tag_map(&[body], &mut images);
+        route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
 
         let flat = tag_levels(9, 0, LightPrecision::Steps16);
         let answer = |route: &LightRoute<DefaultWorld>| {
@@ -2089,7 +2186,7 @@ mod tests {
         // The holder despawns, and its slot goes to the air chunk.
         route.forget(holder);
         route.refill();
-        route.upkeep_tag_map(&[body], &mut images);
+        route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
 
         let tag = answer(&route).unwrap();
         assert_ne!(tag & HAS_SLOT, 0);
@@ -2119,7 +2216,7 @@ mod tests {
             true,
         );
 
-        route.upkeep_tag_map(&[body_in(IVec3::X)], &mut images);
+        route.upkeep_tag_map(&[body_in(IVec3::X)], &Hinting::none(), &mut images);
 
         let tag = route.tag_map().unwrap().answer(IVec3::X).unwrap();
         assert_ne!(tag & HAS_SLOT, 0);
@@ -2160,14 +2257,18 @@ mod tests {
         let flat = route.show(entity, key, false);
         assert_eq!(flat, tag_levels(9, 0, LightPrecision::Steps16));
 
-        route.upkeep_tag_map(&[body_in(IVec3::X)], &mut images);
+        route.upkeep_tag_map(&[body_in(IVec3::X)], &Hinting::none(), &mut images);
         let tag = route.chunks[&RouteId::Entity(entity)].tag;
         assert_ne!(tag & HAS_SLOT, 0);
         assert_eq!(route.tag_map().unwrap().answer(IVec3::X), Some(tag));
         assert_eq!(route.take_changed_tags().next_back(), Some((entity, tag)));
 
         // The body moves away, and the chunk gives its slot back.
-        route.upkeep_tag_map(&[body_in(IVec3::new(9, 0, 0))], &mut images);
+        route.upkeep_tag_map(
+            &[body_in(IVec3::new(9, 0, 0))],
+            &Hinting::none(),
+            &mut images,
+        );
         assert_eq!(route.chunks[&RouteId::Entity(entity)].tag, flat);
         assert!(route.holders.is_empty());
         assert_eq!(route.tag_map().unwrap().answer(IVec3::X), None);

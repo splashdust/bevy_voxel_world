@@ -2,7 +2,7 @@
 //! coarse chunk with no mesh, and in hinted air holding no light entry.
 //!
 //! No chunk holds light there, so a reading walks up the column above the
-//! asked voxel on the caller's thread, along the rows a coarse chunk's walk
+//! asked voxel, along the rows a coarse chunk's walk
 //! takes (see [`CoarseWalk`](super::coarse::CoarseWalk)): starting one cell
 //! above it, a cell's width apart, doubling the step every 8 rows, up to
 //! where the world's sky rule stops looking. Each row reads the voxel edit
@@ -11,8 +11,11 @@
 //! light 15, if no row is solid; otherwise it reads 0. Rows can step past a
 //! roof thinner than the step, so the answer is plausible rather than exact.
 //!
-//! Answers go in a [`WalkCache`], so a game reading the same voxel every
-//! frame walks it once.
+//! `light_at` walks on the caller's thread, and its answers go in a
+//! [`WalkCache`], so a game reading the same voxel every frame walks it
+//! once. With `sub_grids`, the tag map walks the same way in tasks of its
+//! own, for hinted air around sub-grids: see
+//! [`tag_map`](super::tag_map#hinted-air).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,10 +40,13 @@ pub(crate) const WALK_CACHE_CAP: usize = 4096;
 /// The answers of walks on request: whether the column above a voxel is open,
 /// by the voxel and the width of the cells its rows step by.
 ///
-/// Any voxel edit, a `reset_light` and a change of light settings empty it.
+/// Any voxel edit, a `reset_light` and a change of light settings empty it,
+/// and move its generation on, so answers worked out elsewhere can tell they
+/// may be stale.
 #[derive(Default)]
 pub(crate) struct WalkCache {
     answers: HashMap<(IVec3, u32), bool>,
+    generation: u64,
 }
 
 impl WalkCache {
@@ -55,8 +61,17 @@ impl WalkCache {
         self.answers.insert((position, width), open);
     }
 
+    /// Empties the cache, for a change that can change any walk's answer.
     pub fn clear(&mut self) {
         self.answers.clear();
+        self.generation += 1;
+    }
+
+    /// How many times [`clear`](Self::clear) has run. A walk's answer is
+    /// stale once this has moved since the walk started.
+    #[cfg_attr(not(feature = "sub_grids"), allow(dead_code))]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The bytes the cache holds now, counting the table's spare room.

@@ -10,7 +10,8 @@
 //! never held. Each position holds the tag of the chunk the screen shows there, in
 //! the encoding [`route`](super::route) describes: a level-0 chunk's tag, or
 //! else the tag of the coarse chunk covering the position, whose LOD bits
-//! say how wide its cells are. A position with no chunk showing a tag, such
+//! say how wide its cells are. Hinted air holds levels: see [Hinted
+//! air](#hinted-air). Any other position with no chunk showing a tag, such
 //! as one past the spawning distance, holds sky 15 and voxel 0, as open sky
 //! with no lamps does.
 //!
@@ -46,6 +47,23 @@
 //! its first sub-grid exists, and a world without light propagation makes
 //! none.
 //!
+//! # Hinted air
+//!
+//! A position of hinted air within the spawning distance of a camera holds
+//! the most common level among the open voxels of its light entry, if it
+//! has one. Otherwise it holds what `light_at` reads at its middle voxel
+//! with sky fill left out: sky 15 if the column above that voxel is open
+//! and 0 if not, and voxel 0, or sky 0 with sky light off. The column is
+//! walked in a task under
+//! `JobKind::HintedColumn`, and the position holds sky 15 until the answer
+//! lands. Its answer is kept while the position stays in the map, and it
+//! walks again after any voxel edit of the world, a `reset_light` or a
+//! change of light settings, keeping its old answer until the new one
+//! lands: see [`columns`]. This costs one walk for each position of hinted
+//! air a sub-grid's box comes to touch, and one for each such position held
+//! after each of those changes. Hinted air never gets a light entry or a
+//! slot for a sub-grid.
+//!
 //! # The table
 //!
 //! The table is open addressing with linear probing, held in an
@@ -72,14 +90,21 @@ use bevy::render::{
     renderer::RenderQueue,
     texture::GpuImage,
 };
+use bevy::tasks::AsyncComputeTaskPool;
 
 use crate::chunk::CHUNK_SIZE_F;
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridId;
+use crate::pool_budget::{JobKind, PoolBudget};
 use crate::sub_grid::SubGrids;
 use crate::voxel_edits::VoxelEdits;
+use crate::voxel_world::{ConfigCopy, VoxelWorldCamera};
 
 use super::route::LightRoute;
+use super::LightSettings;
+use columns::{walked_voxel, Hinting};
+
+pub(crate) mod columns;
 
 /// The tag of an empty entry. A world chunk's tag never has bit 30 set, so
 /// no entry holding a tag can match it.
@@ -469,7 +494,7 @@ impl TagMap {
         &mut self,
         added: Vec<IVec3>,
         touched: impl Iterator<Item = IVec3>,
-        answer: impl Fn(IVec3) -> u32,
+        mut answer: impl FnMut(IVec3) -> u32,
         nothing_known: u32,
         images: &mut Assets<Image>,
     ) {
@@ -666,14 +691,21 @@ impl PendingWrites {
 }
 
 /// Keeps world `C`'s tag map in line with its sub-grids and its chunks'
-/// tags. Runs in `PostUpdate` after the sub-grids' poses are kept and after
-/// the last system that sets a chunk's tag, and sets the tags of chunks
-/// whose slots it changed.
+/// Keeps world `C`'s tag map in line with its sub-grids and its chunks'
+/// tags, and starts the walks of hinted air it waits on. Runs in
+/// `PostUpdate` after the sub-grids' poses are kept and after the last
+/// system that sets a chunk's tag, and sets the tags of chunks whose slots
+/// it changed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn upkeep<C: VoxelWorldConfig>(
     mut commands: Commands,
     mut route: ResMut<LightRoute<C>>,
     sub_grids: Option<Res<SubGrids<C>>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+    settings: Res<LightSettings<C>>,
+    configuration: Res<ConfigCopy<C>>,
+    mut budget: ResMut<PoolBudget<C>>,
+    cameras: Query<&GlobalTransform, With<VoxelWorldCamera<C>>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(sub_grids) = sub_grids else {
@@ -690,10 +722,55 @@ pub(crate) fn upkeep<C: VoxelWorldConfig>(
     if bodies.is_empty() && route.tag_map().is_none() {
         return;
     }
-    route.upkeep_tag_map(&bodies, &mut images);
+    let world = configuration.0.clone();
+    let is_hinted_air = |position| super::hinted::is_hinted_air(world.as_ref(), position);
+    let hinting = Hinting {
+        is_hinted_air: &is_hinted_air,
+        cameras: cameras
+            .iter()
+            .map(|camera| {
+                crate::chunk::chunk_containing(camera.translation().floor().as_ivec3())
+            })
+            .collect(),
+        spawning_distance: world.spawning_distance(),
+        sky: settings.sky_rule.is_some(),
+        generation: settings.walks.lock().unwrap().generation(),
+    };
+    let finished = route.upkeep_tag_map(&bodies, &hinting, &mut images);
     for (entity, tag) in route.take_changed_tags() {
         commands.entity(entity).try_insert(MeshTag::new(tag));
     }
+    budget.set_finished_last_frame(JobKind::HintedColumn, finished);
+
+    if let Some(rule) = settings.sky_rule.filter(|_| route.wants_hinted_walks()) {
+        let mut count = budget.idle();
+        if route.hinted_walks_running() == 0 {
+            count = count.max(1);
+        }
+        // On WASM tasks run between frames on the main thread.
+        if settings.main_thread {
+            count = count.min(1);
+        }
+        let pool = AsyncComputeTaskPool::get();
+        let counters = settings.task.counters.clone();
+        route.start_hinted_walks(count, |position| {
+            let (world, counters) = (world.clone(), counters.clone());
+            let reader = edits.reader();
+            let top = (position.y + 1) * crate::chunk::CHUNK_SIZE_I;
+            pool.spawn(async move {
+                super::request::column_is_open(
+                    walked_voxel(position),
+                    1,
+                    top,
+                    rule,
+                    world.as_ref(),
+                    &reader,
+                    &counters.requests,
+                )
+            })
+        });
+    }
+    budget.set_running(JobKind::HintedColumn, route.hinted_walks_running());
 }
 
 /// What the tag map of world `C` has done, for benchmarks.

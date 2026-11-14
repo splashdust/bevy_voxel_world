@@ -30,6 +30,9 @@ pub(crate) enum JobKind {
     /// A fill probe, in a world with sky fill.
     #[cfg(feature = "light_propagation")]
     FillProbe,
+    /// A walk up the column above hinted air for a lit world's tag map.
+    #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+    HintedColumn,
     /// A fragment check, in a world that detects dislodged fragments.
     #[cfg(feature = "dislodged_fragments")]
     FragmentCheck,
@@ -42,6 +45,7 @@ pub(crate) enum JobKind {
 impl JobKind {
     const COUNT: usize = 1
         + 3 * cfg!(feature = "light_propagation") as usize
+        + cfg!(all(feature = "light_propagation", feature = "sub_grids")) as usize
         + cfg!(feature = "dislodged_fragments") as usize
         + cfg!(test) as usize;
 

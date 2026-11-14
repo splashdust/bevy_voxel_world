@@ -17,6 +17,8 @@ mod coarse;
 mod edits;
 #[cfg(feature = "light_propagation")]
 mod hinted_air;
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod hinted_tag_map;
 #[cfg(feature = "light_propagation")]
 mod look;
 #[cfg(feature = "light_propagation")]
