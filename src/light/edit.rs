@@ -79,13 +79,14 @@ use super::hinted::air_inputs;
 use super::inputs::LightInputs;
 use super::probe::SkyProbes;
 use super::relight::LightWork;
-use super::sky::{walkable, Columns, Hinted, SkyRule};
+use super::sky::{walkable, Columns, SkyRule};
 use super::solver::ChunkLight;
 use super::view::{ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::ChunkRequests;
 use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::{edit_step, ChunkLookups, Hinted};
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::VoxelEdits;
 
@@ -164,12 +165,14 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     settings.walks.lock().unwrap().clear();
     let quiet = work.is_settled();
     let reader = edits.reader();
+    // The world's voxel lookups this commit makes, made at the first.
+    let mut lookups: Option<ChunkLookups<C::MaterialIndex>> = None;
     // A removed edit leaves the voxel the world generates there, which only
     // the world's voxel lookup knows. A chunk's removed voxels are looked up
     // while they fit in what is left of `LOOKED_UP_REMOVALS`.
     let mut generated = HashMap::new();
     let mut lookups_left = LOOKED_UP_REMOVALS;
-    for (position, voxels) in &by_chunk {
+    for voxels in by_chunk.values() {
         if lookups_left == 0 {
             break;
         }
@@ -183,9 +186,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             continue;
         }
         lookups_left -= removed.len();
-        let mut lookup = (configuration.voxel_lookup_delegate())(*position, 0, None);
+        let lookups = made(&mut lookups, configuration.as_ref());
         for p in removed {
-            generated.insert(p, lookup(p, None));
+            generated.insert(p, lookups.lookup(p));
         }
     }
     // The voxel at a changed position, from the change sets rather than the
@@ -411,7 +414,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 Some(true)
             } else if mask.is_some() {
                 Some(column_looked_up(
-                    configuration.as_ref(),
+                    made(&mut lookups, configuration.as_ref()),
                     &reader,
                     *position,
                     *x,
@@ -641,21 +644,31 @@ fn column_blocked_in(inputs: &LightInputs, x: usize, z: usize) -> bool {
     (0..CHUNK).any(|y| inputs.occupancy.is_solid(x, y, z))
 }
 
-/// Whether the column at `x`, `z` of the chunk position `position` holds a
-/// solid, looked up through the world's lookups and voxel edits: at most 32
-/// lookups.
-fn column_looked_up<C: VoxelWorldConfig>(
+/// The voxel lookups in `lookups`, made from `world`'s delegate if there are
+/// none yet.
+fn made<'a, C: VoxelWorldConfig>(
+    lookups: &'a mut Option<ChunkLookups<C::MaterialIndex>>,
     world: &C,
-    edits: &crate::voxel_edits::VoxelEditReader<C::MaterialIndex>,
+) -> &'a mut ChunkLookups<C::MaterialIndex> {
+    lookups.get_or_insert_with(|| ChunkLookups::new(world.voxel_lookup_delegate()))
+}
+
+/// Whether the column at `x`, `z` of the chunk position `position` holds a
+/// solid, looked up through `lookups` and voxel edits `edits`: at most 32
+/// lookups.
+fn column_looked_up<I: Copy + PartialEq>(
+    lookups: &mut ChunkLookups<I>,
+    edits: &crate::voxel_edits::VoxelEditReader<I>,
     position: IVec3,
     x: usize,
     z: usize,
 ) -> bool {
-    let mut lookup = (world.voxel_lookup_delegate())(position, 0, None);
     let min = position * CHUNK_SIZE_I;
     (0..CHUNK_SIZE_I).any(|y| {
         let at = min + IVec3::new(x as i32, y, z as i32);
-        edits.get(at).unwrap_or_else(|| lookup(at, None)).is_solid()
+        edit_step(edits, at)
+            .unwrap_or_else(|| lookups.lookup(at))
+            .is_solid()
     })
 }
 

@@ -7,6 +7,7 @@ mod debug_draw;
 mod dislodged_fragments;
 pub mod edits;
 mod grid;
+mod level_0_reader;
 #[cfg(feature = "light_propagation")]
 mod light;
 #[cfg(not(feature = "light_propagation"))]

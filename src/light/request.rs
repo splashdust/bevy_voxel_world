@@ -19,9 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use super::sky::{Hinted, SkyRule};
-use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I};
-use crate::configuration::{VoxelLookupFn, VoxelWorldConfig};
+use super::sky::SkyRule;
+use crate::chunk::{chunk_containing, CHUNK_SIZE_I};
+use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::{ChunkLookups, Hinted};
 use crate::voxel_edits::VoxelEditReader;
 
 /// How many walked voxels the cache keeps answers for.
@@ -90,9 +91,7 @@ pub(crate) fn column_is_open<C: VoxelWorldConfig>(
         SkyRule::Ceiling(chunk) => (chunk as i64 + 1) * CHUNK_SIZE_I as i64,
     }
     .min(i32::MAX as i64);
-    let delegate = world.voxel_lookup_delegate();
-    let mut hints: HashMap<IVec3, Hinted> = HashMap::new();
-    let mut lookups: HashMap<IVec3, VoxelLookupFn<C::MaterialIndex>> = HashMap::new();
+    let mut lookups = ChunkLookups::new(world.voxel_lookup_delegate());
     let mut made = 0;
     let (mut y, mut step, mut rows) = (position.y as i64, width as i64, 0);
     let open = loop {
@@ -107,25 +106,16 @@ pub(crate) fn column_is_open<C: VoxelWorldConfig>(
         let at = IVec3::new(position.x, y as i32, position.z);
         let voxel = match edits.get(at) {
             Some(voxel) => voxel,
-            None => {
-                let chunk = chunk_containing(at);
-                let hinted = *hints.entry(chunk).or_insert_with(|| {
-                    // The edit at the voxel was read first, so the hint
-                    // speaks for the voxel whatever else is edited there.
-                    Hinted::of(world.chunk_fill_hint(ChunkKey::new(chunk, 0)), false)
-                });
-                match hinted {
-                    Hinted::Air => continue,
-                    Hinted::Solid => break false,
-                    Hinted::Unknown => {
-                        made += 1;
-                        let lookup = lookups
-                            .entry(chunk)
-                            .or_insert_with(|| delegate(chunk, 0, None));
-                        lookup(at, None)
-                    }
+            // The edit at the voxel was read first, so the hint speaks for
+            // the voxel whatever else is edited there.
+            None => match lookups.hinted(world, chunk_containing(at)) {
+                Hinted::Air => continue,
+                Hinted::Solid => break false,
+                Hinted::Unknown => {
+                    made += 1;
+                    lookups.lookup(at)
                 }
-            }
+            },
         };
         if voxel.is_solid() {
             break false;

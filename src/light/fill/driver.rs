@@ -42,12 +42,13 @@ use super::{
 };
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F};
 use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::Hinted;
 use crate::light::config::LightPropagation;
 use crate::light::inputs::LightInputs;
 use crate::light::probe::{probe_position, ProbeRead, SkyProbes};
 use crate::light::record::SkyRecord;
 use crate::light::relight::LightWork;
-use crate::light::sky::{walkable, Hinted, SkyRule};
+use crate::light::sky::{walkable, SkyRule};
 use crate::light::view::LightView;
 use crate::light::LightSettings;
 use crate::pool_budget::{first_in_start_order, JobKind, PoolBudget};

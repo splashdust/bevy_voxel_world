@@ -40,15 +40,14 @@ use super::fill::driver::{field_of, SkyFillWork};
 use super::fill::open_cells;
 use super::record::SkyRecord;
 use super::relight::LightWork;
-use super::sky::{
-    padding_row, proved, provisional, ColumnAnswer, Columns, Hinted, SkyRule,
-};
+use super::sky::{padding_row, proved, provisional, ColumnAnswer, Columns, SkyRule};
 use super::solver::{ChunkLight, Solved};
 use super::view::{LightView, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::Hinted;
 use crate::pool_budget::{first_in_start_order, JobKind, PoolBudget};
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::VoxelWorldCamera;

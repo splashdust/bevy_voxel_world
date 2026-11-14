@@ -11,8 +11,9 @@ use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
-    configuration::{FillHint, VoxelWorldConfig},
+    configuration::VoxelWorldConfig,
     edits::{EditDelta, EditGap},
+    level_0_reader::{edit_step, hint_step, Level0Reader},
     traversal_alg::voxel_line_traversal,
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
@@ -251,6 +252,18 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             &self.chunk_map.get_map(),
             self.configuration.0.as_ref(),
             position,
+        )
+    }
+
+    /// A read session of the [level-0 reader](Level0Reader), which reads
+    /// voxels as the screen shows them up close, running the world's
+    /// generator on the caller's thread where no level-0 chunk is published.
+    #[allow(dead_code)]
+    pub(crate) fn level_0_reader(&self) -> Level0Reader<C> {
+        Level0Reader::new(
+            self.configuration.0.clone(),
+            self.voxel_edits.reader(),
+            self.chunk_map.get_map(),
         )
     }
 
@@ -782,7 +795,7 @@ fn voxel_at<C: VoxelWorldConfig>(
     configuration: &C,
     position: IVec3,
 ) -> WorldVoxel<C::MaterialIndex> {
-    if let Some(voxel) = voxel_edits.get(position) {
+    if let Some(voxel) = edit_step(voxel_edits, position) {
         return voxel;
     }
     let published = chunk_map
@@ -790,11 +803,9 @@ fn voxel_at<C: VoxelWorldConfig>(
         .unwrap()
         .finest_covering(position)
         .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position));
-    match published {
-        Some(voxel) => voxel,
-        None => match configuration.chunk_fill_hint(ChunkKey::containing(position, 0)) {
-            FillHint::Uniform(voxel) => voxel,
-            FillHint::Unknown => WorldVoxel::Unset,
-        },
-    }
+    published
+        .or_else(|| {
+            hint_step(configuration.chunk_fill_hint(ChunkKey::containing(position, 0)))
+        })
+        .unwrap_or(WorldVoxel::Unset)
 }

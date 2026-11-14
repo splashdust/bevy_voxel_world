@@ -3865,6 +3865,7 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
 }
 
 mod edits;
+mod level_0_reader;
 mod light;
 #[cfg(feature = "sub_grids")]
 mod sub_grids;
