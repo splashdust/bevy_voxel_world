@@ -300,8 +300,7 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         let levels = light.levels_at(local, voxel, &self.task.emission);
         // A chunk of air whose open voxels all have direct sky reads 15
         // anyway, so the larger of the two needs no check for it.
-        let inputs = &light.inputs;
-        if matches!(inputs.occupancy, Occupancy::Open) && !inputs.ring {
+        if light.inputs.reads_fill_cells() {
             return Some(brighter(levels, self.fill_cell_at(position)));
         }
         Some(levels)
@@ -440,17 +439,11 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// `position` has, or 0 where the field has none.
     fn fill_cell_at(&self, position: IVec3) -> LightLevels {
         let chunk = crate::chunk::chunk_containing(position);
-        let local = (position - chunk * crate::chunk::CHUNK_SIZE_I).as_uvec3()
-            / fill::CELL as u32;
-        let bit = fill::cell_bit(local.x as usize, local.y as usize, local.z as usize);
+        let local = (position - chunk * crate::chunk::CHUNK_SIZE_I).as_uvec3();
         let cells = self.fill_cells.read();
         let level = cells
             .get(&chunk)
-            .filter(|fill| fill.open & bit != 0)
-            .map_or(0, |fill| {
-                let sixteenths = fill.levels[bit.trailing_zeros() as usize] as u32;
-                ((sixteenths + 8) / 16).min(15) as u8
-            });
+            .map_or(0, |fill| fill::cell_level(fill, local));
         LightLevels::new(level, 0)
     }
 
@@ -531,6 +524,9 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     let emissive_materials = clamped_emission(world);
     let routed = app.world().contains_resource::<route::LightRoute<C>>();
     let fill_cells = FillCells::default();
+    if let Some(mut route) = app.world_mut().get_resource_mut::<route::LightRoute<C>>() {
+        route.set_fill_cells(fill_cells.clone());
+    }
     let field = fill::driver::field_of(&config);
     let task = Arc::new(task_settings::<C>(
         &config,

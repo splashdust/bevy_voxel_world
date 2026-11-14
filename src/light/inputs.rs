@@ -274,6 +274,14 @@ impl LightInputs {
         }
     }
 
+    /// Whether the chunk is air with no solid in its padding. Its solve takes
+    /// no sky fill, so its stored light can miss what the sky fill field's
+    /// cells know, and the light shown at each of its voxels is the larger
+    /// of the two.
+    pub fn reads_fill_cells(&self) -> bool {
+        matches!(self.occupancy, Occupancy::Open) && !self.ring
+    }
+
     /// Whether every open voxel of the chunk has direct sky. False for a
     /// chunk with no open voxel.
     pub fn all_open_direct(&self) -> bool {

@@ -73,7 +73,10 @@
 //! light texture, from a world chunk position to the tag shown there. Every
 //! change to a tag goes through one place, which notes the position for the
 //! tag map's upkeep, and the tag map's writes go to the render world in the
-//! same extract as the slots': see [`tag_map`](super::tag_map).
+//! same extract as the slots'. A chunk at a position the tag map holds is
+//! kept, which places its light whether or not its mesh shows, under a
+//! wider slot rule that reads all of its open voxels: see
+//! [`tag_map`](super::tag_map).
 //!
 //! # References
 //!
@@ -109,14 +112,16 @@ use std::hash::BuildHasher;
 use super::coarse::takes_coarse_path;
 use super::config::{LightPrecision, LightPropagation};
 use super::faces::Face;
+use super::fill::{cell_level, CellFill, FillCells, CELL};
+use super::kernel::Plane;
 use super::levels::LightLevels;
 use super::slot::{
-    across, border_plane, cell_index, convert_texels, most_common, shell_cell,
-    slot_bytes, texel_at, texel_bytes, texel_levels, texture_format, write_shell,
-    FacesSee, Seen, ShellPlane, PLANE_TEXELS,
+    across, border_plane, border_sees, cell_index, convert_texels, most_common,
+    most_common_open, open_voxels_see, shell_cell, slot_bytes, texel_at, texel_bytes,
+    texel_levels, texture_format, write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
 use super::solver::{ChannelLight, ChunkLight};
-use super::view::chunk_centre;
+use super::view::{chunk_centre, world_position};
 use crate::chunk::CHUNK_SIZE_U;
 use crate::chunk::{Chunk, ChunkKey};
 use crate::configuration::VoxelWorldConfig;
@@ -124,7 +129,7 @@ use crate::grid::GridKey;
 #[cfg(feature = "sub_grids")]
 use {
     super::tag_map::{PendingWrites, Placed, TagMap, TagMapWrites},
-    super::view::world_position,
+    super::view::in_world,
     crate::chunk::MAX_LOD_LEVEL,
     crate::configuration::LodLevel,
 };
@@ -321,6 +326,10 @@ pub(crate) struct LightRoute<C> {
     unlit_sky: u8,
     warned_full: bool,
     pub counters: SlotCounters,
+    /// The cells of the world's sky fill field, which a kept chunk of air
+    /// with no solid in its padding shows where they're brighter than its
+    /// own light.
+    fill_cells: FillCells,
     /// The tag map, once the world has a sub-grid, with what the route
     /// keeps to answer it.
     #[cfg(feature = "sub_grids")]
@@ -334,13 +343,17 @@ pub(crate) struct LightRoute<C> {
 struct TagMapping {
     map: TagMap,
     shown: ShownChunks,
+    /// The kept chunks of air whose light reads the sky fill field's cells,
+    /// with the cells their tags and slots were last made from.
+    filled: HashMap<RouteId, Option<Arc<CellFill>>>,
 }
 
-/// The world chunks showing their meshes, by position, for a tag map.
+/// The world chunks showing their tags, by position, for a tag map.
 #[cfg(feature = "sub_grids")]
 #[derive(Default)]
 struct ShownChunks {
-    /// The level-0 world chunk showing its mesh at each position.
+    /// The level-0 world chunk showing its mesh at each position, or else
+    /// the one kept there while the tag map holds the position.
     level_0: HashMap<IVec3, RouteId>,
     /// The coarse world chunk showing its mesh at each key.
     coarse: HashMap<ChunkKey, Entity>,
@@ -407,6 +420,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             unlit_sky: sky,
             warned_full: false,
             counters: SlotCounters::default(),
+            fill_cells: FillCells::default(),
             #[cfg(feature = "sub_grids")]
             tag_map: None,
             _world: PhantomData,
@@ -425,6 +439,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// level `sky` from now on, after the world's sky rule changed.
     pub fn set_unlit_sky(&mut self, sky: u8) {
         self.unlit_sky = sky;
+    }
+
+    /// Makes kept chunks read the cells of the world's sky fill field from
+    /// `cells`.
+    pub fn set_fill_cells(&mut self, cells: FillCells) {
+        self.fill_cells = cells;
     }
 
     /// What a chunk with no light of its own shows.
@@ -458,7 +478,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 }
                 chunk.tag = tag;
                 #[cfg(feature = "sub_grids")]
-                if let (true, Some(mapping)) = (chunk.shown, self.tag_map.as_mut()) {
+                if let (true, Some(mapping)) = (chunk.placed(), self.tag_map.as_mut()) {
                     mapping.shown.touched.extend(world_position(&chunk.key));
                 }
                 let entity = match id {
@@ -543,22 +563,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         for id in ids {
             let chunk = &self.chunks[&id];
             let had_slot = chunk.slot.is_some();
-            let shows = match &chunk.light {
-                None => unlit,
-                Some(light) => {
-                    let sees = chunk.sees();
-                    if had_slot || sees.needs_slot() {
-                        self.flat_levels(most_common(light), light.precision)
-                    } else {
-                        self.flat_levels(flat_tag(&sees, light), light.precision)
-                    }
-                }
-            };
             let current = chunk
                 .light
                 .as_ref()
                 .is_some_and(|light| light.precision == precision);
-            let starved = current && (had_slot || chunk.sees().needs_slot());
+            let (shows, needs_slot) = match self.placed_light(id) {
+                None => (unlit, false),
+                Some((_, sees)) if had_slot || sees.needs_slot() => {
+                    (self.most_common_shows(id), sees.needs_slot())
+                }
+                Some((light, sees)) => (
+                    self.flat_levels(flat_tag(&sees, &light), light.precision),
+                    false,
+                ),
+            };
+            let starved = current && (had_slot || needs_slot);
             let chunk = self.chunks.get_mut(&id).unwrap();
             let convert = |seen: Seen| match seen {
                 Seen::One(level) => Seen::One(precision.convert(level, old)),
@@ -696,7 +715,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         chunk.light = Some(light.clone());
         chunk.own = own;
         chunk.bytes = bytes;
+        #[cfg(not(feature = "sub_grids"))]
         self.at.insert(key, id);
+        #[cfg(feature = "sub_grids")]
+        {
+            let before = self.at.insert(key, id);
+            self.tag_map_landed(id, key, before);
+        }
         self.entries.remove(&key);
         if first || new_voxels {
             let across = Face::ALL.map(|face| {
@@ -716,7 +741,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// one, and the slot's bytes are queued. A chunk with no entity that is
     /// no longer kept is forgotten, and one with an entity whose mesh isn't
     /// shown gives its slot back.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
+    ///
+    /// A kept chunk takes a slot unless every one of its open voxels, and
+    /// every open voxel its slot's shell copies from its face neighbours,
+    /// holds one level per channel. Without a slot it shows the most common
+    /// level among its open voxels. A chunk showing its mesh that is no
+    /// longer kept goes back to the rule in [`slot`](super::slot).
+    #[cfg_attr(
+        not(any(test, feature = "sub_grids")),
+        expect(dead_code, reason = "called by the tag map")
+    )]
     fn keep(&mut self, id: RouteId, key: GridKey, kept: bool) {
         if kept {
             self.add_chunk(id, key);
@@ -728,28 +762,38 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return;
         }
         chunk.kept = kept;
-        if kept {
-            self.settle(id, None);
-            return;
+        let shown = chunk.shown;
+        #[cfg(feature = "sub_grids")]
+        if let (Some(mapping), Some(position)) =
+            (self.tag_map.as_mut(), world_position(&key))
+        {
+            if kept && !shown {
+                mapping.shown.level_0.entry(position).or_insert(id);
+                mapping.shown.touched.insert(position);
+            }
+            if !kept {
+                mapping.filled.remove(&id);
+            }
         }
-        if chunk.shown {
+        if kept || shown {
+            self.settle(id, None);
             return;
         }
         if let RouteId::Key(_) = id {
             self.forget_chunk(id);
             return;
         }
-        let light = chunk.light.clone();
+        let chunk = self.chunks.get_mut(&id).unwrap();
         let slot = chunk.slot.take();
         chunk.bytes = None;
         if let Some(slot) = slot {
             self.free_slot(slot);
         }
         self.starved.remove(&id);
-        let shows = light.map_or(self.unlit(), |light| {
-            self.flat_levels(most_common(&light), light.precision)
-        });
+        let shows = self.most_common_shows(id);
         self.retag(Tagged::Chunk(id), shows);
+        #[cfg(feature = "sub_grids")]
+        self.tag_map_forget(id, key);
     }
 
     /// Takes the light that landed for the light entry at `key`, which
@@ -989,11 +1033,15 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(chunk) = self.chunks.get(&id) else {
             return;
         };
-        let (true, Some(light)) = (chunk.placed(), chunk.light.clone()) else {
+        if !chunk.placed() {
+            return;
+        }
+        let (slot, key) = (chunk.slot, chunk.key);
+        let Some((light, sees)) = self.placed_light(id) else {
             return;
         };
-        let sees = chunk.sees();
-        let (slot, key) = (chunk.slot, chunk.key);
+        #[cfg(feature = "sub_grids")]
+        self.note_fill_cells(id);
         self.starved.remove(&id);
         let shows = if light.precision != self.precision {
             // Light solved before a change of precision shows flat until it
@@ -1002,7 +1050,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.chunks.get_mut(&id).unwrap().slot = None;
                 self.free_slot(slot);
             }
-            self.flat_levels(most_common(&light), light.precision)
+            self.most_common_shows(id)
         } else if sees.needs_slot() {
             match (slot, face) {
                 (Some(slot), Some(face)) => {
@@ -1025,7 +1073,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                         }
                         None => {
                             self.starved.insert(id);
-                            self.flat_levels(most_common(&light), light.precision)
+                            self.most_common_shows(id)
                         }
                     }
                 }
@@ -1043,6 +1091,133 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             chunk.bytes = None;
         }
         self.retag(Tagged::Chunk(id), shows);
+    }
+
+    /// The light the level-0 chunk `id` shows, and what the voxels its slot
+    /// rule reads hold, once its light has landed. A kept chunk reads all of
+    /// its open voxels and its shell's, and shows its light as
+    /// [`kept_light`](Self::kept_light) gives it. Any other chunk reads the
+    /// voxels [`slot`](super::slot) describes.
+    fn placed_light(&self, id: RouteId) -> Option<(Arc<ChunkLight>, FacesSee)> {
+        let chunk = self.chunks.get(&id)?;
+        let light = chunk.light.as_ref()?;
+        if !chunk.kept {
+            return Some((light.clone(), chunk.sees()));
+        }
+        let light = self.kept_light(chunk.key, light);
+        let (sky, voxel) = open_voxels_see(&light);
+        let mut sees = FacesSee {
+            sky,
+            voxel,
+            lamp: chunk.own.lamp,
+        };
+        for face in Face::ALL {
+            if sees.needs_slot() {
+                break;
+            }
+            if let Some(neighbour) = self.neighbour_light(chunk.key, face) {
+                let (sky, voxel) =
+                    border_sees(&neighbour, face.opposite(), self.precision);
+                sees = sees.join(FacesSee {
+                    sky,
+                    voxel,
+                    lamp: false,
+                });
+            }
+        }
+        Some((light, sees))
+    }
+
+    /// What the level-0 chunk `id` shows with no slot while its light needs
+    /// one: the most common level per channel among the voxels its slot rule
+    /// reads, or the levels of a chunk with no light if its light hasn't
+    /// landed.
+    fn most_common_shows(&self, id: RouteId) -> Shows {
+        let chunk = &self.chunks[&id];
+        let Some(light) = &chunk.light else {
+            return self.unlit();
+        };
+        if chunk.kept {
+            let light = self.kept_light(chunk.key, light);
+            self.flat_levels(most_common_open(&light), light.precision)
+        } else {
+            self.flat_levels(most_common(light), light.precision)
+        }
+    }
+
+    /// The light a kept chunk at `key` lit by `light` shows. A chunk of air
+    /// with no solid in its padding shows, at each voxel, the larger of its
+    /// own sky light and that of the sky fill field's cell holding the voxel,
+    /// as `light_at` reads it. Any other chunk shows its own light.
+    fn kept_light(&self, key: GridKey, light: &Arc<ChunkLight>) -> Arc<ChunkLight> {
+        let position = world_position(&key).filter(|_| light.inputs.reads_fill_cells());
+        let cells = self.fill_cells.read();
+        match position.and_then(|position| cells.get(&position)) {
+            Some(fill) => with_fill_cells(light, fill),
+            None => light.clone(),
+        }
+    }
+
+    /// Notes which sky fill field cells the kept chunk `id` was settled with,
+    /// if its light reads them, so that upkeep settles it again when they
+    /// change: see [`follow_fill_cells`](Self::follow_fill_cells).
+    #[cfg(feature = "sub_grids")]
+    fn note_fill_cells(&mut self, id: RouteId) {
+        let chunk = &self.chunks[&id];
+        let reads = chunk.kept
+            && chunk
+                .light
+                .as_ref()
+                .is_some_and(|light| light.inputs.reads_fill_cells());
+        let position = world_position(&chunk.key);
+        let Some(mapping) = self.tag_map.as_mut() else {
+            return;
+        };
+        match (reads, position) {
+            (true, Some(position)) => {
+                let cells = self.fill_cells.read().get(&position).cloned();
+                mapping.filled.insert(id, cells);
+            }
+            _ => {
+                mapping.filled.remove(&id);
+            }
+        }
+    }
+
+    /// Settles again each kept chunk whose sky fill field cells changed since
+    /// it was last settled. A chunk of air with no solid in its padding takes
+    /// no sky fill in its solve, so no relight of it follows the cells.
+    #[cfg(feature = "sub_grids")]
+    fn follow_fill_cells(&mut self) {
+        let Some(mapping) = self.tag_map.as_ref() else {
+            return;
+        };
+        if mapping.filled.is_empty() {
+            return;
+        }
+        let changed: Vec<RouteId> = {
+            let cells = self.fill_cells.read();
+            mapping
+                .filled
+                .iter()
+                .filter(|(id, used)| {
+                    let now = self
+                        .chunks
+                        .get(*id)
+                        .and_then(|chunk| world_position(&chunk.key))
+                        .and_then(|position| cells.get(&position));
+                    match (now, used) {
+                        (Some(now), Some(used)) => !Arc::ptr_eq(now, used),
+                        (None, None) => false,
+                        _ => true,
+                    }
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in changed {
+            self.settle(id, None);
+        }
     }
 
     /// Queues the whole slot of the level-0 chunk `id`: its own voxels' light
@@ -1159,10 +1334,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.retag(holder, Shows::Levels(sky, voxel));
             }
             Tagged::Chunk(id) => {
-                let light = self.chunks[&id].light.clone();
-                let shows = light.map_or(self.unlit(), |light| {
-                    self.flat_levels(most_common(&light), light.precision)
-                });
+                let shows = self.most_common_shows(id);
                 self.chunks.get_mut(&id).unwrap().slot = None;
                 self.retag(holder, shows);
                 self.starved.insert(id);
@@ -1218,18 +1390,35 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// The tag map is made, with its texture added to `images`, once there
     /// is a sub-grid.
     ///
+    /// The level-0 world chunk at each position the map comes to hold is
+    /// kept, under the slot rule [`keep`](Self::keep) describes, and one at
+    /// a position it stops holding is no longer kept, so its slot is freed in
+    /// the frame its entry leaves. Changed tags of chunks showing their meshes
+    /// wait in [`take_changed_tags`](Self::take_changed_tags).
+    ///
     /// Its cost grows with the positions whose tags changed since the last
-    /// upkeep, and with what [`TagMap::upkeep`] costs.
+    /// upkeep, with what [`TagMap::place`] and [`TagMap::write_entries`]
+    /// cost, and with the chunks of air near sub-grids whose light varies,
+    /// whose slots' bytes are made from the light the world view stores.
     #[cfg(feature = "sub_grids")]
     pub fn upkeep_tag_map(&mut self, bodies: &[Placed], images: &mut Assets<Image>) {
         if self.tag_map.is_none() && bodies.is_empty() {
             return;
         }
         let started = Instant::now();
-        let mut mapping = match self.tag_map.take() {
-            Some(mapping) => mapping,
-            None => self.new_tag_mapping(images),
-        };
+        if self.tag_map.is_none() {
+            self.tag_map = Some(self.new_tag_mapping(images));
+        }
+        let placement = self.tag_map.as_mut().unwrap().map.place(bodies);
+        // Slots freed first go to the chunks kept next.
+        for position in &placement.removed {
+            self.tag_map_holds(*position, false);
+        }
+        for position in &placement.added {
+            self.tag_map_holds(*position, true);
+        }
+        self.follow_fill_cells();
+        let mut mapping = self.tag_map.take().unwrap();
         let mut touched: Vec<IVec3> = mapping.shown.touched.drain().collect();
         for key in mapping.shown.touched_coarse.drain() {
             let (first, side) = (key.position, key.extent());
@@ -1249,11 +1438,55 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
         }
         let nothing_known = tag_levels(self.precision.of_whole(15), 0, self.precision);
-        let TagMapping { mut map, shown } = mapping;
+        let TagMapping {
+            mut map,
+            shown,
+            filled,
+        } = mapping;
         let answer = |position: IVec3| self.tag_at(&shown, position, nothing_known);
-        map.upkeep(bodies, touched.into_iter(), answer, nothing_known, images);
+        map.write_entries(
+            placement.added,
+            touched.into_iter(),
+            answer,
+            nothing_known,
+            images,
+        );
         map.counters.upkeep_nanos += started.elapsed().as_nanos() as u64;
-        self.tag_map = Some(TagMapping { map, shown });
+        self.tag_map = Some(TagMapping { map, shown, filled });
+    }
+
+    /// Keeps the level-0 world chunk at `position` while the tag map `held`
+    /// the position, if its light has landed.
+    #[cfg(feature = "sub_grids")]
+    fn tag_map_holds(&mut self, position: IVec3, held: bool) {
+        let key = in_world(position);
+        if let Some(&id) = self.at.get(&key) {
+            self.keep(id, key, held);
+        }
+    }
+
+    /// Keeps the level-0 chunk `id`, whose light has just landed at `key`,
+    /// if the tag map holds its position, and stops keeping `before`, the
+    /// chunk whose light landed there last, if that was another chunk. Its
+    /// light is settled after this.
+    #[cfg(feature = "sub_grids")]
+    fn tag_map_landed(&mut self, id: RouteId, key: GridKey, before: Option<RouteId>) {
+        let (Some(mapping), Some(position)) =
+            (self.tag_map.as_mut(), world_position(&key))
+        else {
+            return;
+        };
+        if mapping.map.holds(position) {
+            let chunk = self.chunks.get_mut(&id).unwrap();
+            chunk.kept = true;
+            if !chunk.shown {
+                mapping.shown.level_0.entry(position).or_insert(id);
+                mapping.shown.touched.insert(position);
+            }
+        }
+        if let Some(before) = before.filter(|before| *before != id) {
+            self.keep(before, key, false);
+        }
     }
 
     /// A tag map for a world that has just got its first sub-grid, with the
@@ -1263,6 +1496,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let mut mapping = TagMapping {
             map: TagMap::new(images),
             shown: ShownChunks::default(),
+            filled: HashMap::default(),
         };
         for (id, chunk) in &self.chunks {
             if let (true, Some(position)) = (chunk.shown, world_position(&chunk.key)) {
@@ -1305,8 +1539,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         nothing_known
     }
 
-    /// Notes for the tag map that the level-0 chunk `id` at `key` is gone.
-    /// Another chunk showing its mesh at the same key takes its place.
+    /// Notes for the tag map that the level-0 chunk `id` at `key` is gone,
+    /// or no longer shows its tag there. Another chunk at the same key
+    /// showing its mesh, or else one kept there, takes its place.
     #[cfg(feature = "sub_grids")]
     fn tag_map_forget(&mut self, id: RouteId, key: GridKey) {
         let (Some(mapping), Some(position)) =
@@ -1314,6 +1549,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         else {
             return;
         };
+        mapping.filled.remove(&id);
         if mapping.shown.level_0.get(&position) != Some(&id) {
             return;
         }
@@ -1322,7 +1558,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let other = self
             .chunks
             .iter()
-            .find(|(_, chunk)| chunk.shown && chunk.key == key)
+            .filter(|(other, chunk)| **other != id && chunk.placed() && chunk.key == key)
+            .max_by_key(|(_, chunk)| chunk.shown)
             .map(|(other, _)| *other);
         if let Some(other) = other {
             mapping.shown.level_0.insert(position, other);
@@ -1339,6 +1576,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     #[cfg(feature = "sub_grids")]
     pub fn take_tag_map_writes(&mut self) -> Option<TagMapWrites> {
         self.tag_map.as_mut()?.map.take_writes()
+    }
+
+    /// How many slots chunks hold.
+    #[cfg(all(test, feature = "sub_grids"))]
+    pub fn slots_held(&self) -> usize {
+        self.holders.len()
     }
 
     /// The bytes queued whole for `slot` and not yet taken by the render
@@ -1393,6 +1636,48 @@ fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> (u8, u8) {
         _ => 0,
     };
     (level(sees.sky, &light.sky), level(sees.voxel, &light.voxel))
+}
+
+/// `light` with the sky light at each voxel raised to that of the sky fill
+/// field's cell holding it in `fill`, where the cell's is larger. The same
+/// light, shared, when no cell's is.
+///
+/// Its cost grows with the chunk's voxels.
+fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> {
+    let precision = light.precision;
+    let cells: [u8; 64] = std::array::from_fn(|bit| {
+        let cell = UVec3::new(bit as u32 % 4, bit as u32 / 4 % 4, bit as u32 / 16);
+        precision.of_whole(cell_level(fill, cell * CELL as u32))
+    });
+    if cells.iter().all(|level| *level == 0) {
+        return light.clone();
+    }
+    let side = CHUNK_SIZE_U as usize;
+    let mut planes: Vec<Plane> = vec![[0; 32 * 32]; precision.bits()];
+    let mut raised = false;
+    for y in 0..side {
+        for x in 0..side {
+            let column = x + y * side;
+            for z in 0..side {
+                let stored = light.sky.at(x, y, z);
+                let cell = cells[x / CELL + y / CELL * 4 + z / CELL * 16];
+                raised |= cell > stored;
+                let level = stored.max(cell);
+                for (bit, plane) in planes.iter_mut().enumerate() {
+                    plane[column] |= ((level >> bit & 1) as u32) << z;
+                }
+            }
+        }
+    }
+    if !raised {
+        return light.clone();
+    }
+    Arc::new(ChunkLight {
+        inputs: light.inputs.clone(),
+        sky: ChannelLight::Planes(planes.into_boxed_slice()),
+        voxel: light.voxel.clone(),
+        precision,
+    })
 }
 
 /// Sets the tag of a chunk of world `C` as its mesh is shown, and queues its
@@ -1716,6 +2001,176 @@ mod tests {
             route.tag_map().unwrap().answer(IVec3::new(2, 0, 0)),
             Some(15)
         );
+    }
+
+    /// The light of a chunk of air at 16 levels whose sky is 9 at every
+    /// voxel but one, which holds 8, and whose voxel light is 0.
+    #[cfg(feature = "sub_grids")]
+    fn air_lit_voxel_by_voxel() -> Arc<ChunkLight> {
+        let mut sky: Vec<Plane> = (0..4)
+            .map(|bit| [if 9 >> bit & 1 == 1 { !0 } else { 0 }; 32 * 32])
+            .collect();
+        // 8 at x = 3, y = 30, z = 7: bit 3 only.
+        for (bit, plane) in sky.iter_mut().enumerate() {
+            let column = &mut plane[3 + 30 * 32];
+            *column = *column & !(1 << 7) | ((8 >> bit & 1) as u32) << 7;
+        }
+        Arc::new(ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy: Occupancy::Open,
+                emissive: Vec::new(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChannelLight::Planes(sky.into_boxed_slice()),
+            voxel: ChannelLight::Uniform(0),
+            precision: LightPrecision::Steps16,
+        })
+    }
+
+    /// A route whose texture holds `capacity` slots, with a camera at the
+    /// origin.
+    #[cfg(feature = "sub_grids")]
+    fn route_of(capacity: u32) -> LightRoute<DefaultWorld> {
+        let mut images = Assets::<Image>::default();
+        let config = LightPropagation {
+            slot_capacity: capacity,
+            ..default()
+        };
+        let mut route = LightRoute::new(&config, 15, &mut images);
+        route.set_cameras([Vec3::ZERO].into_iter());
+        route
+    }
+
+    /// A sub-grid of two voxels in the middle of the world chunk at
+    /// `position`.
+    #[cfg(feature = "sub_grids")]
+    fn body_in(position: IVec3) -> Placed {
+        Placed {
+            grid: GridId::new(1),
+            pose: GlobalTransform::from_translation(position.as_vec3() * 32.0 + 15.0),
+            bounds: Some((IVec3::ZERO, IVec3::splat(2))),
+        }
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn an_air_chunk_in_the_tag_map_shows_its_most_common_open_level_until_a_slot_frees() {
+        let mut route = route_of(1);
+        let mut images = Assets::<Image>::default();
+        let (light, own) = light_needing_a_slot();
+        let holder = Entity::from_raw_u32(1).unwrap();
+        let near = in_world(IVec3::ZERO);
+        route.light_landed(near, holder, light, own, None, true);
+        assert_ne!(route.show(holder, near, false) & HAS_SLOT, 0);
+        // An air chunk with no mesh, farther from the camera than the holder.
+        let air = Entity::from_raw_u32(2).unwrap();
+        let far = in_world(IVec3::new(3, 0, 0));
+        let air_light = air_lit_voxel_by_voxel();
+        route.light_landed(
+            far,
+            air,
+            air_light.clone(),
+            own_faces_see(&air_light),
+            None,
+            true,
+        );
+        let body = body_in(IVec3::new(3, 0, 0));
+
+        route.upkeep_tag_map(&[body], &mut images);
+
+        let flat = tag_levels(9, 0, LightPrecision::Steps16);
+        let answer = |route: &LightRoute<DefaultWorld>| {
+            route.tag_map().unwrap().answer(IVec3::new(3, 0, 0))
+        };
+        assert_eq!(answer(&route), Some(flat));
+        assert_ne!(route.chunks[&RouteId::Entity(holder)].tag & HAS_SLOT, 0);
+
+        // The holder despawns, and its slot goes to the air chunk.
+        route.forget(holder);
+        route.refill();
+        route.upkeep_tag_map(&[body], &mut images);
+
+        let tag = answer(&route).unwrap();
+        assert_ne!(tag & HAS_SLOT, 0);
+        let queued = route.queued_upload(tag & 0xFF_FFFF).expect("bytes queued");
+        assert_eq!(queued, &slot_bytes(&air_light)[..]);
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn an_air_chunk_in_the_tag_map_takes_the_slot_of_a_farther_holder() {
+        let mut route = route_of(1);
+        let mut images = Assets::<Image>::default();
+        let (light, own) = light_needing_a_slot();
+        let holder = Entity::from_raw_u32(1).unwrap();
+        let far = in_world(IVec3::new(5, 0, 0));
+        route.light_landed(far, holder, light, own, None, true);
+        assert_ne!(route.show(holder, far, false) & HAS_SLOT, 0);
+        let air = Entity::from_raw_u32(2).unwrap();
+        let near = in_world(IVec3::X);
+        let air_light = air_lit_voxel_by_voxel();
+        route.light_landed(
+            near,
+            air,
+            air_light.clone(),
+            own_faces_see(&air_light),
+            None,
+            true,
+        );
+
+        route.upkeep_tag_map(&[body_in(IVec3::X)], &mut images);
+
+        let tag = route.tag_map().unwrap().answer(IVec3::X).unwrap();
+        assert_ne!(tag & HAS_SLOT, 0);
+        assert_eq!(route.chunks[&RouteId::Entity(holder)].tag & HAS_SLOT, 0);
+        assert_eq!(route.counters.evictions, 1);
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_shown_chunk_takes_the_wider_rule_only_while_the_tag_map_holds_it() {
+        let mut route = route_of(16);
+        let mut images = Assets::<Image>::default();
+        // One solid voxel in a chunk of the air above: the open voxels
+        // around the solid one hold 9, but one far from it holds 8.
+        let air = air_lit_voxel_by_voxel();
+        let mut occupancy = Occupancy::Open;
+        occupancy.set(16, 16, 16, true);
+        occupancy.normalize();
+        let light = Arc::new(ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Vec::new(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: match &air.sky {
+                ChannelLight::Planes(planes) => ChannelLight::Planes(planes.clone()),
+                ChannelLight::Uniform(level) => ChannelLight::Uniform(*level),
+            },
+            voxel: ChannelLight::Uniform(0),
+            precision: LightPrecision::Steps16,
+        });
+        let own = own_faces_see(&light);
+        assert!(!own.needs_slot());
+        let entity = Entity::from_raw_u32(1).unwrap();
+        let key = in_world(IVec3::X);
+        route.light_landed(key, entity, light, own, None, true);
+        let flat = route.show(entity, key, false);
+        assert_eq!(flat, tag_levels(9, 0, LightPrecision::Steps16));
+
+        route.upkeep_tag_map(&[body_in(IVec3::X)], &mut images);
+        let tag = route.chunks[&RouteId::Entity(entity)].tag;
+        assert_ne!(tag & HAS_SLOT, 0);
+        assert_eq!(route.tag_map().unwrap().answer(IVec3::X), Some(tag));
+        assert_eq!(route.take_changed_tags().next_back(), Some((entity, tag)));
+
+        // The body moves away, and the chunk gives its slot back.
+        route.upkeep_tag_map(&[body_in(IVec3::new(9, 0, 0))], &mut images);
+        assert_eq!(route.chunks[&RouteId::Entity(entity)].tag, flat);
+        assert!(route.holders.is_empty());
+        assert_eq!(route.tag_map().unwrap().answer(IVec3::X), None);
     }
 
     #[test]

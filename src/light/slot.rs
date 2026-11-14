@@ -502,12 +502,45 @@ fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
 /// voxel light. A chunk with no open voxel holds [`Seen::Nothing`].
 ///
 /// Unlike [`own_faces_see`], it reads open voxels far from any solid too.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
 pub(crate) fn open_voxels_see(light: &ChunkLight) -> (Seen, Seen) {
     let Some(open) = open_voxels(&light.inputs.occupancy) else {
         return (Seen::Nothing, Seen::Nothing);
     };
     (seen_over(&light.sky, &open), seen_over(&light.voxel, &open))
+}
+
+/// What the open voxels on `face` of the chunk lit by `light` hold, as sky
+/// light and voxel light in steps of `precision`: what the shell plane of
+/// the chunk across `face` holds in front of them. A face with no open voxel
+/// holds [`Seen::Nothing`].
+pub(crate) fn border_sees(
+    light: &ChunkLight,
+    face: Face,
+    precision: LightPrecision,
+) -> (Seen, Seen) {
+    let occupancy = &light.inputs.occupancy;
+    let (mut sky, mut voxel) = (Seen::Nothing, Seen::Nothing);
+    if let Occupancy::Solid = occupancy {
+        return (sky, voxel);
+    }
+    let level = |channel: &ChannelLight, (x, y, z)| {
+        Seen::One(precision.convert(channel.at(x, y, z), light.precision))
+    };
+    for v in 0..CHUNK {
+        for u in 0..CHUNK {
+            let voxel_at = face.voxel(u, v);
+            let (x, y, z) = voxel_at;
+            if occupancy.is_solid(x, y, z) {
+                continue;
+            }
+            sky = sky.join(level(&light.sky, voxel_at));
+            voxel = voxel.join(level(&light.voxel, voxel_at));
+            if sky == Seen::Mixed && voxel == Seen::Mixed {
+                return (sky, voxel);
+            }
+        }
+    }
+    (sky, voxel)
 }
 
 /// The most common level per channel among every open voxel of the chunk lit
@@ -516,7 +549,6 @@ pub(crate) fn open_voxels_see(light: &ChunkLight) -> (Seen, Seen) {
 /// Unlike [`most_common`], it counts open voxels far from any solid too, so
 /// an open chunk lit voxel by voxel gets its own most common level and not 0.
 /// Its cost grows with the chunk's open voxels.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by tests"))]
 pub(crate) fn most_common_open(light: &ChunkLight) -> (u8, u8) {
     let open = open_voxels(&light.inputs.occupancy);
     let level = |channel| most_common_over(channel, open.as_deref(), light.precision);

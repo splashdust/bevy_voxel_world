@@ -9,6 +9,8 @@ use bevy::prelude::*;
 use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, FloorWorld};
 use crate::prelude::*;
 
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod air_slots;
 #[cfg(feature = "light_propagation")]
 mod coarse;
 #[cfg(feature = "light_propagation")]

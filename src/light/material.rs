@@ -384,13 +384,15 @@ where
         ),
     );
     // The tag map reads this frame's poses, and the tags every system before
-    // it set.
+    // it set. A slot it gives a chunk can be the first, which makes the
+    // texture.
     #[cfg(feature = "sub_grids")]
     app.add_systems(
         PostUpdate,
         super::tag_map::upkeep::<C>
             .after(crate::sub_grid::SubGrids::<C>::snapshot_poses)
-            .after(super::follow_config::<C>),
+            .after(super::follow_config::<C>)
+            .before(make_texture::<C, M>),
     );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()

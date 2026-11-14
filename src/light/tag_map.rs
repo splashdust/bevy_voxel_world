@@ -11,8 +11,22 @@
 //! the encoding [`route`](super::route) describes: a level-0 chunk's tag, or
 //! else the tag of the coarse chunk covering the position, whose LOD bits
 //! say how wide its cells are. A position with no chunk showing a tag, such
-//! as one past the spawning distance or a chunk of air with no mesh, holds
-//! sky 15 and voxel 0, as open sky with no lamps does.
+//! as one past the spawning distance, holds sky 15 and voxel 0, as open sky
+//! with no lamps does.
+//!
+//! **Slots near a sub-grid.** While the map holds a position, the route
+//! keeps the level-0 world chunk there, a chunk of air with no mesh
+//! included, and gives it a slot unless every one of its open voxels, and
+//! every open voxel its slot's shell copies from its face neighbours, holds
+//! one level per channel. Its slot's bytes are made from the light the
+//! world view already stores, so no relight runs. A chunk of air with no
+//! solid in its padding shows the larger of its own sky light and the sky
+//! fill field's, as `light_at` reads it. Slots come from the world's budget
+//! under the rule the route describes, with no priority for sub-grids, and
+//! while a chunk has none its entry holds the most common level among its
+//! open voxels. When the map stops holding the position, the chunk's slot
+//! is freed in the frame its entry leaves, and a chunk showing its mesh
+//! goes back to the slot rule in [`slot`](super::slot).
 //!
 //! **When entries are written.** Upkeep runs in `PostUpdate`, after
 //! transform propagation and after the last change to a chunk's tag, and an
@@ -24,10 +38,11 @@
 //!
 //! **Cost.** Upkeep grows with the world chunk positions the sub-grids'
 //! boxes touch, and a tumbling sub-grid's box touches more of them than a
-//! still one's. Each entry takes 16 bytes of texture, and the table keeps
-//! at least twice as many entries' room as it holds. When it runs out of
-//! room it doubles, replacing its texture, and every entry is written again
-//! in that frame. It never shrinks. A world makes its tag map in the frame
+//! still one's. Slots go to the chunks of air near sub-grids whose light
+//! varies, and making a slot's bytes grows with the chunk's voxels. Each
+//! entry takes 16 bytes of texture, and the table keeps at least twice as
+//! many entries' room as it holds. When it runs out of room it doubles,
+//! replacing its texture, and every entry is written again in that frame. It never shrinks. A world makes its tag map in the frame
 //! its first sub-grid exists, and a world without light propagation makes
 //! none.
 //!
@@ -45,6 +60,7 @@
 //! does.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::mesh::MeshTag;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::render::{
@@ -283,6 +299,12 @@ pub(crate) struct Placed {
     pub bounds: Option<(IVec3, IVec3)>,
 }
 
+/// The positions one [`TagMap::place`] added to the map and removed from it.
+pub(crate) struct Placement {
+    pub added: Vec<IVec3>,
+    pub removed: Vec<IVec3>,
+}
+
 /// What a sub-grid adds to the tag map, as of its last upkeep.
 struct Body {
     pose: GlobalTransform,
@@ -373,23 +395,19 @@ impl TagMap {
         &self.texture
     }
 
-    /// Brings the map in line with `bodies`, each sub-grid placed, and
-    /// with the tags `answer` gives: for each
-    /// position whose tag may have changed since the last upkeep, from
-    /// `touched`, and for each position the map comes to hold. A position
-    /// with no tag known holds `nothing_known`.
+    /// Whether the map holds `position`.
+    pub fn holds(&self, position: IVec3) -> bool {
+        self.held.contains_key(&position)
+    }
+
+    /// Brings the positions the map holds in line with `bodies`, each
+    /// sub-grid placed. Positions no sub-grid adds any more leave the table
+    /// at once. Returns the positions added and removed, and the added ones
+    /// get their entries from [`write_entries`](Self::write_entries).
     ///
-    /// The table grows into a new texture added to `images` when it runs
-    /// out of room. Its cost grows with the positions the sub-grids add,
-    /// for each sub-grid whose pose or box changed, and with `touched`.
-    pub fn upkeep(
-        &mut self,
-        bodies: &[Placed],
-        touched: impl Iterator<Item = IVec3>,
-        answer: impl Fn(IVec3) -> u32,
-        nothing_known: u32,
-        images: &mut Assets<Image>,
-    ) {
+    /// Its cost grows with the positions the sub-grids add, for each
+    /// sub-grid whose pose or box changed.
+    pub fn place(&mut self, bodies: &[Placed]) -> Placement {
         let mut added = Vec::new();
         let mut removed = Vec::new();
         let live: HashSet<GridId> = bodies.iter().map(|body| body.grid).collect();
@@ -431,18 +449,32 @@ impl TagMap {
                 },
             );
         }
+        // A position released and taken again in the same upkeep stays.
+        removed.retain(|position| !self.held.contains_key(position));
+        added.retain(|position| self.table.get(*position).is_none());
         for position in &removed {
-            // A position released and taken again in the same upkeep stays.
-            if !self.held.contains_key(position) {
-                self.table.remove(*position);
-            }
+            self.table.remove(*position);
         }
+        Placement { added, removed }
+    }
 
+    /// Writes the tags `answer` gives into the table: for each position in
+    /// `added`, from [`place`](Self::place), and for each position whose
+    /// tag may have changed since the last upkeep, from `touched`. A
+    /// position with no tag known holds `nothing_known`.
+    ///
+    /// The table grows into a new texture added to `images` when it runs
+    /// out of room. Its cost grows with `added` and `touched`.
+    pub fn write_entries(
+        &mut self,
+        added: Vec<IVec3>,
+        touched: impl Iterator<Item = IVec3>,
+        answer: impl Fn(IVec3) -> u32,
+        nothing_known: u32,
+        images: &mut Assets<Image>,
+    ) {
         let mut whole = std::mem::take(&mut self.fresh);
-        let new: Vec<IVec3> = added
-            .into_iter()
-            .filter(|position| self.table.get(*position).is_none())
-            .collect();
+        let new = added;
         let needed = self.table.len() + new.len();
         if !self.table.has_room_for(needed) {
             self.grow_for(needed, images);
@@ -635,8 +667,10 @@ impl PendingWrites {
 
 /// Keeps world `C`'s tag map in line with its sub-grids and its chunks'
 /// tags. Runs in `PostUpdate` after the sub-grids' poses are kept and after
-/// the last system that sets a chunk's tag.
+/// the last system that sets a chunk's tag, and sets the tags of chunks
+/// whose slots it changed.
 pub(crate) fn upkeep<C: VoxelWorldConfig>(
+    mut commands: Commands,
     mut route: ResMut<LightRoute<C>>,
     sub_grids: Option<Res<SubGrids<C>>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -657,6 +691,9 @@ pub(crate) fn upkeep<C: VoxelWorldConfig>(
         return;
     }
     route.upkeep_tag_map(&bodies, &mut images);
+    for (entity, tag) in route.take_changed_tags() {
+        commands.entity(entity).try_insert(MeshTag::new(tag));
+    }
 }
 
 /// What the tag map of world `C` has done, for benchmarks.
