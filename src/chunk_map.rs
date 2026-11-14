@@ -19,7 +19,7 @@ use hashbrown::DefaultHashBuilder;
 /// The methods that take a `ChunkKey` or a voxel position read the world's
 /// grid.
 pub struct ChunkMapData<I> {
-    data: GridTable<chunk::ChunkData<I>, DefaultHashBuilder>,
+    data: GridTable<ChunkKey, chunk::ChunkData<I>, DefaultHashBuilder>,
     levels: PerGrid<LevelCounts>,
     bounds: PerGrid<Aabb3d>,
 }
@@ -31,6 +31,7 @@ impl<I> ChunkMapData<I> {
     }
 
     /// The published data of the chunk at `key`, if it has any.
+    #[inline]
     pub(crate) fn get_in(&self, key: &GridKey) -> Option<&chunk::ChunkData<I>> {
         self.data.get(key)
     }
@@ -118,7 +119,7 @@ impl<I> ChunkMapData<I> {
     }
 
     /// Works `grid`'s bounds out again from its published chunks. Its cost
-    /// grows with the published chunks of every grid.
+    /// grows with `grid`'s published chunks.
     fn rebuild_bounds(&mut self, grid: GridId) {
         let empty = self
             .levels

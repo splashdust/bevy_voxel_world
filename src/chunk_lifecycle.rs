@@ -266,7 +266,7 @@ pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
 pub struct ChunkIndex<C> {
-    entities: GridTable<Entity>,
+    entities: GridTable<ChunkKey, Entity>,
     /// The grid key of every live chunk.
     keys: HashMap<Entity, GridKey>,
     /// How many chunks each grid has at each LOD level.
@@ -307,6 +307,7 @@ impl<C> ChunkIndex<C> {
         self.get_in(GridKey::world(key))
     }
 
+    #[inline]
     pub(crate) fn get_in(&self, key: GridKey) -> Option<Entity> {
         self.entities.get(&key).copied()
     }
@@ -315,13 +316,14 @@ impl<C> ChunkIndex<C> {
         self.contains_in(GridKey::world(key))
     }
 
+    #[inline]
     pub(crate) fn contains_in(&self, key: GridKey) -> bool {
         self.entities.contains(&key)
     }
 
     /// The chunk key of every live chunk of the world.
     pub(crate) fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ {
-        self.entities.grid_keys(GridId::WORLD).map(|key| key.key())
+        self.entities.world_keys()
     }
 
     /// Whether the world's chunk at `key` exists and is Retiring.

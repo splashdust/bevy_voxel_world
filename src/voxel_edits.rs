@@ -391,7 +391,7 @@ fn box_positions(min: IVec3, max: IVec3) -> impl Iterator<Item = IVec3> {
 pub(crate) type EditBucket<I> = Arc<Bucket<I>>;
 
 /// Edits by grid and level-0 chunk: a key's LOD level is always 0.
-type BucketMap<I> = GridTable<EditBucket<I>>;
+type BucketMap<I> = GridTable<IVec3, EditBucket<I>>;
 
 /// Committed edits, by chunk.
 type Committed<I> = Arc<RwLock<BucketMap<I>>>;
@@ -654,8 +654,8 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// Clears the edits of each of `grid`'s chunks holding pending or
     /// committed edits that `reached` accepts, within the box `within` gives
-    /// for it, both corners inclusive. Its cost grows with the chunks holding
-    /// edits in every grid.
+    /// for it, both corners inclusive. Its cost grows with `grid`'s chunks
+    /// holding edits.
     fn clear_chunks(
         &self,
         grid: GridId,
@@ -700,8 +700,9 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     }
 
     /// Drops every edit of `grid` and every edit sequence at once, as
-    /// [`forget`](Self::forget) does for the world. Its cost grows with the
-    /// chunks holding edits in every grid.
+    /// [`forget`](Self::forget) does for the world. Its cost grows with
+    /// `grid`'s chunks holding edits, and with every grid's pending edits when
+    /// a reader still holds them.
     pub(crate) fn forget_in(&self, grid: GridId) {
         let mut pending = self.pending.lock().unwrap();
         if let Some(map) = Arc::get_mut(&mut pending) {
@@ -821,7 +822,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// Every level-0 chunk position of `grid` holding committed edits, or an
     /// empty bucket left by removing them, with its edit sequence. Its cost
-    /// grows with the chunks holding edits in every grid.
+    /// grows with `grid`'s chunks holding edits.
     pub(crate) fn edited_chunks_in(&self, grid: GridId) -> Vec<(IVec3, u64)> {
         let buckets = self.committed.read().unwrap();
         buckets
@@ -856,8 +857,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// Commits `grid`'s pending edits, and leaves other grids' pending.
     /// Returns a change set for each of `grid`'s level-0 chunks whose
-    /// committed edits or edit sequence changed. Sorting out `grid`'s pending
-    /// edits costs a visit to each pending chunk of every grid.
+    /// committed edits or edit sequence changed.
     ///
     /// A chunk's edit sequence moves on by the number of voxels in its change
     /// set. Where an edit delta was applied, it takes the delta's sequence
@@ -892,7 +892,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             *pending = Arc::new(all);
         }
         let mut sets = Vec::new();
-        for (key, pending_bucket) in taken {
+        for (key, pending_bucket) in taken.into_entries() {
             let chunk = key.position();
             let empty;
             let committed = match buckets.get(&key) {
@@ -958,8 +958,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// The edits the chunk task of the chunk at `key` reads, from the chunk's
     /// grid, as [`chunk_edits`](Self::chunk_edits) gives them for the world.
-    /// Above level 0 its cost grows with the chunks holding edits in every
-    /// grid.
+    /// Above level 0 its cost grows with the grid's chunks holding edits.
     pub(crate) fn chunk_edits_in(&self, key: GridKey, padding: IVec3) -> ChunkEdits<I> {
         let buckets = self.committed.read().unwrap();
         let (grid, chunk_pos) = (key.grid(), key.position());

@@ -10,9 +10,11 @@
 //! [`PerGrid`] holds a value for each grid beside a table, such as the LOD
 //! levels in use, so one grid's chunks never count towards another's.
 //!
-//! [`GridTable`] keeps every grid in one hash map keyed by grid key. A lookup
-//! costs what it does with one grid, and a scan over one grid's entries visits
-//! every grid's, so its cost grows with the chunks of every grid.
+//! [`GridTable`] keeps the world's entries in a hash map of their own, keyed as
+//! they would be with no sub-grids, and each sub-grid's in a small one beside
+//! it. A lookup picks the grid's table first, and a scan over one grid's
+//! entries visits that grid's alone, so the world's streaming never pays for
+//! sub-grids' chunks.
 
 use std::{
     hash::{BuildHasher, Hash, Hasher},
@@ -88,9 +90,9 @@ const _: () = assert!(size_of::<GridKey>() == size_of::<ChunkKey>());
 const _: () = assert!(size_of::<GridKey>() == 16);
 
 impl Hash for GridKey {
-    /// Hashes the key as two words rather than a word per field: the tables
-    /// hash a key on every lookup, and the hashers cost about the same per
-    /// write whatever its width.
+    /// Hashes the key as two words rather than a word per field: the sets of
+    /// grid keys the chunk lifecycle builds hash a key on every insert, and
+    /// the hashers cost about the same per write whatever its width.
     fn hash<H: Hasher>(&self, state: &mut H) {
         let IVec3 { x, y, z } = self.position;
         state.write_u64(u64::from(x as u32) | u64::from(y as u32) << 32);
@@ -177,60 +179,95 @@ impl GridKey {
     }
 }
 
+/// The key of an entry within its grid's table in a [`GridTable`]: what is
+/// left of a [`GridKey`] once its grid has picked the table.
+pub(crate) trait KeyInGrid: Copy + Eq + Hash {
+    /// The key of the entry at `key` within its grid's table.
+    fn of(key: &GridKey) -> Self;
+
+    /// The grid key of the entry at this key in `grid`'s table.
+    fn on(self, grid: GridId) -> GridKey;
+}
+
+impl KeyInGrid for ChunkKey {
+    #[inline]
+    fn of(key: &GridKey) -> Self {
+        key.key()
+    }
+
+    #[inline]
+    fn on(self, grid: GridId) -> GridKey {
+        GridKey::new(grid, self)
+    }
+}
+
+/// A level-0 chunk position, for a table whose entries are all at level 0.
+impl KeyInGrid for IVec3 {
+    #[inline]
+    fn of(key: &GridKey) -> Self {
+        debug_assert_eq!(key.lod_level, 0, "{} isn't at level 0", key.key());
+        key.position
+    }
+
+    #[inline]
+    fn on(self, grid: GridId) -> GridKey {
+        GridKey::level_0(grid, self)
+    }
+}
+
 /// A table of values by [`GridKey`], holding the entries of every grid.
 ///
-/// `S` builds the hasher of the table's keys.
+/// The world's entries sit in a hash map of their own keyed by `K`, as they
+/// would with no sub-grids, and each sub-grid with entries has a small one of
+/// its own. `K` is the key within a grid's table, and `S` builds its hasher.
+///
+/// A sub-grid's table goes as soon as it holds no entry, so a table that
+/// holds only the world's entries keeps no other table.
+///
+/// A lookup or scan of the world's entries inlines to the plain hash map
+/// operation it would be with no sub-grids, and a sub-grid's picks its table
+/// out of line. The streaming policy looks up the world's chunks many times
+/// each frame, and code for sub-grids inlined into those callers made them
+/// too big to inline in turn.
 #[derive(Clone)]
-pub(crate) struct GridTable<V, S = FixedHasher> {
-    entries: HashMap<GridKey, V, S>,
+pub(crate) struct GridTable<K, V, S = FixedHasher> {
+    world: HashMap<K, V, S>,
+    #[cfg(feature = "sub_grids")]
+    sub_grids: HashMap<GridId, HashMap<K, V, S>>,
+    /// Always empty: the table a scan of a grid with no entries reads, so a
+    /// scan of the world's entries is a plain scan of its hash map.
+    #[cfg(feature = "sub_grids")]
+    empty: HashMap<K, V, S>,
 }
 
-impl<V, S: Default> Default for GridTable<V, S> {
+impl<K, V, S: Default> Default for GridTable<K, V, S> {
     fn default() -> Self {
         Self {
-            entries: HashMap::with_hasher(S::default()),
+            world: HashMap::with_hasher(S::default()),
+            #[cfg(feature = "sub_grids")]
+            sub_grids: HashMap::new(),
+            #[cfg(feature = "sub_grids")]
+            empty: HashMap::with_hasher(S::default()),
         }
     }
 }
 
-impl<V, S: BuildHasher + Default> GridTable<V, S> {
-    /// A table with room for `capacity` entries before it grows.
+impl<K: KeyInGrid, V, S: BuildHasher + Default> GridTable<K, V, S> {
+    /// A table with room for `capacity` of the world's entries before it
+    /// grows.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            entries: HashMap::with_capacity_and_hasher(capacity, S::default()),
+            world: HashMap::with_capacity_and_hasher(capacity, S::default()),
+            #[cfg(feature = "sub_grids")]
+            sub_grids: HashMap::new(),
+            #[cfg(feature = "sub_grids")]
+            empty: HashMap::with_hasher(S::default()),
         }
-    }
-
-    /// Moves `grid`'s entries out into a table of their own.
-    pub fn take_grid(&mut self, grid: GridId) -> Self {
-        if self.holds_only(grid) {
-            return std::mem::take(self);
-        }
-        Self {
-            entries: self.entries.extract_if(|key, _| key.grid == grid).collect(),
-        }
-    }
-}
-
-impl<V, S: BuildHasher> GridTable<V, S> {
-    #[inline]
-    pub fn get(&self, key: &GridKey) -> Option<&V> {
-        self.entries.get(key)
-    }
-
-    #[inline]
-    pub fn contains(&self, key: &GridKey) -> bool {
-        self.entries.contains_key(key)
     }
 
     /// Sets the value at `key`. Returns the value it replaced, if any.
     pub fn insert(&mut self, key: GridKey, value: V) -> Option<V> {
-        self.entries.insert(key, value)
-    }
-
-    /// Removes the value at `key`, and returns it if there was one.
-    pub fn remove(&mut self, key: &GridKey) -> Option<V> {
-        self.entries.remove(key)
+        self.table_or_new(key.grid).insert(K::of(&key), value)
     }
 
     /// The value at `key`, set by `make` first if there is none.
@@ -239,40 +276,129 @@ impl<V, S: BuildHasher> GridTable<V, S> {
         key: GridKey,
         make: impl FnOnce() -> V,
     ) -> &mut V {
-        self.entries.entry(key).or_insert_with(make)
+        self.table_or_new(key.grid)
+            .entry(K::of(&key))
+            .or_insert_with(make)
+    }
+
+    /// Moves `grid`'s entries out into a table of their own.
+    pub fn take_grid(&mut self, grid: GridId) -> Self {
+        let mut taken = Self::default();
+        #[cfg(feature = "sub_grids")]
+        if grid != GridId::WORLD {
+            if let Some(table) = self.sub_grids.remove(&grid) {
+                taken.sub_grids.insert(grid, table);
+            }
+            return taken;
+        }
+        let _ = grid;
+        taken.world = std::mem::take(&mut self.world);
+        taken
+    }
+
+    /// `grid`'s table, made empty first if it has none.
+    #[inline]
+    fn table_or_new(&mut self, grid: GridId) -> &mut HashMap<K, V, S> {
+        #[cfg(feature = "sub_grids")]
+        if grid != GridId::WORLD {
+            return self
+                .sub_grids
+                .entry(grid)
+                .or_insert_with(|| HashMap::with_hasher(S::default()));
+        }
+        let _ = grid;
+        &mut self.world
+    }
+}
+
+impl<K: KeyInGrid, V, S: BuildHasher> GridTable<K, V, S> {
+    #[inline(always)]
+    pub fn get(&self, key: &GridKey) -> Option<&V> {
+        #[cfg(feature = "sub_grids")]
+        if key.grid != GridId::WORLD {
+            return self.sub_grid_get(key);
+        }
+        self.world.get(&K::of(key))
+    }
+
+    #[inline(always)]
+    pub fn contains(&self, key: &GridKey) -> bool {
+        #[cfg(feature = "sub_grids")]
+        if key.grid != GridId::WORLD {
+            return self.sub_grid_get(key).is_some();
+        }
+        self.world.contains_key(&K::of(key))
+    }
+
+    /// The value at `key`, which is a sub-grid's.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    #[inline(never)]
+    fn sub_grid_get(&self, key: &GridKey) -> Option<&V> {
+        self.sub_grids.get(&key.grid)?.get(&K::of(key))
+    }
+
+    /// Removes the value at `key`, and returns it if there was one.
+    pub fn remove(&mut self, key: &GridKey) -> Option<V> {
+        #[cfg(feature = "sub_grids")]
+        if key.grid != GridId::WORLD {
+            let table = self.sub_grids.get_mut(&key.grid)?;
+            let removed = table.remove(&K::of(key));
+            if table.is_empty() {
+                self.sub_grids.remove(&key.grid);
+            }
+            return removed;
+        }
+        self.world.remove(&K::of(key))
     }
 
     /// Whether no grid has an entry.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.world.is_empty() && !self.has_sub_grids()
     }
 
     /// Whether every entry is `grid`'s, as it is in an empty table.
     pub fn holds_only(&self, grid: GridId) -> bool {
-        self.entries.keys().all(|key| key.grid == grid)
+        #[cfg(feature = "sub_grids")]
+        if grid != GridId::WORLD {
+            return self.world.is_empty() && self.sub_grids.keys().all(|g| *g == grid);
+        }
+        let _ = grid;
+        !self.has_sub_grids()
     }
 
-    /// Every entry of `grid`, in no particular order.
-    pub fn grid_entries(&self, grid: GridId) -> impl Iterator<Item = (&GridKey, &V)> {
-        self.entries.iter().filter(move |(key, _)| key.grid == grid)
+    /// Every entry of `grid`, in no particular order. Its cost grows with
+    /// `grid`'s entries alone.
+    pub fn grid_entries(&self, grid: GridId) -> impl Iterator<Item = (GridKey, &V)> {
+        self.table(grid)
+            .iter()
+            .map(move |(key, v)| (key.on(grid), v))
     }
 
-    /// The key of every entry of `grid`, in no particular order.
+    /// The key within the world's table of every entry of the world, in no
+    /// particular order: a plain scan of the world's hash map, for the
+    /// streaming policy, which plans only the world's chunks.
+    #[inline]
+    pub fn world_keys(&self) -> impl Iterator<Item = K> + '_ {
+        self.world.keys().copied()
+    }
+
+    /// The key of every entry of `grid`, in no particular order. Its cost
+    /// grows with `grid`'s entries alone.
     pub fn grid_keys(&self, grid: GridId) -> impl Iterator<Item = GridKey> + '_ {
-        self.entries
-            .keys()
-            .copied()
-            .filter(move |key| key.grid == grid)
+        self.table(grid).keys().map(move |key| key.on(grid))
     }
 
     /// Removes every entry of `grid`.
     pub fn clear_grid(&mut self, grid: GridId) {
-        if self.holds_only(grid) {
-            self.entries.clear();
-        } else {
-            self.entries.retain(|key, _| key.grid != grid);
+        #[cfg(feature = "sub_grids")]
+        if grid != GridId::WORLD {
+            self.sub_grids.remove(&grid);
+            return;
         }
+        let _ = grid;
+        self.world.clear();
     }
 
     /// Removes every entry of `grid`, and returns them in no particular order.
@@ -280,16 +406,62 @@ impl<V, S: BuildHasher> GridTable<V, S> {
         &mut self,
         grid: GridId,
     ) -> impl Iterator<Item = (GridKey, V)> + '_ {
-        self.entries.extract_if(move |key, _| key.grid == grid)
+        #[cfg(feature = "sub_grids")]
+        let (world, sub_grid) = if grid == GridId::WORLD {
+            (Some(&mut self.world), None)
+        } else {
+            (None, self.sub_grids.remove(&grid))
+        };
+        #[cfg(not(feature = "sub_grids"))]
+        let (world, sub_grid) = (Some(&mut self.world), None::<HashMap<K, V, S>>);
+        world
+            .into_iter()
+            .flat_map(|table| table.drain())
+            .chain(sub_grid.into_iter().flatten())
+            .map(move |(key, v)| (key.on(grid), v))
     }
-}
 
-impl<V, S> IntoIterator for GridTable<V, S> {
-    type Item = (GridKey, V);
-    type IntoIter = <HashMap<GridKey, V, S> as IntoIterator>::IntoIter;
+    /// Every entry of every grid, in no particular order.
+    pub fn into_entries(self) -> impl Iterator<Item = (GridKey, V)> {
+        let entries = self
+            .world
+            .into_iter()
+            .map(|(key, v)| (key.on(GridId::WORLD), v));
+        #[cfg(feature = "sub_grids")]
+        let entries =
+            entries.chain(self.sub_grids.into_iter().flat_map(|(grid, table)| {
+                table.into_iter().map(move |(key, v)| (key.on(grid), v))
+            }));
+        entries
+    }
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+    /// Whether any sub-grid has an entry.
+    #[inline]
+    fn has_sub_grids(&self) -> bool {
+        #[cfg(feature = "sub_grids")]
+        return !self.sub_grids.is_empty();
+        #[cfg(not(feature = "sub_grids"))]
+        false
+    }
+
+    /// `grid`'s table, or an empty one if it has none.
+    #[inline(always)]
+    fn table(&self, grid: GridId) -> &HashMap<K, V, S> {
+        #[cfg(feature = "sub_grids")]
+        if grid != GridId::WORLD {
+            return self.sub_grid_table(grid);
+        }
+        let _ = grid;
+        &self.world
+    }
+
+    /// The table of `grid`, which isn't the world, or an empty one if it has
+    /// none.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    #[inline(never)]
+    fn sub_grid_table(&self, grid: GridId) -> &HashMap<K, V, S> {
+        self.sub_grids.get(&grid).unwrap_or(&self.empty)
     }
 }
 
@@ -311,15 +483,24 @@ impl<A> PerGrid<A> {
         }
     }
 
-    /// `grid`'s value, if it has one.
-    #[inline]
+    /// `grid`'s value, if it has one. The world's inlines to a field read, as
+    /// a [`GridTable`] lookup in the world's table does.
+    #[inline(always)]
     pub fn get(&self, grid: GridId) -> Option<&A> {
         #[cfg(feature = "sub_grids")]
         if grid != GridId::WORLD {
-            return self.others.get(&grid);
+            return self.other(grid);
         }
         let _ = grid;
         Some(&self.world)
+    }
+
+    /// The value of `grid`, which isn't the world, if it has one.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    #[inline(never)]
+    fn other(&self, grid: GridId) -> Option<&A> {
+        self.others.get(&grid)
     }
 
     /// `grid`'s value, set by `make` first if it has none.
@@ -357,7 +538,7 @@ mod tests {
 
     #[test]
     fn a_scan_of_one_grid_leaves_the_others_out() {
-        let mut table = GridTable::<u32>::default();
+        let mut table = GridTable::<ChunkKey, u32>::default();
         let key = ChunkKey::new(IVec3::ZERO, 0);
         table.insert(GridKey::world(key), 1);
         table.insert(GridKey::new(GridId::new(1), key), 2);
@@ -367,9 +548,23 @@ mod tests {
         assert_eq!(world, vec![1]);
         let taken = table.take_grid(GridId::new(1));
         assert_eq!(
-            taken.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+            taken.into_entries().map(|(_, v)| v).collect::<Vec<_>>(),
             vec![2]
         );
         assert!(table.holds_only(GridId::WORLD));
+    }
+
+    #[test]
+    fn a_table_is_empty_again_once_a_sub_grid_loses_its_last_entry() {
+        let mut table = GridTable::<IVec3, u32>::default();
+        let key = GridKey::level_0(GridId::new(1), IVec3::new(1, 2, 3));
+        table.insert(key, 1);
+        assert!(!table.is_empty());
+        assert!(!table.holds_only(GridId::WORLD));
+
+        assert_eq!(table.remove(&key), Some(1));
+        assert!(table.is_empty());
+        assert!(table.holds_only(GridId::WORLD));
+        assert_eq!(table.grid_keys(GridId::new(1)).count(), 0);
     }
 }
