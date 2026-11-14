@@ -58,6 +58,8 @@ pub mod prelude {
         ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
         ChunkWillUpdate,
     };
+    #[cfg(feature = "sub_grids")]
+    pub use crate::voxel_world::{GridRaycastFn, GridRaycastHit};
 }
 
 pub mod custom_meshing {

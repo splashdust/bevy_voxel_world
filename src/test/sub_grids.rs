@@ -14,6 +14,8 @@ use crate::prelude::*;
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world_internal::WorldRoot;
 
+mod raycasts;
+
 const OTHER: GridId = GridId::new(1);
 
 /// A voxel the world shows as air, and the other grid holds as solid.

@@ -153,6 +153,16 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         record.live.get(&entity).map(|live| (live.grid, live.pose))
     }
 
+    /// The entity, id and pose of each live sub-grid.
+    pub(crate) fn live_grids(&self) -> Vec<(Entity, GridId, GlobalTransform)> {
+        let record = self.record.lock().unwrap();
+        record
+            .live
+            .iter()
+            .map(|(entity, live)| (*entity, live.grid, live.pose))
+            .collect()
+    }
+
     fn root(&self) -> Entity {
         self.record.lock().unwrap().root
     }
@@ -414,7 +424,7 @@ impl<'a, C: VoxelWorldConfig> GridVoxelsMut<'a, C> {
 }
 
 /// The solid voxel a sub-grid's `edits` hold at `position`, or air.
-fn solid_at<I: Copy + PartialEq>(
+pub(crate) fn solid_at<I: Copy + PartialEq>(
     edits: &VoxelEditReader<I>,
     position: IVec3,
 ) -> WorldVoxel<I> {

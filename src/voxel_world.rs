@@ -7,7 +7,12 @@ use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
+#[cfg(feature = "sub_grids")]
+mod grid_raycast;
 mod raycast;
+
+#[cfg(feature = "sub_grids")]
+pub use grid_raycast::{GridRaycastFn, GridRaycastHit};
 
 #[cfg(feature = "sub_grids")]
 use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, SubGrids};
@@ -728,11 +733,18 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
+    /// The ray and the hit are in the world's grid space, which is world
+    /// space while the world's root sits at the identity. Under a moved or
+    /// turned root, carry a world-space ray into the root's frame first.
+    /// Only the world's own voxels are hit, so the ray passes through
+    /// sub-grids; with the `sub_grids` feature, `raycast_grids` tests them
+    /// too.
+    ///
     /// The ray is traced through the bounds of the published chunks, reading
     /// voxels as [`get_voxel`](Self::get_voxel) does, so within those bounds a
     /// voxel no chunk covers is what its chunk's fill hint says.
     ///
-    /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
+    /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in the world's grid space.
     /// Returns `None` if no voxel was intersected
     ///
     /// # Example
@@ -767,7 +779,11 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         raycast_fn(ray, filter)
     }
 
-    /// Get a sendable closure that can be used to raycast into the voxel world
+    /// Get a sendable closure that can be used to raycast into the voxel world.
+    ///
+    /// It casts as [`raycast`](Self::raycast) does: the ray and the hit are
+    /// in the world's grid space, which is world space while the world's
+    /// root sits at the identity, and only the world's own voxels are hit.
     pub fn raycast_fn(&self) -> Arc<RaycastFn<C::MaterialIndex>> {
         let chunk_map = self.chunk_map.get_map();
         let get_voxel = self.get_voxel_fn();
