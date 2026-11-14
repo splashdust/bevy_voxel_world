@@ -43,6 +43,14 @@ impl<C> LoadingTexture<C> {
     }
 }
 
+/// The crate's chunk shader, the default material's vertex and fragment
+/// shader.
+///
+/// Its vertex shader returns the outputs the [`rendering`](crate::rendering)
+/// module docs list, so a custom material can keep it and bring only a
+/// fragment shader. Its fragment shader picks each face's top, side or bottom
+/// texture from the face's local normal, so a voxel's top texture stays on its
+/// own top however its chunk turns.
 pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("df1398dc-56ad-4cd7-9bc2-7678cab2f144");
 
@@ -51,7 +59,8 @@ pub const VOXEL_TEXTURE_SHADER_HANDLE: Handle<Shader> =
 ///
 /// Its `VoxelVertex` reads the attributes at the locations `vertex_layout`
 /// gives them, and its `VoxelVertexOutput` is what the crate's vertex shader
-/// returns. A custom material that keeps the crate's vertex shader can take a
+/// returns, with the fields and spaces the `rendering` module docs list. A
+/// custom material that keeps the crate's vertex shader can take a
 /// `VoxelVertexOutput` in its fragment shader.
 pub(crate) const VOXEL_IO_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("6f0e7d43-1b8a-4c52-9d3e-a2b4c6d8e0f1");

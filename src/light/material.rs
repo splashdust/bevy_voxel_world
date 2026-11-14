@@ -22,7 +22,8 @@
 //! is exactly `StandardMaterial`: Bevy's shader for it can't read light, so
 //! the extension picks the crate's lit PBR shader, which can. The extension
 //! adds the `VOXEL_LIGHT` shader def, under which the crate's vertex shaders
-//! output what that module reads.
+//! also output the chunk's tag. That module reads the tag with the local
+//! position and normal they output in every world.
 //!
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
 //! extension alone, so the extension passes on the wrapped material's. It
@@ -135,21 +136,17 @@ pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 ///
 /// Light comes from voxels, not from the mesh: a shaft the mesh rounds away
 /// still lets light through, and a wall it doesn't draw still blocks it. The
-/// shader finds a face's voxels from its position and normal, so a custom
-/// mesh uses the chunk's padded local coordinates, where voxel `i` spans
-/// `i..i + 1`, as the crate's mesher does, with normals pointing out of the
-/// solid. A surface sunk more than about half a voxel into solid voxels can
-/// read black along convex edges, where it lies more than a voxel from open
-/// air.
+/// shader finds a face's voxels from its local position and normal, so a
+/// custom mesh is built in the chunk's padded local coordinates, as the
+/// [`rendering`](crate::rendering) module docs describe them, with normals
+/// pointing out of the solid. A surface sunk more than about half a voxel
+/// into solid voxels can read black along convex edges, where it lies more
+/// than a voxel from open air.
 ///
-/// A custom vertex shader must output, under the `VOXEL_LIGHT` shader def,
-/// the vertex's local position at location 9 with
-/// `@interpolate(perspective, centroid)`, its local normal at 10, and the
-/// chunk's `MeshTag` at 11 with `@interpolate(flat)`, as
-/// `bevy_voxel_world::voxel_io::VoxelVertexOutput` does. The position must be
-/// centroid-sampled because with MSAA a pixel centre can lie outside its
-/// triangle, and the position there would read the light of a voxel beyond
-/// the face.
+/// A custom vertex shader outputs what the [`rendering`](crate::rendering)
+/// module docs list. Light reads the local position at location 9, the local
+/// normal at 10 and the chunk's `MeshTag` at 11, the last only under the
+/// `VOXEL_LIGHT` shader def this extension adds.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct VoxelWorldBindings<M: Material> {
     #[texture(200, dimension = "3d", sample_type = "u_int")]

@@ -58,11 +58,10 @@ fn vertex(vertex: VoxelVertex) -> VoxelVertexOutput {
 
     out.tex_idx = vertex.tex_idx;
 
-    @if(VOXEL_LIGHT) {
-        out.local_position = vertex.position;
-        out.local_normal = vertex.normal;
-        out.light_tag = mesh_functions::get_tag(vertex.instance_index);
-    }
+    out.local_position = vertex.position;
+    out.local_normal = vertex.normal;
+    @if(VOXEL_LIGHT)
+    out.light_tag = mesh_functions::get_tag(vertex.instance_index);
 
     return out;
 }
@@ -83,10 +82,11 @@ fn fragment(
 
     var tex_face = 0;
 
-    // determine texture index based on normal
-    if in.world_normal.y == 0.0 {
+    // Top, side or bottom from the normal in the chunk's own coordinates, so
+    // a chunk that turns keeps each voxel's top texture on its own top.
+    if in.local_normal.y == 0.0 {
         tex_face = 1;
-    } else if in.world_normal.y < 0.0 {
+    } else if in.local_normal.y < 0.0 {
         tex_face = 2;
     }
 

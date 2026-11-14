@@ -1,6 +1,7 @@
 // The vertex input and output of voxel chunk meshes, at the shader locations
 // `vertex_layout()` maps the mesh attributes to. Import it as
-// `bevy_voxel_world::voxel_io`.
+// `bevy_voxel_world::voxel_io`. The crate's `rendering` module docs say what
+// space each output is in and which outputs a custom vertex shader must write.
 
 struct VoxelVertex {
     @builtin(instance_index) instance_index: u32,
@@ -40,15 +41,16 @@ struct VoxelVertexOutput {
 
     @location(8) @interpolate(flat) tex_idx: vec3<u32>,
 
-    // What the `bevy_voxel_world::light` module reads, in a lit world: the
-    // face's position and normal in the chunk's padded local coordinates, and
-    // the chunk's tag. The position is centroid-sampled because with MSAA a
-    // pixel centre can lie outside its triangle, and the position there would
-    // read the light of a voxel beyond the face.
-    @if(VOXEL_LIGHT)
+    // The face's position and normal in the chunk's padded local coordinates,
+    // in every world. They stay with the chunk however it moves, so the
+    // default fragment shader picks the face's texture from the normal, and
+    // in a lit world the `bevy_voxel_world::light` module reads both. The
+    // position is centroid-sampled because with MSAA a pixel centre can lie
+    // outside its triangle, and the position there would read the light of a
+    // voxel beyond the face.
     @location(9) @interpolate(perspective, centroid) local_position: vec3<f32>,
-    @if(VOXEL_LIGHT)
     @location(10) local_normal: vec3<f32>,
+    // The chunk's tag, for the `bevy_voxel_world::light` module.
     @if(VOXEL_LIGHT)
     @location(11) @interpolate(flat) light_tag: u32,
 }

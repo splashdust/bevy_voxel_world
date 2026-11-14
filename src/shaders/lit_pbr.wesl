@@ -3,12 +3,16 @@
 //
 // Its vertex shader reads Bevy's own vertex layout, so it draws any mesh,
 // including one without the crate's texture index, such as a marching cubes
-// mesh. It outputs Bevy's usual values and, at locations 9-11, what the
-// `bevy_voxel_world::light` module reads. The fragment shader is Bevy's
-// forward PBR with `apply_voxel_light` before Bevy's lighting and
-// `remove_unshadowed_sun` after it. Vertex colours tint the
-// base colour as in Bevy's own shader. They belong to the mesher, so they are
-// not read as ambient occlusion, and the look's AO setting doesn't apply.
+// mesh. It outputs Bevy's usual values, the local position and normal at
+// locations 9 and 10 that every crate vertex shader outputs, and the tag at
+// 11, as the crate's `rendering` module docs list them. It only ever runs in
+// a lit world, so it writes the tag without testing `VOXEL_LIGHT`, and the
+// `bevy_voxel_world::light` module reads all three.
+//
+// The fragment shader is Bevy's forward PBR with `apply_voxel_light` before
+// Bevy's lighting and `remove_unshadowed_sun` after it. Vertex colours tint
+// the base colour as in Bevy's own shader. They belong to the mesher, so they
+// are not read as ambient occlusion, and the look's AO setting doesn't apply.
 //
 // Chunk meshes are never skinned or morphed, so neither is handled here.
 
@@ -38,9 +42,10 @@ struct LitVertexOutput {
     @location(6) @interpolate(flat) instance_index: u32,
 
     // The face's position and normal in the chunk's padded local coordinates,
-    // and the chunk's tag. The position is centroid-sampled because with MSAA
-    // a pixel centre can lie outside its triangle, and the position there
-    // would read the light of a voxel beyond the face.
+    // which stay with the chunk however it moves, and the chunk's tag. The
+    // position is centroid-sampled because with MSAA a pixel centre can lie
+    // outside its triangle, and the position there would read the light of a
+    // voxel beyond the face.
     @location(9) @interpolate(perspective, centroid) local_position: vec3<f32>,
     @location(10) local_normal: vec3<f32>,
     @location(11) @interpolate(flat) light_tag: u32,

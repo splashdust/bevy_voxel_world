@@ -1,18 +1,20 @@
 // Propagated light for chunk faces. Import it as `bevy_voxel_world::light`.
 //
 // A lit world's material holds the world's light texture and its look, at
-// bindings 200 and 201, and the crate's vertex shader outputs each face's local
-// position, local normal and tag under the `VOXEL_LIGHT` shader def. A fragment
-// shader reads a face's light with `sample_light` and applies it to Bevy's PBR
-// input with `apply_voxel_light`, the one place light meets the PBR
-// calculation. A shader without PBR can use `sky_brightness` and
-// `voxel_brightness` instead.
+// bindings 200 and 201. The crate's vertex shaders output each face's local
+// position and local normal in every world, and the chunk's tag under the
+// `VOXEL_LIGHT` shader def. A fragment shader reads a face's light with
+// `sample_light` and applies it to Bevy's PBR input with
+// `apply_voxel_light`, the one place light meets the PBR calculation. A
+// shader without PBR can use `sky_brightness` and `voxel_brightness` instead.
 //
 // Light is read from a face's position and normal alone, so it reaches any
 // mesh: a cube face reads the voxel in front of it, and a face off the voxel
 // grid the 8 voxels around the point in front of it (see `sample_light`).
 // A custom vertex shader outputs what the crate's do: the centroid-sampled
-// local position at location 9, the local normal at 10 and the flat tag at 11.
+// local position at location 9 and the local normal at 10 in every world, and
+// the flat tag at 11 under `VOXEL_LIGHT`. The crate's `rendering` module docs
+// list every output and its space.
 //
 // The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
 // chunk's slot in the texture: 34 texels a side, the chunk's voxels in its

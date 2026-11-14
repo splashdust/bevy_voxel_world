@@ -5,6 +5,12 @@
 - Fix voxel gizmos so all six circles sit on the faces of the voxel they mark. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
 - Fix `debug_draw_chunks` so each chunk's box goes through the chunk's whole transform and stays on the chunk under a rotated or scaled `WorldRoot`.
 
+### Breaking changes
+
+- The crate's vertex shaders output `local_position` at location 9 and `local_normal` at location 10 in every world, lit or not, and `light_tag` at location 11 only under the `VOXEL_LIGHT` shader def, as before. The `rendering` module docs list every vertex output and its space. The default fragment shader picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`, so a voxel's top texture stays on its own top under a rotated `WorldRoot`.
+
+- Only a custom vertex shader that feeds the crate's fragment shader in an unlit world breaks: it must now write locations 9 and 10, which a lit world already required. A shader that declares those outputs but never writes them still compiles, and shows the side texture on every face. No Rust signature changed.
+
 ## 0.19.3
 
 ### Syncing and saving voxel edits
