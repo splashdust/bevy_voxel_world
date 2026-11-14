@@ -1,0 +1,304 @@
+diff --git a/src/light/bench.rs b/src/light/bench.rs
+index 2f68afa..1cba8ee 100644
+--- a/src/light/bench.rs
++++ b/src/light/bench.rs
+@@ -149,6 +149,71 @@ impl KernelBox {
+         }
+     }
+ 
++    /// Probe accessor, never committed: the bit planes the last spread left,
++    /// one per bit of a level.
++    pub fn planes(&self) -> &[Plane] {
++        &self.planes
++    }
++
++    /// Probe accessor, never committed: replaces the box's sources, each a
++    /// position in the box and its whole level, as `new` takes them.
++    pub fn set_sources(&mut self, sources: &[(IVec3, u8)]) {
++        let scale = LevelScale::new(self.scale.reach(), LightPrecision::Steps16);
++        self.seeds = sources
++            .iter()
++            .filter_map(|&(position, level)| {
++                Some(Seed {
++                    x: position.x as u8,
++                    y: position.y as u8,
++                    z: position.z as u8,
++                    start: scale.start(level)?,
++                })
++            })
++            .collect();
++        self.seeds.sort_by_key(|seed| seed.start);
++        match &mut self.rows {
++            Rows::OneWord(light_box) => light_box.clear_labels(),
++            Rows::TwoWord(light_box) => light_box.clear_labels(),
++        }
++    }
++
++    /// Probe accessor, never committed: replaces the box's sources, each a
++    /// position in the box, its whole level and a colour index, which spreads
++    /// carry as an index of `bits` bits.
++    pub fn set_coloured_sources(&mut self, sources: &[(IVec3, u8, u8)], bits: usize) {
++        let scale = LevelScale::new(self.scale.reach(), LightPrecision::Steps16);
++        let mut seeds: Vec<(Seed, u8)> = sources
++            .iter()
++            .filter_map(|&(position, level, index)| {
++                Some((
++                    Seed {
++                        x: position.x as u8,
++                        y: position.y as u8,
++                        z: position.z as u8,
++                        start: scale.start(level)?,
++                    },
++                    index,
++                ))
++            })
++            .collect();
++        seeds.sort_by_key(|(seed, _)| seed.start);
++        self.seeds = seeds.iter().map(|(seed, _)| *seed).collect();
++        let indices = seeds.iter().map(|(_, index)| *index).collect();
++        match &mut self.rows {
++            Rows::OneWord(light_box) => light_box.set_labels(bits, indices),
++            Rows::TwoWord(light_box) => light_box.set_labels(bits, indices),
++        }
++    }
++
++    /// Probe accessor, never committed: the colour index the last spread left
++    /// at the chunk's voxels, a plane per bit.
++    pub fn label_planes(&self) -> &[Plane] {
++        match &self.rows {
++            Rows::OneWord(light_box) => light_box.label_planes(),
++            Rows::TwoWord(light_box) => light_box.label_planes(),
++        }
++    }
++
+     /// The face hashes the last spread left, one per face of the chunk.
+     pub fn face_hashes(&self) -> [u64; 6] {
+         self.faces
+diff --git a/src/light/kernel.rs b/src/light/kernel.rs
+index de7a074..e1bec2e 100644
+--- a/src/light/kernel.rs
++++ b/src/light/kernel.rs
+@@ -253,6 +253,86 @@ pub(crate) struct LightBox<R> {
+     /// Where a run also writes the level of the layer of voxels just outside
+     /// each of the chunk's faces, if it does.
+     shell: Option<Box<ShellLevels>>,
++    /// Probe only: the colour index a run carries with its light, if it does.
++    labels: Option<Box<Labels<R>>>,
++}
++
++/// Probe only, never committed: a colour index carried with the light, each
++/// newly reached voxel taking the index of a voxel that reached it.
++pub(crate) struct Labels<R> {
++    /// A box of rows per bit of the index.
++    rows: Vec<Vec<R>>,
++    /// The voxels holding an index.
++    has: Vec<R>,
++    /// Each seed's index, in the seeds' order.
++    seeds: Vec<u8>,
++    /// The index of the chunk's voxels after a run, a plane per bit.
++    out: Vec<Plane>,
++}
++
++/// Probe only: where a voxel's light came from in a step.
++#[derive(Clone, Copy)]
++enum Step {
++    /// The voxel at z - 1 in the same row.
++    ZBelow,
++    /// The voxel at z + 1 in the same row.
++    ZAbove,
++    /// The voxel at the same z in the row this far away.
++    Row(isize),
++}
++
++/// Probe only: gives each voxel `new` holds and `old` doesn't the index of the
++/// first neighbour in `from` that `old` holds, over rows `xs` along x and `ys`
++/// along y. `old` of `None` reads `has`, for a step within a row.
++#[allow(clippy::too_many_arguments)]
++fn carry<R: Row>(
++    labels: &mut Labels<R>,
++    old: Option<&[R]>,
++    new: &[R],
++    side: usize,
++    xs: std::ops::Range<usize>,
++    ys: std::ops::Range<usize>,
++    from: &[Step],
++) {
++    for y in ys {
++        for x in xs.clone() {
++            let i = x + y * side;
++            let at = |j: usize, has: &[R]| match old {
++                Some(old) => old[j],
++                None => has[j],
++            };
++            let before = at(i, &labels.has);
++            let fresh = new[i] & !before;
++            if fresh == R::ZERO {
++                continue;
++            }
++            let mut left = fresh;
++            for &step in from {
++                let source = match step {
++                    Step::ZBelow => before << 1,
++                    Step::ZAbove => before >> 1,
++                    Step::Row(offset) => at((i as isize + offset) as usize, &labels.has),
++                };
++                let take = left & source;
++                if take == R::ZERO {
++                    continue;
++                }
++                left &= !take;
++                for rows in labels.rows.iter_mut() {
++                    let index = match step {
++                        Step::ZBelow => rows[i] << 1,
++                        Step::ZAbove => rows[i] >> 1,
++                        Step::Row(offset) => rows[(i as isize + offset) as usize],
++                    };
++                    rows[i] |= take & index;
++                }
++                if left == R::ZERO {
++                    break;
++                }
++            }
++            labels.has[i] |= fresh;
++        }
++    }
+ }
+ 
+ /// The level of each voxel just outside a chunk's faces, by
+@@ -278,9 +358,33 @@ impl<R: Row> LightBox<R> {
+             fresh: vec![0; CHUNK * CHUNK],
+             z_faces: [[0; 2]; CHUNK],
+             shell: None,
++            labels: None,
+         }
+     }
+ 
++    /// Probe only: makes later runs carry a colour index of `bits` bits, the
++    /// seeds' indices in `seeds`, in the seeds' order.
++    pub fn set_labels(&mut self, bits: usize, seeds: Vec<u8>) {
++        let rows = self.side * self.side;
++        self.labels = Some(Box::new(Labels {
++            rows: vec![vec![R::ZERO; rows]; bits],
++            has: vec![R::ZERO; rows],
++            seeds,
++            out: vec![[0; CHUNK * CHUNK]; bits],
++        }));
++    }
++
++    /// Probe only: makes later runs carry no index.
++    pub fn clear_labels(&mut self) {
++        self.labels = None;
++    }
++
++    /// Probe only: the index of the chunk's voxels after the last run, a plane
++    /// per bit.
++    pub fn label_planes(&self) -> &[Plane] {
++        self.labels.as_ref().map_or(&[], |labels| &labels.out)
++    }
++
+     /// Makes later runs also write the levels of the layer of voxels just
+     /// outside the chunk's faces, read back with
+     /// [`shell_levels`](Self::shell_levels). Voxels outside the box's reach
+@@ -361,6 +465,13 @@ impl<R: Row> LightBox<R> {
+         } else {
+             self.reached.fill(R::ZERO);
+         }
++        if let Some(labels) = self.labels.as_deref_mut() {
++            debug_assert!(!lit && fill.is_empty());
++            for rows in labels.rows.iter_mut() {
++                rows.fill(R::ZERO);
++            }
++            labels.has.fill(R::ZERO);
++        }
+         let mut next_seed = 0;
+         let mut next_fill = 0;
+ 
+@@ -374,6 +485,16 @@ impl<R: Row> LightBox<R> {
+                 let row = seed.x as usize + seed.y as usize * side;
+                 self.reached[row] |= R::ONE << seed.z as usize;
+                 self.open[row] |= R::ONE << seed.z as usize;
++                if let Some(labels) = self.labels.as_deref_mut() {
++                    let bit = R::ONE << seed.z as usize;
++                    labels.has[row] |= bit;
++                    let index = labels.seeds[next_seed];
++                    for (k, rows) in labels.rows.iter_mut().enumerate() {
++                        if index >> k & 1 == 1 {
++                            rows[row] |= bit;
++                        }
++                    }
++                }
+                 next_seed += 1;
+             }
+             let round_seeds = &seeds[first_seed..next_seed];
+@@ -418,6 +539,16 @@ impl<R: Row> LightBox<R> {
+                 break;
+             }
+         }
++        if let Some(labels) = self.labels.as_deref_mut() {
++            for (out, rows) in labels.out.iter_mut().zip(&labels.rows) {
++                for y in 0..CHUNK {
++                    let row = reach + (y + reach) * side;
++                    for x in 0..CHUNK {
++                        out[x + y * CHUNK] = (rows[row + x] >> reach).low_u32();
++                    }
++                }
++            }
++        }
+     }
+ 
+     /// Adds the open voxels of `rows` to the voxels this round reached, over
+@@ -466,6 +597,18 @@ impl<R: Row> LightBox<R> {
+                 changed |= row & !c;
+             }
+         }
++        if let Some(labels) = self.labels.as_deref_mut() {
++            let s = side as isize;
++            let from = [
++                Step::ZBelow,
++                Step::ZAbove,
++                Step::Row(-1),
++                Step::Row(1),
++                Step::Row(-s),
++                Step::Row(s),
++            ];
++            carry(labels, Some(&self.reached), &self.next, side, low..high, low..high, &from);
++        }
+         changed
+     }
+ 
+@@ -665,6 +808,10 @@ impl<R: Row> LightBox<R> {
+                 *out = (c | xm | xp) & open;
+             }
+         }
++        if let Some(labels) = self.labels.as_deref_mut() {
++            let from = [Step::Row(-1), Step::Row(1)];
++            carry(labels, Some(&self.reached), &self.pass, side, low..high, low - 1..high + 1, &from);
++        }
+         self.hash_y_faces_after_x(round, faces);
+         // Along y into `next`.
+         for y in low..high {
+@@ -680,6 +827,11 @@ impl<R: Row> LightBox<R> {
+                 *out = (c | ym | yp) & open;
+             }
+         }
++        if let Some(labels) = self.labels.as_deref_mut() {
++            let s = side as isize;
++            let from = [Step::Row(-s), Step::Row(s)];
++            carry(labels, Some(&self.pass), &self.next, side, low..high, low..high, &from);
++        }
+         self.hash_z_faces_after_y(round, faces);
+         // Along z, in place.
+         let mut changed = R::ZERO;
+@@ -696,6 +848,12 @@ impl<R: Row> LightBox<R> {
+                 changed |= row & !old;
+             }
+         }
++        // After the passes along x and y, `has` holds what the step along z
++        // started from.
++        if let Some(labels) = self.labels.as_deref_mut() {
++            let from = [Step::ZBelow, Step::ZAbove];
++            carry(labels, None, &self.next, side, low..high, low..high, &from);
++        }
+         changed
+     }
+ }

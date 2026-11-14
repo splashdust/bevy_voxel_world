@@ -1,0 +1,34 @@
+caves: 256 chunks, 2791 lamps, sampled in 75.8ms
+caves      r14  16 white n=178 white   44.5 | carried   44.5 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    44.5 (+mix    NaN) mixed   0% | comp 1.0 runs    44.5
+caves      r14  16 one   n=178 white   44.5 | carried   44.5 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    44.5 (+mix    NaN) mixed   0% | comp 3.0 runs   125.3
+caves      r14  16 three n=178 white   44.3 | carried  106.6 (wrong 0.0000%, ties 20.58%) | groups  2.5 runs   102.7 (+mix   14.0) mixed  43% | comp 3.0 runs   128.5
+caves      r14  16 eight n=178 white   44.3 | carried  108.0 (wrong 0.0000%, ties 25.63%) | groups  5.5 runs   217.0 (+mix   28.0) mixed  44% | comp 3.0 runs   127.5
+caves reach 14 at 16 levels in 2.0s
+caves      r32  16 white n=233 white  285.8 | carried  285.8 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   286.2 (+mix    NaN) mixed   0% | comp 1.0 runs   285.3
+caves      r32  16 one   n=233 white  285.2 | carried  285.2 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   285.2 (+mix    NaN) mixed   0% | comp 3.0 runs   905.1
+caves      r32  16 three n=233 white  283.5 | carried  611.5 (wrong 0.0000%, ties 17.51%) | groups  2.6 runs   841.4 (+mix   14.3) mixed  35% | comp 3.0 runs   904.7
+caves      r32  16 eight n=233 white  284.4 | carried  629.9 (wrong 0.0000%, ties 20.27%) | groups  6.2 runs  2186.3 (+mix   33.3) mixed  35% | comp 3.0 runs   901.4
+caves reach 32 at 16 levels in 10.9s
+lamp_world: 128 chunks, 1600 lamps, sampled in 62.2ms
+lamp_world r14  16 white n=128 white   47.9 | carried   47.9 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    47.8 (+mix    NaN) mixed   0% | comp 1.0 runs    47.8
+lamp_world r14  16 one   n=128 white   47.8 | carried   47.8 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    47.8 (+mix    NaN) mixed   0% | comp 3.0 runs   141.0
+lamp_world r14  16 three n=128 white   47.7 | carried  161.3 (wrong 0.0000%, ties 39.11%) | groups  3.0 runs   205.2 (+mix   76.3) mixed  92% | comp 3.0 runs   142.1
+lamp_world r14  16 eight n=128 white   47.8 | carried  169.2 (wrong 0.0000%, ties 48.74%) | groups  8.0 runs   520.3 (+mix  157.9) mixed  92% | comp 3.0 runs   143.9
+lamp_world reach 14 at 16 levels in 2.2s
+lamp_world r32  16 white n=128 white  333.4 | carried  333.4 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   333.0 (+mix    NaN) mixed   0% | comp 1.0 runs   332.4
+lamp_world r32  16 one   n=128 white  331.6 | carried  331.6 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   332.3 (+mix    NaN) mixed   0% | comp 3.0 runs  1030.8
+lamp_world r32  16 three n=128 white  332.4 | carried  968.7 (wrong 0.0000%, ties 67.58%) | groups  3.0 runs  1158.1 (+mix  160.0) mixed  92% | comp 3.0 runs  1020.6
+lamp_world r32  16 eight n=128 white  332.5 | carried 1033.2 (wrong 0.0000%, ties 75.70%) | groups  8.0 runs  3183.3 (+mix  432.9) mixed  92% | comp 3.0 runs  1018.3
+lamp_world reach 32 at 16 levels in 8.9s
+many_lamps: 256 chunks, 34119 lamps, sampled in 102.7ms
+many_lamps r14  16 white n=229 white   37.7 | carried   37.7 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    38.5 (+mix    NaN) mixed   0% | comp 1.0 runs    38.5
+many_lamps r14  16 one   n=229 white   38.5 | carried   38.5 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs    37.8 (+mix    NaN) mixed   0% | comp 3.0 runs   120.3
+many_lamps r14  16 three n=229 white   38.5 | carried  117.2 (wrong 0.0000%, ties 64.25%) | groups  3.0 runs   142.9 (+mix   33.1) mixed  69% | comp 3.0 runs   121.9
+many_lamps r14  16 eight n=229 white   38.4 | carried  120.8 (wrong 0.0000%, ties 59.90%) | groups  5.2 runs   189.8 (+mix   39.4) mixed  69% | comp 3.0 runs   118.5
+many_lamps reach 14 at 16 levels in 3.6s
+many_lamps r32  16 white n=256 white  289.3 | carried  289.3 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   290.3 (+mix    NaN) mixed   0% | comp 1.0 runs   288.6
+many_lamps r32  16 one   n=256 white  287.5 | carried  287.5 (wrong 0.0000%, ties 0.00%) | groups  1.0 runs   289.6 (+mix    NaN) mixed   0% | comp 3.0 runs   923.9
+many_lamps r32  16 three n=256 white  288.1 | carried  802.8 (wrong 0.0000%, ties 83.60%) | groups  3.0 runs   921.6 (+mix   31.2) mixed  74% | comp 3.0 runs   915.1
+many_lamps r32  16 eight n=256 white  288.1 | carried  835.5 (wrong 0.0000%, ties 80.69%) | groups  6.2 runs  2152.6 (+mix   41.9) mixed  74% | comp 3.0 runs   888.3
+many_lamps reach 32 at 16 levels in 16.9s
+wrote ../baseline/colour_label.csv

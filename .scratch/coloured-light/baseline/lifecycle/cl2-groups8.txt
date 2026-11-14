@@ -1,0 +1,70 @@
+warm-up...
+caves (3 runs)...
+sampled the reference scene from [-320, -576, -320] to [416, 200, 416] in 2.1s
+colour cost simulation: Groups(8)
+caves: missed its thresholds: ["solves_per_arrival > 5.5"]
+caves: missed its thresholds: ["solves_per_arrival > 5.5"]
+caves: missed its thresholds: ["solves_per_arrival > 5.5"]
+edits_lamps (5 runs)...
+edits_lamps: 4 of 24 single voxel edits missed the gate (frames [2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], main thread µs [546.5399999999931, 441.04600000000005, 449.41599999998516, 467.3469999999895, 416.20499999999083, 493.2179999999846, 482.1669999999756, 243.90900000000215, 336.04299999998943, 465.5570000000182, 333.3419999999876, 320.46199999999203, 340.6129999999905, 329.2810000000088, 905.8029999999917, 573.5609999999838, 322.6710000000139, 323.7220000000036, 501.14899999999807, 498.0279999999766, 266.6189999999915, 209.67699999999923, 239.82899999998608, 287.2999999999877])
+edits_lamps: 4 of 24 single voxel edits missed the gate (frames [2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], main thread µs [545.8289999999977, 366.564000000011, 425.1549999999895, 490.7670000000053, 304.87099999999145, 335.55200000000696, 280.6809999999871, 307.32100000000173, 361.4729999999895, 320.4120000000046, 556.7000000000064, 358.6930000000166, 418.3050000000037, 328.73200000000224, 518.3579999999779, 513.1379999999979, 333.99199999999496, 338.90300000001616, 538.7300000000153, 501.74899999998956, 262.27999999997564, 247.1890000000201, 279.5900000000131, 238.17900000000236])
+edits_lamps: 4 of 24 single voxel edits missed the gate (frames [2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], main thread µs [476.0870000000068, 440.30599999999254, 438.95599999999035, 434.63599999998337, 281.5000000000225, 245.21899999999164, 279.3209999999817, 282.4799999999925, 327.00199999999313, 323.0520000000183, 363.4830000000022, 326.6319999999894, 336.54200000000856, 325.6709999999998, 526.6389999999888, 591.3010000000156, 324.21099999999115, 355.12299999999186, 486.58799999998337, 431.8450000000098, 236.9589999999846, 242.25999999998749, 238.41899999999328, 392.48399999999606])
+edits_lamps: 4 of 24 single voxel edits missed the gate (frames [2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], main thread µs [455.3059999999789, 382.93299999998, 450.23599999998964, 439.6160000000009, 274.0799999999979, 272.66999999997665, 308.8419999999985, 282.71999999998343, 325.9919999999852, 328.80099999999857, 333.5530000000233, 319.82099999999036, 408.06499999999346, 326.52299999998036, 525.5400000000066, 504.24800000001824, 324.73200000001157, 269.3089999999927, 500.59799999999655, 514.5890000000009, 235.67800000000716, 403.0040000000099, 267.94900000001576, 239.7890000000018])
+edits_lamps: 4 of 24 single voxel edits missed the gate (frames [2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], main thread µs [383.9749999999924, 439.7559999999885, 438.5560000000055, 458.15600000000245, 493.73800000000756, 274.70000000002415, 278.570000000002, 228.0279999999948, 326.53199999998606, 321.6409999999996, 401.8350000000055, 330.553000000009, 334.9019999999996, 359.0329999999824, 536.7800000000216, 510.327999999987, 326.3509999999883, 331.51199999997516, 521.049000000005, 499.9679999999955, 236.10800000000154, 243.09000000002357, 246.64799999999332, 418.88499999998885])
+caves.arrivals                             4169.000
+caves.capped                                  0.000
+caves.changed_batches_per_arrival             1.698
+caves.changed_relights                     7081.000
+caves.cpu_light_bytes_per_mixed_voxel         0.494
+caves.cpu_light_mib                          47.469
+caves.emissive_scans                       4105.000
+caves.evictions                               9.000
+caves.fill_probes                            94.000
+caves.fill_relights                        3468.000
+caves.fill_seeded                           245.000
+caves.gate_failures                           1.000
+caves.gpu_light_mib_at_peak                  38.383
+caves.idle_fill_probes                        0.000
+caves.idle_probes                             0.000
+caves.idle_relights                           0.000
+caves.main_thread_max_frame_ms                5.134
+caves.main_thread_total_ms                 1483.277
+caves.max_ms                                 10.386
+caves.over_4ms                              181.000
+caves.over_8ms                                1.000
+caves.p50_ms                                  0.349
+caves.p95_ms                                  0.839
+caves.p99_ms                                  4.074
+caves.peak_slots                           1024.000
+caves.pool_solve_us_per_chunk               860.652
+caves.probes                               1622.000
+caves.record_kib                            503.766
+caves.relight_us_per_relight                833.956
+caves.relights                            22193.000
+caves.relit_ms                             8133.615
+caves.rest_ms                               869.801
+caves.settled_ms                           8133.615
+caves.shown                                3074.000
+caves.slot_allocations                     1132.000
+caves.solves                              23130.000
+caves.solves_per_arrival                      5.548
+caves.starved                              1921.000
+caves.time_ms                              7280.704
+caves.visible_from_arrival_per_shown          1.714
+caves.visible_from_column_per_shown           0.238
+caves.visible_from_other_per_shown            0.170
+caves.visible_from_shell_per_shown            3.857
+caves.visible_per_shown                       2.121
+caves.visible_with_shells_per_shown           5.971
+caves.worst_1pct_ms                           4.721
+edits_lamps.edits                            24.000
+edits_lamps.gate_failures                     4.000
+edits_lamps.max_frames_to_land                4.000
+edits_lamps.max_main_thread_us              556.700
+edits_lamps.max_relights                     13.000
+edits_lamps.p50_frames_to_land                2.000
+edits_lamps.p50_main_thread_us              358.693
+edits_lamps.p50_relights                      9.000
+edits_lamps.pool_solve_us_per_chunk         546.763
+edits_lamps.relight_us_per_relight         1025.293
+wrote /home/joacim/Documents/GitHub/bevy_voxel_world/.scratch/coloured-light/probe-tree/target/bench/chunk_lifecycle/cl2-groups8.json

@@ -11,5 +11,5 @@ assets/.DS_Store
 .scratch/coloured-light/prototype/
 !.scratch/probes/
 .scratch/probes/*
-!.scratch/probes/colour_look*
+!.scratch/probes/colour_*
 .claude/launch.json

@@ -1,0 +1,462 @@
+diff --git a/benches/chunk_lifecycle.rs b/benches/chunk_lifecycle.rs
+index dd0002b..2a55773 100644
+--- a/benches/chunk_lifecycle.rs
++++ b/benches/chunk_lifecycle.rs
+@@ -205,7 +205,17 @@ impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
+     }
+ 
+     fn light_propagation(&self) -> Option<LightPropagation> {
+-        LIT.then(LightPropagation::default)
++        // Probe only: LAMP_REACH and LAMP_LEVELS=256 set its voxel light.
++        LIT.then(|| {
++            let mut light = LightPropagation::default();
++            if let Ok(reach) = std::env::var("LAMP_REACH") {
++                light.voxel_reach = reach.parse().expect("a reach");
++            }
++            if std::env::var("LAMP_LEVELS").as_deref() == Ok("256") {
++                light.precision = LightPrecision::Steps256;
++            }
++            light
++        })
+     }
+ 
+     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+@@ -567,7 +577,15 @@ impl VoxelWorldConfig for CaveWorld {
+     }
+ 
+     fn light_propagation(&self) -> Option<LightPropagation> {
+-        Some(LightPropagation::default())
++        // Probe only: LAMP_REACH and LAMP_LEVELS=256 set its voxel light.
++        let mut light = LightPropagation::default();
++        if let Ok(reach) = std::env::var("LAMP_REACH") {
++            light.voxel_reach = reach.parse().expect("a reach");
++        }
++        if std::env::var("LAMP_LEVELS").as_deref() == Ok("256") {
++            light.precision = LightPrecision::Steps256;
++        }
++        Some(light)
+     }
+ 
+     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+@@ -1818,6 +1836,123 @@ fn scenario_edits_lit() -> Metrics {
+     metrics
+ }
+ 
++/// Probe only, never committed: `edits_lit` on the lamp world, with each edit
++/// beside a lamp so that it relights voxel light: a block placed on the
++/// ground beside the lamp, the lamp dug out, and each undone. Reports as
++/// `edits_lit` does, with the same gate.
++#[cfg(feature = "light_propagation")]
++fn scenario_edits_lamps() -> Metrics {
++    use bevy_voxel_world::light_bench::light_stats;
++
++    type Lit = LampWorld<true>;
++    let prefix = "edits_lamps";
++    let mut app = build_app(Lit::default());
++    // Streamed until light settles, as `caves` streams: slower solves can
++    // leave `stream_in`'s lifecycle quiet for its frames before chunks are done.
++    let streamed = stream_in_settled::<Lit>(&mut app, std::time::Duration::from_secs(120), |_| {});
++    assert!(!streamed.capped, "the lamp world's light didn't settle");
++
++    let main_ms = |app: &App| light_stats::<Lit>(app.world()).unwrap().main_thread_ms;
++    let relights = |app: &App| light_stats::<Lit>(app.world()).unwrap().relights;
++    let set = |app: &mut App, edits: &[(IVec3, WorldVoxel<u8>)]| {
++        let mut state = SystemState::<VoxelWorld<Lit>>::new(app.world_mut());
++        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
++        for (position, voxel) in edits {
++            voxel_world.set_voxel(*position, *voxel);
++        }
++    };
++    let run_edit = |app: &mut App, edits: &[(IVec3, WorldVoxel<u8>)]| -> (u32, f64) {
++        set(app, edits);
++        let mut frames = 0;
++        let mut worst_us: f64 = 0.0;
++        loop {
++            let start = Instant::now();
++            let before = main_ms(app);
++            app.update();
++            worst_us = worst_us.max((main_ms(app) - before) * 1000.0);
++            if light_is_settled::<Lit>(app) {
++                break;
++            }
++            frames += 1;
++            assert!(frames < MAX_FRAMES, "the edit's light didn't land");
++            std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
++        }
++        std::thread::sleep(PACED_FRAME);
++        (frames, worst_us)
++    };
++    let is_lamp = |x: i32, z: i32| {
++        let hash = (x.wrapping_mul(73_856_093) ^ z.wrapping_mul(19_349_663)) as u32;
++        hash.is_multiple_of(64)
++    };
++
++    let mut sites = Vec::new();
++    for (x, z) in [(16, 16), (48, 20), (80, 72), (31, 40), (32, 40), (100, 63)] {
++        // The lamp nearest the site, by rings.
++        let lamp = (0..32)
++            .flat_map(|r: i32| {
++                (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (x + dx, z + dz)))
++            })
++            .find(|&(lx, lz)| is_lamp(lx, lz))
++            .expect("a lamp near the site");
++        let lamp = IVec3::new(lamp.0, sine_height(lamp.0, lamp.1) - 1, lamp.1);
++        let beside = IVec3::new(lamp.x + 1, sine_height(lamp.x + 1, lamp.z), lamp.z);
++        sites.push(vec![(beside, WorldVoxel::Solid(0))]);
++        sites.push(vec![(beside, WorldVoxel::Air)]);
++        sites.push(vec![(lamp, WorldVoxel::Solid(0))]);
++        sites.push(vec![(lamp, WorldVoxel::Solid(LAMP))]);
++    }
++    let mut frames = Vec::new();
++    let mut worst = Vec::new();
++    let mut tasks = Vec::new();
++    for edit in &sites {
++        let started = relights(&app);
++        let (edit_frames, edit_worst) = run_edit(&mut app, edit);
++        frames.push(edit_frames as f64);
++        worst.push(edit_worst);
++        tasks.push((relights(&app) - started) as f64);
++    }
++    let failures = frames
++        .iter()
++        .zip(&worst)
++        .filter(|(frames, worst)| {
++            **frames > EDIT_FRAMES_GATE as f64 || **worst > EDIT_MAIN_THREAD_GATE_US
++        })
++        .count();
++    if failures > 0 {
++        eprintln!(
++            "{prefix}: {failures} of {} single voxel edits missed the gate \
++             (frames {frames:?}, main thread µs {worst:?})",
++            sites.len()
++        );
++    }
++    let stats = light_stats::<Lit>(app.world()).unwrap();
++    let mut metrics = Metrics::new();
++    let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
++    metrics.insert(format!("{prefix}.edits"), sites.len() as f64);
++    metrics.insert(format!("{prefix}.max_frames_to_land"), max(&frames));
++    metrics.insert(
++        format!("{prefix}.p50_frames_to_land"),
++        percentile(&frames, 0.5),
++    );
++    metrics.insert(format!("{prefix}.max_main_thread_us"), max(&worst));
++    metrics.insert(
++        format!("{prefix}.p50_main_thread_us"),
++        percentile(&worst, 0.5),
++    );
++    metrics.insert(format!("{prefix}.max_relights"), max(&tasks));
++    metrics.insert(format!("{prefix}.p50_relights"), percentile(&tasks, 0.5));
++    metrics.insert(format!("{prefix}.gate_failures"), failures as f64);
++    metrics.insert(
++        format!("{prefix}.relight_us_per_relight"),
++        stats.relight_ms * 1000.0 / stats.relights.max(1) as f64,
++    );
++    metrics.insert(
++        format!("{prefix}.pool_solve_us_per_chunk"),
++        stats.solve_ms * 1000.0 / stats.solves.max(1) as f64,
++    );
++    metrics
++}
++
+ /// Changes of light settings on the lit sine terrain once its light is at
+ /// rest, each made through the config resource, as a game's system would:
+ /// sky reach, voxel reach, a sky ceiling in place of the clearance, sky light
+@@ -2223,6 +2358,8 @@ fn run_all(only: Option<&str>) -> Metrics {
+     #[cfg(feature = "light_propagation")]
+     step("edits_lit", RUNS, &scenario_edits_lit);
+     #[cfg(feature = "light_propagation")]
++    step("edits_lamps", RUNS, &scenario_edits_lamps);
++    #[cfg(feature = "light_propagation")]
+     step("settings_lit", RUNS, &scenario_settings_lit);
+     metrics
+ }
+diff --git a/src/light/route.rs b/src/light/route.rs
+index 1cc1f84..22cc191 100644
+--- a/src/light/route.rs
++++ b/src/light/route.rs
+@@ -836,6 +836,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
+         let mut shell = [None; 6];
+         for face in Face::ALL {
+             if let Some(neighbour) = self.neighbour_light(position, face) {
++                // Probe only: the two more components a coloured border plane reads.
++                if crate::light::solver::colour_sim::sim() != crate::light::solver::colour_sim::Sim::Off
++                    && matches!(neighbour.voxel, crate::light::solver::ChannelLight::Planes(_))
++                {
++                    std::hint::black_box(border_plane(&neighbour, face.opposite(), self.precision));
++                }
+                 let plane = border_plane(&neighbour, face.opposite(), self.precision);
+                 write_shell(&mut bytes, face, Some(&plane), self.precision);
+                 shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
+@@ -853,6 +859,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
+         let Some(neighbour) = self.neighbour_light(position, face) else {
+             return;
+         };
++        // Probe only: the two more components a coloured border plane reads.
++        if crate::light::solver::colour_sim::sim() != crate::light::solver::colour_sim::Sim::Off
++            && matches!(neighbour.voxel, crate::light::solver::ChannelLight::Planes(_))
++        {
++            std::hint::black_box(border_plane(&neighbour, face.opposite(), self.precision));
++        }
+         let plane = border_plane(&neighbour, face.opposite(), self.precision);
+         let hash = Some(FixedHasher.hash_one(&plane[..]));
+         let shell = &mut self.chunks.get_mut(&entity).unwrap().shell[face as usize];
+diff --git a/src/light/solver.rs b/src/light/solver.rs
+index 70ede25..a8efe2c 100644
+--- a/src/light/solver.rs
++++ b/src/light/solver.rs
+@@ -548,10 +548,254 @@ pub(crate) fn solve_voxel(
+     if seeds.is_empty() {
+         return unlit;
+     }
++    if colour_sim::sim() != colour_sim::Sim::Off {
++        return colour_sim::solve(neighbours, scale, shape, &seeds, &centre.occupancy);
++    }
+     let (planes, faces) = spread(neighbours, scale, shape, &seeds, None, None);
+     (channel_light(planes, &centre.occupancy), faces)
+ }
+ 
++/// Probe only, never committed: what coloured voxel light would cost a solve,
++/// with light kept white and exact. `COLOUR_SIM=groups<K>` spreads a run per
++/// light colour, lamps taking one of K colours by a hash of where they are
++/// in the box, mixes runs where two or more reach the chunk into three 8-bit
++/// components and packs them as 4-byte texels; the white light is the max
++/// over the runs. `COLOUR_SIM=components` spreads a run per component of
++/// orange lamps (levels 15, 13 and 10), packs the three as texels of 2 bytes
++/// at 16 levels and 4 at 256; the white light is the red run.
++pub(crate) mod colour_sim {
++    use std::sync::OnceLock;
++
++    use super::*;
++    use crate::light::faces::mix;
++
++    #[derive(Clone, Copy, PartialEq, Debug)]
++    pub(crate) enum Sim {
++        Off,
++        Groups(usize),
++        Components,
++    }
++
++    pub(crate) fn sim() -> Sim {
++        static SIM: OnceLock<Sim> = OnceLock::new();
++        *SIM.get_or_init(|| {
++            let sim = match std::env::var("COLOUR_SIM").as_deref() {
++                Ok("components") => Sim::Components,
++                Ok(groups) if groups.starts_with("groups") => {
++                    Sim::Groups(groups[6..].parse().expect("groups<K>"))
++                }
++                _ => Sim::Off,
++            };
++            if sim != Sim::Off {
++                eprintln!("colour cost simulation: {sim:?}");
++            }
++            sim
++        })
++    }
++
++    fn lit(planes: &[Plane]) -> bool {
++        planes.iter().any(|plane| plane.iter().any(|&column| column != 0))
++    }
++
++    const SPREAD: [u64; 256] = {
++        let mut table = [0u64; 256];
++        let mut byte = 0;
++        while byte < 256 {
++            let mut bit = 0;
++            while bit < 8 {
++                if byte >> bit & 1 == 1 {
++                    table[byte] |= 1 << (bit * 8);
++                }
++                bit += 1;
++            }
++            byte += 1;
++        }
++        table
++    };
++
++    fn group_levels(planes: &[Plane], column: usize, shift: usize) -> u64 {
++        let mut texels = 0;
++        for (bit, plane) in planes.iter().enumerate() {
++            texels |= SPREAD[(plane[column] >> shift) as usize & 0xFF] << bit;
++        }
++        texels
++    }
++
++    fn every_other_byte(bytes: u64) -> u128 {
++        let mut wide = bytes as u128;
++        wide = (wide | wide << 32) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
++        wide = (wide | wide << 16) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
++        (wide | wide << 8) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF
++    }
++
++    fn every_fourth_byte(bytes: u32) -> u128 {
++        let mut wide = bytes as u128;
++        wide = (wide | wide << 48) & 0x0000_0000_0000_FFFF_0000_0000_0000_FFFF;
++        (wide | wide << 24) & 0x0000_00FF_0000_00FF_0000_00FF_0000_00FF
++    }
++
++    fn put_four(bytes: &mut [u8], lanes: [u64; 4]) {
++        for half in 0..2 {
++            let mut texels = 0u128;
++            for (i, lane) in lanes.iter().enumerate() {
++                texels |= every_fourth_byte((lane >> (32 * half)) as u32) << (8 * i);
++            }
++            bytes[16 * half..16 * half + 16].copy_from_slice(&texels.to_le_bytes());
++        }
++    }
++
++    /// A slot of sky light and three components, as a slot of `wide`-byte
++    /// texels holds them, from each component's levels: `lane(c, column,
++    /// shift)` gives 8 voxels' levels a byte each. Discarded.
++    fn pack(wide: usize, occupancy: &Occupancy, lane: impl Fn(usize, usize, usize) -> u64) -> Box<[u8]> {
++        let mut bytes = vec![0u8; 34 * 34 * 34 * wide].into_boxed_slice();
++        for y in 0..32 {
++            for x in 0..32 {
++                let column = x + y * 32;
++                let open = !occupancy.solid_column(x, y);
++                let row = 1 + (x + 1) * 34 + (y + 1) * 34 * 34;
++                for shift in (0..32).step_by(8) {
++                    let open_byte = (open >> shift) as usize & 0xFF;
++                    let mask = SPREAD[open_byte] * 0xFF;
++                    let sky = SPREAD[open_byte] * 15;
++                    let at = (row + shift) * wide;
++                    let [r, g, b] = [0, 1, 2].map(|c| lane(c, column, shift) & mask);
++                    if wide == 2 {
++                        bytes[at..at + 16].copy_from_slice(
++                            &(every_other_byte(sky | r << 4) | every_other_byte(g | b << 4) << 8)
++                                .to_le_bytes(),
++                        );
++                    } else {
++                        put_four(&mut bytes[at..at + 32], [sky, r, g, b]);
++                    }
++                }
++            }
++        }
++        bytes
++    }
++
++    pub(crate) fn solve(
++        neighbours: &Neighbourhood,
++        scale: &LevelScale,
++        shape: LightShape,
++        seeds: &[Seed],
++        occupancy: &Occupancy,
++    ) -> (ChannelLight, [u64; 6]) {
++        let precision = scale.precision();
++        let bits = precision.bits();
++        let runs: Vec<Vec<Seed>> = match sim() {
++            Sim::Groups(k) => {
++                let mut parts = vec![Vec::new(); k];
++                for seed in seeds {
++                    let hash = (seed.x as u32).wrapping_mul(73_856_093)
++                        ^ (seed.y as u32).wrapping_mul(19_349_663)
++                        ^ (seed.z as u32).wrapping_mul(83_492_791);
++                    parts[(hash >> 7) as usize % k].push(*seed);
++                }
++                parts.retain(|part| !part.is_empty());
++                parts
++            }
++            Sim::Components => {
++                let top = scale.start(precision.of_whole(15)).unwrap_or(0);
++                [15u8, 13, 10]
++                    .iter()
++                    .map(|&level| {
++                        let extra = scale
++                            .start(precision.of_whole(level))
++                            .map_or(u8::MAX, |start| start - top);
++                        let mut run: Vec<Seed> = seeds
++                            .iter()
++                            .filter(|seed| (seed.start as u32 + extra as u32) < scale.reach())
++                            .map(|seed| Seed {
++                                start: seed.start + extra,
++                                ..*seed
++                            })
++                            .collect();
++                        run.sort_by_key(|seed| seed.start);
++                        run
++                    })
++                    .collect()
++            }
++            Sim::Off => unreachable!(),
++        };
++        let mut faces = [0u64; 6];
++        let mut reaching: Vec<Box<[Plane]>> = Vec::new();
++        for run in &runs {
++            if run.is_empty() {
++                reaching.push(empty_planes(precision));
++                continue;
++            }
++            let (planes, run_faces) = spread(neighbours, scale, shape, run, None, None);
++            for (face, run_face) in faces.iter_mut().zip(run_faces) {
++                *face = mix(*face, run_face);
++            }
++            if lit(&planes) || sim() == Sim::Components {
++                reaching.push(planes);
++            }
++        }
++        if reaching.is_empty() {
++            return (ChannelLight::Uniform(0), faces);
++        }
++        let white = match sim() {
++            Sim::Components => {
++                if reaching.iter().any(|planes| lit(planes)) {
++                    let wide = if bits == 4 { 2 } else { 4 };
++                    std::hint::black_box(pack(wide, occupancy, |c, column, shift| {
++                        group_levels(&reaching[c], column, shift)
++                    }));
++                }
++                reaching.swap_remove(0)
++            }
++            _ if reaching.len() == 1 => reaching.pop().unwrap(),
++            _ => {
++                // Each component the max over runs of a table at the run's
++                // level: red keeps the level, so it's the white light.
++                let mut out: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; 32768]);
++                let drop = [0u8, 2 * (bits as u8 - 3), 5 * (bits as u8 - 3)];
++                for (run, planes) in reaching.iter().enumerate() {
++                    for column in 0..1024 {
++                        let any = planes.iter().fold(0, |any, plane| any | plane[column]);
++                        if any == 0 {
++                            continue;
++                        }
++                        for shift in (0..32).step_by(8) {
++                            if (any >> shift) & 0xFF == 0 {
++                                continue;
++                            }
++                            let levels = group_levels(planes, column, shift).to_le_bytes();
++                            for (i, &level) in levels.iter().enumerate() {
++                                if level == 0 {
++                                    continue;
++                                }
++                                for c in 0..3 {
++                                    let value = level.saturating_sub(drop[(c + run) % 3] * (c != 0) as u8);
++                                    let cell = &mut out[c][column * 32 + shift + i];
++                                    *cell = (*cell).max(value);
++                                }
++                            }
++                        }
++                    }
++                }
++                let mut planes = empty_planes(precision);
++                for column in 0..1024 {
++                    for z in 0..32 {
++                        let level = out[0][column * 32 + z];
++                        for (bit, plane) in planes.iter_mut().enumerate() {
++                            plane[column] |= ((level >> bit & 1) as u32) << z;
++                        }
++                    }
++                }
++                std::hint::black_box(pack(4, occupancy, |c, column, shift| {
++                    let base = column * 32 + shift;
++                    u64::from_le_bytes(out[c][base..base + 8].try_into().unwrap())
++                }));
++                planes
++            }
++        };
++        (channel_light(white, occupancy), faces)
++    }
++}
++
+ /// The sky fill cells of the 27 positions around `position`.
+ fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
+     let cells = cells.read();

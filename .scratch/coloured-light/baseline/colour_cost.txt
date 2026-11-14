@@ -1,0 +1,64 @@
+caves: 256 chunks, 2791 lamps, sampled in 84.4ms
+caves      r14  16 white n=178 white   44.6 | groups  1.0 runs    44.6 (+mix    NaN) mixed   0% | comp 1.0 runs    44.6 distinct   0% | B/voxel today 0.32 mix 0.32 keep 0.32 comp 0.32
+caves      r14  16 one   n=178 white   44.6 | groups  1.0 runs    44.8 (+mix    NaN) mixed   0% | comp 3.0 runs   131.6 distinct  65% | B/voxel today 0.32 mix 0.32 keep 0.32 comp 0.97
+caves      r14  16 three n=178 white   44.5 | groups  2.5 runs   106.0 (+mix   14.7) mixed  43% | comp 3.0 runs   131.1 distinct  65% | B/voxel today 0.32 mix 1.39 keep 0.73 comp 0.97
+caves      r14  16 eight n=178 white   44.4 | groups  5.5 runs   215.7 (+mix   31.0) mixed  44% | comp 3.0 runs   130.8 distinct  65% | B/voxel today 0.32 mix 1.42 keep 1.57 comp 0.97
+caves reach 14 at 16 levels in 2.2s
+caves      r14 256 white n=178 white   45.1 | groups  1.0 runs    45.0 (+mix    NaN) mixed   0% | comp 1.0 runs    45.0 distinct   0% | B/voxel today 0.65 mix 0.65 keep 0.65 comp 0.65
+caves      r14 256 one   n=178 white   45.0 | groups  1.0 runs    45.6 (+mix    NaN) mixed   0% | comp 3.0 runs   132.0 distinct  65% | B/voxel today 0.65 mix 0.65 keep 0.65 comp 1.94
+caves      r14 256 three n=178 white   45.1 | groups  2.5 runs   103.6 (+mix   15.9) mixed  43% | comp 3.0 runs   132.9 distinct  65% | B/voxel today 0.65 mix 1.50 keep 1.46 comp 1.94
+caves      r14 256 eight n=178 white   45.2 | groups  5.5 runs   220.9 (+mix   34.9) mixed  44% | comp 3.0 runs   132.5 distinct  65% | B/voxel today 0.65 mix 1.52 keep 3.14 comp 1.94
+caves reach 14 at 256 levels in 2.9s
+caves      r32  16 white n=233 white  285.2 | groups  1.0 runs   285.1 (+mix    NaN) mixed   0% | comp 1.0 runs   286.7 distinct   0% | B/voxel today 0.26 mix 0.26 keep 0.26 comp 0.26
+caves      r32  16 one   n=233 white  284.1 | groups  1.0 runs   284.9 (+mix    NaN) mixed   0% | comp 3.0 runs   898.5 distinct  51% | B/voxel today 0.26 mix 0.26 keep 0.26 comp 0.77
+caves      r32  16 three n=233 white  284.9 | groups  2.6 runs   857.5 (+mix   14.5) mixed  35% | comp 3.0 runs   900.0 distinct  51% | B/voxel today 0.26 mix 1.14 keep 0.60 comp 0.77
+caves      r32  16 eight n=233 white  285.2 | groups  6.2 runs  2178.1 (+mix   35.2) mixed  35% | comp 3.0 runs   896.2 distinct  51% | B/voxel today 0.26 mix 1.14 keep 1.37 comp 0.77
+caves reach 32 at 16 levels in 12.7s
+caves      r32 256 white n=233 white  285.7 | groups  1.0 runs   286.1 (+mix    NaN) mixed   0% | comp 1.0 runs   286.3 distinct   0% | B/voxel today 0.51 mix 0.51 keep 0.51 comp 0.51
+caves      r32 256 one   n=233 white  286.6 | groups  1.0 runs   287.4 (+mix    NaN) mixed   0% | comp 3.0 runs   907.0 distinct  51% | B/voxel today 0.51 mix 0.51 keep 0.51 comp 1.53
+caves      r32 256 three n=233 white  285.2 | groups  2.6 runs   843.7 (+mix   16.4) mixed  35% | comp 3.0 runs   904.4 distinct  51% | B/voxel today 0.51 mix 1.21 keep 1.21 comp 1.53
+caves      r32 256 eight n=233 white  287.0 | groups  6.2 runs  2200.6 (+mix   38.5) mixed  35% | comp 3.0 runs   901.2 distinct  51% | B/voxel today 0.51 mix 1.21 keep 2.74 comp 1.53
+caves reach 32 at 256 levels in 13.5s
+lamp_world: 128 chunks, 1600 lamps, sampled in 71.3ms
+lamp_world r14  16 white n=128 white   47.7 | groups  1.0 runs    47.7 (+mix    NaN) mixed   0% | comp 1.0 runs    47.7 distinct   0% | B/voxel today 0.46 mix 0.46 keep 0.46 comp 0.46
+lamp_world r14  16 one   n=128 white   47.7 | groups  1.0 runs    47.8 (+mix    NaN) mixed   0% | comp 3.0 runs   141.4 distinct  92% | B/voxel today 0.46 mix 0.46 keep 0.46 comp 1.38
+lamp_world r14  16 three n=128 white   47.7 | groups  3.0 runs   217.4 (+mix   76.9) mixed  92% | comp 3.0 runs   141.8 distinct  92% | B/voxel today 0.46 mix 2.77 keep 1.38 comp 1.38
+lamp_world r14  16 eight n=128 white   47.9 | groups  8.0 runs   542.0 (+mix  173.3) mixed  92% | comp 3.0 runs   143.3 distinct  92% | B/voxel today 0.46 mix 2.77 keep 3.59 comp 1.38
+lamp_world reach 14 at 16 levels in 2.5s
+lamp_world r14 256 white n=128 white   50.2 | groups  1.0 runs    50.3 (+mix    NaN) mixed   0% | comp 1.0 runs    50.3 distinct   0% | B/voxel today 0.92 mix 0.92 keep 0.92 comp 0.92
+lamp_world r14 256 one   n=128 white   50.2 | groups  1.0 runs    50.3 (+mix    NaN) mixed   0% | comp 3.0 runs   147.3 distinct  92% | B/voxel today 0.92 mix 0.92 keep 0.92 comp 2.77
+lamp_world r14 256 three n=128 white   50.1 | groups  3.0 runs   237.9 (+mix   91.7) mixed  92% | comp 3.0 runs   148.6 distinct  92% | B/voxel today 0.92 mix 2.77 keep 2.77 comp 2.77
+lamp_world r14 256 eight n=128 white   50.2 | groups  8.0 runs   563.0 (+mix  189.5) mixed  92% | comp 3.0 runs   151.2 distinct  92% | B/voxel today 0.92 mix 2.77 keep 7.19 comp 2.77
+lamp_world reach 14 at 256 levels in 3.3s
+lamp_world r32  16 white n=128 white  332.0 | groups  1.0 runs   331.6 (+mix    NaN) mixed   0% | comp 1.0 runs   329.1 distinct   0% | B/voxel today 0.46 mix 0.46 keep 0.46 comp 0.46
+lamp_world r32  16 one   n=128 white  323.1 | groups  1.0 runs   329.7 (+mix    NaN) mixed   0% | comp 3.0 runs  1015.0 distinct  92% | B/voxel today 0.46 mix 0.46 keep 0.46 comp 1.38
+lamp_world r32  16 three n=128 white  321.0 | groups  3.0 runs  1119.1 (+mix  160.1) mixed  92% | comp 3.0 runs   989.2 distinct  92% | B/voxel today 0.46 mix 2.77 keep 1.38 comp 1.38
+lamp_world r32  16 eight n=128 white  332.7 | groups  8.0 runs  3105.9 (+mix  424.1) mixed  92% | comp 3.0 runs   984.3 distinct  92% | B/voxel today 0.46 mix 2.77 keep 3.69 comp 1.38
+lamp_world reach 32 at 16 levels in 9.8s
+lamp_world r32 256 white n=128 white  338.0 | groups  1.0 runs   338.2 (+mix    NaN) mixed   0% | comp 1.0 runs   341.1 distinct   0% | B/voxel today 0.92 mix 0.92 keep 0.92 comp 0.92
+lamp_world r32 256 one   n=128 white  336.1 | groups  1.0 runs   335.9 (+mix    NaN) mixed   0% | comp 3.0 runs  1034.2 distinct  92% | B/voxel today 0.92 mix 0.92 keep 0.92 comp 2.77
+lamp_world r32 256 three n=128 white  335.5 | groups  3.0 runs  1179.5 (+mix  178.1) mixed  92% | comp 3.0 runs  1028.5 distinct  92% | B/voxel today 0.92 mix 2.77 keep 2.77 comp 2.77
+lamp_world r32 256 eight n=128 white  335.8 | groups  8.0 runs  3167.5 (+mix  471.3) mixed  92% | comp 3.0 runs  1011.1 distinct  92% | B/voxel today 0.92 mix 2.77 keep 7.38 comp 2.77
+lamp_world reach 32 at 256 levels in 10.6s
+many_lamps: 256 chunks, 34119 lamps, sampled in 109.2ms
+many_lamps r14  16 white n=229 white   39.9 | groups  1.0 runs    38.8 (+mix    NaN) mixed   0% | comp 1.0 runs    40.9 distinct   0% | B/voxel today 0.35 mix 0.35 keep 0.35 comp 0.35
+many_lamps r14  16 one   n=229 white   39.6 | groups  1.0 runs    39.3 (+mix    NaN) mixed   0% | comp 3.0 runs   126.9 distinct  70% | B/voxel today 0.35 mix 0.35 keep 0.35 comp 1.05
+many_lamps r14  16 three n=229 white   39.4 | groups  3.0 runs   144.6 (+mix   33.6) mixed  69% | comp 3.0 runs   123.2 distinct  70% | B/voxel today 0.35 mix 2.09 keep 1.04 comp 1.05
+many_lamps r14  16 eight n=229 white   38.6 | groups  5.2 runs   193.3 (+mix   41.5) mixed  69% | comp 3.0 runs   125.5 distinct  70% | B/voxel today 0.35 mix 2.09 keep 1.60 comp 1.05
+many_lamps reach 14 at 16 levels in 4.0s
+many_lamps r14 256 white n=229 white   40.1 | groups  1.0 runs    40.3 (+mix    NaN) mixed   0% | comp 1.0 runs    41.5 distinct   0% | B/voxel today 0.70 mix 0.70 keep 0.70 comp 0.70
+many_lamps r14 256 one   n=229 white   41.9 | groups  1.0 runs    42.1 (+mix    NaN) mixed   0% | comp 3.0 runs   126.6 distinct  70% | B/voxel today 0.70 mix 0.70 keep 0.70 comp 2.11
+many_lamps r14 256 three n=229 white   41.8 | groups  3.0 runs   150.1 (+mix   38.1) mixed  69% | comp 3.0 runs   126.7 distinct  70% | B/voxel today 0.70 mix 2.09 keep 2.08 comp 2.11
+many_lamps r14 256 eight n=229 white   42.2 | groups  5.2 runs   210.3 (+mix   46.2) mixed  69% | comp 3.0 runs   130.3 distinct  70% | B/voxel today 0.70 mix 2.09 keep 3.19 comp 2.11
+many_lamps reach 14 at 256 levels in 5.0s
+many_lamps r32  16 white n=256 white  283.7 | groups  1.0 runs   283.3 (+mix    NaN) mixed   0% | comp 1.0 runs   286.7 distinct   0% | B/voxel today 0.37 mix 0.37 keep 0.37 comp 0.37
+many_lamps r32  16 one   n=256 white  283.0 | groups  1.0 runs   283.7 (+mix    NaN) mixed   0% | comp 3.0 runs   913.8 distinct  75% | B/voxel today 0.37 mix 0.37 keep 0.37 comp 1.12
+many_lamps r32  16 three n=256 white  281.1 | groups  3.0 runs   911.6 (+mix   32.6) mixed  74% | comp 3.0 runs   901.3 distinct  75% | B/voxel today 0.37 mix 2.22 keep 1.11 comp 1.12
+many_lamps r32  16 eight n=256 white  282.0 | groups  6.2 runs  2127.3 (+mix   41.9) mixed  74% | comp 3.0 runs   877.8 distinct  75% | B/voxel today 0.37 mix 2.22 keep 1.65 comp 1.12
+many_lamps reach 32 at 16 levels in 19.2s
+many_lamps r32 256 white n=256 white  285.6 | groups  1.0 runs   284.9 (+mix    NaN) mixed   0% | comp 1.0 runs   285.2 distinct   0% | B/voxel today 0.75 mix 0.75 keep 0.75 comp 0.75
+many_lamps r32 256 one   n=256 white  283.9 | groups  1.0 runs   284.1 (+mix    NaN) mixed   0% | comp 3.0 runs   922.5 distinct  75% | B/voxel today 0.75 mix 0.75 keep 0.75 comp 2.24
+many_lamps r32 256 three n=256 white  284.6 | groups  3.0 runs   920.1 (+mix   37.0) mixed  74% | comp 3.0 runs   901.4 distinct  75% | B/voxel today 0.75 mix 2.22 keep 2.21 comp 2.24
+many_lamps r32 256 eight n=256 white  284.6 | groups  6.2 runs  2134.7 (+mix   50.7) mixed  74% | comp 3.0 runs   873.1 distinct  75% | B/voxel today 0.75 mix 2.22 keep 3.31 comp 2.24
+many_lamps reach 32 at 256 levels in 20.1s
+wrote ../baseline/colour_cost.csv

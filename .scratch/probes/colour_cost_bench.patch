@@ -1,0 +1,35 @@
+diff --git a/src/light/bench.rs b/src/light/bench.rs
+index 2f68afa..3de7dfa 100644
+--- a/src/light/bench.rs
++++ b/src/light/bench.rs
+@@ -149,6 +149,30 @@ impl KernelBox {
+         }
+     }
+ 
++    /// Probe accessor, never committed: the bit planes the last spread left,
++    /// one per bit of a level.
++    pub fn planes(&self) -> &[Plane] {
++        &self.planes
++    }
++
++    /// Probe accessor, never committed: replaces the box's sources, each a
++    /// position in the box and its whole level, as `new` takes them.
++    pub fn set_sources(&mut self, sources: &[(IVec3, u8)]) {
++        let scale = LevelScale::new(self.scale.reach(), LightPrecision::Steps16);
++        self.seeds = sources
++            .iter()
++            .filter_map(|&(position, level)| {
++                Some(Seed {
++                    x: position.x as u8,
++                    y: position.y as u8,
++                    z: position.z as u8,
++                    start: scale.start(level)?,
++                })
++            })
++            .collect();
++        self.seeds.sort_by_key(|seed| seed.start);
++    }
++
+     /// The face hashes the last spread left, one per face of the chunk.
+     pub fn face_hashes(&self) -> [u64; 6] {
+         self.faces

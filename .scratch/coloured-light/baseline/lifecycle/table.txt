@@ -1,0 +1,39 @@
+                                                white      groups3      groups8   components      r32-off  r32-groups8 r32-components     l256-off l256-groups8 l256-components  r32l256-off r32l256-groups8 r32l256-components
+edits_lamps.p50_frames_to_land                    2.0          2.0          2.0          2.0          3.0          3.0          3.0          2.0          2.0          2.0          3.0          4.0          3.0
+edits_lamps.max_frames_to_land                    4.0          4.0          4.0          4.0          5.0          5.0          5.0          4.0          4.0          4.0          5.0          5.0          5.0
+edits_lamps.gate_failures                         4.0          4.0          4.0          4.0         20.0         20.0         20.0          4.0          4.0          4.0         20.0         20.0         20.0
+edits_lamps.p50_main_thread_us                  253.2        352.6        358.7        347.0        232.9        356.7        362.1        279.0        440.7        422.7        291.3        500.5        470.2
+edits_lamps.max_main_thread_us                  519.1        711.7        556.7        810.8        416.1        798.5        790.1        475.0        778.0        791.4        706.2       1250.4       1178.2
+edits_lamps.p50_relights                          8.0          9.0          9.0          8.0         10.0         15.0         10.0          8.0          9.0          8.0         10.0         15.0         10.0
+edits_lamps.max_relights                         11.0         12.0         13.0         11.0         17.0         21.0         17.0         11.0         13.0         11.0         17.0         21.0         17.0
+edits_lamps.relight_us_per_relight              189.6        549.0       1025.3        378.4        512.8       4062.9       1476.7        180.9       1229.7        517.4        574.4       4702.9       1652.5
+stream_in_lamps.time_ms                        1384.9          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan
+stream_in_lamps_unlit.time_ms                  1151.6          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan
+stream_in_lamps.rest_ms                        2472.8          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan
+stream_in_lamps.pool_solve_us_per_chunk          72.9          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan
+stream_in_lamps.main_thread_max_frame_ms          2.5          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan          nan
+caves.gate_failures                               0.0          0.0          1.0          0.0          1.0          1.0          1.0          0.0          1.0          0.0          nan          nan          nan
+caves.capped                                      0.0          0.0          0.0          0.0          0.0          0.0          0.0          0.0          0.0          0.0          nan          nan          nan
+caves.solves_per_arrival                          5.0          5.2          5.5          5.0          5.6          6.4          5.7          5.0          5.6          5.1          nan          nan          nan
+caves.visible_per_shown                           2.1          2.1          2.1          2.1          2.3          2.3          2.3          2.1          2.1          2.1          nan          nan          nan
+caves.pool_solve_us_per_chunk                   288.4        553.6        860.7        419.0        572.9       3761.6       1353.6        219.0        988.4        484.4          nan          nan          nan
+caves.relight_us_per_relight                    318.8        546.3        834.0        414.4        553.4       3497.9       1262.5        280.3        983.0        493.7          nan          nan          nan
+caves.time_ms                                  2834.8       4741.9       7280.7       3905.8       5077.5      29864.7      10870.6       2665.3       8325.5       4357.7          nan          nan          nan
+caves.settled_ms                               4089.4       5609.7       8133.6       4592.7       6072.9      32223.1      12129.5       3575.4       9551.4       5099.6          nan          nan          nan
+caves.arrivals                                 4169.0       4169.0       4169.0       4169.0       4169.0       4169.0       4169.0       4169.0       4169.0       4169.0          nan          nan          nan
+caves.peak_slots                               1024.0       1024.0       1024.0       1024.0       1024.0       1024.0       1024.0       1024.0       1024.0       1024.0          nan          nan          nan
+caves.main_thread_max_frame_ms                    5.8          5.6          5.1          4.8          5.1          4.3          2.7          2.1          4.5          5.9          nan          nan          nan
+
+cl2-white edit frames per run: 2, 2, 2, 2, 1, 1, 1, 1, 4, 4, 4, 4, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2
+cl2-groups3 edit frames per run: 2, 2, 2, 2, 1, 1, 2, 2, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+cl2-groups8 edit frames per run: 2, 2, 2, 2, 1, 1, 2, 2, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+cl2-components edit frames per run: 2, 2, 2, 2, 1, 1, 1, 1, 4, 4, 4, 4, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2
+cl2-r32-off edit frames per run: 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2
+cl2-r32-groups8 edit frames per run: 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2 | 3, 3, 3, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 4, 3, 3, 4, 3, 2, 2, 2, 2 | 3, 3, 3, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 3, 3, 3, 4, 4, 2, 2, 2, 2 | 3, 3, 3, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 4, 3, 3, 3, 4, 2, 2, 2, 2
+cl2-r32-components edit frames per run: 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2 | 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2
+cl2-l256-off edit frames per run: 2, 2, 2, 2, 1, 1, 1, 1, 4, 4, 4, 4, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2
+cl2-l256-groups8 edit frames per run: 2, 2, 2, 2, 1, 1, 2, 2, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 | 2, 2, 2, 2, 1, 1, 2, 2, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2, 2
+cl2-l256-components edit frames per run: 2, 2, 2, 2, 1, 1, 1, 1, 4, 4, 4, 4, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2
+cl2-r32l256-off edit frames per run: 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2
+cl2-r32l256-groups8 edit frames per run: 3, 3, 3, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 4, 3, 3, 3, 4, 2, 2, 2, 2 | 3, 3, 3, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 4, 4, 3, 4, 4, 2, 2, 2, 2 | 3, 3, 4, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 4, 3, 3, 4, 3, 2, 2, 2, 2 | 3, 3, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 4, 3, 3, 3, 4, 2, 2, 2, 2 | 3, 3, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 4, 3, 3, 4, 3, 2, 2, 2, 2
+cl2-r32l256-components edit frames per run: 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2 | 3, 3, 3, 3, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2
