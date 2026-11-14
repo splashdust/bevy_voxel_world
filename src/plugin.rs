@@ -341,6 +341,7 @@ where
         {
             use crate::sub_grid::SubGrids;
             app.add_message::<crate::sub_grid::Lifted<C>>();
+            app.add_message::<crate::edits::SubGridEditsCommitted<C>>();
             app.add_systems(
                 PreUpdate,
                 (

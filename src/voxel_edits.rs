@@ -302,6 +302,30 @@ impl<I: Copy + PartialEq> Bucket<I> {
         }
     }
 
+    /// Removes every edit that isn't solid. Its cost grows with the
+    /// bucket's edits.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    fn drop_non_solids(&mut self) {
+        let gone: Vec<IVec3> = self
+            .iter()
+            .filter(|(_, voxel)| !voxel.is_solid())
+            .map(|(position, _)| position)
+            .collect();
+        for position in gone {
+            self.remove(position);
+        }
+    }
+
+    /// How many edits the bucket holds.
+    #[cfg(feature = "sub_grids")]
+    fn len(&self) -> usize {
+        match &self.store {
+            Store::Sparse(voxels) => voxels.len(),
+            Store::Dense { count, .. } => *count,
+        }
+    }
+
     /// Sets the voxel at `position` from a local set rather than an applied
     /// delta.
     #[inline]
@@ -1078,11 +1102,23 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// them. A full delta first drops the chunk's pending edits and has the
     /// commit replace its committed edits.
     pub(crate) fn apply(&self, delta: EditDelta<I>) -> Result<(), EditGap> {
-        let key = GridKey::level_0(GridId::WORLD, delta.chunk);
+        self.apply_in(GridId::WORLD, delta)
+    }
+
+    /// Applies `delta` to `grid`'s chunk at its chunk position, as
+    /// [`apply`](Self::apply) does to the world's. In a sub-grid, the
+    /// delta's voxels that aren't solid remove the edit there when they
+    /// commit, as a set does.
+    pub(crate) fn apply_in(
+        &self,
+        grid: GridId,
+        delta: EditDelta<I>,
+    ) -> Result<(), EditGap> {
+        let key = GridKey::level_0(grid, delta.chunk);
         let mut pending = self.pending.lock().unwrap();
         let local = match pending.get(&key).and_then(|b| b.assigned) {
             Some(assigned) => assigned.seq,
-            None => self.edit_sequence(delta.chunk),
+            None => self.edit_sequence_in(key),
         };
         if !delta.applies_at(local)? {
             return Ok(());
@@ -1121,8 +1157,15 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// The full delta of the world's level-0 chunk at `chunk`, from its
     /// committed edits: an empty one at sequence 0 for a chunk with no bucket.
     pub(crate) fn full_delta(&self, chunk: IVec3) -> EditDelta<I> {
+        self.full_delta_in(GridId::WORLD, chunk)
+    }
+
+    /// The full delta of `grid`'s level-0 chunk at `chunk`, as
+    /// [`full_delta`](Self::full_delta) gives the world's. Its cost grows
+    /// with the chunk's edits.
+    pub(crate) fn full_delta_in(&self, grid: GridId, chunk: IVec3) -> EditDelta<I> {
         let buckets = self.committed.read().unwrap();
-        let Some(bucket) = buckets.get(&GridKey::level_0(GridId::WORLD, chunk)) else {
+        let Some(bucket) = buckets.get(&GridKey::level_0(grid, chunk)) else {
             return EditDelta::new(chunk, 0, true, Vec::new());
         };
         match &bucket.store {
@@ -1141,6 +1184,26 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                     .collect();
                 EditDelta::new(chunk, bucket.seq, true, voxels)
             }
+        }
+    }
+
+    /// The delta a sub-grid's change set `set`, just committed, travels as:
+    /// its full delta where the commit replaced the chunk's edits or left it
+    /// fewer solids than the voxels it changed, else the change set's own,
+    /// with each removed voxel as air. So a big removal costs the solids
+    /// left, not the voxels removed.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn sub_grid_delta(&self, set: &ChangeSet<I>) -> EditDelta<I> {
+        let left = self
+            .committed
+            .read()
+            .unwrap()
+            .get(&GridKey::level_0(set.grid, set.chunk))
+            .map_or(0, |bucket| bucket.len());
+        if set.replaced || left < set.voxels.len() {
+            self.full_delta_in(set.grid, set.chunk)
+        } else {
+            EditDelta::from_change_set(set)
         }
     }
 
@@ -1348,6 +1411,12 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             let committed = bucket_mut(&mut buckets, key);
             if replaced {
                 committed.store = Bucket::compacted_store(pending_bucket);
+                // A sub-grid holds only solids, and its replacing bucket can
+                // hold air or `Unset` from a set or an applied delta.
+                #[cfg(feature = "sub_grids")]
+                if grid != GridId::WORLD {
+                    committed.drop_non_solids();
+                }
             } else {
                 if changes.len() >= DENSE_AT {
                     committed.make_dense();
@@ -1474,14 +1543,19 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
 
     /// The edit sequence of the world's level-0 chunk at `position`: 0 for a
     /// chunk with no edits.
+    #[cfg(test)]
     pub(crate) fn edit_sequence(&self, position: IVec3) -> u64 {
+        self.edit_sequence_in(GridKey::level_0(GridId::WORLD, position))
+    }
+
+    /// The edit sequence of the level-0 chunk at `key`: 0 for a chunk with
+    /// no edits.
+    fn edit_sequence_in(&self, key: GridKey) -> u64 {
         let buckets = self.committed.read().unwrap();
         if buckets.is_empty() {
             return 0;
         }
-        buckets
-            .get(&GridKey::level_0(GridId::WORLD, position))
-            .map_or(0, |bucket| bucket.seq)
+        buckets.get(&key).map_or(0, |bucket| bucket.seq)
     }
 
     /// A stamp of the voxel edits of the world's level-0 chunk at `position`. Work
@@ -2189,6 +2263,42 @@ mod tests {
         );
         assert_eq!(edits.edited_chunks_in(grid), vec![(IVec3::ZERO, 7)]);
         assert_eq!(edits.solid_bounds_in(grid), Some((kept, kept)));
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_full_delta_applied_to_a_sub_grid_commits_only_its_solids() {
+        let edits = Edits::default();
+        let grid = GridId::new(1);
+        let (solid, air, unset) = (IVec3::X, IVec3::Y, IVec3::Z);
+        let at = |position: IVec3| voxel_index(position) as u16;
+        edits
+            .apply_in(
+                grid,
+                EditDelta::new(
+                    IVec3::ZERO,
+                    3,
+                    true,
+                    vec![
+                        (at(solid), WorldVoxel::Solid(1)),
+                        (at(air), WorldVoxel::Air),
+                        (at(unset), WorldVoxel::Unset),
+                    ],
+                ),
+            )
+            .unwrap();
+        edits.commit_all(&mut Vec::new());
+
+        assert_eq!(
+            edits.full_delta_in(grid, IVec3::ZERO),
+            EditDelta::new(
+                IVec3::ZERO,
+                3,
+                true,
+                vec![(at(solid), WorldVoxel::Solid(1))]
+            )
+        );
+        assert_eq!(edits.solid_bounds_in(grid), Some((solid, solid)));
     }
 
     #[cfg(feature = "sub_grids")]

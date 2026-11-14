@@ -14,6 +14,8 @@ use crate::prelude::*;
 
 #[cfg(feature = "serde")]
 mod serialise;
+#[cfg(feature = "sub_grids")]
+mod sub_grids;
 
 /// Every edit delta a world `C` committed so far, in commit order.
 #[derive(Resource)]

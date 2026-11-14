@@ -120,6 +120,15 @@
 //! A handover's cost grows with the chunks it holds. Each one keeps its
 //! newest finished chunk task until the handover lands.
 //!
+//! # Syncing and saving
+//!
+//! A sub-grid's voxel edits travel and save as the world's do: its commits
+//! write a [`SubGridEditsCommitted`](crate::prelude::SubGridEditsCommitted)
+//! per changed chunk, and [`GridVoxels::full_delta`],
+//! [`GridVoxels::edited_chunks`] and [`GridVoxelsMut::apply_delta`] work on
+//! any grid. The [`edits`](crate::edits) module docs give the rules, how a
+//! lift and a stamp travel as their parts, and the order a load runs in.
+//!
 //! # Lifetime and pose
 //!
 //! The crate keeps a record of each world's live sub-grids, which a system
@@ -150,6 +159,7 @@ use crate::{
     },
     chunk_map::{ChunkMap, ChunkMapRemoveBuffer},
     configuration::VoxelWorldConfig,
+    edits::{EditDelta, EditGap},
     grid::{GridId, GridIds, GridKey},
     voxel::WorldVoxel,
     voxel_edits::{chunks_including_box, EditedBox, VoxelEditReader, VoxelEdits},
@@ -289,6 +299,11 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     pub(crate) fn live(&self, entity: Entity) -> Option<(GridId, GlobalTransform)> {
         let record = self.record.lock().unwrap();
         record.live.get(&entity).map(|live| (live.grid, live.pose))
+    }
+
+    /// The entity of the live sub-grid kept under `grid`, if there is one.
+    pub(crate) fn entity_of(&self, grid: GridId) -> Option<Entity> {
+        self.record.lock().unwrap().by_grid.get(&grid).copied()
     }
 
     /// The entity, id and pose of each live sub-grid.
@@ -648,6 +663,32 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         }
     }
 
+    /// The full delta of this grid's level-0 chunk at `chunk_pos`: every
+    /// voxel edit it has, at its edit sequence. A chunk with no edits gives
+    /// an empty one at sequence 0. Its cost grows with the chunk's edits.
+    ///
+    /// For the world, it gives what
+    /// [`VoxelWorld::full_delta`](crate::prelude::VoxelWorld::full_delta)
+    /// does. A sub-grid's full delta holds only solid voxels, so an emptied
+    /// chunk gives an empty one at its sequence. It reads committed edits
+    /// only.
+    pub fn full_delta(&self, chunk_pos: IVec3) -> EditDelta<C::MaterialIndex> {
+        self.edits.full_delta_in(self.id(), chunk_pos)
+    }
+
+    /// Every level-0 chunk position of this grid with voxel edits, in no
+    /// particular order, with its edit sequence. Its cost grows with the
+    /// grid's chunks holding edits.
+    ///
+    /// For the world, it gives what
+    /// [`VoxelWorld::edited_chunks`](crate::prelude::VoxelWorld::edited_chunks)
+    /// does. A sub-grid's chunk whose solids were all removed stays listed,
+    /// with its sequence, for as long as the sub-grid lives, so a join and a
+    /// heartbeat carry the removal. It reads committed edits only.
+    pub fn edited_chunks(&self) -> Vec<(IVec3, u64)> {
+        self.edits.edited_chunks_in(self.id())
+    }
+
     /// The grid's pose against the world's root: the identity for the world.
     ///
     /// Voxel `v` of the grid fills the box from `v` to `v + 1` in the pose's
@@ -777,6 +818,26 @@ impl<'a, C: VoxelWorldConfig> GridVoxelsMut<'a, C> {
             Target::World => self.edits.clear_region(min, max),
             Target::SubGrid { grid, .. } => self.edits.remove_region_in(grid, min, max),
         }
+    }
+
+    /// Applies an edit delta from another world to this grid's chunk at the
+    /// delta's chunk position, if it continues from that chunk's edit
+    /// sequence here. Returns `Ok` for a delta applied or one already
+    /// applied, and an [`EditGap`] for one that doesn't continue, which is
+    /// dropped: ask the sender for the chunk's full delta and apply that.
+    ///
+    /// For the world, it does what
+    /// [`VoxelWorld::apply_delta`](crate::prelude::VoxelWorld::apply_delta)
+    /// does, by the rule the [`edits`](crate::edits) module docs give. In a
+    /// sub-grid, the rule is the same, and a voxel in the delta that isn't
+    /// solid removes the voxel there, as setting it does. A delta that fills
+    /// an empty sub-grid or empties one lands as one handover when it
+    /// commits, with the other deltas applied in the same frame.
+    pub fn apply_delta(
+        &mut self,
+        delta: EditDelta<C::MaterialIndex>,
+    ) -> Result<(), EditGap> {
+        self.edits.apply_in(self.id(), delta)
     }
 }
 

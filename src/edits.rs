@@ -5,9 +5,11 @@
 //! This module adds the forms a delta's voxels take, [`Voxels`] and [`Mask`],
 //! and the guide below to syncing and saving voxel edits.
 //!
-//! Every commit writes an [`EditsCommitted`] message for each level-0 chunk
-//! whose voxel edits changed, carrying the chunk's [`EditDelta`]. A world with
-//! no networking can read it to learn which voxels each commit changed.
+//! A commit writes an [`EditsCommitted`] message for each of the world's
+//! level-0 chunks whose voxel edits changed, carrying the chunk's
+//! [`EditDelta`]. A world with no networking can read it to learn which
+//! voxels each commit changed. With the `sub_grids` feature, a sub-grid's
+//! chunks get a message of their own: see [Sub-grids](#sub-grids).
 //! In a networked game, the server forwards each delta to the clients whose
 //! interest covers its chunk. A listen server's own world is the server, so it
 //! forwards too. A pure client ignores the message, and a client never forwards
@@ -84,6 +86,76 @@
 //! chunk task looks up their voxels again rather than starting from the
 //! voxels they published, which have the edits in them. Until then, a cleared
 //! voxel reads the voxel its chunk last published.
+//!
+//! # Sub-grids
+//!
+//! With the `sub_grids` feature, a sub-grid's voxel edits travel as the
+//! world's do. `VoxelWorld::grid(g)` gives any grid's `full_delta` and
+//! `edited_chunks`, and `VoxelWorld::grid_mut(g)` its `apply_delta`, with
+//! the rule above, so gap requests, joins and heartbeats work per sub-grid
+//! unchanged. Beside [`EditsCommitted`], which carries only the world's
+//! chunks, a commit writes a `SubGridEditsCommitted` for each sub-grid chunk
+//! whose edits changed, on a receiver too. A world with no sub-grid writes
+//! none.
+//!
+//! The crate gives sub-grids no id that holds across worlds. The game names
+//! each one with its own id and maps it to the local entity, and a
+//! sub-grid's existence and pose travel as the game's own entity
+//! replication. A despawn needs no deltas.
+//!
+//! - A sub-grid holds only solid voxels. An incremental delta carries a
+//!   voxel removed from it as air, which removes the voxel where the delta
+//!   is applied. `Unset` never appears in a sub-grid's delta, and an applied
+//!   one removes the voxel as air does.
+//! - A chunk left with fewer solids than the voxels its commit changed sends
+//!   its full delta instead, so a large removal costs the solids left rather
+//!   than the voxels removed. A chunk emptied of every solid sends an empty
+//!   full delta.
+//! - An emptied chunk keeps its edit sequence and stays in `edited_chunks`
+//!   while the sub-grid lives. A receiver that missed the delta emptying it
+//!   sees a gap on the chunk's next delta, or a heartbeat shows it behind,
+//!   and the full delta heals it.
+//! - A sub-grid has no clear of all its edits or forget of its own.
+//!   Despawning it is its forget.
+//!
+//! **Lift and stamp travel as their parts**, never as calls for a receiver
+//! to repeat, since a receiver may not hold the voxels the sender read. A
+//! lift is the new sub-grid's existence and pose, its deltas, and the source
+//! grid's deltas setting air. A stamp is the target grid's deltas, the
+//! sub-grid's deltas emptying it (an empty full delta per chunk) and its
+//! despawn. A receiver that applies the deltas of one sender commit in one
+//! system, spawning a lift's sub-grid in that system first, lands them as
+//! one handover, as the sender did. It routes the sender's despawn of a
+//! sub-grid through `VoxelWorld::despawn_sub_grid`, so the sub-grid stays
+//! until the deltas emptying it land. Clients ask the server for lifts and
+//! stamps, and never lift from or stamp into a synced grid themselves.
+//!
+//! **Joins and interest.** A client joins a sub-grid whole: its existence
+//! and pose, then the full delta of every chunk in its `edited_chunks`,
+//! empty ones included, applied to a fresh sub-grid. Incremental deltas
+//! continue from there with no gap. A sub-grid that leaves a client's
+//! interest is despawned there, and coming back into it is a fresh join. A
+//! client joining a server again despawns every synced sub-grid first, as it
+//! forgets the world's edits.
+//!
+//! **Saving and loading.** Beside the world's full deltas, a save holds each
+//! sub-grid's game id, its `pose()`, its parent in the game's own terms, and
+//! the full delta of each chunk in its `edited_chunks`. An empty sub-grid
+//! saves as its pose alone. A sub-grid whose stamp hasn't landed stays out
+//! of the save: its voxels are in the target's edits already, and saved as
+//! its pose it would load as an empty sub-grid that nothing despawns. A
+//! load runs in one frame, in this order:
+//!
+//! 1. [`VoxelWorld::forget_edits`].
+//! 2. Despawn every sub-grid of the world. Despawning each entity directly
+//!    is enough, since the load replaces everything, and a despawned
+//!    sub-grid drops out of any handover. `despawn_sub_grid` would wait for
+//!    a handover holding its chunks, which a load has no need of.
+//! 3. Apply the world's full deltas with [`VoxelWorld::apply_delta`].
+//! 4. For each saved sub-grid, `spawn_sub_grid` at its saved pose, then
+//!    apply its full deltas through `grid_mut`.
+//!
+//! The saved edit sequences become the new sub-grids'.
 //!
 //! # Chunk layout
 //!
@@ -213,8 +285,10 @@ pub struct EditDelta<I> {
     /// Whether the delta carries every voxel edit the chunk has, replacing its
     /// edits, rather than the ones that changed.
     pub full: bool,
-    /// The voxel edits, each with its new value. `WorldVoxel::Unset` is a
-    /// value like any other.
+    /// The voxel edits, each with its new value. In the world's grid,
+    /// `WorldVoxel::Unset` is an edit like any other. A sub-grid's delta
+    /// holds solid voxels, and air where an incremental delta removes one;
+    /// applied to a sub-grid, air and `Unset` both remove the voxel.
     pub voxels: Voxels<I>,
 }
 
@@ -352,10 +426,17 @@ impl<I: Copy> EditDelta<I> {
     }
 
     /// The delta of a commit's change set.
+    ///
+    /// Only a sub-grid's change set that isn't replaced holds removed edits,
+    /// and each travels as air, which removes the edit where it's applied.
     pub(crate) fn from_change_set(set: &ChangeSet<I>) -> Self {
         // A replaced chunk's delta carries every edit it has left, which the
         // change set alone doesn't hold.
         debug_assert!(!set.replaced, "a replaced chunk's delta is its full delta");
+        #[cfg(feature = "sub_grids")]
+        if set.grid != crate::grid::GridId::WORLD {
+            return Self::removing_as_air(set);
+        }
         let min = set.chunk * CHUNK_SIZE_I;
         let voxels = set
             .voxels
@@ -365,6 +446,24 @@ impl<I: Copy> EditDelta<I> {
             })
             .collect();
         Self::new(set.chunk, set.seq, set.replaced, voxels)
+    }
+
+    /// The delta of a sub-grid's change set, each removed edit as air.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    fn removing_as_air(set: &ChangeSet<I>) -> Self {
+        let min = set.chunk * CHUNK_SIZE_I;
+        let voxels = set
+            .voxels
+            .iter()
+            .map(|&(position, voxel)| {
+                (
+                    voxel_index(position - min) as u16,
+                    voxel.unwrap_or(WorldVoxel::Air),
+                )
+            })
+            .collect();
+        Self::new(set.chunk, set.seq, false, voxels)
     }
 }
 
@@ -582,3 +681,20 @@ pub struct EditsCommitted<C: VoxelWorldConfig> {
 }
 
 impl<C: VoxelWorldConfig> Message for EditsCommitted<C> {}
+
+/// Written by the commit of the voxel world `C`, beside [`EditsCommitted`],
+/// once for each level-0 chunk of a sub-grid whose voxel edits changed.
+///
+/// The delta's chunk position is on the sub-grid's own grid. A receiver
+/// applies it through `grid_mut(Grid::SubGrid(entity))` with the entity its
+/// game maps `sub_grid` to: the crate names sub-grids by local entity only.
+/// A world with no sub-grid writes none.
+#[cfg(feature = "sub_grids")]
+pub struct SubGridEditsCommitted<C: VoxelWorldConfig> {
+    /// The sub-grid whose chunk this is.
+    pub sub_grid: Entity,
+    pub delta: EditDelta<C::MaterialIndex>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> Message for SubGridEditsCommitted<C> {}

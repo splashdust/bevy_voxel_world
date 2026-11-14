@@ -208,12 +208,17 @@ where
     /// published voxels have it baked in. Edits forgotten since the last
     /// frame make their chunks regenerate too, with no message.
     ///
-    /// With `sub_grids`, a commit that gives a sub-grid its first solid voxel
-    /// or takes its last lands as one handover.
+    /// With `sub_grids`, a `SubGridEditsCommitted` goes out for each sub-grid
+    /// chunk whose edits changed, and a commit that gives a sub-grid its
+    /// first solid voxel or takes its last lands as one handover.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         mut committed: MessageWriter<EditsCommitted<C>>,
+        #[cfg(feature = "sub_grids")] sub_grids: Res<crate::sub_grid::SubGrids<C>>,
+        #[cfg(feature = "sub_grids")] mut sub_grid_committed: MessageWriter<
+            crate::edits::SubGridEditsCommitted<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
@@ -231,6 +236,17 @@ where
                 EditDelta::from_change_set(set)
             },
         }));
+        #[cfg(feature = "sub_grids")]
+        sub_grid_committed.write_batch(
+            sets.iter()
+                .filter(|set| set.grid != GridId::WORLD)
+                .filter_map(|set| {
+                    Some(crate::edits::SubGridEditsCommitted {
+                        sub_grid: sub_grids.entity_of(set.grid)?,
+                        delta: voxel_edits.sub_grid_delta(set),
+                    })
+                }),
+        );
         // Forgotten edits change chunks as removed edits do, but no other
         // world hears of them.
         let forgotten = voxel_edits.take_forgotten();

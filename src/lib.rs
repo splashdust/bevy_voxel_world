@@ -41,6 +41,8 @@ pub mod prelude {
     pub use crate::dislodged_fragments::{
         Connectivity, FragmentDetection, FragmentDislodged,
     };
+    #[cfg(feature = "sub_grids")]
+    pub use crate::edits::SubGridEditsCommitted;
     pub use crate::edits::{EditDelta, EditGap, EditsCommitted};
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{
