@@ -38,6 +38,8 @@ pub(crate) mod route;
 pub(crate) mod sky;
 pub(crate) mod slot;
 pub(crate) mod solver;
+#[cfg(feature = "sub_grids")]
+pub(crate) mod tag_map;
 pub(crate) mod view;
 
 #[doc(hidden)]

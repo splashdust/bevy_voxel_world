@@ -383,6 +383,15 @@ where
                 .before(AssetEventSystems),
         ),
     );
+    // The tag map reads this frame's poses, and the tags every system before
+    // it set.
+    #[cfg(feature = "sub_grids")]
+    app.add_systems(
+        PostUpdate,
+        super::tag_map::upkeep::<C>
+            .after(crate::sub_grid::SubGrids::<C>::snapshot_poses)
+            .after(super::follow_config::<C>),
+    );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
         .insert_chunk_components = route::tag_chunk::<C>;

@@ -69,6 +69,12 @@
 //! level per channel, and takes a slot in the new texture as its light lands
 //! again.
 //!
+//! With `sub_grids`, a world with a sub-grid also keeps a tag map beside the
+//! light texture, from a world chunk position to the tag shown there. Every
+//! change to a tag goes through one place, which notes the position for the
+//! tag map's upkeep, and the tag map's writes go to the render world in the
+//! same extract as the slots': see [`tag_map`](super::tag_map).
+//!
 //! # References
 //!
 //! - [all-is-cubes' light texture](https://github.com/kpreid/all-is-cubes/blob/main/all-is-cubes-gpu/src/light_texture.rs):
@@ -115,6 +121,13 @@ use crate::chunk::CHUNK_SIZE_U;
 use crate::chunk::{Chunk, ChunkKey};
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridKey;
+#[cfg(feature = "sub_grids")]
+use {
+    super::tag_map::{PendingWrites, Placed, TagMap, TagMapWrites},
+    super::view::world_position,
+    crate::chunk::MAX_LOD_LEVEL,
+    crate::configuration::LodLevel,
+};
 
 /// Texels along each side of a slot: a chunk and a shell one voxel deep.
 pub(crate) const SLOT_SIDE: u32 = CHUNK_SIZE_U + 2;
@@ -308,7 +321,55 @@ pub(crate) struct LightRoute<C> {
     unlit_sky: u8,
     warned_full: bool,
     pub counters: SlotCounters,
+    /// The tag map, once the world has a sub-grid, with what the route
+    /// keeps to answer it.
+    #[cfg(feature = "sub_grids")]
+    tag_map: Option<TagMapping>,
     _world: PhantomData<C>,
+}
+
+/// A tag map, and what the route keeps to give the tag at each of its
+/// positions: see [`tag_map`](super::tag_map).
+#[cfg(feature = "sub_grids")]
+struct TagMapping {
+    map: TagMap,
+    shown: ShownChunks,
+}
+
+/// The world chunks showing their meshes, by position, for a tag map.
+#[cfg(feature = "sub_grids")]
+#[derive(Default)]
+struct ShownChunks {
+    /// The level-0 world chunk showing its mesh at each position.
+    level_0: HashMap<IVec3, RouteId>,
+    /// The coarse world chunk showing its mesh at each key.
+    coarse: HashMap<ChunkKey, Entity>,
+    /// How many of `coarse` are at each LOD level.
+    coarse_levels: [u32; MAX_LOD_LEVEL as usize + 1],
+    /// Level-0 positions whose tag may have changed since the last upkeep.
+    touched: HashSet<IVec3>,
+    /// Coarse chunks whose tag may have changed since the last upkeep.
+    touched_coarse: HashSet<ChunkKey>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl ShownChunks {
+    /// Notes that the coarse chunk `entity` with `key` shows its mesh.
+    fn coarse_shown(&mut self, key: ChunkKey, entity: Entity) {
+        if self.coarse.insert(key, entity).is_none() {
+            self.coarse_levels[key.lod_level as usize] += 1;
+        }
+        self.touched_coarse.insert(key);
+    }
+
+    /// Notes that the coarse chunk `entity` with `key` is gone.
+    fn coarse_gone(&mut self, key: ChunkKey, entity: Entity) {
+        if self.coarse.get(&key) == Some(&entity) {
+            self.coarse.remove(&key);
+            self.coarse_levels[key.lod_level as usize] -= 1;
+            self.touched_coarse.insert(key);
+        }
+    }
 }
 
 impl<C: VoxelWorldConfig> LightRoute<C> {
@@ -346,6 +407,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             unlit_sky: sky,
             warned_full: false,
             counters: SlotCounters::default(),
+            #[cfg(feature = "sub_grids")]
+            tag_map: None,
             _world: PhantomData,
         }
     }
@@ -394,6 +457,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     return;
                 }
                 chunk.tag = tag;
+                #[cfg(feature = "sub_grids")]
+                if let (true, Some(mapping)) = (chunk.shown, self.tag_map.as_mut()) {
+                    mapping.shown.touched.extend(world_position(&chunk.key));
+                }
                 let entity = match id {
                     RouteId::Entity(entity) => Some(entity),
                     RouteId::Key(_) => None,
@@ -414,6 +481,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     return;
                 }
                 chunk.tag = tag;
+                #[cfg(feature = "sub_grids")]
+                if let (true, Some(mapping)) = (chunk.shown, self.tag_map.as_mut()) {
+                    mapping.shown.touched_coarse.insert(chunk.key);
+                }
                 (tag, chunk.shown, Some(entity))
             }
         };
@@ -730,6 +801,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let chunk = self.coarse.get_mut(&entity).unwrap();
             if !chunk.shown {
                 chunk.shown = true;
+                #[cfg(feature = "sub_grids")]
+                if let Some(mapping) = self.tag_map.as_mut() {
+                    mapping.shown.coarse_shown(key.key(), entity);
+                }
                 self.settle_coarse(entity);
             }
             return self.coarse[&entity].tag;
@@ -739,6 +814,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let chunk = self.chunks.get_mut(&id).unwrap();
         if !chunk.shown {
             chunk.shown = true;
+            #[cfg(feature = "sub_grids")]
+            if let (Some(mapping), Some(position)) =
+                (self.tag_map.as_mut(), world_position(&key))
+            {
+                mapping.shown.level_0.insert(position, id);
+                mapping.shown.touched.insert(position);
+            }
             self.settle(id, None);
         }
         self.chunks[&id].tag
@@ -750,6 +832,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let Some(chunk) = self.coarse.remove(&entity) {
             if let Some(slot) = chunk.slot {
                 self.free_slot(slot);
+            }
+            #[cfg(feature = "sub_grids")]
+            if let (true, Some(mapping)) = (chunk.shown, self.tag_map.as_mut()) {
+                mapping.shown.coarse_gone(chunk.key, entity);
             }
             return;
         }
@@ -768,6 +854,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let Some(slot) = chunk.slot {
             self.free_slot(slot);
         }
+        #[cfg(feature = "sub_grids")]
+        self.tag_map_forget(id, chunk.key);
     }
 
     /// Takes the light that landed for the coarse chunk `entity` with `key`:
@@ -1125,6 +1213,134 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .fold(f32::INFINITY, f32::min)
     }
 
+    /// Brings the tag map in line with `bodies`, each sub-grid placed, and
+    /// with the chunks' tags as they are now.
+    /// The tag map is made, with its texture added to `images`, once there
+    /// is a sub-grid.
+    ///
+    /// Its cost grows with the positions whose tags changed since the last
+    /// upkeep, and with what [`TagMap::upkeep`] costs.
+    #[cfg(feature = "sub_grids")]
+    pub fn upkeep_tag_map(&mut self, bodies: &[Placed], images: &mut Assets<Image>) {
+        if self.tag_map.is_none() && bodies.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let mut mapping = match self.tag_map.take() {
+            Some(mapping) => mapping,
+            None => self.new_tag_mapping(images),
+        };
+        let mut touched: Vec<IVec3> = mapping.shown.touched.drain().collect();
+        for key in mapping.shown.touched_coarse.drain() {
+            let (first, side) = (key.position, key.extent());
+            if side.pow(3) as usize <= mapping.map.len() {
+                for x in 0..side {
+                    for y in 0..side {
+                        for z in 0..side {
+                            touched.push(first + IVec3::new(x, y, z));
+                        }
+                    }
+                }
+            } else {
+                let last = first + side;
+                touched.extend(mapping.map.positions().filter(|position| {
+                    position.cmpge(first).all() && position.cmplt(last).all()
+                }));
+            }
+        }
+        let nothing_known = tag_levels(self.precision.of_whole(15), 0, self.precision);
+        let TagMapping { mut map, shown } = mapping;
+        let answer = |position: IVec3| self.tag_at(&shown, position, nothing_known);
+        map.upkeep(bodies, touched.into_iter(), answer, nothing_known, images);
+        map.counters.upkeep_nanos += started.elapsed().as_nanos() as u64;
+        self.tag_map = Some(TagMapping { map, shown });
+    }
+
+    /// A tag map for a world that has just got its first sub-grid, with the
+    /// chunks showing their meshes now.
+    #[cfg(feature = "sub_grids")]
+    fn new_tag_mapping(&self, images: &mut Assets<Image>) -> TagMapping {
+        let mut mapping = TagMapping {
+            map: TagMap::new(images),
+            shown: ShownChunks::default(),
+        };
+        for (id, chunk) in &self.chunks {
+            if let (true, Some(position)) = (chunk.shown, world_position(&chunk.key)) {
+                mapping.shown.level_0.insert(position, *id);
+            }
+        }
+        for (entity, chunk) in &self.coarse {
+            if chunk.shown {
+                mapping.shown.coarse_shown(chunk.key, *entity);
+            }
+        }
+        mapping
+    }
+
+    /// The tag the screen shows at the level-0 world chunk position
+    /// `position`: the level-0 chunk's there, or else the finest coarse
+    /// chunk's covering it, or else `nothing_known`.
+    #[cfg(feature = "sub_grids")]
+    fn tag_at(&self, shown: &ShownChunks, position: IVec3, nothing_known: u32) -> u32 {
+        if let Some(chunk) = shown
+            .level_0
+            .get(&position)
+            .and_then(|id| self.chunks.get(id))
+        {
+            return chunk.tag;
+        }
+        for (level, count) in shown.coarse_levels.iter().enumerate() {
+            if *count == 0 {
+                continue;
+            }
+            let key = ChunkKey::containing_chunk(position, level as LodLevel);
+            if let Some(chunk) = shown
+                .coarse
+                .get(&key)
+                .and_then(|entity| self.coarse.get(entity))
+            {
+                return chunk.tag;
+            }
+        }
+        nothing_known
+    }
+
+    /// Notes for the tag map that the level-0 chunk `id` at `key` is gone.
+    /// Another chunk showing its mesh at the same key takes its place.
+    #[cfg(feature = "sub_grids")]
+    fn tag_map_forget(&mut self, id: RouteId, key: GridKey) {
+        let (Some(mapping), Some(position)) =
+            (self.tag_map.as_mut(), world_position(&key))
+        else {
+            return;
+        };
+        if mapping.shown.level_0.get(&position) != Some(&id) {
+            return;
+        }
+        mapping.shown.level_0.remove(&position);
+        mapping.shown.touched.insert(position);
+        let other = self
+            .chunks
+            .iter()
+            .find(|(_, chunk)| chunk.shown && chunk.key == key)
+            .map(|(other, _)| *other);
+        if let Some(other) = other {
+            mapping.shown.level_0.insert(position, other);
+        }
+    }
+
+    /// The tag map, once the world has a sub-grid.
+    #[cfg(feature = "sub_grids")]
+    pub fn tag_map(&self) -> Option<&TagMap> {
+        self.tag_map.as_ref().map(|mapping| &mapping.map)
+    }
+
+    /// The tag map's writes waiting since the render world last took them.
+    #[cfg(feature = "sub_grids")]
+    pub fn take_tag_map_writes(&mut self) -> Option<TagMapWrites> {
+        self.tag_map.as_mut()?.map.take_writes()
+    }
+
     /// The bytes queued whole for `slot` and not yet taken by the render
     /// world, with any planes written since.
     #[cfg(test)]
@@ -1221,6 +1437,8 @@ pub(crate) fn add_render_systems<C: VoxelWorldConfig>(app: &mut App) {
             slots_per_axis: UVec3::ONE,
             texel_bytes: 1,
             pending: Vec::new(),
+            #[cfg(feature = "sub_grids")]
+            tag_map: PendingWrites::default(),
             _world: PhantomData,
         })
         .add_systems(ExtractSchedule, extract_uploads::<C>)
@@ -1238,10 +1456,14 @@ struct RenderUploads<C> {
     texel_bytes: usize,
     /// Each slot and what to write into it, oldest first.
     pending: Vec<(u32, Upload)>,
+    /// The tag map's writes.
+    #[cfg(feature = "sub_grids")]
+    tag_map: PendingWrites,
     _world: PhantomData<C>,
 }
 
-/// Takes the slot writes queued in the main world this frame.
+/// Takes the slot writes and the tag map's writes queued in the main world
+/// this frame, in the extract that takes the chunks' tags.
 fn extract_uploads<C: VoxelWorldConfig>(
     mut main_world: ResMut<MainWorld>,
     mut uploads: ResMut<RenderUploads<C>>,
@@ -1249,6 +1471,10 @@ fn extract_uploads<C: VoxelWorldConfig>(
     let Some(mut route) = main_world.get_resource_mut::<LightRoute<C>>() else {
         return;
     };
+    #[cfg(feature = "sub_grids")]
+    if let Some(writes) = route.take_tag_map_writes() {
+        uploads.tag_map.extend(writes);
+    }
     if route.uploads.is_empty() {
         return;
     }
@@ -1265,13 +1491,16 @@ fn extract_uploads<C: VoxelWorldConfig>(
     uploads.pending.extend(route.uploads.drain());
 }
 
-/// Writes each pending slot write into its part of the texture, once the
-/// texture exists on the GPU.
+/// Writes each pending slot write into its part of the texture, and each
+/// pending tag map write into the tag map's texture, once the texture exists
+/// on the GPU.
 fn write_uploads<C: VoxelWorldConfig>(
     mut uploads: ResMut<RenderUploads<C>>,
     images: Res<RenderAssets<GpuImage>>,
     queue: Res<RenderQueue>,
 ) {
+    #[cfg(feature = "sub_grids")]
+    uploads.tag_map.write(&images, &queue);
     if uploads.pending.is_empty() {
         return;
     }
@@ -1357,6 +1586,8 @@ fn plane_texels(face: Face, plane: &ShellPlane, wide: usize) -> (UVec3, UVec3, V
 mod tests {
     use super::*;
     use crate::configuration::DefaultWorld;
+    #[cfg(feature = "sub_grids")]
+    use crate::grid::GridId;
     use crate::light::inputs::{LightInputs, Occupancy};
     use crate::light::kernel::Plane;
     use crate::light::sky::ColumnAnswer;
@@ -1432,6 +1663,59 @@ mod tests {
 
         assert!(!route.chunks.contains_key(&id));
         assert_eq!(route.holders.len(), 1);
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn the_tag_map_answers_a_coarse_chunks_tag_wherever_no_finer_chunk_shows() {
+        let mut route = route();
+        let mut images = Assets::<Image>::default();
+        let coarse = Entity::from_raw_u32(1).unwrap();
+        let key = ChunkKey::new(IVec3::ZERO, 2);
+        let bytes = vec![0; SLOT_SIDE.pow(3) as usize].into_boxed_slice();
+        route.coarse_landed(coarse, key, (15, 0), LightPrecision::Steps16, Some(bytes));
+        let coarse_tag = route.show(coarse, GridKey::world(key), true);
+        assert_eq!(coarse_tag & HAS_SLOT, HAS_SLOT);
+        assert_eq!(coarse_tag >> LOD_SHIFT & 0xF, 2);
+        let fine = Entity::from_raw_u32(2).unwrap();
+        let fine_tag = route.show(fine, in_world(IVec3::X), false);
+        assert_ne!(fine_tag, coarse_tag);
+
+        // Padded, the box runs from -1 to 160 along x: chunks -1 to 4.
+        let pose = GlobalTransform::from_xyz(0.0, 10.0, 10.0);
+        let body = Placed {
+            grid: GridId::new(1),
+            pose,
+            bounds: Some((IVec3::ZERO, IVec3::new(159, 1, 1))),
+        };
+        route.upkeep_tag_map(&[body], &mut images);
+
+        let map = route.tag_map().unwrap();
+        assert_eq!(map.len(), 6);
+        for x in -1..=4 {
+            let expected = match x {
+                1 => fine_tag,
+                0..=3 => coarse_tag,
+                _ => 15,
+            };
+            assert_eq!(map.answer(IVec3::new(x, 0, 0)), Some(expected), "{x}");
+        }
+
+        // The coarse chunk gives its slot back, and its tag changes.
+        route.coarse_landed(coarse, key, (9, 0), LightPrecision::Steps16, None);
+        route.upkeep_tag_map(&[body], &mut images);
+        let flat = tag_levels(9, 0, LightPrecision::Steps16);
+        let map = route.tag_map().unwrap();
+        assert_eq!(map.answer(IVec3::new(2, 0, 0)), Some(flat));
+        assert_eq!(map.answer(IVec3::X), Some(fine_tag));
+
+        // Once it's gone, nothing is known where it was.
+        route.forget(coarse);
+        route.upkeep_tag_map(&[body], &mut images);
+        assert_eq!(
+            route.tag_map().unwrap().answer(IVec3::new(2, 0, 0)),
+            Some(15)
+        );
     }
 
     #[test]
