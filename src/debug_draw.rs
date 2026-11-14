@@ -1,6 +1,11 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use std::sync::{Arc, RwLock};
 
+#[cfg(feature = "sub_grids")]
+use bevy::platform::collections::HashMap;
+
+#[cfg(feature = "sub_grids")]
+use crate::sub_grid::{Grid, SubGrid};
 use crate::{
     chunk::{Chunk, ChunkKey},
     configuration::{LodLevel, VoxelWorldConfig},
@@ -16,7 +21,11 @@ impl<C: VoxelWorldConfig> Plugin for VoxelWorldDebugDrawPlugin<C> {
     fn build(&self, app: &mut App) {
         app.init_gizmo_group::<ChunkGizmos>()
             .add_systems(Startup, setup::<C>)
-            .add_systems(Update, (draw_voxel_gizmos::<C>, draw_ray_gizmos::<C>));
+            .add_systems(Update, draw_ray_gizmos::<C>)
+            .add_systems(
+                PostUpdate,
+                draw_voxel_gizmos::<C>.after(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -26,9 +35,101 @@ pub struct VoxelGizmo {
 }
 
 #[derive(Resource)]
-struct VoxelGizmos<C: VoxelWorldConfig> {
-    gizmos: Arc<RwLock<Vec<VoxelGizmo>>>,
+pub(crate) struct VoxelGizmos<C: VoxelWorldConfig> {
+    gizmos: Arc<RwLock<VoxelGizmoStore>>,
     _marker: std::marker::PhantomData<C>,
+}
+
+impl<C: VoxelWorldConfig> VoxelGizmos<C> {
+    /// The centres of the circles the voxel gizmo draw places, with each
+    /// sub-grid's pose read by `pose_of`.
+    #[cfg(all(test, feature = "sub_grids"))]
+    pub(crate) fn placed_circle_centres(
+        &self,
+        pose_of: impl Fn(Entity) -> Option<GlobalTransform>,
+    ) -> Vec<Vec3> {
+        let mut centres = Vec::new();
+        self.gizmos
+            .read()
+            .unwrap()
+            .place(pose_of, |circle, _| centres.push(circle.centre));
+        centres
+    }
+}
+
+/// The voxel gizmos of every grid of one world.
+#[derive(Default)]
+struct VoxelGizmoStore {
+    world: Vec<VoxelGizmo>,
+    /// Each sub-grid's gizmos, by the sub-grid's entity.
+    #[cfg(feature = "sub_grids")]
+    sub_grids: HashMap<Entity, Vec<VoxelGizmo>>,
+}
+
+impl VoxelGizmoStore {
+    #[cfg(feature = "sub_grids")]
+    fn set(&mut self, grid: Grid, gizmo: VoxelGizmo) {
+        match grid {
+            Grid::World => self.world.push(gizmo),
+            Grid::SubGrid(entity) => {
+                self.sub_grids.entry(entity).or_default().push(gizmo)
+            }
+        }
+    }
+
+    fn clear_world(&mut self, pos: IVec3) {
+        self.world.retain(|gizmo| gizmo.pos != pos);
+    }
+
+    #[cfg(feature = "sub_grids")]
+    fn clear(&mut self, grid: Grid, pos: IVec3) {
+        match grid {
+            Grid::World => self.clear_world(pos),
+            Grid::SubGrid(entity) => {
+                if let Some(gizmos) = self.sub_grids.get_mut(&entity) {
+                    gizmos.retain(|gizmo| gizmo.pos != pos);
+                    if gizmos.is_empty() {
+                        self.sub_grids.remove(&entity);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drops the gizmos of each sub-grid `is_live` says is gone.
+    #[cfg(feature = "sub_grids")]
+    fn prune(&mut self, is_live: impl Fn(Entity) -> bool) {
+        self.sub_grids.retain(|entity, _| is_live(*entity));
+    }
+
+    /// Places the six circles of every gizmo, passing each to `draw` with
+    /// its gizmo's colour.
+    ///
+    /// The world's gizmos are placed with the identity transform. A
+    /// sub-grid's go through the pose `pose_of` gives its entity, and are
+    /// skipped when it gives none.
+    fn place(
+        &self,
+        #[cfg(feature = "sub_grids")] pose_of: impl Fn(Entity) -> Option<GlobalTransform>,
+        mut draw: impl FnMut(GizmoCircle, Srgba),
+    ) {
+        for gizmo in &self.world {
+            for circle in voxel_gizmo_circles(gizmo.pos, &GlobalTransform::IDENTITY) {
+                draw(circle, gizmo.color);
+            }
+        }
+        #[cfg(feature = "sub_grids")]
+        for (entity, gizmos) in &self.sub_grids {
+            let Some(pose) = pose_of(*entity) else {
+                continue;
+            };
+            for gizmo in gizmos {
+                for circle in voxel_gizmo_circles(gizmo.pos, &pose) {
+                    draw(circle, gizmo.color);
+                }
+            }
+        }
+    }
 }
 
 pub struct RayGizmo {
@@ -56,7 +157,7 @@ impl<C: VoxelWorldConfig> VoxelWorldDebugDraw<'_, C> {
     pub fn set_voxel_gizmo_fn(&self) -> Arc<dyn Fn(VoxelGizmo) + Send + Sync> {
         let gizmos = self.voxel_gizmos.gizmos.clone();
         Arc::new(move |gizmo| {
-            gizmos.write().unwrap().push(gizmo);
+            gizmos.write().unwrap().world.push(gizmo);
         })
     }
 
@@ -67,18 +168,22 @@ impl<C: VoxelWorldConfig> VoxelWorldDebugDraw<'_, C> {
     pub fn clear_voxel_gizmo_fn(&self) -> Arc<dyn Fn(IVec3) + Send + Sync> {
         let gizmos = self.voxel_gizmos.gizmos.clone();
         Arc::new(move |pos: IVec3| {
-            gizmos.write().unwrap().retain(|gizmo| gizmo.pos != pos);
+            gizmos.write().unwrap().clear_world(pos);
         })
     }
 
+    /// Clears the voxel gizmos of every grid: the world's and, with the
+    /// `sub_grids` feature, each sub-grid's.
     pub fn clear_all_voxel_gizmos(&self) {
         self.clear_all_voxel_gizmos_fn()();
     }
 
+    /// Returns a function that does what
+    /// [`clear_all_voxel_gizmos`](Self::clear_all_voxel_gizmos) does.
     pub fn clear_all_voxel_gizmos_fn(&self) -> Arc<dyn Fn() + Send + Sync> {
         let gizmos = self.voxel_gizmos.gizmos.clone();
         Arc::new(move || {
-            gizmos.write().unwrap().clear();
+            *gizmos.write().unwrap() = VoxelGizmoStore::default();
         })
     }
 
@@ -116,9 +221,49 @@ impl<C: VoxelWorldConfig> VoxelWorldDebugDraw<'_, C> {
     }
 }
 
+/// Voxel gizmos on any grid.
+///
+/// A sub-grid's gizmos are drawn through its `GlobalTransform` after
+/// transform propagation in `PostUpdate`, so they follow the pose drawn this
+/// frame and stay on their voxels as the sub-grid moves. They are dropped
+/// once the draw finds the sub-grid's entity despawned, or without its
+/// [`SubGrid<C>`]. [`Grid::World`] names the gizmos that the methods taking no
+/// grid set and clear.
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> VoxelWorldDebugDraw<'_, C> {
+    /// Marks the voxel at `gizmo.pos` on `grid`.
+    pub fn set_grid_voxel_gizmo(&self, grid: Grid, gizmo: VoxelGizmo) {
+        self.set_grid_voxel_gizmo_fn()(grid, gizmo);
+    }
+
+    /// Returns a function that does what
+    /// [`set_grid_voxel_gizmo`](Self::set_grid_voxel_gizmo) does.
+    pub fn set_grid_voxel_gizmo_fn(&self) -> Arc<dyn Fn(Grid, VoxelGizmo) + Send + Sync> {
+        let gizmos = self.voxel_gizmos.gizmos.clone();
+        Arc::new(move |grid, gizmo| {
+            gizmos.write().unwrap().set(grid, gizmo);
+        })
+    }
+
+    /// Clears the gizmos at `pos` on `grid`, and leaves other grids' gizmos
+    /// at the same position.
+    pub fn clear_grid_voxel_gizmo(&self, grid: Grid, pos: IVec3) {
+        self.clear_grid_voxel_gizmo_fn()(grid, pos);
+    }
+
+    /// Returns a function that does what
+    /// [`clear_grid_voxel_gizmo`](Self::clear_grid_voxel_gizmo) does.
+    pub fn clear_grid_voxel_gizmo_fn(&self) -> Arc<dyn Fn(Grid, IVec3) + Send + Sync> {
+        let gizmos = self.voxel_gizmos.gizmos.clone();
+        Arc::new(move |grid, pos| {
+            gizmos.write().unwrap().clear(grid, pos);
+        })
+    }
+}
+
 fn setup<C: VoxelWorldConfig>(mut commands: Commands) {
     commands.insert_resource(VoxelGizmos {
-        gizmos: Arc::new(RwLock::new(Vec::new())),
+        gizmos: Arc::new(RwLock::new(VoxelGizmoStore::default())),
         _marker: std::marker::PhantomData::<C>,
     });
     commands.insert_resource(RayGizmos {
@@ -127,22 +272,33 @@ fn setup<C: VoxelWorldConfig>(mut commands: Commands) {
     });
 }
 
+/// Draws every grid's voxel gizmos, after dropping those of sub-grids that
+/// are gone.
 fn draw_voxel_gizmos<C: VoxelWorldConfig>(
     mut gizmos: Gizmos,
     voxel_gizmos: Res<VoxelGizmos<C>>,
+    #[cfg(feature = "sub_grids")] sub_grids: Query<&GlobalTransform, With<SubGrid<C>>>,
 ) {
-    for gizmo in voxel_gizmos.gizmos.read().unwrap().iter() {
-        for circle in voxel_gizmo_circles(gizmo.pos, &GlobalTransform::IDENTITY) {
+    #[cfg(feature = "sub_grids")]
+    voxel_gizmos
+        .gizmos
+        .write()
+        .unwrap()
+        .prune(|entity| sub_grids.contains(entity));
+    voxel_gizmos.gizmos.read().unwrap().place(
+        #[cfg(feature = "sub_grids")]
+        |entity| sub_grids.get(entity).ok().copied(),
+        |circle, color| {
             gizmos.circle(
                 Isometry3d::new(
                     circle.centre,
                     Quat::from_rotation_arc(Vec3::Z, circle.normal),
                 ),
                 circle.radius,
-                gizmo.color,
+                color,
             );
-        }
-    }
+        },
+    );
 }
 
 /// How far a voxel gizmo's circle reaches across its face, in voxels.
@@ -202,24 +358,62 @@ fn draw_ray_gizmos<C: VoxelWorldConfig>(
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub struct ChunkGizmos;
 
-/// Add this system to your app to draw cuboid gizmos for non-empy chunks
+/// The colour of a box `debug_draw_chunks` draws around a chunk of the
+/// world's streamed voxels.
+pub(crate) const WORLD_CHUNK_COLOUR: Srgba = Srgba::new(0.0, 1.0, 0.0, 1.0);
+
+/// The colour of a box `debug_draw_chunks` draws around a sub-grid's chunk.
+#[cfg(feature = "sub_grids")]
+pub(crate) const SUB_GRID_CHUNK_COLOUR: Srgba = Srgba::new(1.0, 0.0, 1.0, 1.0);
+
+/// Draws a box around each chunk, of every grid, whose published data holds
+/// voxels other than air. Add it to your app to see the chunks.
+///
+/// Schedule it in `PostUpdate` after transform propagation
+/// (`TransformSystems::Propagate`), so each box follows the chunk as it is
+/// drawn this frame. A box goes through its chunk's whole `GlobalTransform`,
+/// so it turns, scales and moves with the world's root or a sub-grid. A
+/// sub-grid's chunks are drawn in a second colour. The cost grows with the
+/// number of spawned chunks.
 pub fn debug_draw_chunks<C: VoxelWorldConfig>(
     mut gizmos: Gizmos<ChunkGizmos>,
     chunks: Query<(&Chunk<C>, &GlobalTransform)>,
     voxel_world: VoxelWorld<C>,
 ) {
-    for (chunk, transform) in chunks.iter() {
-        let color = Srgba::new(0.0, 1.0, 0.0, 1.0);
+    for_each_chunk_box(chunks, &voxel_world, |placement, color| {
+        gizmos.cube(placement, color);
+    });
+}
 
-        let Some(chunk_data) = voxel_world.get_chunk_data(chunk.key()) else {
+/// Passes the placement and colour of each box [`debug_draw_chunks`] draws
+/// to `draw`.
+///
+/// Each chunk's published data is read from its own grid, so a sub-grid's
+/// chunk shows the sub-grid's voxels, never those of the world's chunk at the
+/// same key.
+pub(crate) fn for_each_chunk_box<'a, C: VoxelWorldConfig>(
+    chunks: impl IntoIterator<Item = (&'a Chunk<C>, &'a GlobalTransform)>,
+    voxel_world: &VoxelWorld<C>,
+    mut draw: impl FnMut(GlobalTransform, Srgba),
+) {
+    let chunk_map = voxel_world.chunk_map().get_read_lock();
+    for (chunk, transform) in chunks {
+        let key = chunk.grid_key();
+        let Some(chunk_data) = chunk_map.get_in(&key) else {
             continue;
         };
-
         if chunk_data.is_empty() {
             continue;
         }
-
-        gizmos.cube(chunk_box(transform, chunk.lod_level()), color);
+        #[cfg(feature = "sub_grids")]
+        let color = if key.is_world() {
+            WORLD_CHUNK_COLOUR
+        } else {
+            SUB_GRID_CHUNK_COLOUR
+        };
+        #[cfg(not(feature = "sub_grids"))]
+        let color = WORLD_CHUNK_COLOUR;
+        draw(chunk_box(transform, chunk.lod_level()), color);
     }
 }
 
@@ -231,7 +425,10 @@ pub fn debug_draw_chunks<C: VoxelWorldConfig>(
 /// every LOD level. The box is placed in that space and then taken through
 /// the chunk's whole `GlobalTransform`, so it turns, scales and moves with
 /// the chunk.
-fn chunk_box(transform: &GlobalTransform, lod_level: LodLevel) -> GlobalTransform {
+pub(crate) fn chunk_box(
+    transform: &GlobalTransform,
+    lod_level: LodLevel,
+) -> GlobalTransform {
     let extent = ChunkKey::new(IVec3::ZERO, lod_level).voxel_extent() as f32;
     *transform
         * Transform::from_translation(Vec3::splat(1.0 + extent / 2.0))
@@ -363,6 +560,91 @@ mod tests {
             [12.0, 76.0],
             [22.0, 86.0],
             [28.0, -36.0],
+        );
+    }
+
+    #[test]
+    fn a_sub_grid_chunks_box_follows_a_rotated_translated_and_scaled_pose() {
+        // The sub-grid's chunk at (1, 0, 0) sits at (31, -1, -1) on its grid
+        // and fills (32, 0, 0) to (64, 32, 32) there. The pose turns a quarter
+        // about +Y, mapping (x, y, z) to (z, y, -x), doubles and moves it, so
+        // grid (32, 0, 0) lands at (10, 20, -34) and (64, 32, 32) at
+        // (74, 84, -98).
+        let pose = Transform::from_translation(Vec3::new(10.0, 20.0, 30.0))
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::splat(2.0));
+        let chunk = GlobalTransform::from(
+            pose * Transform::from_translation(Vec3::new(31.0, -1.0, -1.0)),
+        );
+        assert_same_corners(
+            box_corners(&chunk, 0),
+            [10.0, 74.0],
+            [20.0, 84.0],
+            [-34.0, -98.0],
+        );
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_sub_grids_gizmo_circles_sit_on_its_voxels_faces_through_its_pose() {
+        let sub_grid = Entity::from_raw_u32(7).unwrap();
+        let mut store = VoxelGizmoStore::default();
+        store.set(
+            Grid::SubGrid(sub_grid),
+            VoxelGizmo {
+                color: Srgba::RED,
+                pos: IVec3::new(1, 0, 0),
+            },
+        );
+        store.set(
+            Grid::World,
+            VoxelGizmo {
+                color: Srgba::BLUE,
+                pos: IVec3::new(1, 0, 0),
+            },
+        );
+        // A quarter turn about +Y maps (x, y, z) to (z, y, -x), then the
+        // scale doubles it and the translation moves it, so the voxel's
+        // centre (1.5, 0.5, 0.5) lands at (11, 21, 27).
+        let pose = GlobalTransform::from(
+            Transform::from_translation(Vec3::new(10.0, 20.0, 30.0))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(2.0)),
+        );
+        let mut on_sub_grid = Vec::new();
+        let mut on_world = Vec::new();
+        store.place(
+            |entity| (entity == sub_grid).then_some(pose),
+            |circle, color| {
+                if color == Srgba::RED {
+                    on_sub_grid.push(circle);
+                } else {
+                    on_world.push(circle);
+                }
+            },
+        );
+
+        let faces = [
+            (Vec3::new(11.0, 21.0, 26.0), Vec3::NEG_Z), // the voxel's +X face
+            (Vec3::new(11.0, 21.0, 28.0), Vec3::Z),     // its -X face
+            (Vec3::new(11.0, 22.0, 27.0), Vec3::Y),
+            (Vec3::new(11.0, 20.0, 27.0), Vec3::NEG_Y),
+            (Vec3::new(12.0, 21.0, 27.0), Vec3::X), // its +Z face
+            (Vec3::new(10.0, 21.0, 27.0), Vec3::NEG_X), // its -Z face
+        ];
+        assert_eq!(on_sub_grid.len(), 6);
+        for (centre, normal) in faces {
+            let circle = circle_at(&on_sub_grid, centre);
+            assert_near(circle.centre, centre);
+            assert_near(circle.normal, normal);
+        }
+        assert_one_circle_per_face(&on_sub_grid, 1.0);
+
+        // The world's gizmo at the same position stays on the world's voxel.
+        assert_eq!(on_world.len(), 6);
+        assert_near(
+            circle_at(&on_world, Vec3::new(2.0, 0.5, 0.5)).centre,
+            Vec3::new(2.0, 0.5, 0.5),
         );
     }
 

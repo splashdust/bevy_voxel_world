@@ -3864,6 +3864,8 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
     );
 }
 
+#[cfg(feature = "sub_grids")]
+mod debug_draw;
 #[cfg(feature = "dislodged_fragments")]
 mod dislodged_fragments;
 mod edits;

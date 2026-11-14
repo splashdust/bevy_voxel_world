@@ -353,6 +353,11 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         )
     }
 
+    /// The published data of every grid's chunks, found by grid key.
+    pub(crate) fn chunk_map(&self) -> &ChunkMap<C, C::MaterialIndex> {
+        &self.chunk_map
+    }
+
     /// A read session of the [level-0 reader](Level0Reader), which reads
     /// voxels as the screen shows them up close, running the world's
     /// generator on the caller's thread where no level-0 chunk is published.
