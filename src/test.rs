@@ -3870,5 +3870,7 @@ mod edits;
 mod level_0_reader;
 mod light;
 #[cfg(feature = "sub_grids")]
+mod sub_grid_chunks;
+#[cfg(feature = "sub_grids")]
 mod sub_grids;
 mod sync;

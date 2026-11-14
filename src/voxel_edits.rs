@@ -1362,6 +1362,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// chunk whose reach holds no edit reads none.
     ///
     /// [`padding_depth`]: crate::chunk::padding_depth
+    #[cfg(test)]
     pub(crate) fn chunk_edits(&self, key: ChunkKey, padding: IVec3) -> ChunkEdits<I> {
         self.chunk_edits_in(GridKey::world(key), padding)
     }
@@ -1572,6 +1573,27 @@ impl<I> CommittedEdits<'_, I> {
             key.position().cmpge(min).all()
                 && key.position().cmplt(max).all()
                 && !bucket.is_empty()
+        })
+    }
+}
+
+impl<I: Copy + PartialEq> CommittedEdits<'_, I> {
+    /// Whether `grid` has a committed edit in the box from `min` to `max`,
+    /// both inclusive. A sub-grid's committed edits are its solids, since its
+    /// commit removes a voxel set to one that isn't solid. Its cost grows
+    /// with the level-0 chunks the box reaches into.
+    #[cfg(feature = "sub_grids")]
+    pub fn holds_edit_within(&self, grid: GridId, min: IVec3, max: IVec3) -> bool {
+        let (chunk_min, chunk_max) = (chunk_containing(min), chunk_containing(max));
+        box_positions(chunk_min, chunk_max).any(|chunk| {
+            let Some(bucket) = self.0.get(&GridKey::level_0(grid, chunk)) else {
+                return false;
+            };
+            let chunk_first = chunk * CHUNK_SIZE_I;
+            bucket.any_within(
+                chunk_first.max(min),
+                (chunk_first + CHUNK_SIZE_I - 1).min(max),
+            )
         })
     }
 }

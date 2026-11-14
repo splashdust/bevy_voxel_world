@@ -1184,7 +1184,11 @@ fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> (u8, u8) {
 pub(crate) fn tag_chunk<C: VoxelWorldConfig>(chunk: &mut EntityCommands) {
     chunk.queue(|mut chunk: EntityWorldMut| {
         let entity = chunk.id();
-        let Some((key, coarse)) = chunk.get::<Chunk<C>>().map(|chunk| {
+        // A sub-grid's chunks stay out of the world's light, and keep no tag.
+        let world_chunk = chunk
+            .get::<Chunk<C>>()
+            .filter(|chunk| chunk.grid_key().is_world());
+        let Some((key, coarse)) = world_chunk.map(|chunk| {
             let key = chunk.key();
             (key, takes_coarse_path(key, chunk.data_shape()))
         }) else {

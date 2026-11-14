@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     chunk::{self, ChunkData, ChunkKey, LevelCounts, CHUNK_SIZE_F},
+    chunk_lifecycle::ChunkIndex,
     configuration::VoxelWorldConfig,
     grid::{GridId, GridKey, GridTable, PerGrid},
     voxel::VOXEL_SIZE,
@@ -118,6 +119,14 @@ impl<I> ChunkMapData<I> {
         last || bounds.min.floor().cmpeq(min).any() || bounds.max.floor().cmpeq(max).any()
     }
 
+    /// Whether any chunk of `grid` has published data.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn holds_grid(&self, grid: GridId) -> bool {
+        self.levels
+            .get(grid)
+            .is_some_and(|levels| levels.total() > 0)
+    }
+
     /// Works `grid`'s bounds out again from its published chunks. Its cost
     /// grows with `grid`'s published chunks.
     fn rebuild_bounds(&mut self, grid: GridId) {
@@ -204,6 +213,7 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         remove_buffer: &mut ChunkMapRemoveBuffer<C>,
         ev_chunk_published: &mut MessageWriter<ChunkPublished<C>>,
         ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
+        index: &ChunkIndex<C>,
     ) {
         if update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
@@ -211,6 +221,12 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
 
         if let Ok(mut write_lock) = self.map.try_write() {
             for (key, chunk_data, entity) in update_buffer.iter() {
+                // A sub-grid's chunk despawned while its data waited for the
+                // lock publishes nothing, so its grid holds no data once its
+                // chunks are gone.
+                if !key.is_world() && index.get_in(*key) != Some(*entity) {
+                    continue;
+                }
                 let previous = write_lock.insert(
                     *key,
                     ChunkData {
@@ -221,9 +237,13 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
                 // A chunk is published for the first time when the key has no
                 // data, or still holds the data of a despawned chunk.
                 if previous.map(|data| data.entity) != Some(*entity) {
-                    ev_chunk_will_spawn.write(ChunkWillSpawn::new(key.key(), *entity));
+                    if let Some(message) = index.message(*key, *entity) {
+                        ev_chunk_will_spawn.write(message);
+                    }
                 }
-                ev_chunk_published.write(ChunkPublished::new(key.key(), *entity));
+                if let Some(message) = index.message(*key, *entity) {
+                    ev_chunk_published.write(message);
+                }
             }
             update_buffer.clear();
 

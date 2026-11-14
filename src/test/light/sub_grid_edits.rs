@@ -1,4 +1,5 @@
-//! Tests that a sub-grid's voxel edits leave the world's light alone.
+//! Tests that a sub-grid's voxel edits and chunks leave the world's light
+//! alone.
 
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
@@ -6,6 +7,7 @@ use bevy::prelude::*;
 use super::edits::{settle, world};
 use super::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 use crate::prelude::*;
+use crate::test::update_until;
 
 #[test]
 fn filling_a_sub_grid_inside_loaded_world_chunks_leaves_the_worlds_light_alone() {
@@ -23,7 +25,8 @@ fn filling_a_sub_grid_inside_loaded_world_chunks_leaves_the_worlds_light_alone()
     let before = places.map(|place| light_at(&mut app, place));
     assert!(before.iter().all(Option::is_some), "{before:?}");
 
-    app.world_mut()
+    let entity = app
+        .world_mut()
         .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
             let entity = voxel_world.spawn_sub_grid(Transform::default());
             let mut grid = voxel_world.grid_mut(Grid::SubGrid(entity)).unwrap();
@@ -38,8 +41,26 @@ fn filling_a_sub_grid_inside_loaded_world_chunks_leaves_the_worlds_light_alone()
             grid.set_voxels_in(IVec3::new(0, 4, 0), IVec3::new(32, 5, 32), |_| {
                 Some(WorldVoxel::Solid(LAMP))
             });
+            entity
         })
         .unwrap();
+    // The sub-grid's chunks share their keys with the world's loaded chunks.
+    let keys: Vec<ChunkKey> = places
+        .iter()
+        .map(|place| ChunkKey::containing(*place, 0))
+        .collect();
+    update_until(&mut app, "the sub-grid's chunks to be ready", |app| {
+        let keys = keys.clone();
+        app.world_mut()
+            .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
+                let grid = voxel_world.grid(Grid::SubGrid(entity)).unwrap();
+                keys.iter().all(|key| {
+                    grid.chunk_state(*key) == Some(ChunkStatus::Ready)
+                        && voxel_world.chunk_state(*key) == Some(ChunkStatus::Ready)
+                })
+            })
+            .unwrap()
+    });
     settle(&mut app, "light to settle after the sub-grid is filled");
 
     let after = places.map(|place| light_at(&mut app, place));

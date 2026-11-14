@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    grid::GridKey,
+    grid::{GridId, GridKey},
     mesh_cache::WeakMeshMap,
     prelude::{
         ChunkMeshingFn, FillHint, LodLevel, TextureIndexMapperFn, VoxelWorldConfig,
@@ -489,6 +489,8 @@ impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
 #[derive(Component, Clone)]
 pub struct Chunk<C> {
     pub(crate) key: ChunkKey,
+    /// The grid the chunk belongs to: the world's, or a sub-grid's.
+    grid: GridId,
     pub(crate) entity: Entity,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
@@ -497,13 +499,14 @@ pub struct Chunk<C> {
 
 impl<C> Chunk<C> {
     pub(crate) fn new(
-        key: ChunkKey,
+        key: GridKey,
         entity: Entity,
         data_shape: UVec3,
         mesh_shape: UVec3,
     ) -> Self {
         Self {
-            key,
+            key: key.key(),
+            grid: key.grid(),
             entity,
             data_shape,
             mesh_shape,
@@ -511,9 +514,15 @@ impl<C> Chunk<C> {
         }
     }
 
-    /// The chunk's key: its position and LOD level.
+    /// The chunk's key: its position and LOD level, on its own grid.
     pub fn key(&self) -> ChunkKey {
         self.key
+    }
+
+    /// The chunk's grid key: its grid and its chunk key.
+    #[inline]
+    pub(crate) fn grid_key(&self) -> GridKey {
+        GridKey::new(self.grid, self.key)
     }
 
     /// The chunk position, in level-0 chunks.

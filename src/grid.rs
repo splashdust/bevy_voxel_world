@@ -165,6 +165,12 @@ impl GridKey {
         self.grid
     }
 
+    /// Whether the chunk is the world's. Always true with `sub_grids` off.
+    #[inline(always)]
+    pub fn is_world(&self) -> bool {
+        self.grid == GridId::WORLD
+    }
+
     /// The chunk key on the grid.
     pub fn key(&self) -> ChunkKey {
         ChunkKey {

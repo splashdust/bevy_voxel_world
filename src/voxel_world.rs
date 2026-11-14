@@ -105,6 +105,13 @@ impl<C> std::fmt::Debug for VoxelWorldSet<C> {
 pub trait ChunkEventType: Send + Sync + 'static {}
 
 /// A message about a chunk, which it names by its chunk key and its entity.
+///
+/// With `sub_grids`, the chunk messages fire for the chunks of sub-grids too,
+/// and `grid` names the chunk's grid. A sub-grid's chunk key is on the
+/// sub-grid's own grid, so it can equal the key of a world chunk somewhere
+/// else entirely: a reader that places things by chunk position checks
+/// `grid`, and reads the chunk through `VoxelWorld::grid(message.grid)`
+/// rather than the world's [`VoxelWorld::get_chunk_data`].
 #[derive(Event)]
 pub struct ChunkEvent<C, E>
 where
@@ -113,6 +120,9 @@ where
 {
     pub chunk_key: ChunkKey,
     pub entity: Entity,
+    /// The chunk's grid: [`Grid::World`] for the world's chunks.
+    #[cfg(feature = "sub_grids")]
+    pub grid: Grid,
     _marker: (PhantomData<C>, PhantomData<E>),
 }
 
@@ -121,11 +131,23 @@ where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
+    /// A message about the world's chunk at `chunk_key`.
     pub fn new(chunk_key: ChunkKey, entity: Entity) -> Self {
         Self {
             chunk_key,
             entity,
+            #[cfg(feature = "sub_grids")]
+            grid: Grid::World,
             _marker: (PhantomData, PhantomData),
+        }
+    }
+
+    /// A message about the chunk at `chunk_key` on `grid`.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn in_grid(chunk_key: ChunkKey, entity: Entity, grid: Grid) -> Self {
+        Self {
+            grid,
+            ..Self::new(chunk_key, entity)
         }
     }
 
@@ -133,6 +155,8 @@ where
         Self {
             chunk_key: self.chunk_key,
             entity: self.entity,
+            #[cfg(feature = "sub_grids")]
+            grid: self.grid,
             _marker: (PhantomData, PhantomData),
         }
     }
@@ -281,6 +305,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             &self.sub_grids,
             &self.voxel_edits,
             &self.chunk_map,
+            &self.chunk_index,
+            &self.chunk_states,
             &self.configuration.0,
         )
     }

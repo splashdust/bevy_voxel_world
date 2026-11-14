@@ -9,14 +9,78 @@
 //! A sub-grid has no generator, so every voxel it holds is a voxel edit, and
 //! its edits are exactly its solid voxels. Setting air or `Unset` removes a
 //! voxel, and a position with no solid reads air. Its edits commit in the
-//! next `PreUpdate`, with the world's. A sub-grid has no chunks yet, so
-//! nothing renders it: its voxels are read from its edits.
+//! next `PreUpdate`, with the world's.
+//!
+//! # Chunks
+//!
+//! A sub-grid shows through chunks of its own, built by the world's chunk
+//! tasks and meshed by the world's mesher, material and mesh cache, so
+//! identical voxels in two grids share one mesh. Each commit spawns and
+//! retires them in place of the streaming policy: after it, the sub-grid
+//! has a chunk at LOD level 0 at every chunk position whose padded voxels
+//! hold one of its solid voxels, and no other. A chunk's voxels are the
+//! sub-grid's voxel edits over air, so the world's voxel lookup delegate and
+//! fill hints are never called for them. A sub-grid with no solid voxel has
+//! no chunks, and lives on until it is despawned.
+//!
+//! A sub-grid's chunks start their chunk tasks ahead of streamed chunks, as
+//! edited chunks do, and count towards the world's
+//! [`max_active_chunk_threads`](crate::prelude::VoxelWorldConfig::max_active_chunk_threads)
+//! with the world's own. A commit's cost grows with the chunks its edits
+//! reach, not with the sub-grid's size. Moving the camera never retires them,
+//! and [`VoxelWorld::regenerate_chunks`] leaves them alone. In a world with
+//! light propagation, they stay out of the world's light: they don't change
+//! what the world's chunks read, and have no light of their own yet.
+//!
+//! Each chunk is a child of the sub-grid's entity, placed by its chunk key as
+//! the world's chunks are under the world's root, so it moves with the
+//! sub-grid. The crate copies no component from the sub-grid to its chunks:
+//! `Visibility` inherits through the hierarchy, and a game gives the chunks
+//! `RenderLayers` or `NotShadowCaster` by putting Bevy's `Propagate` of them
+//! on the sub-grid. A sub-grid spawned under the world's root picks up a
+//! layer the root propagates, until the game gives the sub-grid another
+//! parent.
+//!
+//! The meshing delegate and texture index mapper get a sub-grid chunk's
+//! position on the sub-grid's own grid, and aren't told which grid it is on,
+//! so a chunk meshes the same whichever grid holds its voxels.
+//!
+//! The chunk messages fire for a sub-grid's chunks with `grid` naming the
+//! sub-grid, and keys on its grid. A physics integration rebuilds a chunk's
+//! collider on [`ChunkPublished`](crate::prelude::ChunkPublished) by reading
+//! the chunk through its grid, which works for every grid:
+//!
+//! ```
+//! use bevy::prelude::*;
+//! use bevy_voxel_world::prelude::*;
+//!
+//! fn rebuild_colliders(
+//!     mut published: MessageReader<ChunkPublished<DefaultWorld>>,
+//!     voxel_world: VoxelWorld<DefaultWorld>,
+//! ) {
+//!     for message in published.read() {
+//!         let Some(chunk) = voxel_world
+//!             .grid(message.grid)
+//!             .and_then(|grid| grid.get_chunk_data(message.chunk_key))
+//!         else {
+//!             continue;
+//!         };
+//!         // Build the collider from `chunk`'s voxels and put it on
+//!         // `message.entity`. A sub-grid's chunk is a child of the
+//!         // sub-grid, so its collider moves with the sub-grid.
+//!         let _ = chunk;
+//!     }
+//! }
+//! # bevy::ecs::system::assert_is_system(rebuild_colliders);
+//! ```
+//!
+//! # Lifetime and pose
 //!
 //! The crate keeps a record of each world's live sub-grids, which a system
 //! reads at once, before its commands apply, so the system that spawns a
 //! sub-grid can fill it. Once the crate sees a sub-grid's entity despawned,
 //! or its [`SubGrid<C>`] removed, in the next `PreUpdate` at the latest, the
-//! sub-grid's voxel edits go with it.
+//! sub-grid's voxel edits and chunks go with it.
 //!
 //! After transform propagation in `PostUpdate`, the crate keeps each
 //! sub-grid's pose against the world's root, which [`GridVoxels::pose`]
@@ -27,14 +91,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bevy::{math::Affine3A, platform::collections::HashMap, prelude::*};
+use bevy::{
+    math::Affine3A,
+    platform::collections::{HashMap, HashSet},
+    prelude::*,
+};
 
 use crate::{
-    chunk_map::ChunkMap,
+    chunk::{padding_depth, ChunkData, ChunkKey, CHUNK_SIZE_I},
+    chunk_lifecycle::{
+        ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus, SpawnRequest,
+    },
+    chunk_map::{ChunkMap, ChunkMapRemoveBuffer},
     configuration::VoxelWorldConfig,
-    grid::{GridId, GridIds},
+    grid::{GridId, GridIds, GridKey},
     voxel::WorldVoxel,
-    voxel_edits::{VoxelEditReader, VoxelEdits},
+    voxel_edits::{chunks_including_box, EditedBox, VoxelEditReader, VoxelEdits},
     voxel_world::voxel_at,
     voxel_world_internal::WorldRoot,
 };
@@ -56,7 +128,8 @@ pub enum Grid {
 ///
 /// It is added by [`VoxelWorld::spawn_sub_grid`] and
 /// [`VoxelWorld::insert_sub_grid`], and has no public constructor. Removing
-/// it, or despawning its entity, ends the sub-grid and drops its voxels.
+/// it, or despawning its entity, ends the sub-grid and drops its voxels and
+/// chunks.
 ///
 /// [`VoxelWorld::spawn_sub_grid`]: crate::prelude::VoxelWorld::spawn_sub_grid
 /// [`VoxelWorld::insert_sub_grid`]: crate::prelude::VoxelWorld::insert_sub_grid
@@ -89,9 +162,17 @@ struct Record {
     /// The world's root, which a spawned sub-grid is a child of.
     root: Entity,
     live: HashMap<Entity, Live>,
+    /// The entity of each live sub-grid, by its id.
+    by_grid: HashMap<GridId, Entity>,
     ids: GridIds,
     /// How many pose snapshots have run.
     snapshots: u64,
+    /// Chunks a commit found needed while their key's chunk was still
+    /// Retiring, to look at again each frame until that chunk is gone.
+    recheck: HashSet<GridKey>,
+    /// The ids of ended sub-grids whose chunks or chunk data aren't gone yet,
+    /// so the ids can't be handed out again.
+    ending: Vec<GridId>,
 }
 
 /// A live sub-grid.
@@ -111,8 +192,11 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
             record: Mutex::new(Record {
                 root,
                 live: HashMap::new(),
+                by_grid: HashMap::new(),
                 ids: GridIds::default(),
                 snapshots: 0,
+                recheck: HashSet::new(),
+                ending: Vec::new(),
             }),
             _world: PhantomData,
         }
@@ -138,6 +222,7 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
                     )
                 });
                 record.live.insert(entity, Live { grid, pose, added });
+                record.by_grid.insert(grid, entity);
                 grid
             }
         };
@@ -167,25 +252,114 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         self.record.lock().unwrap().root
     }
 
-    /// Ends the sub-grid `entity`, dropping its voxel edits and freeing its
-    /// id for a later sub-grid.
+    /// Ends the sub-grid `entity`, dropping its voxel edits at once. Its
+    /// chunks go in the next [`forget_despawned`](Self::forget_despawned),
+    /// and its id is freed for a later sub-grid once their data is gone too.
     fn end(record: &mut Record, entity: Entity, edits: &VoxelEdits<C, C::MaterialIndex>) {
         if let Some(live) = record.live.remove(&entity) {
             edits.drop_grid(live.grid);
-            record.ids.release(live.grid);
+            record.by_grid.remove(&live.grid);
+            record.recheck.retain(|key| key.grid() != live.grid);
+            record.ending.push(live.grid);
         }
     }
 
     /// Ends each sub-grid whose entity was despawned or lost its
-    /// [`SubGrid<C>`] since this last ran.
+    /// [`SubGrid<C>`] since this last ran, and despawns the chunks of every
+    /// ended sub-grid, dropping them from the chunk index at once as
+    /// despawned chunks are.
+    ///
+    /// An ended sub-grid's id is freed once the chunk map holds none of its
+    /// chunks' data, which the chunk lifecycle removes later in the frame,
+    /// so a later sub-grid given the id never finds the old one's chunks.
+    #[allow(clippy::too_many_arguments)]
     pub fn forget_despawned(
+        mut commands: Commands,
         mut removed: RemovedComponents<SubGrid<C>>,
         mut sub_grids: ResMut<Self>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        mut index: ResMut<ChunkIndex<C>>,
+        mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
+        chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     ) {
         let record = sub_grids.record.get_mut().unwrap();
         for entity in removed.read() {
             Self::end(record, entity, &edits);
+        }
+        if record.ending.is_empty() {
+            return;
+        }
+        let chunk_map = chunk_map.get_read_lock();
+        let Record { ending, ids, .. } = record;
+        ending.retain(|&grid| {
+            index.despawn_grid(grid, &mut commands, &mut chunk_map_remove_buffer);
+            if chunk_map.holds_grid(grid) {
+                return true;
+            }
+            ids.release(grid);
+            false
+        });
+    }
+
+    /// Spawns and retires the chunks of each sub-grid whose voxel edits this
+    /// frame's commit changed, so each sub-grid has a level-0 chunk at
+    /// exactly the chunk positions whose padded voxels hold a solid.
+    ///
+    /// Only the chunks whose padded voxels hold a changed voxel can change,
+    /// so its cost grows with the chunks the commit changed, not with the
+    /// sub-grids' size. A chunk needed again while its key's chunk is still
+    /// Retiring spawns once that chunk has despawned.
+    pub fn plan_chunks(
+        mut sub_grids: ResMut<Self>,
+        mut requests: ResMut<ChunkRequests<C>>,
+        index: Res<ChunkIndex<C>>,
+        edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        configuration: Res<C>,
+    ) {
+        let record = sub_grids.record.get_mut().unwrap();
+        if record.live.is_empty() && record.recheck.is_empty() {
+            return;
+        }
+        let padding = padding_depth(configuration.chunk_data_shape(0), 0);
+        let committed = edits.committed();
+        let mut decisions: Vec<(GridKey, bool)> = std::mem::take(&mut record.recheck)
+            .into_iter()
+            .map(|key| {
+                let (min, max) = padded_box(key.position(), padding);
+                (key, committed.holds_edit_within(key.grid(), min, max))
+            })
+            .collect();
+        for set in requests
+            .edited
+            .iter()
+            .filter(|set| set.grid != GridId::WORLD)
+        {
+            for changed in set.stale_boxes() {
+                decisions.extend(chunks_needing(changed, padding, |min, max| {
+                    committed.holds_edit_within(changed.grid, min, max)
+                }));
+            }
+        }
+        let mut seen: HashSet<GridKey> = HashSet::new();
+        for (key, needed) in decisions {
+            let Some(&sub_grid) = record.by_grid.get(&key.grid()) else {
+                continue;
+            };
+            if !seen.insert(key) {
+                continue;
+            }
+            match index.get_in(key) {
+                None if needed => requests
+                    .spawn
+                    .push(SpawnRequest::sub_grid_chunk(key, sub_grid)),
+                Some(_) if index.is_retiring_in(key) => {
+                    if needed {
+                        record.recheck.insert(key);
+                    }
+                }
+                Some(_) if !needed => requests.retire.push(key),
+                _ => {}
+            }
         }
     }
 
@@ -228,6 +402,34 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     }
 }
 
+/// The padded voxels of the level-0 chunk at `chunk`, whose padding is
+/// `padding` voxels deep: the box from its minimum to its maximum corner,
+/// both inclusive.
+fn padded_box(chunk: IVec3, padding: IVec3) -> (IVec3, IVec3) {
+    let first = chunk * CHUNK_SIZE_I;
+    (first - padding, first + CHUNK_SIZE_I - 1 + padding)
+}
+
+/// Each level-0 chunk of the grid of `changed` whose padded voxels hold a
+/// voxel of the box `changed`, with whether it needs a chunk: whether
+/// `holds_solid` says its padded voxels hold a solid voxel. `holds_solid`
+/// takes a box from its minimum to its maximum corner, both inclusive, and
+/// `padding` is how many voxels deep a level-0 chunk's padding is.
+///
+/// A chunk position whose padded voxels hold none of the box's voxels keeps
+/// its need when the box's voxels change, so a commit spawns and retires
+/// only the chunks this gives for the voxels it changed.
+pub(crate) fn chunks_needing(
+    changed: EditedBox,
+    padding: IVec3,
+    holds_solid: impl Fn(IVec3, IVec3) -> bool,
+) -> impl Iterator<Item = (GridKey, bool)> {
+    chunks_including_box(changed, 0, padding).map(move |key| {
+        let (min, max) = padded_box(key.position(), padding);
+        (key, holds_solid(min, max))
+    })
+}
+
 /// What a grid view reads and edits.
 #[derive(Clone, Copy)]
 enum Target {
@@ -241,6 +443,8 @@ enum Target {
 pub struct GridVoxels<'a, C: VoxelWorldConfig> {
     edits: &'a VoxelEdits<C, C::MaterialIndex>,
     chunk_map: &'a ChunkMap<C, C::MaterialIndex>,
+    chunk_index: &'a ChunkIndex<C>,
+    chunk_states: &'a Query<'a, 'a, &'static ChunkStateOf<C>>,
     configuration: &'a Arc<C>,
     target: Target,
 }
@@ -248,11 +452,14 @@ pub struct GridVoxels<'a, C: VoxelWorldConfig> {
 impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
     /// The view of `grid`, or `None` if it names an entity that isn't a live
     /// sub-grid of this world.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         grid: Grid,
         sub_grids: &SubGrids<C>,
         edits: &'a VoxelEdits<C, C::MaterialIndex>,
         chunk_map: &'a ChunkMap<C, C::MaterialIndex>,
+        chunk_index: &'a ChunkIndex<C>,
+        chunk_states: &'a Query<'a, 'a, &'static ChunkStateOf<C>>,
         configuration: &'a Arc<C>,
     ) -> Option<Self> {
         let target = match grid {
@@ -265,9 +472,51 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         Some(Self {
             edits,
             chunk_map,
+            chunk_index,
+            chunk_states,
             configuration,
             target,
         })
+    }
+
+    /// The id this view's grid is kept under.
+    fn id(&self) -> GridId {
+        match self.target {
+            Target::World => GridId::WORLD,
+            Target::SubGrid { grid, .. } => grid,
+        }
+    }
+
+    /// Where this grid's chunk at `key` is in the chunk lifecycle, or `None`
+    /// if the grid has no chunk spawned there.
+    ///
+    /// For the world, it reads what
+    /// [`VoxelWorld::chunk_state`](crate::prelude::VoxelWorld::chunk_state)
+    /// does. A sub-grid's chunk keys are on its own grid, and its chunks are
+    /// all at LOD level 0.
+    pub fn chunk_state(&self, key: ChunkKey) -> Option<ChunkStatus> {
+        let entity = self.chunk_index.get_in(GridKey::new(self.id(), key))?;
+        // A chunk spawned this frame has no state component until commands
+        // apply.
+        Some(
+            self.chunk_states
+                .get(entity)
+                .map_or(ChunkStatus::Pending, |state| state.status()),
+        )
+    }
+
+    /// The published data of this grid's chunk at `key`, or `None` if the
+    /// grid has no chunk published there.
+    ///
+    /// For the world, it reads what
+    /// [`VoxelWorld::get_chunk_data`](crate::prelude::VoxelWorld::get_chunk_data)
+    /// does. A sub-grid's chunk holds its voxel edits over air, with the key
+    /// and voxel positions of its own grid.
+    pub fn get_chunk_data(&self, key: ChunkKey) -> Option<ChunkData<C::MaterialIndex>> {
+        self.chunk_map
+            .get_read_lock()
+            .get_in(&GridKey::new(self.id(), key))
+            .cloned()
     }
 
     /// The voxel at `position` on this grid.
@@ -467,5 +716,88 @@ pub(crate) mod world {
         }
         let marker = sub_grids.add(entity, GlobalTransform::IDENTITY);
         commands.entity(entity).try_insert(marker);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The level-0 chunk positions a sub-grid holding `solids` needs, as a
+    /// commit setting each of them finds them.
+    fn needed(solids: &[IVec3]) -> HashSet<IVec3> {
+        let holds_solid = |min: IVec3, max: IVec3| {
+            solids
+                .iter()
+                .any(|solid| solid.cmpge(min).all() && solid.cmple(max).all())
+        };
+        solids
+            .iter()
+            .flat_map(|&solid| {
+                chunks_needing(EditedBox::world(solid, solid), IVec3::ONE, holds_solid)
+                    .filter(|(_, needed)| *needed)
+                    .map(|(key, _)| key.position())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn chunks(positions: &[[i32; 3]]) -> HashSet<IVec3> {
+        positions.iter().map(|&p| IVec3::from_array(p)).collect()
+    }
+
+    #[test]
+    fn a_solid_needs_every_chunk_whose_padding_reaches_it() {
+        assert_eq!(
+            needed(&[IVec3::new(5, 6, 7)]),
+            chunks(&[[0, 0, 0]]),
+            "inside"
+        );
+        assert_eq!(
+            needed(&[IVec3::new(0, 6, 7)]),
+            chunks(&[[0, 0, 0], [-1, 0, 0]]),
+            "on a face"
+        );
+        assert_eq!(
+            needed(&[IVec3::new(31, -1, 7)]),
+            chunks(&[[0, -1, 0], [1, -1, 0], [0, 0, 0], [1, 0, 0]]),
+            "on an edge"
+        );
+        let corner: Vec<[i32; 3]> = (0..8)
+            .map(|i| [i & 1, (i >> 1) & 1, i >> 2].map(|c| c - 1))
+            .collect();
+        assert_eq!(
+            needed(&[IVec3::new(-1, -1, -1)]),
+            chunks(&corner),
+            "at a corner"
+        );
+        assert_eq!(
+            needed(&[
+                IVec3::new(5, 6, 7),
+                IVec3::new(0, 6, 7),
+                IVec3::new(70, 6, 7)
+            ]),
+            chunks(&[[0, 0, 0], [-1, 0, 0], [2, 0, 0]]),
+            "several solids"
+        );
+    }
+
+    #[test]
+    fn a_changed_voxel_reaches_only_the_chunks_whose_padding_holds_it() {
+        // The solid at the corner is gone, and one inside the chunk at the
+        // origin remains.
+        let remaining = IVec3::new(5, 6, 7);
+        let holds_solid = |min: IVec3, max: IVec3| {
+            remaining.cmpge(min).all() && remaining.cmple(max).all()
+        };
+        let removed = IVec3::splat(31);
+        let reached: Vec<(IVec3, bool)> =
+            chunks_needing(EditedBox::world(removed, removed), IVec3::ONE, holds_solid)
+                .map(|(key, needed)| (key.position(), needed))
+                .collect();
+        assert_eq!(reached.len(), 8);
+        for (position, needed) in reached {
+            assert_eq!(needed, position == IVec3::ZERO, "{position}");
+        }
     }
 }

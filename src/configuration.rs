@@ -210,6 +210,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The three values correspond to the top, sides and bottom of the voxel. For example,
     /// if the slice is `[1,2,2]`, the top will use texture index 1 and the sides and bottom will use texture
     /// index 2.
+    ///
+    /// With the `sub_grids` feature it maps the voxels of sub-grids' chunks
+    /// too, with no word of which grid they are on.
     fn texture_index_mapper(&self) -> TextureIndexMapperFn<Self::MaterialIndex> {
         Arc::new(|_mat| [0, 0, 0])
     }
@@ -243,6 +246,12 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// whose texture coordinates advance by one per voxel, as the default
     /// mesher's do, should scale them by `1 << lod_level` itself, so the texture
     /// stays the same size at every level.
+    ///
+    /// With the `sub_grids` feature it meshes sub-grids' chunks too. A
+    /// sub-grid's chunk is at level 0, and the delegate gets its position on
+    /// the sub-grid's own grid and isn't told which grid it is on, so a
+    /// chunk holding the same voxels meshes the same in any grid, and the
+    /// grids share its mesh.
     fn chunk_meshing_delegate(
         &self,
     ) -> ChunkMeshingDelegate<Self::MaterialIndex, Self::ChunkUserBundle> {

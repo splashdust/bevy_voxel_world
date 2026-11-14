@@ -342,8 +342,15 @@ where
             use crate::sub_grid::SubGrids;
             app.add_systems(
                 PreUpdate,
-                SubGrids::<C>::forget_despawned
-                    .before(Internals::<C>::commit_voxel_edits)
+                (
+                    SubGrids::<C>::forget_despawned
+                        .before(Internals::<C>::commit_voxel_edits),
+                    // A commit spawns and retires sub-grids' chunks in place of
+                    // the streaming policy.
+                    SubGrids::<C>::plan_chunks
+                        .after(Internals::<C>::commit_voxel_edits)
+                        .before(ChunkLifecycle::<C>::apply_requests),
+                )
                     .in_set(VoxelWorldSet::<C>::default()),
             )
             .add_systems(
