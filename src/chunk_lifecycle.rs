@@ -649,7 +649,6 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
     /// empties a sub-grid does, for an operation whose commit leaves every
     /// sub-grid as full or empty as it was. It takes a shared borrow, so
     /// `VoxelWorld` can mark its edits.
-    #[allow(dead_code)]
     pub(crate) fn mark_handover(&self) {
         self.handover_marked
             .store(true, std::sync::atomic::Ordering::Relaxed);

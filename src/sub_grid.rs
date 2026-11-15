@@ -16,6 +16,13 @@
 //! where they were, and leaves air behind. Lifting from a sub-grid cuts it
 //! in two. [`Lifted`] says when the move has landed.
 //!
+//! [`VoxelWorld::stamp`](crate::prelude::VoxelWorld::stamp) writes a
+//! sub-grid's voxels into any other grid, snapped to the nearest pose that
+//! lines up with it, and despawns the sub-grid once [`Stamped`] says the move
+//! has landed. Together they move voxels every way: from the world into a
+//! sub-grid, from a sub-grid into the world, from one sub-grid into a new
+//! one, and from one sub-grid into another.
+//!
 //! # Chunks
 //!
 //! A sub-grid shows through chunks of its own, built by the world's chunk
@@ -117,6 +124,14 @@
 //! [`VoxelWorld::despawn_sub_grid`](crate::prelude::VoxelWorld::despawn_sub_grid)
 //! waits for the handover holding a sub-grid's chunks to land.
 //!
+//! A stamp's commit lands as one handover even when it fills or empties no
+//! sub-grid, as when one system lifts voxels out of a sub-grid and stamps
+//! the new sub-grid into the world: the new sub-grid is empty before the
+//! commit and after it. A world applying that commit from another world's
+//! edit deltas gets only the deltas of the grid lifted from and the grid
+//! stamped into, which fill or empty no sub-grid, so there the two grids'
+//! chunks can publish a frame apart.
+//!
 //! A handover's cost grows with the chunks it holds. Each one keeps its
 //! newest finished chunk task until the handover lands.
 //!
@@ -168,9 +183,12 @@ use crate::{
 };
 
 mod lift;
+mod stamp;
 
 pub(crate) use lift::{lift, LiftParts};
 pub use lift::{LiftError, Lifted};
+pub use stamp::{incoming_replaces, StampError, StampPreview, StampVoxel, Stamped};
+pub(crate) use stamp::{move_stamped_children, preview, stamp, StampParts};
 
 /// Names a grid of a voxel world: its streamed voxels, or one of its
 /// sub-grids by the sub-grid's entity.
@@ -246,6 +264,9 @@ struct Live {
     pose: GlobalTransform,
     /// The snapshot count when the sub-grid was added.
     added: u64,
+    /// The nearest of its ancestors that is a live sub-grid, as the last
+    /// pose snapshot found it, or as the call that spawned it says.
+    inside: Option<Entity>,
 }
 
 impl<C: VoxelWorldConfig> SubGrids<C> {
@@ -266,15 +287,22 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     }
 
     /// Makes `entity` a sub-grid at `pose`, with a new id, and returns the
-    /// sub-grid's marker. An entity that is a live sub-grid already keeps its
+    /// sub-grid's marker. `parent` is the entity it is a child of, where the
+    /// caller knows it. An entity that is a live sub-grid already keeps its
     /// id and pose.
     ///
     /// # Panics
     ///
     /// When the world has 65,535 live sub-grids, the most its ids can name.
-    fn add(&self, entity: Entity, pose: GlobalTransform) -> SubGrid<C> {
+    fn add(
+        &self,
+        entity: Entity,
+        pose: GlobalTransform,
+        parent: Option<Entity>,
+    ) -> SubGrid<C> {
         let mut record = self.record.lock().unwrap();
         let added = record.snapshots;
+        let inside = parent.filter(|parent| record.live.contains_key(parent));
         let grid = match record.live.get(&entity) {
             Some(live) => live.grid,
             None => {
@@ -284,7 +312,15 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
                         std::any::type_name::<C>()
                     )
                 });
-                record.live.insert(entity, Live { grid, pose, added });
+                record.live.insert(
+                    entity,
+                    Live {
+                        grid,
+                        pose,
+                        added,
+                        inside,
+                    },
+                );
                 record.by_grid.insert(grid, entity);
                 grid
             }
@@ -318,6 +354,24 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
 
     fn root(&self) -> Entity {
         self.record.lock().unwrap().root
+    }
+
+    /// Whether the live sub-grid `entity` is `ancestor` or one of its
+    /// descendants, through the sub-grid ancestors the last pose snapshot
+    /// found. Its cost grows with how deep sub-grids nest.
+    pub(crate) fn is_within(&self, entity: Entity, ancestor: Entity) -> bool {
+        let record = self.record.lock().unwrap();
+        let mut at = Some(entity);
+        // A hierarchy has no cycles, but the record is only as fresh as the
+        // last snapshot, so the walk stops after one step per sub-grid.
+        for _ in 0..=record.live.len() {
+            match at {
+                Some(at) if at == ancestor => return true,
+                Some(entity) => at = record.live.get(&entity).and_then(|l| l.inside),
+                None => return false,
+            }
+        }
+        false
     }
 
     /// Ends the sub-grid `entity`, dropping its voxel edits at once. Its
@@ -432,17 +486,19 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     }
 
     /// Keeps each sub-grid's `GlobalTransform` against the world root's as
-    /// its pose. Runs after transform propagation, so the pose is the one
-    /// shown this frame.
+    /// its pose, and the nearest of its ancestors that is a sub-grid. Runs
+    /// after transform propagation, so the pose is the one shown this frame.
     ///
     /// A sub-grid added before the last snapshot whose entity never got its
     /// [`SubGrid<C>`], as an entity despawned before
     /// [`VoxelWorld::insert_sub_grid`](crate::prelude::VoxelWorld::insert_sub_grid)
-    /// reached it, ends here. Its cost grows with the live sub-grids.
+    /// reached it, ends here. Its cost grows with the live sub-grids and how
+    /// deep they sit in the hierarchy.
     pub fn snapshot_poses(
         mut sub_grids: ResMut<Self>,
         roots: Query<&GlobalTransform, With<WorldRoot<C>>>,
         grids: Query<&GlobalTransform, With<SubGrid<C>>>,
+        parents: Query<&ChildOf>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
     ) {
         let record = sub_grids.record.get_mut().unwrap();
@@ -454,11 +510,30 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         let from_root = roots
             .get(record.root)
             .map_or(Affine3A::IDENTITY, |root| root.affine().inverse());
+        let nearest_sub_grid_above = |entity: Entity| {
+            let mut at = entity;
+            while let Ok(child_of) = parents.get(at) {
+                at = child_of.parent();
+                if at == record.root {
+                    return None;
+                }
+                if grids.contains(at) {
+                    return Some(at);
+                }
+            }
+            None
+        };
+        let inside: Vec<Option<Entity>> = record
+            .live
+            .keys()
+            .map(|&entity| nearest_sub_grid_above(entity))
+            .collect();
         let mut gone = Vec::new();
-        for (entity, live) in record.live.iter_mut() {
+        for ((entity, live), inside) in record.live.iter_mut().zip(inside) {
             match grids.get(*entity) {
                 Ok(global) => {
-                    live.pose = GlobalTransform::from(from_root * global.affine())
+                    live.pose = GlobalTransform::from(from_root * global.affine());
+                    live.inside = inside;
                 }
                 Err(_) if live.added < snapshots => gone.push(*entity),
                 Err(_) => {}
@@ -879,7 +954,7 @@ pub(crate) mod world {
         pose: GlobalTransform,
     ) -> (Entity, GridId) {
         let entity = commands.spawn_empty().id();
-        let marker = sub_grids.add(entity, pose);
+        let marker = sub_grids.add(entity, pose, Some(parent));
         let grid = marker.grid;
         commands
             .entity(entity)
@@ -914,7 +989,7 @@ pub(crate) mod world {
         if sub_grids.live(entity).is_some() {
             return;
         }
-        let marker = sub_grids.add(entity, GlobalTransform::IDENTITY);
+        let marker = sub_grids.add(entity, GlobalTransform::IDENTITY, None);
         commands.entity(entity).try_insert(marker);
     }
 }

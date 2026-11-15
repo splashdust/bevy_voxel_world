@@ -3876,6 +3876,8 @@ mod level_0_reader;
 mod lift;
 mod light;
 #[cfg(feature = "sub_grids")]
+mod stamp;
+#[cfg(feature = "sub_grids")]
 mod sub_grid_chunks;
 #[cfg(feature = "sub_grids")]
 mod sub_grids;

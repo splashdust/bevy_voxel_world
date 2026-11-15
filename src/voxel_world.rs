@@ -15,7 +15,10 @@ mod raycast;
 pub use grid_raycast::{GridRaycastFn, GridRaycastHit};
 
 #[cfg(feature = "sub_grids")]
-use crate::sub_grid::{Grid, GridVoxels, GridVoxelsMut, LiftError, SubGrids};
+use crate::sub_grid::{
+    Grid, GridVoxels, GridVoxelsMut, LiftError, StampError, StampPreview, StampVoxel,
+    SubGrids,
+};
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
@@ -428,6 +431,97 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             max,
             pick,
         )
+    }
+
+    /// What [`stamp`](Self::stamp) would do with the sub-grid `sub_grid`
+    /// and `target` now, without changing anything: the snapped pose, what
+    /// the snap takes away, and each target position where a solid voxel
+    /// would land on a solid voxel.
+    ///
+    /// It reads what `stamp` reads, so a game can refuse a stamp that
+    /// overlaps too much or snaps too far, or move the sub-grid to the
+    /// preview's pose first, so the snap doesn't show. An empty sub-grid
+    /// snaps about its grid origin and overlaps nothing. Its cost grows as
+    /// `stamp`'s does.
+    ///
+    /// Returns `None` where `stamp` would refuse: `sub_grid` isn't a live
+    /// sub-grid, `target` names an entity that isn't one, or `target` is
+    /// the sub-grid or one of its descendants.
+    pub fn stamp_preview(&self, sub_grid: Entity, target: Grid) -> Option<StampPreview> {
+        crate::sub_grid::preview(self.stamp_parts(), sub_grid, target)
+    }
+
+    /// Stamps the sub-grid `sub_grid` into `target`: writes its voxels into
+    /// the target grid at the nearest pose that lines up with it, empties
+    /// it, and despawns it once the move lands.
+    ///
+    /// The stamp always snaps: to the nearest of the 24
+    /// [`GridRotation`](crate::prelude::GridRotation)s against the target
+    /// grid, the nearest voxel and scale 1. It turns the sub-grid about the
+    /// centre of the box holding its solid voxels, so a long sub-grid's far
+    /// end doesn't swing. The pose it snaps is the one
+    /// [`pose`](GridVoxels::pose) reads at the call, the one shown last
+    /// frame, for both grids. A sub-grid moved to its
+    /// [`stamp_preview`](Self::stamp_preview) pose this frame snaps from its
+    /// old pose to the same result. The sub-grid's `Transform` is left
+    /// alone, so the snap shows when the move lands.
+    ///
+    /// `rule` sees each solid voxel of the sub-grid as a [`StampVoxel`],
+    /// with the target position it lands on and the target's voxel there,
+    /// and returns the voxel to write, or `None` to leave the target's voxel
+    /// as it is. [`incoming_replaces`](crate::prelude::incoming_replaces)
+    /// writes every incoming voxel. A rule can record the voxels it
+    /// overwrites, and turn a facing it keeps in the material index by the
+    /// stamp's rotation.
+    ///
+    /// From the call on, every voxel reads from one grid: the sub-grid reads
+    /// air throughout, and the target reads the voxels written. A sub-grid
+    /// lifted this frame stamps the voxels the lift gave it, at the pose the
+    /// lift gave it. Both grids' edits commit together in the next
+    /// `PreUpdate`, as one handover: the target's chunks keep showing what
+    /// they showed, and the sub-grid's keep showing its voxels, until all of
+    /// them change in the same frame. [`Stamped`](crate::prelude::Stamped)
+    /// is written in that frame, the sub-grid's child sub-grids move onto
+    /// the target grid's entity, keeping their world pose, and the sub-grid
+    /// despawns in that frame's `PostUpdate`, with its other children. A
+    /// stamp of an empty sub-grid writes nothing, and lands in the next
+    /// frame.
+    ///
+    /// Its cost grows with the box holding the sub-grid's solid voxels, and
+    /// with the target's chunk positions they land on that have no published
+    /// level-0 chunk and no uniform fill hint: at each, the world's voxel
+    /// lookup runs on the caller's thread. Every chunk the stamp touches, in
+    /// both grids, joins its handover.
+    ///
+    /// # Errors
+    ///
+    /// [`StampError::NoSuchSubGrid`] when `sub_grid` isn't a live sub-grid
+    /// of this world, [`StampError::NoSuchTarget`] when `target` names an
+    /// entity that isn't one, and [`StampError::IntoItself`] when `target`
+    /// is the sub-grid or one of its descendants. Nothing is changed. A
+    /// sub-grid counts as a descendant of the sub-grids above it in the
+    /// hierarchy as it was when last frame's transforms propagated, or from
+    /// the call for one lifted this frame.
+    pub fn stamp(
+        &mut self,
+        sub_grid: Entity,
+        target: Grid,
+        rule: impl FnMut(
+            &StampVoxel<C::MaterialIndex>,
+        ) -> Option<WorldVoxel<C::MaterialIndex>>,
+    ) -> Result<(), StampError> {
+        crate::sub_grid::stamp(self.stamp_parts(), sub_grid, target, rule)
+    }
+
+    fn stamp_parts(&self) -> crate::sub_grid::StampParts<'_, C> {
+        crate::sub_grid::StampParts {
+            sub_grids: &self.sub_grids,
+            edits: &self.voxel_edits,
+            chunk_map: &self.chunk_map,
+            configuration: &self.configuration.0,
+            handovers: &self.handovers,
+            requests: &self.chunk_requests,
+        }
     }
 }
 

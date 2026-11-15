@@ -22,7 +22,7 @@ const HOLE: IVec3 = IVec3::new(0, -1, 0);
 
 /// Ground below y = 0, of material 1 where x is even and 2 where it is odd,
 /// with air at [`HOLE`], `Unset` at y = 0 and air above.
-fn ground(position: IVec3) -> WorldVoxel {
+pub(super) fn ground(position: IVec3) -> WorldVoxel {
     if position.y < 0 && position != HOLE {
         WorldVoxel::Solid(1 + position.x.rem_euclid(2) as u8)
     } else if position.y == 0 {
@@ -35,8 +35,8 @@ fn ground(position: IVec3) -> WorldVoxel {
 /// A world of [`ground`]. Once `slow`, it runs two chunk tasks at a time,
 /// so a commit touching many chunks takes several frames to publish them.
 #[derive(Resource, Clone, Default)]
-struct LiftWorld {
-    slow: bool,
+pub(super) struct LiftWorld {
+    pub(super) slow: bool,
 }
 
 impl VoxelWorldConfig for LiftWorld {
@@ -83,23 +83,23 @@ fn record_lifted(
     log.0.extend(lifted.read().map(|message| (frame, *message)));
 }
 
-fn lifted(app: &App) -> &[(u32, Lifted<LiftWorld>)] {
+pub(super) fn lifted(app: &App) -> &[(u32, Lifted<LiftWorld>)] {
     &app.world().resource::<LiftedLog>().0
 }
 
 /// The top layer of the ground around the origin, which reaches into eight
 /// chunks of the world through their padding.
-fn slab() -> (IVec3, IVec3) {
+pub(super) fn slab() -> (IVec3, IVec3) {
     (IVec3::new(-1, -1, -1), IVec3::new(2, 0, 2))
 }
 
 /// A voxel of the ground in the chunk below the origin, away from the slab.
-const APART: IVec3 = IVec3::new(9, -1, 9);
+pub(super) const APART: IVec3 = IVec3::new(9, -1, 9);
 
 /// The level-0 chunk positions whose padded voxels hold a voxel of the box
 /// from `min` inclusive to `max` exclusive: a chunk's padding is one voxel
 /// deep.
-fn padded_chunks(min: IVec3, max: IVec3) -> BTreeSet<[i32; 3]> {
+pub(super) fn padded_chunks(min: IVec3, max: IVec3) -> BTreeSet<[i32; 3]> {
     let chunk = |voxel: IVec3| voxel.div_euclid(IVec3::splat(CHUNK_SIZE_I));
     let (lo, hi) = (chunk(min - 1), chunk(max));
     let mut chunks = BTreeSet::new();
@@ -115,7 +115,7 @@ fn padded_chunks(min: IVec3, max: IVec3) -> BTreeSet<[i32; 3]> {
 
 /// Runs `f` on the voxel world in a system of its own, whose commands apply
 /// when it returns.
-fn run<T: 'static>(
+pub(super) fn run<T: 'static>(
     app: &mut App,
     mut f: impl FnMut(&mut VoxelWorld<LiftWorld>) -> T + Send + Sync + 'static,
 ) -> T {
@@ -127,13 +127,13 @@ fn run<T: 'static>(
 }
 
 /// The frame the next update runs, as the message recorders count it.
-fn next_frame(app: &App) -> u32 {
+pub(super) fn next_frame(app: &App) -> u32 {
     app.world().resource::<FrameCount>().0
 }
 
 /// The frames, from `since` on, in which each chunk of `grid` at one of
 /// `chunks` published.
-fn published_since(
+pub(super) fn published_since(
     app: &App,
     since: u32,
     grid: Grid,
@@ -151,7 +151,7 @@ fn published_since(
         .collect()
 }
 
-fn all_published_since(
+pub(super) fn all_published_since(
     app: &App,
     since: u32,
     grid: Grid,
@@ -164,12 +164,12 @@ fn all_published_since(
     published == *chunks
 }
 
-fn edits(app: &App) -> &VoxelEdits<LiftWorld, u8> {
+pub(super) fn edits(app: &App) -> &VoxelEdits<LiftWorld, u8> {
     app.world().resource::<VoxelEdits<LiftWorld, u8>>()
 }
 
 /// The id the sub-grid `entity`'s voxel edits are kept under.
-fn grid_id(app: &App, entity: Entity) -> crate::grid::GridId {
+pub(super) fn grid_id(app: &App, entity: Entity) -> crate::grid::GridId {
     app.world()
         .get::<SubGrid<LiftWorld>>(entity)
         .expect("a live sub-grid")
@@ -179,7 +179,7 @@ fn grid_id(app: &App, entity: Entity) -> crate::grid::GridId {
 /// A world app with transforms, a camera and message recorders, run until
 /// the world's chunks around the origin are published. Then the world turns
 /// slow.
-fn lift_app() -> App {
+pub(super) fn lift_app() -> App {
     let mut app = App::new();
     app.add_plugins((
         test_plugins(),
@@ -203,7 +203,7 @@ fn lift_app() -> App {
 }
 
 /// Runs `app` until it has read a `Lifted` naming `sub_grid`.
-fn until_lifted(app: &mut App, sub_grid: Entity) {
+pub(super) fn until_lifted(app: &mut App, sub_grid: Entity) {
     update_until(app, "the lift to land", |app| {
         lifted(app)
             .iter()
@@ -282,7 +282,7 @@ fn lifting_a_box_moves_only_its_solids_and_leaves_air_edits_in_the_world() {
 }
 
 /// The positions of the box from `min` inclusive to `max` exclusive.
-fn positions(min: IVec3, max: IVec3) -> Vec<IVec3> {
+pub(super) fn positions(min: IVec3, max: IVec3) -> Vec<IVec3> {
     let mut positions = Vec::new();
     for z in min.z..max.z {
         for y in min.y..max.y {
@@ -453,7 +453,11 @@ fn lifting_inside_a_coarse_chunk_lifts_the_generators_level_0_voxels() {
 
 /// Spawns a sub-grid at `transform` holding `Solid(5)` at each of `voxels`,
 /// and runs `app` until its pose is the one its transform gives.
-fn sub_grid_holding(app: &mut App, transform: Transform, voxels: Vec<IVec3>) -> Entity {
+pub(super) fn sub_grid_holding(
+    app: &mut App,
+    transform: Transform,
+    voxels: Vec<IVec3>,
+) -> Entity {
     let entity = run(app, move |voxel_world| {
         let entity = voxel_world.spawn_sub_grid(transform);
         let mut grid = voxel_world.grid_mut(Grid::SubGrid(entity)).unwrap();
@@ -468,7 +472,7 @@ fn sub_grid_holding(app: &mut App, transform: Transform, voxels: Vec<IVec3>) -> 
 }
 
 /// A row of four voxels along x, from (3, 4, 5).
-fn row() -> Vec<IVec3> {
+pub(super) fn row() -> Vec<IVec3> {
     (3..7).map(|x| IVec3::new(x, 4, 5)).collect()
 }
 
@@ -532,7 +536,7 @@ fn a_sub_grid_lifted_bare_lives_on_with_no_bounds() {
     assert!(app.world().get_entity(source).is_ok());
 }
 
-fn root(app: &mut App) -> Entity {
+pub(super) fn root(app: &mut App) -> Entity {
     app.world_mut()
         .query_filtered::<Entity, With<WorldRoot<LiftWorld>>>()
         .single(app.world())
@@ -547,7 +551,7 @@ fn placement(app: &App, entity: Entity) -> (Entity, Transform) {
     )
 }
 
-fn assert_poses_match(got: GlobalTransform, expected: GlobalTransform) {
+pub(super) fn assert_poses_match(got: GlobalTransform, expected: GlobalTransform) {
     let (got, expected) = (got.affine(), expected.affine());
     assert!(
         got.abs_diff_eq(expected, 1e-4),

@@ -126,7 +126,6 @@ impl Mul for GridRotation {
 
 /// The nearest pose at which a sub-grid's voxels line up with a target grid's,
 /// and what [`snap`] took away to reach it.
-#[allow(dead_code)]
 pub(crate) struct Snap {
     /// The nearest of the 24 rotations to the pose's.
     pub rotation: GridRotation,
@@ -146,7 +145,6 @@ pub(crate) struct Snap {
     pub scale: Vec3,
 }
 
-#[allow(dead_code)]
 impl Snap {
     /// The target grid position that sub-grid position `position` lands on.
     pub fn target_position(&self, position: IVec3) -> IVec3 {
@@ -168,7 +166,6 @@ impl Snap {
 /// A pose halfway between two rotations, to within float error, snaps to the
 /// one listed first in [`GridRotation::ALL`]. A centre halfway between two
 /// voxels along an axis snaps towards positive on that axis.
-#[allow(dead_code)]
 pub(crate) fn snap(pose: Transform, min: IVec3, max: IVec3) -> Snap {
     let turn = pose.rotation.normalize();
     let rotation = nearest_rotation(turn);

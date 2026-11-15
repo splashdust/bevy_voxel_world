@@ -29,9 +29,16 @@
 //! when they are ready: a despawned grid's chunks, a world chunk the
 //! streaming policy retires, a chunk a game despawns.
 //!
-//! A handover carries the [`Lifted`] message of each lift whose commit it
-//! holds, and folded handovers carry them all. They are written once it
-//! lands, leaving out those whose sub-grid is gone by then.
+//! A handover carries the [`Lifted`] or [`Stamped`] message of each lift and
+//! stamp whose commit it holds, and folded handovers carry them all. They
+//! are written once it lands, leaving out those whose sub-grid is gone by
+//! then, and each stamped sub-grid despawns in that frame's `PostUpdate`.
+//!
+//! A stamp marks its commit, since a lift and a stamp of the new sub-grid in
+//! one frame leave it as empty after the commit as before. A world applying
+//! another world's edit deltas gets no such mark: it sees only the deltas of
+//! the grid lifted from and the grid stamped into, which fill or empty no
+//! sub-grid, so there the two grids' chunks can publish a frame apart.
 //!
 //! A world with no handover in flight pays a check per lifecycle system for
 //! it. A handover's cost grows with the chunks it holds.
@@ -39,7 +46,13 @@
 use std::sync::Mutex;
 
 use super::*;
-use crate::sub_grid::{Lifted, SubGrids};
+use crate::sub_grid::{Lifted, Stamped, SubGrids};
+
+/// A lift or stamp whose commit a handover holds, announced once it lands.
+pub(crate) enum Operation<C: VoxelWorldConfig> {
+    Lift(Lifted<C>),
+    Stamp(Stamped<C>),
+}
 
 /// What a held chunk waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,12 +98,12 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     held: HashMap<Entity, Held<C>>,
     /// The chunks of each handover, by its id.
     handovers: HashMap<u32, Vec<Entity>>,
-    /// The lifts of each handover holding any, by its id.
-    lifts: HashMap<u32, Vec<Lifted<C>>>,
-    /// Lifts whose commit is still to come.
-    lifting: Mutex<Vec<Lifted<C>>>,
-    /// Lifts whose handover has landed, to announce.
-    landed: Vec<Lifted<C>>,
+    /// The operations of each handover holding any, by its id.
+    operations: HashMap<u32, Vec<Operation<C>>>,
+    /// Operations whose commit is still to come.
+    queued: Mutex<Vec<Operation<C>>>,
+    /// Operations whose handover has landed, to announce.
+    landed: Vec<Operation<C>>,
     next_id: u32,
     /// Sub-grids to despawn once no handover holds their chunks, each with
     /// whether a `PostUpdate` has passed since `despawn_sub_grid`.
@@ -103,8 +116,8 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
         Self {
             held: HashMap::new(),
             handovers: HashMap::new(),
-            lifts: HashMap::new(),
-            lifting: Mutex::default(),
+            operations: HashMap::new(),
+            queued: Mutex::default(),
             landed: Vec::new(),
             next_id: 0,
             despawns: Mutex::default(),
@@ -171,21 +184,21 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         true
     }
 
-    /// Takes in the chunks `joining` gathered, and the lifts whose edits
-    /// this frame's commit took. A forming handover holds them all, and
-    /// folds in each handover holding one of the chunks. Otherwise only
-    /// chunks already held change: a retire held for one of them, or one
-    /// held for despawning that the commit needs again.
+    /// Takes in the chunks `joining` gathered, and the lifts and stamps
+    /// whose edits this frame's commit took. A forming handover holds them
+    /// all, and folds in each handover holding one of the chunks. Otherwise
+    /// only chunks already held change: a retire held for one of them, or
+    /// one held for despawning that the commit needs again.
     ///
     /// A lift's commit fills its sub-grid, so it forms a handover unless the
     /// sub-grid was emptied or despawned before it, and then nothing moved
     /// and the lift is dropped. A forming handover with no chunks lands at
-    /// once.
+    /// once. A stamp marks its commit, so it always forms one.
     pub fn join(&mut self, joining: Joining) {
-        let lifts = std::mem::take(self.lifting.get_mut().unwrap());
+        let operations = std::mem::take(self.queued.get_mut().unwrap());
         if joining.chunks.is_empty() {
             if joining.forming {
-                self.landed.extend(lifts);
+                self.landed.extend(operations);
             }
             return;
         }
@@ -202,8 +215,8 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.handovers.insert(id, Vec::new());
-        if !lifts.is_empty() {
-            self.lifts.insert(id, lifts);
+        if !operations.is_empty() {
+            self.operations.insert(id, operations);
         }
         for (entity, key, wait) in joining.chunks {
             match self.held.get_mut(&entity) {
@@ -241,8 +254,8 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             }
         }
         self.handovers.get_mut(&into).unwrap().extend(chunks);
-        if let Some(lifts) = self.lifts.remove(&from) {
-            self.lifts.entry(into).or_default().extend(lifts);
+        if let Some(operations) = self.operations.remove(&from) {
+            self.operations.entry(into).or_default().extend(operations);
         }
     }
 
@@ -284,9 +297,9 @@ impl<C: VoxelWorldConfig> Handovers<C> {
 
     /// Drops the chunks that left their handover, and lands each handover
     /// whose chunks are all ready: publishes their kept tasks, despawns the
-    /// chunks it retires and queues its lifts' [`Lifted`]. The data they
-    /// publish is readable once the next `flush_chunk_map_buffers` has run,
-    /// in this frame.
+    /// chunks it retires and queues the messages of its lifts and stamps.
+    /// The data they publish is readable once the next
+    /// `flush_chunk_map_buffers` has run, in this frame.
     #[allow(clippy::too_many_arguments)]
     pub fn land_ready(
         &mut self,
@@ -308,7 +321,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         let Self {
             held,
             handovers,
-            lifts,
+            operations,
             landed,
             stats,
             ..
@@ -320,7 +333,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             if !chunks.iter().all(ready) {
                 return true;
             }
-            landed.extend(lifts.remove(id).into_iter().flatten());
+            landed.extend(operations.remove(id).into_iter().flatten());
             if chunks.is_empty() {
                 return false;
             }
@@ -356,25 +369,48 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Notes a lift, whose edits commit in the next `commit_voxel_edits`,
     /// to announce with `lifted` once that commit's handover lands.
     pub fn lifted(&self, lifted: Lifted<C>) {
-        self.lifting.lock().unwrap().push(lifted);
+        self.queued.lock().unwrap().push(Operation::Lift(lifted));
     }
 
-    /// Writes the [`Lifted`] of each lift whose handover has landed, except
-    /// those whose sub-grid is no longer live.
-    pub fn write_lifted(
+    /// Notes a stamp, whose edits commit in the next `commit_voxel_edits`,
+    /// to announce with `stamped` once that commit's handover lands.
+    pub fn stamped(&self, stamped: Stamped<C>) {
+        self.queued.lock().unwrap().push(Operation::Stamp(stamped));
+    }
+
+    /// Writes the [`Lifted`] or [`Stamped`] of each lift and stamp whose
+    /// handover has landed, in call order, except those whose sub-grid is no
+    /// longer live. Each stamped sub-grid despawns in this frame's
+    /// `PostUpdate`.
+    pub fn write_landed(
         mut handovers: ResMut<Self>,
         sub_grids: Res<SubGrids<C>>,
-        mut messages: MessageWriter<Lifted<C>>,
+        mut lifted: MessageWriter<Lifted<C>>,
+        mut stamped: MessageWriter<Stamped<C>>,
     ) {
         if handovers.landed.is_empty() {
             return;
         }
-        messages.write_batch(
-            handovers
-                .landed
-                .drain(..)
-                .filter(|lifted| sub_grids.live(lifted.sub_grid).is_some()),
-        );
+        let Self {
+            landed, despawns, ..
+        } = &mut *handovers;
+        for operation in landed.drain(..) {
+            match operation {
+                Operation::Lift(message) => {
+                    if sub_grids.live(message.sub_grid).is_some() {
+                        lifted.write(message);
+                    }
+                }
+                Operation::Stamp(message) => {
+                    if sub_grids.live(message.sub_grid).is_some() {
+                        stamped.write(message);
+                        // The handover holding its chunks has landed, so it
+                        // despawns in this frame's `despawn_landed`.
+                        despawns.get_mut().unwrap().push((message.sub_grid, true));
+                    }
+                }
+            }
+        }
     }
 
     /// Whether a handover holds a chunk of `grid`.

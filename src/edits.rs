@@ -125,9 +125,13 @@
 //! sub-grid's deltas emptying it (an empty full delta per chunk) and its
 //! despawn. A receiver that applies the deltas of one sender commit in one
 //! system, spawning a lift's sub-grid in that system first, lands them as
-//! one handover, as the sender did. It routes the sender's despawn of a
-//! sub-grid through `VoxelWorld::despawn_sub_grid`, so the sub-grid stays
-//! until the deltas emptying it land. Clients ask the server for lifts and
+//! one handover, as the sender did, with one exception: a lift and a stamp
+//! of the new sub-grid in one sender commit reach a receiver as only the
+//! source grid's and the target grid's deltas, which fill or empty no
+//! sub-grid, so there the two grids can publish a frame apart. A receiver
+//! routes the sender's despawn of a sub-grid through
+//! `VoxelWorld::despawn_sub_grid`, so the sub-grid stays until the deltas
+//! emptying it land. Clients ask the server for lifts and
 //! stamps, and never lift from or stamp into a synced grid themselves.
 //!
 //! **Joins and interest.** A client joins a sub-grid whole: its existence
