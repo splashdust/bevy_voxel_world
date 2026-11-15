@@ -105,6 +105,14 @@ required-features = ["sub_grids", "dislodged_fragments"]
 test = true
 
 [[example]]
+name = "airship"
+path = "examples/airship/main.rs"
+required-features = ["sub_grids", "light_propagation"]
+# Its tests check that the autopilot's loop clears the world, and that the
+# dock's lift takes the whole airship and leaves the dock.
+test = true
+
+[[example]]
 name = "save_load"
 path = "examples/save_load.rs"
 required-features = ["serde", "sub_grids"]
