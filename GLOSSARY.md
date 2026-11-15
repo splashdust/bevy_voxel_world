@@ -253,7 +253,7 @@ Room for one chunk's light in the light texture of its world: a light level for 
 _Avoid_: page, atlas entry
 
 **Tag**:
-The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level.
+The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
 _Avoid_: mesh tag (the Bevy component that carries it), light index
 
 **Tag map**:

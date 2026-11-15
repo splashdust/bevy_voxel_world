@@ -34,6 +34,10 @@
 // Its slot's cells are `1 << L` voxels wide, so its local position is divided
 // by that width, keeping the corner of its first cell at (1, 1, 1).
 //
+// Bit 30 marks a sub-grid's chunk, with or without a slot, and bits 28 and 29
+// are clear. Every read of a field masks it to its width, so a sub-grid's tag
+// reads the same slot, LOD level and levels it would without bit 30.
+//
 // References:
 //
 // - Terasology's `BlockMeshPart`, which lights a vertex from 8 points around

@@ -1472,6 +1472,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         configuration: Res<C>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        #[cfg(feature = "sub_grids")] sub_grids: Option<
+            Res<crate::sub_grid::SubGrids<C>>,
+        >,
     ) {
         let refill = route.as_ref().is_some_and(|route| route.wants_refill());
         if work.landing.is_empty()
@@ -1495,6 +1498,10 @@ impl<C: VoxelWorldConfig> Relights<C> {
         if let Some(route) = route.as_mut() {
             route.set_cameras(cameras.iter().map(|camera| camera.translation()));
             route.set_device(device.as_deref());
+            #[cfg(feature = "sub_grids")]
+            if let Some(sub_grids) = &sub_grids {
+                route.set_poses(sub_grids.live_grids());
+            }
         }
         // Coarse chunks' light lands whole every frame: it relights nothing
         // and costs a few map writes.

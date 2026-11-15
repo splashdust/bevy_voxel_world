@@ -19,14 +19,20 @@
 //!   chunk has a slot. With one, bits 0–23 are the slot's index. Without one,
 //!   bits 0–15 hold the one sky level and voxel level every face of the chunk
 //!   sees: 4 bits each at 16 levels, sky in bits 0–3 and voxel in 4–7, and 8
-//!   bits each at 256 levels, sky in bits 0–7 and voxel in 8–15. Bits 28–30
-//!   are always clear. The crate sets the tag on every chunk of a lit world
-//!   showing its light, replacing any tag the world's own systems set.
+//!   bits each at 256 levels, sky in bits 0–7 and voxel in 8–15. Bit 30 is
+//!   set on every chunk of a sub-grid and never on a world chunk, and bits
+//!   28 and 29 are always clear. Every reader of a field masks it to its
+//!   width, so bit 30 never reads as part of the slot, the LOD level or the
+//!   levels. The crate sets the tag on every chunk of a lit world showing
+//!   its light, replacing any tag the world's own systems set.
 //!
 //! A slot's shell holds copies of the six face neighbours' border planes, so
 //! a face on a chunk boundary reads the light in front of it. The shell is
 //! only for display: it never feeds back into light. Its edges and corners
-//! stay 0, and so does a plane whose neighbour isn't loaded. When a
+//! stay 0, and so does a plane whose neighbour isn't loaded. A sub-grid's
+//! chunk copies only the neighbours on its own grid, never a world chunk or
+//! another sub-grid's chunk at the same position, and a plane toward a
+//! position where its grid has no chunk stays 0. When a
 //! neighbour's light lands, only the plane in front of it is written again,
 //! and only if it changed; the chunk doesn't relight. A neighbour that
 //! retires leaves its last plane in place.
@@ -43,7 +49,7 @@
 //! chunks all see one level holds none. Its slot count is clamped to the
 //! largest 3D texture the device makes. When every slot is taken, the slot
 //! holder farthest from the cameras gives way to a nearer chunk, and the
-//! world warns once. A chunk with no slot shows the most common level of the
+//! world warns once. A sub-grid's chunk is measured at its grid's last pose. A chunk with no slot shows the most common level of the
 //! voxels touching its solids, so it loses its shadows and its lamps' glow;
 //! it takes a slot again when one comes free.
 //!
@@ -133,6 +139,7 @@ use {
     super::view::in_world,
     crate::chunk::MAX_LOD_LEVEL,
     crate::configuration::LodLevel,
+    crate::grid::GridId,
 };
 
 /// Texels along each side of a slot: a chunk and a shell one voxel deep.
@@ -140,6 +147,9 @@ pub(crate) const SLOT_SIDE: u32 = CHUNK_SIZE_U + 2;
 
 /// The tag bit of a chunk with a slot.
 pub(crate) const HAS_SLOT: u32 = 1 << 31;
+
+/// The tag bit of a sub-grid's chunk.
+pub(crate) const SUB_GRID: u32 = 1 << 30;
 
 /// The lowest of the tag bits holding a coarse chunk's LOD level when it has
 /// a slot.
@@ -321,6 +331,10 @@ pub(crate) struct LightRoute<C> {
     /// Tags changed for chunks, waiting to be set on them.
     changed_tags: Vec<(Entity, u32)>,
     cameras: Vec<Vec3>,
+    /// Each live sub-grid's last pose against the world's root, which places
+    /// its chunks for the farthest-from-cameras rule.
+    #[cfg(feature = "sub_grids")]
+    poses: HashMap<GridId, GlobalTransform>,
     /// The sky light, a whole level, of a chunk with no light of its own,
     /// such as a chunk above LOD level 0, or one whose light hasn't landed
     /// yet.
@@ -420,6 +434,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             uploads: HashMap::default(),
             changed_tags: Vec::new(),
             cameras: Vec::new(),
+            #[cfg(feature = "sub_grids")]
+            poses: HashMap::default(),
             unlit_sky: sky,
             warned_full: false,
             counters: SlotCounters::default(),
@@ -472,10 +488,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 let Some(chunk) = self.chunks.get_mut(&id) else {
                     return;
                 };
-                let tag = match shows {
+                let mut tag = match shows {
                     Shows::Slot(slot) => HAS_SLOT | slot,
                     Shows::Levels(sky, voxel) => levels(sky, voxel),
                 };
+                if !chunk.key.is_world() {
+                    tag |= SUB_GRID;
+                }
                 if chunk.tag == tag {
                     return;
                 }
@@ -630,6 +649,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     pub fn set_cameras(&mut self, cameras: impl Iterator<Item = Vec3>) {
         self.cameras.clear();
         self.cameras.extend(cameras);
+    }
+
+    /// Places each live sub-grid's chunks at its pose in `grids`, given as
+    /// entity, id and pose, for the farthest-from-cameras rule from now on.
+    /// Its cost grows with the live sub-grids.
+    #[cfg(feature = "sub_grids")]
+    pub fn set_poses(&mut self, grids: Vec<(Entity, GridId, GlobalTransform)>) {
+        self.poses.clear();
+        self.poses
+            .extend(grids.into_iter().map(|(_, grid, pose)| (grid, pose)));
     }
 
     /// Whether the texture waits to be made.
@@ -1371,9 +1400,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// How far the middle of the level-0 chunk at `key` is from the
-    /// nearest camera, with its middle placed as a world chunk's: see
-    /// [`chunk_centre`].
+    /// nearest camera, with a sub-grid's chunk placed at its grid's last
+    /// pose: see [`chunk_centre`]. The chunks of a sub-grid with no pose
+    /// noted yet are placed as the world's.
     fn distance(&self, key: GridKey) -> f32 {
+        #[cfg(feature = "sub_grids")]
+        if let Some(pose) = self.poses.get(&key.grid()) {
+            return self.distance_to(chunk_centre(key, pose));
+        }
         self.distance_to(chunk_centre(key, &GlobalTransform::IDENTITY))
     }
 
