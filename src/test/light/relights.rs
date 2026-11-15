@@ -405,6 +405,60 @@ fn light_is_settled_goes_true_once_arrivals_have_landed() {
     assert_eq!(light_at(&mut app, lit).unwrap().voxel, 12.0);
 }
 
+/// Stone below y 16 and air above, with a tunnel of air along x through the
+/// origin's stone to its face with the chunk beside it along x. A lamp sits in
+/// that chunk's stone at the tunnel's end, lighting no open voxel of its own
+/// chunk, so only light across the face lights the tunnel.
+fn lamp_on_the_face(p: IVec3) -> WorldVoxel {
+    if p == IVec3::new(32, 8, 16) {
+        WorldVoxel::Solid(LAMP)
+    } else if p.y >= 16 || (p.y, p.z) == (8, 16) && (24..32).contains(&p.x) {
+        WorldVoxel::Air
+    } else {
+        WorldVoxel::Solid(STONE)
+    }
+}
+
+#[test]
+fn a_lamp_on_a_late_neighbours_face_lights_the_voxels_across_it() {
+    let _holding = Hold::exclusive();
+    let hold = Hold::new(IVec3::X);
+    let mut app = app(LampWorld {
+        scene: Arc::new(lamp_on_the_face),
+        hold: Some(hold.clone()),
+        ..default()
+    });
+    let beside = IVec3::new(31, 8, 16);
+    update_until(&mut app, "all but the held chunk to settle", |app| {
+        settled_but(app, Some(IVec3::X))
+    });
+    assert_eq!(light_at(&mut app, beside).unwrap().voxel, 0.0);
+
+    hold.release();
+    update_until(&mut app, "the held chunk to settle", |app| {
+        settled_but(app, None)
+    });
+    // One step from the lamp, at reach 14.
+    assert_eq!(light_at(&mut app, beside).unwrap().voxel, 14.0);
+    let emission = LampWorld::default().emissive;
+    let reference = Reference::voxel_light(
+        IVec3::splat(-15),
+        IVec3::splat(47),
+        14,
+        LightShape::Round,
+        lamp_on_the_face,
+        |material| {
+            emission
+                .iter()
+                .find(|(emissive, _)| *emissive == material)
+                .map(|(_, emission)| emission.whole_level() as f32)
+        },
+    );
+    for (p, level) in chunk_voxel_light(&mut app, IVec3::ZERO).unwrap() {
+        assert_eq!(level, reference.voxel_at(p) as f32, "at {p}");
+    }
+}
+
 #[test]
 fn changes_a_late_neighbour_brings_count_as_its_arrivals_and_shells() {
     use crate::light_bench::{change_counts, count_changes};
