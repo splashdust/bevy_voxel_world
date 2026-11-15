@@ -20,6 +20,10 @@
 //! light of a chunk being re-meshed is held for its new mesh, and lands in
 //! the handover's frame with the meshes. Waiting for solved rather than
 //! landed light keeps the two holds from waiting on each other.
+//!
+//! Light entries are neither waited for nor held. So beside a lift, a light
+//! entry's new light can reach its neighbours' shells a few frames before
+//! the handover lands.
 
 use bevy::platform::collections::HashMap;
 

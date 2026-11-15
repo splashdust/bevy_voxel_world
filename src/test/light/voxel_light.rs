@@ -582,12 +582,16 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         })
         .filter(|offset| *offset != IVec3::ZERO)
         .collect();
-    update_until(&mut app, "the held chunk's neighbours' light to land", |app| {
-        neighbours.iter().all(|chunk| {
-            chunk_status::<LampWorld>(app, *chunk) == Some(ChunkStatus::Ready)
-                && landed_stamp(app, *chunk).is_some()
-        })
-    });
+    update_until(
+        &mut app,
+        "the held chunk's neighbours' light to land",
+        |app| {
+            neighbours.iter().all(|chunk| {
+                chunk_status::<LampWorld>(app, *chunk) == Some(ChunkStatus::Ready)
+                    && landed_stamp(app, *chunk).is_some()
+            })
+        },
+    );
     // An edit while the held task runs starts a new task once it lands, after
     // the light of every neighbour has landed.
     let edited = IVec3::new(5, 5, 5);

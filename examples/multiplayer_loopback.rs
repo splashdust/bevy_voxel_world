@@ -102,8 +102,8 @@
 //! - On client A only, whose lane is clean: that every chunk a server
 //!   message's deltas touch, padding neighbours included, publishes or
 //!   retires in one frame when the message holds a handover. B's faults can
-//!   split a handover into parts until the heartbeat heals it, so B is only
-//!   checked to converge.
+//!   drop or delay part of a handover's deltas until the heartbeat heals
+//!   it, so B is only checked to converge.
 //!
 //! `-- audit <file.png>` also saves a frame of both views partway through,
 //! with a lifted piece hanging in both.

@@ -253,8 +253,39 @@ The opt-in `serde` feature serialises voxels and deltas in any format. The [`edi
 The [`multiplayer_loopback` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/multiplayer_loopback.rs) runs a server and two clients in one app over a fake network, and the [`save_load` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/save_load.rs) saves edits and the terrain seed to a file and loads them back.
 
 ```bash
-$ cargo run -r --example multiplayer_loopback --features serde
-$ cargo run -r --example save_load --features serde
+$ cargo run -r --example multiplayer_loopback --features serde,sub_grids
+$ cargo run -r --example save_load --features serde,sub_grids
+```
+
+Both examples also lift and stamp sub-grids, so they need the `sub_grids` feature too.
+
+## Sub-grids
+
+A sub-grid is a set of voxels on a grid of its own, with its own transform, that moves freely against the world's grid: a ship, a vehicle, a falling piece of rock. It sits behind the opt-in `sub_grids` feature.
+
+```bash
+$ cargo add bevy_voxel_world --features sub_grids
+```
+
+`VoxelWorld::spawn_sub_grid` makes an empty one, and `VoxelWorld::grid` and `VoxelWorld::grid_mut` read and edit any grid with the same calls the world's own methods use. A sub-grid has no generator, so every voxel it holds is a voxel edit. It shows through chunks of its own, built by the world's chunk tasks, mesher and material, and its chunks are children of its entity, so they move with it.
+
+`VoxelWorld::lift` moves the voxels a game picks out of any grid into a new sub-grid, and `VoxelWorld::stamp` writes a sub-grid's voxels back into any other grid at the nearest pose that lines up with it. Either way the voxels never show twice or not at all: every chunk the move touches changes in the same frame. `VoxelWorld::raycast_grids` casts a ray through every grid. In a lit world, a sub-grid's lamps light it, its own voxels keep sky out of its insides, and its faces show the world's light where it is, so it darkens as it flies into a cave.
+
+The [`airship` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/airship/main.rs) lifts a ship off its dock, flies it through a cave and a lamp-lit hall while you edit it, and stamps it back down.
+
+```bash
+$ cargo run -r --example airship --features sub_grids,light_propagation
+```
+
+## Dislodged fragments
+
+With the opt-in `dislodged_fragments` feature, a world can ask the crate to find the voxels an edit cuts off from the rest of their grid, by returning settings from `VoxelWorldConfig::detect_dislodged_fragments`. Each piece arrives as a `FragmentDislodged` message. With `sub_grids` too, the crate can lift each piece into a sub-grid for the game to drop.
+
+The [`dislodged_fragments` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/dislodged_fragments/main.rs) carves overhangs and floating islands that fall under physics, and the [`dislodged_fragments_tree` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/dislodged_fragments_tree/main.rs) cuts branches off a tree lit only by lamps.
+
+```bash
+$ cargo run -r --example dislodged_fragments --features sub_grids,dislodged_fragments
+$ cargo run -r --example dislodged_fragments_tree --features sub_grids,dislodged_fragments,light_propagation
 ```
 
 ## AI Disclosure

@@ -3372,11 +3372,22 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
                 .iter()
                 .map(|frame| frame.main_thread_us)
                 .fold(0.0, f64::max),
-            tag_entries: frames.iter().map(|frame| frame.tag_entries).max().unwrap_or(0),
-            tag_entries_written: frames.iter().map(|frame| frame.tag_entries_written).sum(),
+            tag_entries: frames
+                .iter()
+                .map(|frame| frame.tag_entries)
+                .max()
+                .unwrap_or(0),
+            tag_entries_written: frames
+                .iter()
+                .map(|frame| frame.tag_entries_written)
+                .sum(),
             tag_full_rewrites: frames.iter().map(|frame| frame.tag_full_rewrites).sum(),
             tag_upkeep_us: frames.iter().map(|frame| frame.tag_upkeep_us).sum(),
-            air_slots: frames.iter().map(|frame| frame.air_slots).max().unwrap_or(0),
+            air_slots: frames
+                .iter()
+                .map(|frame| frame.air_slots)
+                .max()
+                .unwrap_or(0),
         }
     }
 
@@ -3460,7 +3471,12 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
     /// written per frame and full rewrites, upkeep per frame, and the most
     /// slots world chunks of air in it held after a frame. Returns the work
     /// of the phase.
-    fn report_tag_map(&self, prefix: &str, name: &str, metrics: &mut Metrics) -> LightFrame {
+    fn report_tag_map(
+        &self,
+        prefix: &str,
+        name: &str,
+        metrics: &mut Metrics,
+    ) -> LightFrame {
         let (first, end) = self.phase(name);
         let work = self.sum(first, end);
         let frames = (end - first).max(1) as f64;

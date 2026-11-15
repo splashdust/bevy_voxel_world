@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Sub-grids
+
+Add the off-by-default `sub_grids` feature: sets of voxels on grids of their own, each belonging to one voxel world, that a game moves freely against the world's grid. A ship, a vehicle or a falling piece of rock is a sub-grid. A sub-grid has no generator, so every voxel it holds is a voxel edit. Its chunks are children of its entity, built by the world's chunk tasks, mesher, material and mesh cache, and count towards `max_active_chunk_threads` with the world's.
+
+- Add the `SubGrid<C>` component and `Grid`, which names the world's streamed voxels or one sub-grid by its entity. `VoxelWorld::spawn_sub_grid` spawns an empty sub-grid under the world's root, `VoxelWorld::insert_sub_grid` makes an existing entity one, and `VoxelWorld::despawn_sub_grid` despawns one once the handover holding its chunks lands.
+- Add `VoxelWorld::grid` and `VoxelWorld::grid_mut`, which return `GridVoxels` and `GridVoxelsMut` for any grid. They read and edit it with the calls the world's own methods use: `get_voxel`, `get_voxel_fn`, `chunk_state`, `get_chunk_data`, `set_voxel`, `set_voxels_in`, `clear_voxels_in`, `full_delta`, `edited_chunks` and `apply_delta`, plus `bounds`, the box holding a sub-grid's solid voxels, and `pose`, its pose against the world's root.
+- Add `VoxelWorld::lift`, which moves the voxels a game picks out of any grid into a new sub-grid that shows them where they were, and leaves air behind. `Lifted<C>` says when the move has landed, and `LiftError` says why a lift was refused.
+- Add `VoxelWorld::stamp`, which writes a sub-grid's voxels into any other grid at the nearest pose that lines up with it, and despawns the sub-grid once `Stamped<C>` says the move has landed. A rule picks each landing voxel from the `StampVoxel`, and `incoming_replaces` is the rule that lets the sub-grid's voxels win. `VoxelWorld::stamp_preview` returns a `StampPreview` of what a stamp would do: the snapped pose, the `GridRotation` it takes, how far the snap moves and turns, and the voxels that would overlap. `StampError` says why a stamp was refused.
+- Add `GridRotation`, one of the 24 turns that keep a grid's axes on another grid's axes.
+- Voxels moving between grids never show twice or not at all: a commit that gives a sub-grid its first solid voxel, or takes its last, and every stamp's commit, land as one handover, where every chunk the commit touches, in every grid, publishes in the same frame. In a lit world the handover also waits for the light the commit changes. Handovers that hold a chunk in common fold into one, so lifting from the same chunks every frame holds them back until the lifting stops.
+- Add `VoxelWorld::raycast_grids` and `VoxelWorld::raycast_grids_fn`, which cast a ray through every grid and return a `GridRaycastHit` naming the grid, the voxel, and the hit point in the frame of the world's root. `GridRaycastFn` is the closure's type. Add `VoxelWorld::sub_grids_at_point`, which returns the sub-grids whose box holds a point.
+- The chunk messages fire for sub-grids' chunks too, and `ChunkEvent` gains a `grid` field naming the chunk's grid. A sub-grid's chunk key is on its own grid.
+- Add `SubGridEditsCommitted<C>`, written for each chunk of a sub-grid whose edits a commit changed, so a sub-grid's edits sync and save as the world's do. The `edits` module docs say how a lift and a stamp travel as their parts, and the order a load runs in.
+- Add `VoxelWorldDebugDraw::set_grid_voxel_gizmo`, `clear_grid_voxel_gizmo` and their `_fn` variants, which draw a voxel gizmo on any grid. `debug_draw_chunks` draws sub-grids' chunk boxes in another colour, on the chunks as they move.
+- With `light_propagation`, a sub-grid's emissive voxels light the sub-grid, and `GridVoxels::light_at` reads a sub-grid's light on top of the world's. Its faces show the world's light where they are, read through a tag map of the world chunks around sub-grids, so a sub-grid darkens in a cave and brightens past the world's lamps. Moving a sub-grid solves no light. A sub-grid's voxels never shade the world's light.
+- Add `SubGridSky` and `LightPropagation::sub_grid_sky`. By default, `SubGridSky::Enclosed` caps the sky a sub-grid's faces show by how closed in its own voxels are, so a cabin is dark inside under an open sky. `SubGridSky::World` shows the world's sky alone.
+- The `airship` example flies an editable, lit ship through a cave and a lamp-lit hall, and lifts and stamps it in every direction. `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature. `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
+
+### Dislodged fragments
+
+Add the off-by-default `dislodged_fragments` feature, which finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`. A world that doesn't opt in gets no detection systems.
+
+- Each check runs on the task pool after a commit of local edits, and each piece it finds arrives as a `FragmentDislodged<C>` message, with its box, its voxel count and `contains`. The largest piece of a cut keeps its place.
+- `FragmentDetection` sets the `limit` past which a piece counts as attached, the `Connectivity` that holds voxels together (faces, edges or corners), and the `non_carrying` materials that hold nothing up.
+- With `sub_grids`, sub-grids are checked too, `FragmentDislodged` names the `grid` a piece was cut from, and `FragmentDetection::auto_lift` has the crate lift each piece into a sub-grid, named by `FragmentDislodged::lifted`.
+- In a multiplayer game, opt in only the authority's world. Its edits reach the clients as edit deltas, so clients never disagree about what fell.
+- The `dislodged_fragments` and `dislodged_fragments_tree` examples drop the pieces under avian3d physics and stamp them where they come to rest.
+
+### Other changes
+
+- Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
+- `raycast` and `raycast_fn` say what they cast through: the world's voxels only, never sub-grids.
 - Fix voxel gizmos so all six circles sit on the faces of the voxel they mark. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
 - Fix `debug_draw_chunks` so each chunk's box goes through the chunk's whole transform and stays on the chunk under a rotated or scaled `WorldRoot`.
 
@@ -10,6 +42,8 @@
 - The crate's vertex shaders output `local_position` at location 9 and `local_normal` at location 10 in every world, lit or not, and `light_tag` at location 11 only under the `VOXEL_LIGHT` shader def, as before. With the `sub_grids` feature, a lit world's vertex shaders also output `world_grid_position`, the centroid-sampled world position, at location 12 under the `SUB_GRIDS` shader def, and its fragment shaders read sub-grids' faces from it. The `rendering` module docs list every vertex output and its space. The default fragment shader picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`, so a voxel's top texture stays on its own top under a rotated `WorldRoot`.
 
 - Only a custom vertex shader that feeds the crate's fragment shader in an unlit world breaks: it must now write locations 9 and 10, which a lit world already required. A shader that declares those outputs but never writes them still compiles, and shows the side texture on every face. A custom vertex shader in a lit world with `sub_grids` on must also write location 12: one that declares the crate's output but never writes location 12 still compiles, and lights sub-grids' faces as if they were at the world's origin. No Rust signature changed.
+
+- With `sub_grids` and `light_propagation` both on, `LightPropagation` has a new field, `sub_grid_sky`, so a `LightPropagation` written out in full, without `..default()`, needs it.
 
 ## 0.19.3
 

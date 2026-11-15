@@ -54,7 +54,10 @@
 //!
 //! A sub-grid chunk's solve grows with reach, as a world chunk's does. An
 //! edit's cost grows with the sub-grid chunks within reach of the voxels it
-//! changed, and a burst of lifts with the chunks lifted. Moving a sub-grid
+//! changed, and a burst of lifts with the chunks lifted. On the main thread,
+//! an edit rebuilds the light inputs of each sub-grid chunk it changed from
+//! all of that chunk's voxel edits, so that part grows with the chunk's
+//! solid voxels rather than with the voxels changed. Moving a sub-grid
 //! costs no solve.
 //!
 //! Enclosure adds to that, and `World` skips all of it:

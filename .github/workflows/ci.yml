@@ -63,8 +63,9 @@ jobs:
         run: cargo test ${{ matrix.features.example_flags }} ${{ matrix.features.examples }}
 
   # Run cargo clippy on every target, so the examples, benchmarks and tests
-  # are checked too, with the default features, with light propagation, and
-  # with serde and light propagation together
+  # are checked too, with the default features, with light propagation, with
+  # serde and light propagation together, and with every feature, which
+  # builds every example
   clippy_check:
     name: Clippy (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -76,6 +77,7 @@ jobs:
           - { name: default, flags: "" }
           - { name: light_propagation, flags: "--features light_propagation" }
           - { name: serde-light_propagation, flags: "--features serde,light_propagation" }
+          - { name: all-features, flags: "--all-features" }
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
