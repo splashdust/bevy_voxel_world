@@ -429,14 +429,6 @@ impl<K: KeyInGrid, V, S: BuildHasher> GridTable<K, V, S> {
             .map(move |(key, v)| (key.on(grid), v))
     }
 
-    /// The key within the world's table of every entry of the world, in no
-    /// particular order: a plain scan of the world's hash map, for the
-    /// streaming policy, which plans only the world's chunks.
-    #[inline]
-    pub fn world_keys(&self) -> impl Iterator<Item = K> + '_ {
-        self.world.keys().copied()
-    }
-
     /// The key of every entry of `grid`, in no particular order. Its cost
     /// grows with `grid`'s entries alone.
     pub fn grid_keys(&self, grid: GridId) -> impl Iterator<Item = GridKey> + '_ {

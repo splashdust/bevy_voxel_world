@@ -142,6 +142,7 @@ where
         budget: Res<PoolBudget<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+        chunks: Query<&Chunk<C>>,
         world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
@@ -176,10 +177,17 @@ where
 
         #[cfg(feature = "trace")]
         let _plan_span = bevy::log::info_span!("streaming_policy_plan").entered();
+        // The policy checks every chunk each frame. It walks the chunk
+        // entities, which sit roughly in the order they spawned, rather than
+        // `ChunkIndex`, whose hash map scatters neighbouring chunks: those
+        // checks run measurably slower in the scattered order.
         let plan = streaming_policy::plan(
             configuration.as_ref(),
             &cameras,
-            index.keys(),
+            chunks
+                .iter()
+                .filter(|chunk| chunk.grid_key().is_world())
+                .map(Chunk::key),
             &lookup,
             budget
                 .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),

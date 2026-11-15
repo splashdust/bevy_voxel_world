@@ -341,11 +341,6 @@ impl<C> ChunkIndex<C> {
         self.entities.contains(&key)
     }
 
-    /// The chunk key of every live chunk of the world.
-    pub(crate) fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ {
-        self.entities.world_keys()
-    }
-
     /// Whether the world's chunk at `key` exists and is Retiring.
     pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
         self.get(key)
