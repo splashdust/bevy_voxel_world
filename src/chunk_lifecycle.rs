@@ -660,6 +660,13 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
         let marked = std::mem::take(self.handover_marked.get_mut());
         self.handover = flipped || marked;
     }
+
+    /// Whether this frame's commit lands as one handover, until
+    /// `apply_requests` takes the commit's requests.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn lands_as_handover(&self) -> bool {
+        self.handover
+    }
 }
 
 impl<C: VoxelWorldConfig> ChunkRequests<C> {

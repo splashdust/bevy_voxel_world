@@ -577,6 +577,11 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     drop(view);
 
+    // A handover waits for the relights its commit starts.
+    #[cfg(feature = "sub_grids")]
+    if requests.lands_as_handover() {
+        work.capture_handover(Some(settings.edit_frame.load(Ordering::Relaxed)));
+    }
     // Hinted air holding no light entry passes its relight on.
     for position in relight {
         if by_chunk.contains_key(&position) {
@@ -585,6 +590,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             work.trigger_urgent(in_world(position));
         }
     }
+    #[cfg(feature = "sub_grids")]
+    work.capture_handover(None);
     work.add_edit_time(started);
 }
 

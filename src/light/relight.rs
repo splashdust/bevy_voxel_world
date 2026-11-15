@@ -33,6 +33,10 @@
 //! worked out for its new voxels, such as a placed block's old floor face
 //! reading the new solid's level of 0.
 //!
+//! A handover holds the light of its chunks the same way, being re-meshed
+//! or not, until it lands, and waits for the relights its commit started to
+//! solve: see the `handover` module, with `sub_grids`.
+//!
 //! A change of light settings marks chunks dirty in a queue of its own,
 //! whose relights start after chunk tasks, nearest a camera first. A relight
 //! solved under older settings is thrown away as it lands and started again,
@@ -276,6 +280,10 @@ pub(crate) struct LightWork<C> {
     edited: HashSet<GridKey>,
     /// Time relights ran on the main thread this frame.
     relight_time: Duration,
+    /// The relights handovers wait for, and the chunks whose light they
+    /// hold.
+    #[cfg(feature = "sub_grids")]
+    handovers: super::handover::HandoverWaits,
     _world: PhantomData<C>,
 }
 
@@ -307,14 +315,21 @@ impl<C> Default for LightWork<C> {
             census: None,
             edited: HashSet::new(),
             relight_time: Duration::ZERO,
+            #[cfg(feature = "sub_grids")]
+            handovers: Default::default(),
             _world: PhantomData,
         }
     }
 }
 
 impl<C: VoxelWorldConfig> LightWork<C> {
-    /// Whether no relight is queued or running, and no light waits to land.
+    /// Whether no relight is queued or running, and no light waits to land,
+    /// for a chunk's mesh or for a handover.
     pub fn is_settled(&self) -> bool {
+        #[cfg(feature = "sub_grids")]
+        if !self.handovers.is_empty() {
+            return false;
+        }
         self.queue.is_empty()
             && self.settings_queue.is_empty()
             && self.fill_queue.is_empty()
@@ -453,6 +468,27 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 .is_some_and(|meshed| *meshed >= edit_frame)
     }
 
+    /// Whether a handover holds the light of the chunk at `key` until it
+    /// lands.
+    fn held_for_handover(&self, key: GridKey) -> bool {
+        #[cfg(feature = "sub_grids")]
+        return self.handovers.holds(key);
+        #[cfg(not(feature = "sub_grids"))]
+        {
+            let _ = key;
+            false
+        }
+    }
+
+    /// Notes for the handovers that a relight of the chunk at `key`, started
+    /// at the world's edit frame `edit_frame`, has finished solving.
+    fn note_solved(&mut self, key: GridKey, edit_frame: u64) {
+        #[cfg(feature = "sub_grids")]
+        self.handovers.solved(key, edit_frame);
+        #[cfg(not(feature = "sub_grids"))]
+        let _ = (key, edit_frame);
+    }
+
     /// Marks every chunk with light for a relight.
     pub fn trigger_all(&mut self) {
         let keys: Vec<GridKey> = self.chunks.keys().copied().collect();
@@ -515,6 +551,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             }
             return;
         };
+        #[cfg(feature = "sub_grids")]
+        if chunk.entity != ENTRY {
+            self.handovers.triggered(key);
+        }
         chunk.urgent |= urgent;
         // The first trigger since the last relight started names its cause.
         if matches!(
@@ -624,6 +664,63 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         );
         self.positions.insert(entity, key);
         self.trigger_edited(key);
+    }
+
+    /// Notes the relights triggered from now on as those of a commit landing
+    /// as a handover, taken in at the world's edit frame `since`, or stops
+    /// noting them with `None`. See the `handover` module.
+    #[cfg(feature = "sub_grids")]
+    pub fn capture_handover(&mut self, since: Option<u64>) {
+        self.handovers.capture(since);
+    }
+
+    /// Notes the first solve of the new sub-grid chunk at `key` as a relight
+    /// of the handover's commit, if one is being taken in.
+    #[cfg(feature = "sub_grids")]
+    pub fn capture_new_chunk(&mut self, key: GridKey) {
+        self.handovers.triggered(key);
+    }
+
+    /// The chunks whose relights the commits taken in since this was last
+    /// called noted for their handovers.
+    #[cfg(feature = "sub_grids")]
+    pub fn take_handover_relights(&mut self) -> Vec<GridKey> {
+        self.handovers.take_captured()
+    }
+
+    /// Holds the light landing for the chunk at `key` until
+    /// [`release_for_handover`](Self::release_for_handover), for a chunk a
+    /// handover holds whose relight it doesn't wait for.
+    #[cfg(feature = "sub_grids")]
+    pub fn hold_for_handover(&mut self, key: GridKey) {
+        self.handovers.hold(key);
+    }
+
+    /// Lets the light of the chunk at `key` land, once its handover has
+    /// landed or no longer holds it. Light held for it lands in this frame's
+    /// [`Relights::land`], with the chunk's new mesh if it has one.
+    ///
+    /// The relight ripple from the light held for it starts now.
+    #[cfg(feature = "sub_grids")]
+    pub fn release_for_handover(&mut self, key: GridKey) {
+        for (target, urgent, cause) in self.handovers.release(key) {
+            self.trigger_from(target, key, urgent, cause);
+        }
+    }
+
+    /// Whether every relight a handover waits for among the chunks at `keys`
+    /// has solved. A chunk with no light of its own any more, or only a
+    /// light entry's, waits for nothing.
+    #[cfg(feature = "sub_grids")]
+    pub fn handover_solved(&self, keys: &[GridKey]) -> bool {
+        let relights = |key: GridKey| {
+            self.chunks
+                .get(&key)
+                .is_some_and(|chunk| chunk.entity != ENTRY)
+        };
+        !keys
+            .iter()
+            .any(|key| self.handovers.waits_for(*key, relights))
     }
 
     /// Whether the light entry at `key` is still there, so light solved
@@ -776,7 +873,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             rebase(&mut landing, view);
         }
         if landing.source == Source::Relight
-            && !self.shows_mesh_of(landing.entity, landing.edit_frame, ready)
+            && (!self.shows_mesh_of(landing.entity, landing.edit_frame, ready)
+                || self.held_for_handover(landing.key))
         {
             self.hold(landing, view);
             return None;
@@ -1039,6 +1137,13 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         } else {
             self.held.insert(key, landing);
         }
+        // Light a handover holds starts its ripple as the handover lands.
+        #[cfg(feature = "sub_grids")]
+        if self.handovers.holds(key) {
+            let ripples = triggers.into_iter().map(|target| (target, urgent, cause));
+            self.handovers.defer(key, ripples);
+            return;
+        }
         for key in triggers {
             self.trigger_as(key, urgent, cause);
         }
@@ -1109,6 +1214,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         if let Some(census) = &mut self.census {
             census.forget(key);
         }
+        // A chunk that despawned drops out of the handover holding it, and
+        // relights nothing.
+        #[cfg(feature = "sub_grids")]
+        self.handovers.release(key);
         let mut clean = true;
         if self
             .chunks
@@ -1243,6 +1352,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             cause,
         } = relight;
         let Some(solved) = solved else {
+            self.note_solved(key, edit_frame);
             self.relight_done(key, entity);
             return;
         };
@@ -1537,12 +1647,12 @@ impl<C: VoxelWorldConfig> Relights<C> {
         let released: Vec<GridKey> = work
             .held
             .iter()
-            .filter(|(_, landing)| {
+            .filter(|(key, landing)| {
                 work.shows_mesh_of(
                     landing.entity,
                     landing.edit_frame,
                     ready(landing.entity),
-                )
+                ) && !work.held_for_handover(**key)
             })
             .map(|(key, _)| *key)
             .collect();
@@ -1583,6 +1693,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 work.relight_done(key, entity);
                 work.trigger(key);
                 continue;
+            }
+            if source == Source::Relight {
+                work.note_solved(key, landing.edit_frame);
             }
             let alive = if entity == ENTRY {
                 work.has_entry(key)

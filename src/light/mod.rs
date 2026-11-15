@@ -28,6 +28,8 @@ mod edit;
 mod enclosure;
 mod faces;
 pub(crate) mod fill;
+#[cfg(feature = "sub_grids")]
+mod handover;
 pub(crate) mod hinted;
 mod inputs;
 mod kernel;

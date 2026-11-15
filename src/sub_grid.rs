@@ -109,6 +109,16 @@
 //! too. A commit that fills or empties no sub-grid publishes each chunk as
 //! its task finishes.
 //!
+//! In a lit world, a handover also waits until the relights its commit
+//! starts have solved, in every grid: the new sub-grid chunks' first solves,
+//! the chunks around a lift's hole and those under a stamp. Then light
+//! changes with the meshes, in the same frame, so a lifted piece shows its
+//! lamps from its first frame and the hole's walls never flash dark. The
+//! relight ripple that light calls for isn't waited for: it starts as the
+//! handover lands, and lands later, as after any edit. So a lit handover
+//! lasts as long as its slowest relight, which grows with the world's light
+//! reach.
+//!
 //! A held chunk's state turns Ready when its task finishes, before its
 //! result publishes, so a game waits for `ChunkPublished` rather than for
 //! Ready to read it. An edit made every frame in a held chunk doesn't hold

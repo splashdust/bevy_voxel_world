@@ -17,6 +17,8 @@ mod coarse;
 mod edits;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 mod enclosure;
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod handover_light;
 #[cfg(feature = "light_propagation")]
 mod hinted_air;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]

@@ -151,6 +151,10 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let _span = bevy::log::info_span!("relight_sub_grid_edits").entered();
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
+    // A handover waits for the relights its commit starts.
+    if requests.lands_as_handover() {
+        work.capture_handover(Some(settings.edit_frame.load(Ordering::Relaxed)));
+    }
     let task = &settings.task;
     let flips = {
         let mut view = settings.view.write();
@@ -194,6 +198,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             };
             view.chunks.insert(*key, chunk);
             new.keys.push(*key);
+            work.capture_new_chunk(*key);
         }
         flips
     };
@@ -231,6 +236,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             work.trigger_urgent(key);
         }
     }
+    work.capture_handover(None);
     work.add_edit_time(started);
 }
 
@@ -266,6 +272,7 @@ pub(crate) fn name_new_chunks<C: VoxelWorldConfig>(
             }
             None => {
                 view.chunks.remove(&key);
+                work.release_for_handover(key);
             }
         }
     }

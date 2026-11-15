@@ -20,6 +20,19 @@
 //! rebuilt on `ChunkPublished` and removed on `ChunkWillDespawn` swap in one
 //! frame.
 //!
+//! In a lit world, a handover also waits until the relights its commit
+//! started have solved, in every grid: the first solves of the sub-grid
+//! chunks it spawns, and the relights of the chunks within reach of the
+//! voxels it changed, around a lift's hole and under a stamp. The light of
+//! those chunks and of the chunks it holds is held until it lands, and
+//! lands in the frame its chunks publish, so meshes and light change
+//! together, a relit chunk with no new mesh included. It doesn't wait for
+//! the relight ripple that light calls for, which starts as it lands and
+//! lands later, as after any edit. So a lit handover lasts as long as its
+//! slowest relight, which grows with reach. A relight superseded by a later
+//! edit counts once it has solved, as a superseded task does. See the light
+//! module's `handover` module.
+//!
 //! Handovers that hold a chunk in common fold into one and land together.
 //! So lifting from the same chunks every frame holds the folded handover
 //! until the lifts stop. A sub-grid that flips between empty and not every
@@ -113,6 +126,17 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     #[cfg(feature = "dislodged_fragments")]
     stamped_away: Mutex<HashSet<Entity>>,
     stats: HandoverStats,
+    /// In a lit world, the chunks whose light each handover holds, by its
+    /// id: those whose relights its commits started, and its own.
+    #[cfg(feature = "light_propagation")]
+    light: HashMap<u32, Vec<GridKey>>,
+    /// The handover holding the light of each chunk in `light`.
+    #[cfg(feature = "light_propagation")]
+    lit_by: HashMap<GridKey, u32>,
+    /// The handover the last commit formed, whose commit's relights are
+    /// still to be noted.
+    #[cfg(feature = "light_propagation")]
+    formed: Option<u32>,
 }
 
 impl<C: VoxelWorldConfig> Default for Handovers<C> {
@@ -128,6 +152,12 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             #[cfg(feature = "dislodged_fragments")]
             stamped_away: Mutex::default(),
             stats: HandoverStats::default(),
+            #[cfg(feature = "light_propagation")]
+            light: HashMap::new(),
+            #[cfg(feature = "light_propagation")]
+            lit_by: HashMap::new(),
+            #[cfg(feature = "light_propagation")]
+            formed: None,
         }
     }
 }
@@ -221,6 +251,10 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.handovers.insert(id, Vec::new());
+        #[cfg(feature = "light_propagation")]
+        {
+            self.formed = Some(id);
+        }
         if !operations.is_empty() {
             self.operations.insert(id, operations);
         }
@@ -263,6 +297,56 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         if let Some(operations) = self.operations.remove(&from) {
             self.operations.entry(into).or_default().extend(operations);
         }
+        #[cfg(feature = "light_propagation")]
+        if let Some(keys) = self.light.remove(&from) {
+            for key in &keys {
+                self.lit_by.insert(*key, into);
+            }
+            self.light.entry(into).or_default().extend(keys);
+        }
+    }
+
+    /// Makes the handover the last commit formed wait for the relights that
+    /// commit started, and hold the light of those chunks and of its own,
+    /// which would otherwise show as it lands. Handovers holding the light of
+    /// a chunk in common fold into one.
+    ///
+    /// The relights are noted as the commit is taken into light, after its
+    /// handover forms, so this runs at the next landing check.
+    #[cfg(feature = "light_propagation")]
+    fn wait_for_light(&mut self, light_work: &mut crate::light::relight::LightWork<C>) {
+        let relights = light_work.take_handover_relights();
+        let Some(id) = self
+            .formed
+            .take()
+            .filter(|id| self.handovers.contains_key(id))
+        else {
+            for key in relights {
+                light_work.release_for_handover(key);
+            }
+            return;
+        };
+        let mut keys: HashSet<GridKey> = relights.into_iter().collect();
+        for entity in &self.handovers[&id] {
+            let Some(held) = self.held.get(entity) else {
+                continue;
+            };
+            // A chunk the handover retires despawns as it lands, so the
+            // handover waits for no relight of it, but holds its light.
+            if held.wait == Wait::Despawn {
+                light_work.release_for_handover(held.key);
+            }
+            light_work.hold_for_handover(held.key);
+            keys.insert(held.key);
+        }
+        for key in &keys {
+            if let Some(from) = self.lit_by.insert(*key, id) {
+                if from != id && self.handovers.contains_key(&from) {
+                    self.fold(from, id);
+                }
+            }
+        }
+        self.light.entry(id).or_default().extend(keys);
     }
 
     /// Keeps `finished` if a handover holds its chunk, and returns it to
@@ -318,6 +402,10 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             &mut crate::light::relight::LightWork<C>,
         >,
     ) {
+        #[cfg(feature = "light_propagation")]
+        if let Some(light_work) = light_work.as_deref_mut() {
+            self.wait_for_light(light_work);
+        }
         if self.held.is_empty() {
             return;
         }
@@ -330,6 +418,10 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             operations,
             landed,
             stats,
+            #[cfg(feature = "light_propagation")]
+            light,
+            #[cfg(feature = "light_propagation")]
+            lit_by,
             ..
         } = self;
         handovers.retain(|id, chunks| {
@@ -338,6 +430,19 @@ impl<C: VoxelWorldConfig> Handovers<C> {
                 |entity: &Entity| held.get(entity).is_some_and(|c| c.wait.is_ready());
             if !chunks.iter().all(ready) {
                 return true;
+            }
+            // In a lit world, the relights its commits started must have
+            // solved too. The light held for its chunks lands in this frame.
+            #[cfg(feature = "light_propagation")]
+            if let Some(light_work) = light_work.as_deref_mut() {
+                let keys = light.get(id).map_or(&[][..], Vec::as_slice);
+                if !light_work.handover_solved(keys) {
+                    return true;
+                }
+                for key in light.remove(id).into_iter().flatten() {
+                    light_work.release_for_handover(key);
+                    lit_by.remove(&key);
+                }
             }
             landed.extend(operations.remove(id).into_iter().flatten());
             if chunks.is_empty() {
