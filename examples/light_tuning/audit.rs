@@ -2,12 +2,12 @@
 //! light where the panel says it shows best.
 //!
 //! It renders offscreen and casts rays through each place's view to find the
-//! open voxels in front of what the camera sees. Then it sets each relighting
-//! setting to its lowest and highest value, or to each other option, waits
-//! for the light to settle, and prints what share of its place's voxels
-//! changed by a level or more, and which place changed most. A setting
-//! changing less than [`SHOWS`] of its place's view at every value is listed
-//! at the end: the world or the place needs changing.
+//! open voxels in front of what the camera sees. Then it sets each
+//! relighting setting to its lowest and highest value, or to each other
+//! option, waits for the light to settle, and prints what share of its
+//! place's voxels changed by a level or more, and which place changed most.
+//! A setting changing less than [`SHOWS`] of its place's view at every value
+//! is listed at the end: the world or the place needs changing.
 //!
 //! Levels change more than a picture does: a level of sky light in shade is
 //! a small change of a dark colour. Look at a setting flagged as showing
@@ -15,6 +15,12 @@
 //!
 //! Settings that apply only under one sky fill model are audited with that
 //! model picked.
+//!
+//! The world's places are traced through the world's voxel lookup before
+//! the app starts. The cabin is a sub-grid, which `raycast` and the voxel
+//! lookup don't see, so its place is traced with `raycast_grids` once it has
+//! spawned, and its open voxels are read through `grid(g).light_at` on the
+//! cabin's grid.
 
 use bevy::{
     camera::RenderTarget, platform::collections::HashSet, prelude::*,
@@ -24,9 +30,9 @@ use bevy_voxel_world::prelude::*;
 
 use crate::{
     add_lights, camera_transform,
-    scene::{Place, Scene},
+    scene::{spawn_cabin, Cabin, Place, Scene},
     settings::{Applies, Control, FillModel, Tuning, Value, SETTINGS},
-    TuningWorld,
+    settling, Chunks, TuningWorld,
 };
 
 /// The share of a place's open voxels in view a setting must change by a
@@ -54,8 +60,9 @@ struct Auditing {
     last_busy: u32,
     runs: Vec<Run>,
     run: usize,
-    /// Each place's open voxels in view.
-    samples: Vec<(Place, IVec3)>,
+    /// Each place's open voxels in view, on the grid they are read from.
+    /// The cabin's are added once it has spawned.
+    samples: Vec<(Place, Grid, IVec3)>,
     /// The sky and voxel levels at each sample, by run.
     levels: Vec<Vec<(f32, f32)>>,
     /// The settings that barely show at their place, and the most of it
@@ -67,11 +74,11 @@ pub fn audit() {
     let mut scene = Scene::default();
     let samples = Place::ALL
         .into_iter()
-        .filter(|place| *place != Place::Overview)
+        .filter(|place| !matches!(place, Place::Overview | Place::Cabin))
         .flat_map(|place| {
             visible(&mut scene, place)
                 .into_iter()
-                .map(move |at| (place, at))
+                .map(move |at| (place, Grid::World, at))
         })
         .collect();
     App::new()
@@ -97,38 +104,68 @@ pub fn audit() {
             levels: Vec::new(),
             unseen: Vec::new(),
         })
-        .add_systems(Startup, setup_audit)
+        .add_systems(Startup, (setup_audit, spawn_cabin))
         .add_systems(Update, change_and_compare)
         .run();
 }
 
-/// The open voxels in front of the first solid voxel along rays through a
-/// 64 × 36 grid over `place`'s view, with Bevy's default field of view at
-/// 16:9.
-fn visible(scene: &mut Scene, place: Place) -> Vec<IVec3> {
+/// The directions of rays through a 64 × 36 grid over `place`'s view, with
+/// Bevy's default field of view at 16:9.
+fn rays(place: Place) -> impl Iterator<Item = Vec3> {
     let camera = camera_transform(place);
     let (forward, right, up) = (camera.forward(), camera.right(), camera.up());
     let half_height = (std::f32::consts::FRAC_PI_4 / 2.0).tan();
     let half_width = half_height * 16.0 / 9.0;
-    let mut seen = HashSet::new();
-    for row in 0..36 {
-        for column in 0..64 {
+    (0..36).flat_map(move |row| {
+        (0..64).map(move |column| {
             let across = (column as f32 + 0.5) / 32.0 - 1.0;
             let down = 1.0 - (row as f32 + 0.5) / 18.0;
-            let ray =
-                (*forward + *right * across * half_width + *up * down * half_height)
-                    .normalize();
-            let mut open = camera.translation.floor().as_ivec3();
-            let mut distance = 0.0;
-            while distance < 400.0 {
-                let at = (camera.translation + ray * distance).floor().as_ivec3();
-                if at != open && scene.voxel(at).is_solid() {
-                    seen.insert(open);
-                    break;
-                }
-                open = at;
-                distance += 0.2;
+            (*forward + *right * across * half_width + *up * down * half_height)
+                .normalize()
+        })
+    })
+}
+
+/// The open voxels in front of the first solid voxel of the world along each
+/// of `place`'s [`rays`].
+fn visible(scene: &mut Scene, place: Place) -> Vec<IVec3> {
+    let eye = camera_transform(place).translation;
+    let mut seen = HashSet::new();
+    for ray in rays(place) {
+        let mut open = eye.floor().as_ivec3();
+        let mut distance = 0.0;
+        while distance < 400.0 {
+            let at = (eye + ray * distance).floor().as_ivec3();
+            if at != open && scene.voxel(at).is_solid() {
+                seen.insert(open);
+                break;
             }
+            open = at;
+            distance += 0.2;
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// The open voxels on the cabin's grid in front of the faces the cabin
+/// place's [`rays`] hit first. Rays that miss the cabin add nothing.
+fn visible_in_cabin(voxel_world: &VoxelWorld<TuningWorld>, cabin: Grid) -> Vec<IVec3> {
+    let eye = camera_transform(Place::Cabin).translation;
+    let mut seen = HashSet::new();
+    for ray in rays(Place::Cabin) {
+        let Ok(direction) = Dir3::new(ray) else {
+            continue;
+        };
+        let hit = voxel_world.raycast_grids(
+            Ray3d::new(eye, direction),
+            400.0,
+            &|grid| grid == cabin,
+            &|_, _, _| true,
+        );
+        if let Some(open) =
+            hit.and_then(|hit| hit.normal.map(|normal| hit.position + normal))
+        {
+            seen.insert(open);
         }
     }
     seen.into_iter().collect()
@@ -200,28 +237,34 @@ fn setup_audit(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 fn change_and_compare(
     mut auditing: ResMut<Auditing>,
     mut world: ResMut<TuningWorld>,
-    chunks: Query<&Chunk<TuningWorld>>,
+    chunks: Chunks,
     voxel_world: VoxelWorld<TuningWorld>,
+    cabin: Res<Cabin>,
     mut exit: MessageWriter<AppExit>,
 ) {
     auditing.frame += 1;
     let frame = auditing.frame;
-    let busy = !voxel_world.light_is_settled()
-        || chunks.iter().any(|chunk| {
-            voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready)
-        });
+    let busy = settling(&voxel_world, &chunks);
     if busy || auditing.frame == 1 {
         auditing.last_busy = frame;
     }
     if frame - auditing.last_busy < QUIET_FRAMES {
         return;
     }
+    if auditing.run == 0 {
+        let cabin = Grid::SubGrid(cabin.0);
+        let in_cabin = visible_in_cabin(&voxel_world, cabin);
+        auditing
+            .samples
+            .extend(in_cabin.into_iter().map(|at| (Place::Cabin, cabin, at)));
+    }
     let levels: Vec<(f32, f32)> = auditing
         .samples
         .iter()
-        .map(|&(_, at)| {
+        .map(|&(_, grid, at)| {
             voxel_world
-                .light_at(at)
+                .grid(grid)
+                .and_then(|grid| grid.light_at(at))
                 .map_or((0.0, 0.0), |levels| (levels.sky, levels.voxel))
         })
         .collect();
@@ -231,7 +274,7 @@ fn change_and_compare(
         let base = &auditing.levels[run.base];
         let share = |place: Place| {
             let (mut count, mut changed) = (0, 0);
-            for (sample, &(at, _)) in auditing.samples.iter().enumerate() {
+            for (sample, &(at, _, _)) in auditing.samples.iter().enumerate() {
                 if at != place {
                     continue;
                 }
@@ -245,12 +288,19 @@ fn change_and_compare(
             changed as f32 / count.max(1) as f32
         };
         let at_place = share(setting.place);
+        // The setting's own place wins a tie, so another place is named
+        // only where the setting changes more.
         let (most, most_share) = Place::ALL
             .into_iter()
             .filter(|place| *place != Place::Overview)
             .map(|place| (place, share(place)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("there are places");
+            .fold((setting.place, at_place), |most, next| {
+                if next.1 > most.1 {
+                    next
+                } else {
+                    most
+                }
+            });
         report!(
             "audit: {} = {}: {:.0}% of {} changes; most at {} ({:.0}%)",
             setting.label,

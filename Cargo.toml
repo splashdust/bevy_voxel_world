@@ -93,7 +93,7 @@ required-features = ["light_propagation"]
 [[example]]
 name = "light_tuning"
 path = "examples/light_tuning/main.rs"
-required-features = ["light_propagation"]
+required-features = ["light_propagation", "sub_grids"]
 # Its tests check that the config it prints is the Rust that builds it.
 test = true
 

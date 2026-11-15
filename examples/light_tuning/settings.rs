@@ -356,6 +356,7 @@ fn sun(index: usize) -> SunGate {
 
 const FILL_MODELS: [FillModel; 3] =
     [FillModel::Off, FillModel::Paths, FillModel::Openness];
+const SUB_GRID_SKIES: [SubGridSky; 2] = [SubGridSky::Enclosed, SubGridSky::World];
 const SHAPES: [LightShape; 2] = [LightShape::Round, LightShape::Diamond];
 const SMOOTHINGS: [LightSmoothing; 2] =
     [LightSmoothing::Smoothed, LightSmoothing::Stepped];
@@ -441,6 +442,24 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 options: &["Round", "Diamond"],
                 get: |t| index_of(&SHAPES, &t.light.shape),
                 set: |t, index| t.light.shape = SHAPES[index],
+            },
+            shown: always,
+        },
+        Setting {
+            label: "Sub-grid sky",
+            rust: "sub_grid_sky",
+            tab: Tab::Sky,
+            applies: Applies::Relights,
+            about: "The sky a sub-grid shows: the world's sky capped by the \
+                    sub-grid's enclosure, so the cabin goes dark inside away \
+                    from its door, or the world's sky alone, as bright inside \
+                    as out. A switch relights sub-grid chunks only, working \
+                    out or dropping each one's enclosure.",
+            place: Place::Cabin,
+            control: Control::Choice {
+                options: &["Enclosed", "World"],
+                get: |t| index_of(&SUB_GRID_SKIES, &t.light.sub_grid_sky),
+                set: |t, index| t.light.sub_grid_sky = SUB_GRID_SKIES[index],
             },
             shown: always,
         },

@@ -30,7 +30,7 @@ jobs:
       matrix:
         features:
           - { name: default, flags: "", examples: "", example_flags: "" }
-          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning", example_flags: "--features light_propagation" }
+          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning", example_flags: "--features light_propagation,sub_grids" }
           - { name: serde, flags: "--features serde", examples: "--example save_load --example multiplayer_loopback", example_flags: "--features serde,sub_grids" }
           - { name: sub_grids, flags: "--features sub_grids", examples: "", example_flags: "" }
           - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "--example dislodged_fragments", example_flags: "--features sub_grids,dislodged_fragments" }

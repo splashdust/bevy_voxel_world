@@ -209,7 +209,7 @@ When Some config is returned, the light calculations are performed in the chunk 
 Every setting is documented in [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning/main.rs) puts every setting in a panel that says what it does and where in its world to look for the change. Use the example to test out values interactiely to better understand the config options.
 
 ```bash
-$ cargo run -r --example light_tuning --features light_propagation
+$ cargo run -r --example light_tuning --features light_propagation,sub_grids
 ```
 
 ### Light demo

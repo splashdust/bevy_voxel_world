@@ -10,21 +10,24 @@
 //! default, ready to paste into a world's `VoxelWorldConfig`.
 //!
 //! The bar at the bottom moves the camera to the places each setting shows
-//! best, as do the keys 1 to 8: a cave whose wide hall sky fill reaches down
-//! from its mouth, a step darker at each chunk, with lanterns along its walls,
-//! and a deep chamber behind a narrow passage that only crystals light; the
-//! ground under a floating island, an arch the sun stops
-//! at, a house lit through its door and windows, and a well sky light falls
-//! straight down. The bar lights the place the camera is at, and underlines
-//! the one the hovered setting shows best from. The right mouse button orbits
-//! the camera, the middle one pans it and the wheel zooms. H hides the panel.
+//! best, as do the keys 1 to 9: the meadow, a cave whose wide hall sky fill
+//! reaches down from its mouth, a step darker at each chunk, with lanterns
+//! along its walls, and a deep chamber behind a narrow passage that only
+//! crystals light; the ground under a floating island, an arch the sun stops
+//! at, a house lit through its door and windows, a well sky light falls
+//! straight down, the whole world from above, and a hollow cabin hanging
+//! tilted in the sky beside the island, seen through its door. The cabin is
+//! a sub-grid, whose inside the Sub-grid sky setting darkens or lights. The
+//! bar lights the place the camera is at, and underlines the one the hovered
+//! setting shows best from. The right mouse button orbits the camera, the
+//! middle one pans it and the wheel zooms. H hides the panel.
 //!
 //! The ball walking in and out of the cave isn't a chunk, so propagated light
 //! doesn't shade it. It dims itself from `VoxelWorld::light_at` at its
 //! position, through the look's `LevelCurve::at`, so it goes dark in the cave
 //! as the rock around it does instead of standing out fully lit.
 //!
-//! Run with `cargo run --release --example light_tuning --features light_propagation`.
+//! Run with `cargo run --release --example light_tuning --features light_propagation,sub_grids`.
 //! On WASM the world starts with a sky reach of 16, as a WASM application
 //! should.
 //!
@@ -62,7 +65,7 @@ mod scene;
 mod settings;
 
 use panel::PanelPlugin;
-use scene::{texture_indices, Place, Scene, TEXTURE, TILE_COUNT};
+use scene::{spawn_cabin, texture_indices, Place, Scene, TEXTURE, TILE_COUNT};
 use settings::Tuning;
 
 /// The world, whose light settings are the values being tuned.
@@ -151,7 +154,7 @@ fn main() {
         .add_plugins(PanelPlugin)
         .insert_resource(ClearColor(SKY))
         .init_resource::<WalkerScene>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, spawn_cabin))
         .add_systems(Update, (walk, dim_walker, follow_ambient).chain())
         .run();
 }
@@ -179,6 +182,27 @@ fn add_lights(commands: &mut Commands) {
         brightness: Tuning::default().ambient,
         affects_lightmapped_meshes: true,
     });
+}
+
+/// The chunks of the world and of its sub-grids, with their parents.
+#[cfg(not(target_arch = "wasm32"))]
+type Chunks<'w, 's> =
+    Query<'w, 's, (&'static Chunk<TuningWorld>, Option<&'static ChildOf>)>;
+
+/// Whether light hasn't settled, or a chunk of any grid isn't Ready.
+///
+/// A sub-grid's chunk has its key on the sub-grid's grid, and is a child of
+/// the sub-grid's entity, so its state is read through that grid.
+#[cfg(not(target_arch = "wasm32"))]
+fn settling(voxel_world: &VoxelWorld<TuningWorld>, chunks: &Chunks) -> bool {
+    !voxel_world.light_is_settled()
+        || chunks.iter().any(|(chunk, parent)| {
+            let grid = parent
+                .and_then(|parent| voxel_world.grid(Grid::SubGrid(parent.parent())))
+                .or_else(|| voxel_world.grid(Grid::World));
+            grid.and_then(|grid| grid.chunk_state(chunk.key()))
+                != Some(ChunkStatus::Ready)
+        })
 }
 
 fn camera_transform(place: Place) -> Transform {

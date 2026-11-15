@@ -1,7 +1,9 @@
 //! The world light is tuned in: a meadow at the foot of a mountain, with a
 //! place to see each kind of setting at work.
 //!
-//! Every voxel is a pure function of its position, as sky light needs.
+//! Every voxel is a pure function of its position, as sky light needs. The
+//! cabin hanging in the sky beside the floating island is the exception: it
+//! is a sub-grid, built from edits at startup.
 
 use std::sync::LazyLock;
 
@@ -82,10 +84,11 @@ pub enum Place {
     House,
     Well,
     Overview,
+    Cabin,
 }
 
 impl Place {
-    pub const ALL: [Place; 8] = [
+    pub const ALL: [Place; 9] = [
         Place::Meadow,
         Place::Cave,
         Place::Chamber,
@@ -94,6 +97,7 @@ impl Place {
         Place::House,
         Place::Well,
         Place::Overview,
+        Place::Cabin,
     ];
 
     pub fn name(self) -> &'static str {
@@ -106,6 +110,7 @@ impl Place {
             Place::House => "House",
             Place::Well => "Well",
             Place::Overview => "Overview",
+            Place::Cabin => "Cabin",
         }
     }
 
@@ -140,6 +145,14 @@ impl Place {
             Place::Well => ([-12.5, 8.5, -10.0], [-30.0, 8.0, -10.0]),
             // Everything from above.
             Place::Overview => ([-140.0, 175.0, 170.0], [40.0, 45.0, 0.0]),
+            // Outside the cabin's door, looking in along its length.
+            Place::Cabin => {
+                let pose = cabin_pose();
+                return (
+                    pose.transform_point(CABIN_EYE),
+                    pose.transform_point(CABIN_TARGET),
+                );
+            }
         };
         (Vec3::from_array(eye), Vec3::from_array(target))
     }
@@ -580,8 +593,10 @@ fn room_for_tree(x: i32, z: i32) -> bool {
     let at = Vec2::new(x as f32, z as f32);
     let cave_front = x.abs() < 24 && z < -28;
     let path = x.abs() < 5 && (-50..40).contains(&z);
+    // The cabin's camera hangs in the sky far above any tree.
     let near_camera = Place::ALL
         .iter()
+        .filter(|place| **place != Place::Cabin)
         .any(|place| place.view().0.xz().distance(at) < 9.0);
     // The island and the ground under it, seen from the island's place.
     let island_view = at.distance(ISLAND_CENTRE) < 44.0
@@ -662,6 +677,80 @@ fn spruce(b: &mut Blueprint, terrain: &Terrain, base: IVec3, height: i32) {
     }
 }
 
+// --- The cabin ----------------------------------------------------------------
+
+/// The cabin's size in voxels: across, up and along. Its walls, floor and
+/// roof are one voxel thick, from 0 to one less than the size on its grid.
+const CABIN_SIZE: IVec3 = IVec3::new(12, 9, 26);
+/// The door, in the wall of greatest x near the cabin's end of greatest z,
+/// from its first corner inclusive to its second exclusive. It is near one
+/// end so the cabin's inside reaches far from it.
+const CABIN_DOOR: (IVec3, IVec3) = (IVec3::new(11, 1, 17), IVec3::new(12, 6, 22));
+/// Where the cabin's camera stands and what it looks at, on the cabin's
+/// grid: outside the door, looking in along the cabin to its far end.
+const CABIN_EYE: Vec3 = Vec3::new(15.5, 4.0, 27.0);
+const CABIN_TARGET: Vec3 = Vec3::new(2.0, 2.5, 4.0);
+
+/// Where the cabin hangs: in open sky east of the floating island and
+/// above its top, tilted 20° about its length so its door faces up a little,
+/// toward the sun.
+pub fn cabin_pose() -> Transform {
+    Transform::from_xyz(114.0, 119.0, 27.0)
+        .with_rotation(Quat::from_rotation_z(20f32.to_radians()))
+}
+
+/// The cabin's voxels on its own grid, with their materials: plank walls
+/// with timber corners and eaves, a plank floor and a flat roof, and one
+/// door. The walls are light planks, so the light fading across them shows.
+pub fn cabin_voxels() -> Vec<(IVec3, u8)> {
+    let max = CABIN_SIZE - 1;
+    let (door_min, door_max) = CABIN_DOOR;
+    let mut voxels = Vec::new();
+    for x in 0..=max.x {
+        for y in 0..=max.y {
+            for z in 0..=max.z {
+                let at = IVec3::new(x, y, z);
+                let on_x = x == 0 || x == max.x;
+                let on_z = z == 0 || z == max.z;
+                let in_door = at.cmpge(door_min).all() && at.cmplt(door_max).all();
+                let material = if y == max.y {
+                    ROOF
+                } else if y == 0 {
+                    FLOOR
+                } else if in_door || !(on_x || on_z) {
+                    continue;
+                } else if on_x && on_z || y == max.y - 1 {
+                    TIMBER
+                } else {
+                    FLOOR
+                };
+                voxels.push((at, material));
+            }
+        }
+    }
+    voxels
+}
+
+/// The cabin's sub-grid, which the `audit` mode reads the light of.
+#[derive(Resource)]
+pub struct Cabin(#[cfg_attr(target_arch = "wasm32", allow(dead_code))] pub Entity);
+
+/// Spawns the cabin as a sub-grid of the world and fills in its voxels. A
+/// sub-grid has no voxel lookup, so its voxels are set as edits.
+pub fn spawn_cabin(
+    mut commands: Commands,
+    mut voxel_world: VoxelWorld<crate::TuningWorld>,
+) {
+    let cabin = voxel_world.spawn_sub_grid(cabin_pose());
+    let mut grid = voxel_world
+        .grid_mut(Grid::SubGrid(cabin))
+        .expect("a sub-grid is live as it spawns");
+    for (at, material) in cabin_voxels() {
+        grid.set_voxel(at, WorldVoxel::Solid(material));
+    }
+    commands.insert_resource(Cabin(cabin));
+}
+
 // --- The world ----------------------------------------------------------------
 
 /// Looks up the world's voxels, keeping each column of ground it works out.
@@ -732,6 +821,8 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
+    use bevy::platform::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -741,6 +832,56 @@ mod tests {
             let eye = place.view().0.floor().as_ivec3();
             assert!(!scene.voxel(eye).is_solid(), "{place:?}");
         }
+    }
+
+    /// The first cabin voxel at or past `from` along `direction`, in the
+    /// cabin's grid, stepping a fifth of a voxel at a time.
+    fn first_cabin_voxel(from: Vec3, direction: Vec3) -> Option<IVec3> {
+        let solids: HashSet<IVec3> =
+            cabin_voxels().into_iter().map(|(at, _)| at).collect();
+        (0..400)
+            .map(|step| {
+                (from + direction.normalize() * step as f32 * 0.2)
+                    .floor()
+                    .as_ivec3()
+            })
+            .find(|at| solids.contains(at))
+    }
+
+    #[test]
+    fn the_cabin_is_hollow_with_a_door() {
+        let solids: HashSet<IVec3> =
+            cabin_voxels().into_iter().map(|(at, _)| at).collect();
+        let middle = (CABIN_SIZE / 2).as_vec3() + 0.5;
+        assert!(!solids.contains(&middle.as_ivec3()));
+        // Out through the door, a line leaves the cabin; out through any
+        // other wall, it meets one.
+        let door = (CABIN_DOOR.0 + CABIN_DOOR.1).as_vec3() / 2.0;
+        let from_door = Vec3::new(middle.x, door.y, door.z);
+        assert_eq!(first_cabin_voxel(from_door, Vec3::X), None);
+        for direction in [Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+            assert!(
+                first_cabin_voxel(from_door, direction).is_some(),
+                "{direction}"
+            );
+        }
+        assert!(first_cabin_voxel(middle, Vec3::X).is_some());
+    }
+
+    #[test]
+    fn the_cabin_place_looks_in_through_the_door() {
+        let (eye, target) = Place::Cabin.view();
+        let pose = cabin_pose();
+        let (eye, target) = (
+            pose.compute_affine().inverse().transform_point3(eye),
+            pose.compute_affine().inverse().transform_point3(target),
+        );
+        // The eye is outside the door's wall, and the first voxel in the
+        // middle of the view is inside, on the far wall or the end wall.
+        let seen =
+            first_cabin_voxel(eye, target - eye).expect("the view meets the cabin");
+        assert!(seen.x < CABIN_DOOR.0.x, "{seen}");
+        assert!(eye.x > CABIN_SIZE.x as f32);
     }
 
     #[test]

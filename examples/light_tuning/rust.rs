@@ -135,6 +135,7 @@ pub fn light_rust(light: &LightPropagation) -> String {
         look => look_rust,
         sky_record_cap => bytes_rust,
         wasm_relight_budget => duration_rust,
+        sub_grid_sky => |sky| format!("SubGridSky::{sky:?}"),
     );
     literal("LightPropagation", fields)
 }
@@ -216,6 +217,7 @@ mod tests {
             },
             sky_record_cap: 4 * 1024 * 1024,
             wasm_relight_budget: std::time::Duration::from_millis(8),
+            sub_grid_sky: SubGridSky::World,
             ..default()
         });
         assert_eq!(without_spaces(&light_rust(&light)), without_spaces(rust));
