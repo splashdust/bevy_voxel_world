@@ -713,15 +713,37 @@ impl PendingWrites {
     }
 }
 
-/// Keeps world `C`'s tag map in line with its sub-grids and its chunks'
+/// Whether [`upkeep`] has anything to do: world `C` has a live sub-grid, or
+/// a tag map to keep or drop.
+pub(crate) fn has_upkeep<C: VoxelWorldConfig>(
+    route: Res<LightRoute<C>>,
+    sub_grids: Option<Res<SubGrids<C>>>,
+) -> bool {
+    route.tag_map().is_some() || sub_grids.is_some_and(|sub_grids| sub_grids.has_live())
+}
+
+/// Sets the `MeshTag` of each chunk whose tag [`upkeep`] changed.
+///
+/// It is a system of its own, with no system ordered after it, so `upkeep`
+/// has no `Commands` and the systems ordered after `upkeep` wait for no sync
+/// point. The tags apply by the end of `PostUpdate`, before the frame is
+/// drawn.
+pub(crate) fn set_changed_tags<C: VoxelWorldConfig>(
+    mut commands: Commands,
+    mut route: ResMut<LightRoute<C>>,
+) {
+    for (entity, tag) in route.take_changed_tags() {
+        commands.entity(entity).try_insert(MeshTag::new(tag));
+    }
+}
+
 /// Keeps world `C`'s tag map in line with its sub-grids and its chunks'
 /// tags, and starts the walks of hinted air it waits on. Runs in
 /// `PostUpdate` after the sub-grids' poses are kept and after the last
-/// system that sets a chunk's tag, and sets the tags of chunks whose slots
-/// it changed.
+/// system that sets a chunk's tag. The tags of chunks whose slots it
+/// changed are set by [`set_changed_tags`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn upkeep<C: VoxelWorldConfig>(
-    mut commands: Commands,
     mut route: ResMut<LightRoute<C>>,
     sub_grids: Option<Res<SubGrids<C>>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -760,9 +782,6 @@ pub(crate) fn upkeep<C: VoxelWorldConfig>(
         generation: settings.walks.lock().unwrap().generation(),
     };
     let finished = route.upkeep_tag_map(&bodies, &hinting, &mut images);
-    for (entity, tag) in route.take_changed_tags() {
-        commands.entity(entity).try_insert(MeshTag::new(tag));
-    }
     budget.set_finished_last_frame(JobKind::HintedColumn, finished);
 
     if let Some(rule) = settings.sky_rule.filter(|_| route.wants_hinted_walks()) {

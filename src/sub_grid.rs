@@ -386,6 +386,31 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         false
     }
 
+    /// Whether the world has a live sub-grid, or an ended one whose chunks or
+    /// chunk data aren't gone yet. The systems that keep this record run only
+    /// then, so a world with no sub-grid pays one lock per system and frame.
+    pub(crate) fn in_use(&self) -> bool {
+        let record = self.record.lock().unwrap();
+        !record.live.is_empty() || !record.ending.is_empty() || !record.recheck.is_empty()
+    }
+
+    /// Whether the world has a live sub-grid.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn has_live(&self) -> bool {
+        !self.record.lock().unwrap().live.is_empty()
+    }
+
+    /// Ends the sub-grid `entity` ahead of its queued despawn, as
+    /// [`snapshot_poses`](Self::snapshot_poses) would once the despawn has
+    /// applied.
+    pub(crate) fn end_despawned(
+        &self,
+        entity: Entity,
+        edits: &VoxelEdits<C, C::MaterialIndex>,
+    ) {
+        Self::end(&mut self.record.lock().unwrap(), entity, edits);
+    }
+
     /// Ends the sub-grid `entity`, dropping its voxel edits at once. Its
     /// chunks go in the next [`forget_despawned`](Self::forget_despawned),
     /// and its id is freed for a later sub-grid once their data is gone too.
@@ -401,14 +426,14 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
     /// Ends each sub-grid whose entity was despawned or lost its
     /// [`SubGrid<C>`] since this last ran, and despawns the chunks of every
     /// ended sub-grid, dropping them from the chunk index at once as
-    /// despawned chunks are.
+    /// despawned chunks are. The chunk entities despawn later in the frame,
+    /// with the retired chunks, so this system has no `Commands` and needs no
+    /// sync point before the commit it runs ahead of.
     ///
     /// An ended sub-grid's id is freed once the chunk map holds none of its
     /// chunks' data, which the chunk lifecycle removes later in the frame,
     /// so a later sub-grid given the id never finds the old one's chunks.
-    #[allow(clippy::too_many_arguments)]
     pub fn forget_despawned(
-        mut commands: Commands,
         mut removed: RemovedComponents<SubGrid<C>>,
         mut sub_grids: ResMut<Self>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -426,7 +451,7 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         let chunk_map = chunk_map.get_read_lock();
         let Record { ending, ids, .. } = record;
         ending.retain(|&grid| {
-            index.despawn_grid(grid, &mut commands, &mut chunk_map_remove_buffer);
+            index.despawn_grid(grid, &mut chunk_map_remove_buffer);
             if chunk_map.holds_grid(grid) {
                 return true;
             }

@@ -498,15 +498,21 @@ where
     );
     // The tag map reads this frame's poses, and the tags every system before
     // it set. A slot it gives a chunk can be the first, which makes the
-    // texture.
+    // texture. It reads the live sub-grids after those despawning this
+    // frame have ended.
     #[cfg(feature = "sub_grids")]
     app.add_systems(
         PostUpdate,
         (
             super::tag_map::upkeep::<C>
+                .run_if(super::tag_map::has_upkeep::<C>)
                 .after(crate::sub_grid::SubGrids::<C>::snapshot_poses)
+                .after(crate::chunk_lifecycle::handover::Handovers::<C>::despawn_landed)
                 .after(super::follow_config::<C>)
                 .before(make_texture::<C, M>),
+            super::tag_map::set_changed_tags::<C>
+                .run_if(super::tag_map::has_upkeep::<C>)
+                .after(super::tag_map::upkeep::<C>),
             bind_tag_map::<C, M>
                 .after(super::tag_map::upkeep::<C>)
                 .before(AssetEventSystems),

@@ -121,6 +121,9 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     /// Sub-grids to despawn once no handover holds their chunks, each with
     /// whether a `PostUpdate` has passed since `despawn_sub_grid`.
     despawns: Mutex<Vec<(Entity, bool)>>,
+    /// Sub-grids `despawn_landed` ended this frame, for `apply_despawns` to
+    /// despawn.
+    despawning: Vec<Entity>,
     /// Sub-grids stamped and still live, which fragment checks landing from
     /// the stamp on count as gone.
     #[cfg(feature = "dislodged_fragments")]
@@ -149,6 +152,7 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             landed: Vec::new(),
             next_id: 0,
             despawns: Mutex::default(),
+            despawning: Vec::new(),
             #[cfg(feature = "dislodged_fragments")]
             stamped_away: Mutex::default(),
             stats: HandoverStats::default(),
@@ -499,6 +503,22 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         self.stamped_away.lock().unwrap().contains(&entity)
     }
 
+    /// Whether [`write_landed`](Self::write_landed) has anything to do: a
+    /// landed lift or stamp to announce, or a stamped sub-grid to forget.
+    pub fn has_landed(handovers: Res<Self>) -> bool {
+        #[cfg(feature = "dislodged_fragments")]
+        if !handovers.stamped_away.lock().unwrap().is_empty() {
+            return true;
+        }
+        !handovers.landed.is_empty()
+    }
+
+    /// Whether [`despawn_landed`](Self::despawn_landed) has a sub-grid
+    /// waiting to despawn.
+    pub fn has_despawns(handovers: Res<Self>) -> bool {
+        !handovers.despawns.lock().unwrap().is_empty()
+    }
+
     /// Writes the [`Lifted`] or [`Stamped`] of each lift and stamp whose
     /// handover has landed, in call order, except those whose sub-grid is no
     /// longer live. Each stamped sub-grid despawns in this frame's
@@ -554,10 +574,13 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         self.despawns.lock().unwrap().push((entity, false));
     }
 
-    /// Despawns each sub-grid waiting for a handover that no handover holds
-    /// any more.
+    /// Ends each sub-grid waiting for a handover that no handover holds any
+    /// more in the record of live sub-grids, and queues it for
+    /// [`apply_despawns`](Self::apply_despawns) to despawn.
+    ///
+    /// It has no `Commands`, so a system ordered after it, such as one that
+    /// reads the live sub-grids, waits for no sync point.
     pub fn despawn_landed(
-        mut commands: Commands,
         mut handovers: ResMut<Self>,
         sub_grids: Res<crate::sub_grid::SubGrids<C>>,
         edits: Res<VoxelEdits<C, C::MaterialIndex>>,
@@ -575,10 +598,29 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             if committing || handovers.holds_grid(grid) {
                 return true;
             }
-            commands.entity(*entity).try_despawn();
+            sub_grids.end_despawned(*entity, &edits);
+            handovers.despawning.push(*entity);
             false
         });
         handovers.despawns.get_mut().unwrap().extend(despawns);
+    }
+
+    /// Whether [`apply_despawns`](Self::apply_despawns) has a sub-grid to
+    /// despawn.
+    pub fn has_despawning(handovers: Res<Self>) -> bool {
+        !handovers.despawning.is_empty()
+    }
+
+    /// Despawns the sub-grids [`despawn_landed`](Self::despawn_landed) ended
+    /// this frame.
+    ///
+    /// No system is ordered after it, so its despawns need no sync point and
+    /// apply by the end of `PostUpdate`: a sub-grid despawned in the frame its
+    /// handover lands is never drawn.
+    pub fn apply_despawns(mut commands: Commands, mut handovers: ResMut<Self>) {
+        for entity in handovers.despawning.drain(..) {
+            commands.entity(entity).try_despawn();
+        }
     }
 }
 

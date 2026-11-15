@@ -57,6 +57,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     app.add_systems(
         PreUpdate,
         FragmentChecks::<C>::lift_landed
+            .run_if(|checks: Res<FragmentChecks<C>>| !checks.lifting.is_empty())
             .after(ChunkLifecycle::<C>::apply_requests)
             .in_set(VoxelWorldSet::<C>::default()),
     );

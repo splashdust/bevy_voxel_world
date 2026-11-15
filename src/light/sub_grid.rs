@@ -114,6 +114,28 @@ impl<C> Default for NewChunks<C> {
     }
 }
 
+impl<C: VoxelWorldConfig> NewChunks<C> {
+    /// Whether a chunk waits for [`name_new_chunks`] to name its entity.
+    pub(crate) fn any(new: Res<Self>) -> bool {
+        !new.keys.is_empty()
+    }
+}
+
+/// Whether [`relight_edits`] has anything to do: a sub-grid in use, or a
+/// line record of an ended sub-grid still to forget.
+pub(crate) fn has_sub_grid_edits<C: VoxelWorldConfig>(
+    sub_grids: Res<SubGrids<C>>,
+    settings: Res<LightSettings<C>>,
+) -> bool {
+    sub_grids.in_use()
+        || settings
+            .view
+            .read()
+            .lines
+            .as_ref()
+            .is_some_and(|lines| !lines.is_empty())
+}
+
 /// Takes this frame's committed sub-grid voxel edits, and the sub-grid
 /// chunks the commit spawns, into the world view, and triggers the relights
 /// they call for. Runs after the world's edits are taken in.

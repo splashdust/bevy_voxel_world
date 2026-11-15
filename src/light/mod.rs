@@ -640,6 +640,7 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     app.init_resource::<sub_grid::NewChunks<C>>().add_systems(
         PreUpdate,
         sub_grid::name_new_chunks::<C>
+            .run_if(sub_grid::NewChunks::<C>::any)
             .after(ChunkLifecycle::<C>::apply_requests)
             .before(Relights::<C>::start)
             .in_set(VoxelWorldSet::<C>::default()),
@@ -657,7 +658,10 @@ fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
 /// chunks.
 #[cfg(feature = "sub_grids")]
 fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
-    (edit::relight_edits::<C>, sub_grid::relight_edits::<C>)
+    (
+        edit::relight_edits::<C>,
+        sub_grid::relight_edits::<C>.run_if(sub_grid::has_sub_grid_edits::<C>),
+    )
         .chain()
         .after(crate::sub_grid::SubGrids::<C>::plan_chunks)
 }

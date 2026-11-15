@@ -283,6 +283,10 @@ pub struct ChunkIndex<C> {
     /// messages name.
     #[cfg(feature = "sub_grids")]
     owners: HashMap<GridId, Entity>,
+    /// Chunks of ended sub-grids, dropped from the index, for
+    /// `despawn_retired_chunks` to despawn.
+    #[cfg(feature = "sub_grids")]
+    ended: Vec<Entity>,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
     /// Pending chunks with priority, oldest first. May hold chunks that have
@@ -306,6 +310,8 @@ impl<C> Default for ChunkIndex<C> {
             levels: PerGrid::new(LevelCounts::new()),
             #[cfg(feature = "sub_grids")]
             owners: HashMap::new(),
+            #[cfg(feature = "sub_grids")]
+            ended: Vec::new(),
             priority: VecDeque::new(),
             pending: HashMap::new(),
             generating: HashSet::new(),
@@ -532,14 +538,19 @@ impl<C: VoxelWorldConfig> ChunkIndex<C> {
         ))
     }
 
-    /// Despawns every chunk of `grid`, a sub-grid that has ended, and drops
-    /// them from the index at once, queuing their data for removal. Its cost
-    /// grows with the grid's chunks.
+    /// Drops every chunk of `grid`, a sub-grid that has ended, from the index
+    /// at once, queuing their data for removal and their entities for
+    /// [`despawn_retired_chunks`](ChunkLifecycle::despawn_retired_chunks) to
+    /// despawn later in the frame. So the caller needs no `Commands`, and no
+    /// sync point after it. Its cost grows with the grid's chunks.
+    ///
+    /// A chunk out of the index is no longer visited by the chunk lifecycle,
+    /// so it only waits there to despawn. Light hears of the despawn in the
+    /// next frame, as of any chunk despawned late in the frame.
     #[cfg(feature = "sub_grids")]
     pub(crate) fn despawn_grid(
         &mut self,
         grid: GridId,
-        commands: &mut Commands,
         chunk_map_remove_buffer: &mut ChunkMapRemoveBuffer<C>,
     ) {
         let chunks: Vec<Entity> = self
@@ -548,7 +559,7 @@ impl<C: VoxelWorldConfig> ChunkIndex<C> {
             .map(|(_, entity)| *entity)
             .collect();
         for entity in chunks {
-            commands.entity(entity).try_despawn();
+            self.ended.push(entity);
             if let Some(key) = self.despawned(entity) {
                 chunk_map_remove_buffer.push((key, entity));
             }
@@ -1090,6 +1101,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 
     /// Despawns chunks that have been retiring for a frame.
+    ///
+    /// With `sub_grids`, it also despawns the chunks of ended sub-grids,
+    /// which `SubGrids::forget_despawned` dropped from the index this frame.
     pub fn despawn_retired_chunks(
         mut commands: Commands,
         mut chunks: Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
@@ -1098,6 +1112,10 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("despawn_retired_chunks").entered();
+        #[cfg(feature = "sub_grids")]
+        for entity in std::mem::take(&mut index.ended) {
+            commands.entity(entity).try_despawn();
+        }
         let retiring: Vec<Entity> = index.retiring.iter().copied().collect();
         for entity in retiring {
             let Ok((chunk, mut state)) = chunks.get_mut(entity) else {

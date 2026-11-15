@@ -337,28 +337,36 @@ where
             .add_message::<ChunkWillUpdate<C>>()
             .add_message::<EditsCommitted<C>>();
 
+        // Each system here runs only while it has something to do, so a world
+        // that never makes a sub-grid pays a run condition per system and
+        // frame.
         #[cfg(feature = "sub_grids")]
         {
-            use crate::sub_grid::SubGrids;
+            use crate::chunk_lifecycle::handover::Handovers;
+            use crate::sub_grid::{Stamped, SubGrids};
+            let in_use = |sub_grids: Res<SubGrids<C>>| sub_grids.in_use();
             app.add_message::<crate::sub_grid::Lifted<C>>()
-                .add_message::<crate::sub_grid::Stamped<C>>();
+                .add_message::<Stamped<C>>();
             app.add_message::<crate::edits::SubGridEditsCommitted<C>>();
             app.add_systems(
                 PreUpdate,
                 (
                     SubGrids::<C>::forget_despawned
+                        .run_if(in_use)
                         .before(Internals::<C>::commit_voxel_edits),
                     // A commit spawns and retires sub-grids' chunks in place of
                     // the streaming policy.
                     SubGrids::<C>::plan_chunks
+                        .run_if(in_use)
                         .after(Internals::<C>::commit_voxel_edits)
                         .before(ChunkLifecycle::<C>::apply_requests),
                     // After the handovers land and form, so a lift's
                     // `Lifted` and a stamp's `Stamped` arrive in the frame
                     // their chunks publish.
                     (
-                        crate::chunk_lifecycle::handover::Handovers::<C>::write_landed,
-                        crate::sub_grid::move_stamped_children::<C>,
+                        Handovers::<C>::write_landed.run_if(Handovers::<C>::has_landed),
+                        crate::sub_grid::move_stamped_children::<C>
+                            .run_if(on_message::<Stamped<C>>),
                     )
                         .chain()
                         .after(ChunkLifecycle::<C>::apply_requests),
@@ -368,11 +376,21 @@ where
             .add_systems(
                 PostUpdate,
                 (
-                    // Before transforms propagate, so a sub-grid despawned in
-                    // the frame its handover lands is never drawn.
-                    crate::chunk_lifecycle::handover::Handovers::<C>::despawn_landed
-                        .before(TransformSystems::Propagate),
-                    SubGrids::<C>::snapshot_poses.after(TransformSystems::Propagate),
+                    SubGrids::<C>::snapshot_poses
+                        .run_if(in_use)
+                        .after(TransformSystems::Propagate),
+                    // The despawns apply within `PostUpdate`, so a sub-grid
+                    // despawned in the frame its handover lands is never
+                    // drawn. A system ordered after `apply_despawns` would
+                    // wait for a sync point, so none is.
+                    (
+                        Handovers::<C>::despawn_landed
+                            .run_if(Handovers::<C>::has_despawns),
+                        Handovers::<C>::apply_despawns
+                            .run_if(Handovers::<C>::has_despawning),
+                    )
+                        .chain()
+                        .after(SubGrids::<C>::snapshot_poses),
                 ),
             );
         }
