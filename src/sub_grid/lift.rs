@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use bevy::{math::I64Vec3, prelude::*};
+use bevy::prelude::*;
 
 use super::{world, Grid, SubGrids};
 use crate::chunk_lifecycle::handover::Handovers;
@@ -27,8 +27,9 @@ pub(crate) struct LiftParts<'a, 'w, 's, C: VoxelWorldConfig> {
 /// `max` exclusive out of `source` into a new sub-grid, and returns the
 /// sub-grid: see [`VoxelWorld::lift`](crate::prelude::VoxelWorld::lift).
 ///
-/// It reads the whole box first, keeping one voxel per position, then sets
-/// the lifted voxels in the new sub-grid and air over them in `source`.
+/// It reads the whole box first, keeping each voxel `pick` chose, then sets
+/// those voxels in the new sub-grid and air over them in `source`. Its
+/// memory grows with the voxels lifted, not with the box.
 pub(crate) fn lift<C: VoxelWorldConfig>(
     parts: LiftParts<C>,
     source: Grid,
@@ -38,8 +39,7 @@ pub(crate) fn lift<C: VoxelWorldConfig>(
 ) -> Result<Entity, LiftError> {
     let (parent, grid, source_pose) =
         world::place(parts.sub_grids, source).ok_or(LiftError::NoSuchGrid)?;
-    let size = (max.as_i64vec3() - min.as_i64vec3()).max(I64Vec3::ZERO);
-    let mut picked = Vec::with_capacity((size.x * size.y * size.z) as usize);
+    let mut picked: Vec<(IVec3, WorldVoxel<C::MaterialIndex>)> = Vec::new();
     let (mut lowest, mut highest) = (IVec3::MAX, IVec3::MIN);
     {
         let chunk_map = parts.chunk_map.get_map();
@@ -59,12 +59,11 @@ pub(crate) fn lift<C: VoxelWorldConfig>(
                 for x in min.x..max.x {
                     let position = IVec3::new(x, y, z);
                     let voxel = reader.read(position);
-                    let lifted = pick(position, voxel) && voxel.is_solid();
-                    if lifted {
+                    if pick(position, voxel) && voxel.is_solid() {
                         lowest = lowest.min(position);
                         highest = highest.max(position);
+                        picked.push((position, voxel));
                     }
-                    picked.push(lifted.then_some(voxel));
                 }
             }
         }
@@ -82,22 +81,16 @@ pub(crate) fn lift<C: VoxelWorldConfig>(
         offset,
         source_pose.mul_transform(offset),
     );
-    let at = |position: IVec3| {
-        let i = (position - min).as_i64vec3();
-        picked[((i.z * size.y + i.y) * size.x + i.x) as usize]
-    };
-    let past_highest = highest + 1;
-    parts.edits.set_region_in(
-        lifted_grid,
-        lowest - origin,
-        past_highest - origin,
-        |local| at(local + origin),
-    );
-    parts
-        .edits
-        .set_region_in(grid, lowest, past_highest, |position| {
-            at(position).map(|_| WorldVoxel::Air)
-        });
+    let mut air: Vec<(IVec3, WorldVoxel<C::MaterialIndex>)> = picked
+        .iter()
+        .map(|(position, _)| (*position, WorldVoxel::Air))
+        .collect();
+    parts.edits.set_voxels_in(grid, &mut air);
+    drop(air);
+    for (position, _) in &mut picked {
+        *position -= origin;
+    }
+    parts.edits.set_voxels_in(lifted_grid, &mut picked);
     parts.handovers.lifted(Lifted::new(source, entity));
     Ok(entity)
 }

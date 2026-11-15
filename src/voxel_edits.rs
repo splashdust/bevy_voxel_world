@@ -881,26 +881,48 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                             }
                         }
                     }
-                    if voxels.is_empty() {
-                        continue;
-                    }
-                    let mut pending = self.pending.lock().unwrap();
-                    let bucket = bucket_mut(
-                        Arc::make_mut(&mut pending),
-                        GridKey::level_0(grid, chunk),
-                    );
-                    if voxels.len() >= DENSE_AT {
-                        bucket.make_dense();
-                    }
-                    let mut changed = 0;
-                    for &(position, v) in &voxels {
-                        changed += bucket.insert(position, v) as u64;
-                        bucket.note_local_set(position);
-                    }
-                    bucket.count_sets(changed);
+                    self.set_in_chunk(GridKey::level_0(grid, chunk), &voxels);
                 }
             }
         }
+    }
+
+    /// Sets each of `voxels` in `grid`. It sorts them by chunk, and sets each
+    /// chunk's with the pending edits locked once, as
+    /// [`set_region_in`](Self::set_region_in) does. A position listed more
+    /// than once takes its last voxel.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn set_voxels_in(
+        &self,
+        grid: GridId,
+        voxels: &mut [(IVec3, WorldVoxel<I>)],
+    ) {
+        voxels.sort_by_key(|(position, _)| chunk_containing(*position).to_array());
+        for chunk in
+            voxels.chunk_by(|(a, _), (b, _)| chunk_containing(*a) == chunk_containing(*b))
+        {
+            let key = GridKey::level_0(grid, chunk_containing(chunk[0].0));
+            self.set_in_chunk(key, chunk);
+        }
+    }
+
+    /// Sets `voxels`, all within the level-0 chunk at `key`, with the pending
+    /// edits locked. A chunk given many voxels gets a dense bucket up front.
+    fn set_in_chunk(&self, key: GridKey, voxels: &[(IVec3, WorldVoxel<I>)]) {
+        if voxels.is_empty() {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap();
+        let bucket = bucket_mut(Arc::make_mut(&mut pending), key);
+        if voxels.len() >= DENSE_AT {
+            bucket.make_dense();
+        }
+        let mut changed = 0;
+        for &(position, v) in voxels {
+            changed += bucket.insert(position, v) as u64;
+            bucket.note_local_set(position);
+        }
+        bucket.count_sets(changed);
     }
 
     /// Clears the edits in the box from `min` inclusive to `max` exclusive:

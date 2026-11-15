@@ -109,6 +109,8 @@ struct Held<C: VoxelWorldConfig> {
 #[derive(Resource)]
 pub(crate) struct Handovers<C: VoxelWorldConfig> {
     held: HashMap<Entity, Held<C>>,
+    /// How many of `held` each grid has, for grids with any.
+    held_per_grid: HashMap<GridId, usize>,
     /// The chunks of each handover, by its id.
     handovers: HashMap<u32, Vec<Entity>>,
     /// The operations of each handover holding any, by its id.
@@ -146,6 +148,7 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
     fn default() -> Self {
         Self {
             held: HashMap::new(),
+            held_per_grid: HashMap::new(),
             handovers: HashMap::new(),
             operations: HashMap::new(),
             queued: Mutex::default(),
@@ -272,6 +275,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
                     }
                 }
                 None => {
+                    *self.held_per_grid.entry(key.grid()).or_default() += 1;
                     self.held.insert(
                         entity,
                         Held {
@@ -415,11 +419,9 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         if self.held.is_empty() && self.handovers.is_empty() {
             return;
         }
-        self.held.retain(|entity, held| {
-            index.keys.get(entity) == Some(&held.key) && !index.retiring.contains(entity)
-        });
         let Self {
             held,
+            held_per_grid,
             handovers,
             operations,
             landed,
@@ -430,6 +432,14 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             lit_by,
             ..
         } = self;
+        held.retain(|entity, chunk| {
+            let stays = index.keys.get(entity) == Some(&chunk.key)
+                && !index.retiring.contains(entity);
+            if !stays {
+                drop_held(held_per_grid, chunk.key.grid());
+            }
+            stays
+        });
         handovers.retain(|id, chunks| {
             chunks.retain(|entity| held.contains_key(entity));
             let ready =
@@ -460,6 +470,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
                 let Some(chunk) = held.remove(&entity) else {
                     continue;
                 };
+                drop_held(held_per_grid, chunk.key.grid());
                 if chunk.wait == Wait::Despawn {
                     if let Some(message) = index.message(chunk.key, entity) {
                         ev_chunk_will_despawn.write(message);
@@ -565,7 +576,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
 
     /// Whether a handover holds a chunk of `grid`.
     pub fn holds_grid(&self, grid: GridId) -> bool {
-        self.held.values().any(|held| held.key.grid() == grid)
+        self.held_per_grid.contains_key(&grid)
     }
 
     /// Despawns the sub-grid `entity` once no handover holds its chunks: in
@@ -622,6 +633,17 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     pub fn apply_despawns(mut commands: Commands, mut handovers: ResMut<Self>) {
         for entity in handovers.despawning.drain(..) {
             commands.entity(entity).try_despawn();
+        }
+    }
+}
+
+/// Counts one chunk of `grid` fewer in `held_per_grid`, dropping the grid
+/// once it has none.
+fn drop_held(held_per_grid: &mut HashMap<GridId, usize>, grid: GridId) {
+    if let Some(count) = held_per_grid.get_mut(&grid) {
+        *count -= 1;
+        if *count == 0 {
+            held_per_grid.remove(&grid);
         }
     }
 }
