@@ -386,10 +386,13 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// each dislodged fragment. Applied edit deltas, forgets and
     /// regenerating chunks never start a check. A game without sub-grids
     /// turns a fragment into debris by setting air wherever
-    /// [`contains`](crate::prelude::FragmentDislodged::contains) holds.
+    /// [`contains`](crate::prelude::FragmentDislodged::contains) holds. With
+    /// `sub_grids`, sub-grids are checked too, and the crate can lift each
+    /// fragment itself, with `FragmentDetection::auto_lift`.
     ///
     /// A check's cost grows with its [`limit`](FragmentDetection::limit) and
-    /// with how many separate pieces a commit's digs touch. A region edited
+    /// with how many separate pieces a commit's digs touch, and a sub-grid's
+    /// check grows with the sub-grid's size. A region edited
     /// in every frame holds its check back until the edits stop. In a
     /// multiplayer game, opt in only the authority's world, so that clients
     /// never disagree about what fell.

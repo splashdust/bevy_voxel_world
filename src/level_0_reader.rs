@@ -260,6 +260,22 @@ impl<C: VoxelWorldConfig> Level0Reader<C> {
         }
     }
 
+    /// A read session for a fragment check of a sub-grid, as
+    /// [`for_sub_grid`](Self::for_sub_grid) makes, that also notes the edit
+    /// stamps of the chunk positions it reads from `stamps`.
+    #[cfg(all(feature = "sub_grids", feature = "dislodged_fragments"))]
+    pub fn for_sub_grid_fragment_check(
+        world: Arc<C>,
+        edits: VoxelEditReader<C::MaterialIndex>,
+        chunk_map: Arc<RwLock<ChunkMapData<C::MaterialIndex>>>,
+        stamps: EditStamps<C::MaterialIndex>,
+    ) -> Self {
+        Self {
+            sub_grid: true,
+            ..Self::for_fragment_check(world, edits, chunk_map, stamps, HashSet::new())
+        }
+    }
+
     /// The edit stamp of each chunk position a fragment check's session read
     /// from, noted before its first read there. Empty for any other session.
     #[cfg(feature = "dislodged_fragments")]
@@ -269,10 +285,6 @@ impl<C: VoxelWorldConfig> Level0Reader<C> {
 
     /// The voxel at `position`.
     pub fn read(&mut self, position: IVec3) -> WorldVoxel<C::MaterialIndex> {
-        #[cfg(feature = "sub_grids")]
-        if self.sub_grid {
-            return crate::sub_grid::solid_at(&self.edits, position);
-        }
         let chunk = chunk_containing(position);
         // Noted before the voxel is read, so an edit committed after the read
         // moves the stamp past the noted one.
@@ -288,6 +300,10 @@ impl<C: VoxelWorldConfig> Level0Reader<C> {
         });
         #[cfg(not(feature = "dislodged_fragments"))]
         let cleared = false;
+        #[cfg(feature = "sub_grids")]
+        if self.sub_grid {
+            return crate::sub_grid::solid_at(&self.edits, position);
+        }
         if let Some(voxel) = edit_step(&self.edits, position) {
             return voxel;
         }

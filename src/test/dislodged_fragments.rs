@@ -9,6 +9,9 @@ use crate::dislodged_fragments::FragmentChecks;
 use crate::grid_bench::fragment_stats;
 use crate::prelude::*;
 
+#[cfg(feature = "sub_grids")]
+mod sub_grids;
+
 const STONE: u8 = 1;
 const ICE: u8 = 2;
 
@@ -95,15 +98,19 @@ struct Dislodged(Vec<FragmentDislodged<CliffWorld>>);
 /// read the world's generator. It records the fragments it receives.
 fn fragments_app(world: CliffWorld) -> App {
     let mut app = App::new();
-    app.add_plugins((test_plugins(), VoxelWorldPlugin::minimal_with_config(world)))
-        .init_resource::<Dislodged>()
-        .add_systems(
-            Update,
-            |mut dislodged: ResMut<Dislodged>,
-             mut messages: MessageReader<FragmentDislodged<CliffWorld>>| {
-                dislodged.0.extend(messages.read().cloned());
-            },
-        );
+    app.add_plugins((
+        test_plugins(),
+        TransformPlugin,
+        VoxelWorldPlugin::minimal_with_config(world),
+    ))
+    .init_resource::<Dislodged>()
+    .add_systems(
+        Update,
+        |mut dislodged: ResMut<Dislodged>,
+         mut messages: MessageReader<FragmentDislodged<CliffWorld>>| {
+            dislodged.0.extend(messages.read().cloned());
+        },
+    );
     app.update();
     app
 }

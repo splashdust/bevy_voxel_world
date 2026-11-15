@@ -1567,7 +1567,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
     /// the sequence back to 0, and the epoch keeps the stamp from ever going
     /// back to a value it had, when the chunk's edits may have been
     /// different. A forget moves the stamp of every position, edited or not.
-    #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
+    #[cfg(feature = "light_propagation")]
     pub(crate) fn edit_stamp(&self, position: IVec3) -> u64 {
         self.edit_stamp_in(GridKey::level_0(GridId::WORLD, position))
     }
@@ -1580,13 +1580,14 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         stamp_of(&self.committed, &self.forget_epoch, key)
     }
 
-    /// A reader of the world's [edit stamps](Self::edit_stamp) that works
+    /// A reader of `grid`'s [edit stamps](Self::edit_stamp_in) that works
     /// from any thread.
     #[cfg(feature = "dislodged_fragments")]
-    pub(crate) fn stamps(&self) -> EditStamps<I> {
+    pub(crate) fn stamps_in(&self, grid: GridId) -> EditStamps<I> {
         EditStamps {
             committed: self.committed.clone(),
             epoch: self.forget_epoch.clone(),
+            grid,
         }
     }
 
@@ -1643,19 +1644,20 @@ fn stamp_of<I>(committed: &Committed<I>, epoch: &AtomicU64, key: GridKey) -> u64
     epoch + buckets.get(&key).map_or(0, |bucket| bucket.seq)
 }
 
-/// Reads the world's [edit stamps](VoxelEdits::edit_stamp) from any thread,
-/// as they are at the time of each read.
+/// Reads one grid's [edit stamps](VoxelEdits::edit_stamp_in) from any
+/// thread, as they are at the time of each read.
 #[cfg(feature = "dislodged_fragments")]
 pub(crate) struct EditStamps<I> {
     committed: Committed<I>,
     epoch: Arc<AtomicU64>,
+    grid: GridId,
 }
 
 #[cfg(feature = "dislodged_fragments")]
 impl<I> EditStamps<I> {
-    /// The edit stamp of the world's level-0 chunk at `position`.
-    pub fn get(&self, position: IVec3) -> u64 {
-        let key = GridKey::level_0(GridId::WORLD, position);
+    /// The edit stamp of the grid's level-0 chunk at `chunk`.
+    pub fn get(&self, chunk: IVec3) -> u64 {
+        let key = GridKey::level_0(self.grid, chunk);
         stamp_of(&self.committed, &self.epoch, key)
     }
 }

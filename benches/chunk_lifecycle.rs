@@ -605,12 +605,15 @@ impl VoxelWorldConfig for CaveWorld {
 
 /// The light reference scene around `FRAGMENT_CAMERA`, unlit, with every
 /// solid voxel of one material. With `detect`, it detects dislodged
-/// fragments with the default settings and only reports them. Its voxels
-/// are read from [`fragment_table`].
+/// fragments with the default settings and only reports them, or with
+/// `auto_lift` lifts each of them too. Its voxels are read from
+/// [`fragment_table`].
 #[cfg(feature = "dislodged_fragments")]
 #[derive(Resource, Clone, Default)]
 struct FragmentWorld {
     detect: bool,
+    #[cfg(feature = "sub_grids")]
+    auto_lift: bool,
 }
 
 /// Where `fragments` starts its camera: beside the reference scene's slab,
@@ -696,7 +699,11 @@ impl VoxelWorldConfig for FragmentWorld {
     }
 
     fn detect_dislodged_fragments(&self) -> Option<FragmentDetection<u8>> {
-        self.detect.then(FragmentDetection::default)
+        self.detect.then(|| FragmentDetection {
+            #[cfg(feature = "sub_grids")]
+            auto_lift: self.auto_lift,
+            ..default()
+        })
     }
 }
 
@@ -2202,6 +2209,9 @@ fn fragments_app(world: FragmentWorld) -> App {
     app.insert_resource(FRAGMENT_CAMERA)
         .init_resource::<Dislodged>()
         .add_systems(Update, record_dislodged::<FragmentWorld>);
+    #[cfg(feature = "sub_grids")]
+    app.init_resource::<FragmentLifts>()
+        .add_systems(Update, record_fragment_lifts::<FragmentWorld>);
     stream_in::<FragmentWorld>(&mut app);
     app
 }
@@ -2318,9 +2328,16 @@ struct CutReport {
 /// unchanged for `QUIET_CHECK_FRAMES`.
 #[cfg(feature = "dislodged_fragments")]
 fn fragment_cut(app: &mut App, cut: &fragment_sites::Cut) -> CutReport {
+    fragment_cut_by(app, |app| dig_voxels(app, &cut.dug))
+}
+
+/// Cuts with `dig`, which sets voxels to commit in the next frame, and runs
+/// frames until the cut's check lands, as [`fragment_cut`] does.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cut_by(app: &mut App, dig: impl FnOnce(&mut App)) -> CutReport {
     let before = fragment_counters(app);
     let seen = app.world().resource::<Dislodged>().0.len();
-    dig_voxels(app, &cut.dug);
+    dig(app);
     let mut last = before;
     let mut changed_at = 0;
     for frame in 1..=CUT_FRAME_CAP {
@@ -2425,6 +2442,236 @@ fn fragment_cuts(
     capped
 }
 
+/// The sub-grid each `FragmentDislodged` received so far was lifted into,
+/// in the order they arrived, and the sub-grid of each `Lifted`.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+#[derive(Resource, Default)]
+struct FragmentLifts {
+    lifted: Vec<Option<Entity>>,
+    landed: Vec<Entity>,
+}
+
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn record_fragment_lifts<C: VoxelWorldConfig>(
+    mut lifts: ResMut<FragmentLifts>,
+    mut dislodged: MessageReader<FragmentDislodged<C>>,
+    mut landed: MessageReader<Lifted<C>>,
+) {
+    let lifts = &mut *lifts;
+    lifts
+        .lifted
+        .extend(dislodged.read().map(|fragment| fragment.lifted));
+    lifts
+        .landed
+        .extend(landed.read().map(|lifted| lifted.sub_grid));
+}
+
+/// What one cut of `fragments` made with auto-lift on did.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+struct LiftCutReport {
+    /// Frames from the cut's frame to the one its check landed in.
+    frames_to_report: u32,
+    /// Frames from the cut's frame to the one the handover of the lifts of
+    /// its fragments landed in.
+    frames: u32,
+    /// The voxel count of each fragment it reported.
+    dislodged: Vec<u32>,
+    /// Whether each fragment it reported was lifted and its `Lifted`
+    /// arrived.
+    landed: bool,
+    /// Whether that hadn't happened after `CUT_FRAME_CAP` frames.
+    capped: bool,
+}
+
+/// Makes `cut` in a world that lifts each fragment, and runs frames until
+/// the fragments it reports have all been lifted and their `Lifted` has
+/// arrived.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_lift_cut(app: &mut App, cut: &fragment_sites::Cut) -> LiftCutReport {
+    let seen = app.world().resource::<Dislodged>().0.len();
+    let seen_lifts = app.world().resource::<FragmentLifts>().lifted.len();
+    dig_voxels(app, &cut.dug);
+    let mut report = LiftCutReport {
+        frames_to_report: CUT_FRAME_CAP,
+        frames: CUT_FRAME_CAP,
+        dislodged: Vec::new(),
+        landed: false,
+        capped: true,
+    };
+    for frame in 1..=CUT_FRAME_CAP {
+        app.update();
+        let written = &app.world().resource::<Dislodged>().0[seen..];
+        if written.is_empty() {
+            continue;
+        }
+        if report.dislodged.is_empty() {
+            report.frames_to_report = frame;
+            report.dislodged = written.iter().map(|(_, _, count)| *count).collect();
+        }
+        let lifts = app.world().resource::<FragmentLifts>();
+        let lifted = &lifts.lifted[seen_lifts..];
+        let landed = lifted
+            .iter()
+            .all(|sub_grid| sub_grid.is_some_and(|s| lifts.landed.contains(&s)));
+        if landed || lifted.contains(&None) {
+            report.frames = frame;
+            report.landed = landed;
+            report.capped = false;
+            break;
+        }
+    }
+    report
+}
+
+/// Part 3 of `fragments`, with `sub_grids`: sets the voxels part 2's cuts
+/// dug back to what they were, turns `auto_lift` on, and makes the same
+/// cuts again, one at a time. Reports each as `lift_cut_NN`, and their sum
+/// as `lift_cuts`: frames to the `FragmentDislodged`, frames to its lift's
+/// handover landing and the voxels dislodged, with the handovers that
+/// landed and their chunks per handover. `lifts_without_landing` counts the
+/// cuts whose fragments weren't all lifted, or whose `Lifted` never came.
+/// Turns `auto_lift` off again after. Returns how many cuts were capped.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_lift_cuts(
+    app: &mut App,
+    prefix: &str,
+    sites: &fragment_sites::Sites,
+    metrics: &mut Metrics,
+) -> usize {
+    {
+        let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+        for position in sites.cuts.iter().flat_map(|cut| &cut.dug) {
+            voxel_world.set_voxel(*position, WorldVoxel::Solid(1));
+        }
+    }
+    settle_fragment_checks(app);
+    app.world_mut().resource_mut::<FragmentWorld>().auto_lift = true;
+
+    let handovers = |app: &App| {
+        bevy_voxel_world::grid_bench::handover_stats::<FragmentWorld>(app.world())
+            .unwrap_or_default()
+    };
+    let before = handovers(app);
+    let mut put = |name: &str, metric: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}.{metric}"), value);
+    };
+    let (mut frames_to_report, mut frames, mut dislodged) = (0, 0, 0);
+    let (mut without_landing, mut capped) = (0, 0);
+    for (i, cut) in sites.cuts.iter().enumerate() {
+        let report = fragment_lift_cut(app, cut);
+        if report.dislodged != [cut.piece] {
+            eprintln!(
+                "{prefix}: the lifted cut at {} dislodged {:?} voxels, not its piece of {}",
+                cut.min, report.dislodged, cut.piece
+            );
+        }
+        let name = format!("lift_cut_{:02}", i + 1);
+        let voxels = report.dislodged.iter().sum::<u32>();
+        put(&name, "frames_to_report", report.frames_to_report as f64);
+        put(&name, "frames", report.frames as f64);
+        put(&name, "dislodged_voxels", voxels as f64);
+        frames_to_report += report.frames_to_report;
+        frames += report.frames;
+        dislodged += voxels;
+        without_landing += !report.landed as usize;
+        capped += report.capped as usize;
+    }
+    let landed = handovers(app);
+    let handovers = landed.handovers - before.handovers;
+    let chunks = landed.chunks - before.chunks;
+    put("lift_cuts", "frames_to_report", frames_to_report as f64);
+    put("lift_cuts", "frames", frames as f64);
+    put("lift_cuts", "dislodged_voxels", dislodged as f64);
+    put("lift_cuts", "handovers", handovers as f64);
+    put(
+        "lift_cuts",
+        "chunks_per_handover",
+        chunks as f64 / handovers.max(1) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.lifts_without_landing"),
+        without_landing as f64,
+    );
+
+    app.world_mut().resource_mut::<FragmentWorld>().auto_lift = false;
+    settle_fragment_checks(app);
+    capped
+}
+
+/// Where part 4 of `fragments` spawns the vehicle hull: in the air above
+/// the reference scene, near `FRAGMENT_CAMERA`.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+const FRAGMENT_HULL_AT: Vec3 = Vec3::new(-48.0, 200.0, 200.0);
+
+/// The plane of air part 4 of `fragments` cuts the hull with, at this z in
+/// the hull's sub-grid: across the envelope, ahead of the gondola.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+const HULL_CUT_Z: i32 = 64;
+
+/// Part 4 of `fragments`, with `sub_grids`: builds the vehicle hull in a
+/// sub-grid of the world, lets its chunks settle, and cuts it in two with a
+/// plane of air across a whole cross-section of the box holding it, at
+/// `HULL_CUT_Z`. A sub-grid is checked with no limit, so the check floods
+/// until the smaller half runs out. Reports `hull_cut` as part 2 reports a
+/// cut, with the hull's solid voxels. Returns whether the cut was capped.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_hull_cut(app: &mut App, prefix: &str, metrics: &mut Metrics) -> usize {
+    let (hull, built) = spawn_hull::<FragmentWorld>(
+        app,
+        Transform::from_translation(FRAGMENT_HULL_AT),
+        None,
+    );
+    let ready = settle_hull::<FragmentWorld>(app, hull);
+    if ready != built.chunks.len() {
+        eprintln!(
+            "{prefix}: {ready} hull chunks are Ready, but the hull should have {}",
+            built.chunks.len()
+        );
+    }
+    settle_fragment_checks(app);
+    let (min, max) = (vehicle_hull::MIN, vehicle_hull::MAX);
+    let mut piece = 0;
+    for z in min.z..HULL_CUT_Z {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                piece +=
+                    vehicle_hull::hull_voxel(IVec3::new(x, y, z), None).is_some() as u32;
+            }
+        }
+    }
+
+    let report = fragment_cut_by(app, |app| {
+        let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+        voxel_world
+            .grid_mut(Grid::SubGrid(hull))
+            .unwrap()
+            .set_voxels_in(min.with_z(HULL_CUT_Z), max.with_z(HULL_CUT_Z + 1), |_| {
+                Some(WorldVoxel::Air)
+            });
+    });
+    if report.dislodged != [piece] {
+        eprintln!(
+            "{prefix}: the hull cut dislodged {:?} voxels, not its smaller half of {piece}",
+            report.dislodged
+        );
+    }
+    let mut put = |metric: &str, value: f64| {
+        metrics.insert(format!("{prefix}.hull_cut.{metric}"), value);
+    };
+    put("solid_voxels", built.solid_voxels as f64);
+    put("frames", report.frames as f64);
+    put("task_us", report.counted.task_micros as f64);
+    put("voxels_visited", report.counted.voxels_visited as f64);
+    put("reruns", report.counted.reruns as f64);
+    put(
+        "dislodged_voxels",
+        report.dislodged.iter().sum::<u32>() as f64,
+    );
+    report.capped as usize
+}
+
 /// What detecting dislodged fragments costs in the light reference scene,
 /// unlit, in a world that detects them with the default settings and only
 /// reports them. `fragment_sites` finds where it digs and cuts.
@@ -2439,28 +2686,43 @@ fn fragment_cuts(
 ///    voxels with air under it, as in a cave ceiling, an overhang or an
 ///    arch, then a cut around more voxels than a check floods by default;
 ///    see `fragment_cuts`.
+/// 3. With `sub_grids`, the same dozen cuts again with auto-lift on, in the
+///    same app, timed to their lifts' handovers landing; see
+///    `fragment_lift_cuts`.
+/// 4. With `sub_grids`, the `vehicle` hull built in a sub-grid and cut in
+///    two, which a check floods with no limit; see `fragment_hull_cut`.
 ///
 /// Threshold, checked here and reported as `gate_failures`: voxels visited
 /// per check in `digs` at most `FRAGMENT_DIG_VISITED_PER_CHECK`. A cut whose
-/// check hasn't landed within `CUT_FRAME_CAP` frames also counts. Timings
-/// have no threshold.
+/// check, or whose lifts' handover, hasn't landed within `CUT_FRAME_CAP`
+/// frames also counts. Timings have no threshold.
 #[cfg(feature = "dislodged_fragments")]
 fn scenario_fragments() -> Metrics {
     let prefix = "fragments";
     let sites = fragment_sites();
     let mut metrics = Metrics::new();
 
-    let mut app = fragments_app(FragmentWorld { detect: true });
+    let mut app = fragments_app(FragmentWorld {
+        detect: true,
+        #[cfg(feature = "sub_grids")]
+        auto_lift: false,
+    });
     fragment_digs(
         &mut app,
         &format!("{prefix}.digs"),
         &sites.digs,
         &mut metrics,
     );
-    let capped = fragment_cuts(&mut app, prefix, sites, &mut metrics);
+    #[allow(unused_mut)]
+    let mut capped = fragment_cuts(&mut app, prefix, sites, &mut metrics);
+    #[cfg(feature = "sub_grids")]
+    {
+        capped += fragment_lift_cuts(&mut app, prefix, sites, &mut metrics);
+        capped += fragment_hull_cut(&mut app, prefix, &mut metrics);
+    }
     drop(app);
 
-    let mut app = fragments_app(FragmentWorld { detect: false });
+    let mut app = fragments_app(FragmentWorld::default());
     fragment_digs(
         &mut app,
         &format!("{prefix}.digs_not_opted_in"),

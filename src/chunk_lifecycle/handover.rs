@@ -108,6 +108,10 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     /// Sub-grids to despawn once no handover holds their chunks, each with
     /// whether a `PostUpdate` has passed since `despawn_sub_grid`.
     despawns: Mutex<Vec<(Entity, bool)>>,
+    /// Sub-grids stamped and still live, which fragment checks landing from
+    /// the stamp on count as gone.
+    #[cfg(feature = "dislodged_fragments")]
+    stamped_away: Mutex<HashSet<Entity>>,
     stats: HandoverStats,
 }
 
@@ -121,6 +125,8 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             landed: Vec::new(),
             next_id: 0,
             despawns: Mutex::default(),
+            #[cfg(feature = "dislodged_fragments")]
+            stamped_away: Mutex::default(),
             stats: HandoverStats::default(),
         }
     }
@@ -375,7 +381,17 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Notes a stamp, whose edits commit in the next `commit_voxel_edits`,
     /// to announce with `stamped` once that commit's handover lands.
     pub fn stamped(&self, stamped: Stamped<C>) {
+        #[cfg(feature = "dislodged_fragments")]
+        self.stamped_away.lock().unwrap().insert(stamped.sub_grid);
         self.queued.lock().unwrap().push(Operation::Stamp(stamped));
+    }
+
+    /// Whether the sub-grid `entity` was stamped: from the call on, a
+    /// fragment check of it finds nothing to report, since its voxels are
+    /// the target's.
+    #[cfg(feature = "dislodged_fragments")]
+    pub fn is_stamped_away(&self, entity: Entity) -> bool {
+        self.stamped_away.lock().unwrap().contains(&entity)
     }
 
     /// Writes the [`Lifted`] or [`Stamped`] of each lift and stamp whose
@@ -388,6 +404,13 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         mut lifted: MessageWriter<Lifted<C>>,
         mut stamped: MessageWriter<Stamped<C>>,
     ) {
+        #[cfg(feature = "dislodged_fragments")]
+        {
+            let stamped_away = handovers.stamped_away.get_mut().unwrap();
+            if !stamped_away.is_empty() {
+                stamped_away.retain(|&entity| sub_grids.live(entity).is_some());
+            }
+        }
         if handovers.landed.is_empty() {
             return;
         }
