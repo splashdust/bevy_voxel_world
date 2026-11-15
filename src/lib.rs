@@ -114,14 +114,15 @@ pub mod rendering {
     //! | 9 | `local_position` | The position in the chunk's padded local coordinates, centroid-sampled. |
     //! | 10 | `local_normal` | The normal in the chunk's padded local coordinates, as the mesh holds it. |
     //! | 11 | `light_tag` | Flat. The chunk's `MeshTag`, present only under the `VOXEL_LIGHT` shader def of a lit world. |
+    //! | 12 | `world_grid_position` | `world_position`, centroid-sampled, which light reads as a position in the world's grid. Present only under the `SUB_GRIDS` shader def, which a lit world gets with the `sub_grids` feature. |
     //!
     //! Locations 3 and 4 hold Bevy's `uv_b` and `world_tangent` for a mesh
     //! that has them. The crate's mesher makes neither.
     //!
     //! # On a moving body
     //!
-    //! `world_position`, `world_normal` and `world_tangent` follow the chunk's
-    //! transform, so they change as the chunk moves or turns, for example
+    //! `world_position`, `world_grid_position`, `world_normal` and
+    //! `world_tangent` follow the chunk's transform, so they change as the chunk moves or turns, for example
     //! when a world's root, set up in
     //! [`init_root`](crate::prelude::VoxelWorldConfig::init_root), is
     //! rotated. Every other output stays with the chunk and holds the same
@@ -162,10 +163,15 @@ pub mod rendering {
     //! [`vertex_layout`], and take `VoxelVertexOutput` in its own fragment
     //! shader. A custom vertex shader outputs `local_position` at location 9
     //! with `@interpolate(perspective, centroid)` and `local_normal` at
-    //! location 10 in every world, and `light_tag` at location 11 with
-    //! `@interpolate(flat)` under `VOXEL_LIGHT`. The crate's fragment shader
-    //! picks textures from `local_normal`, so a vertex shader that declares
-    //! location 10 but never writes it shows the side texture on every face.
+    //! location 10 in every world, `light_tag` at location 11 with
+    //! `@interpolate(flat)` under `VOXEL_LIGHT`, and `world_grid_position` at
+    //! location 12 with `@interpolate(perspective, centroid)` under
+    //! `SUB_GRIDS`. The crate's fragment shader picks textures from
+    //! `local_normal`, so a vertex shader that declares location 10 but never
+    //! writes it shows the side texture on every face. Light reads a
+    //! sub-grid's faces at `world_grid_position`, so a vertex shader that
+    //! declares location 12 but never writes it lights them as if they were
+    //! at the world's origin.
     #![cfg_attr(
         feature = "light_propagation",
         doc = "",

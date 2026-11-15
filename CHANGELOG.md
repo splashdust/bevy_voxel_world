@@ -7,9 +7,9 @@
 
 ### Breaking changes
 
-- The crate's vertex shaders output `local_position` at location 9 and `local_normal` at location 10 in every world, lit or not, and `light_tag` at location 11 only under the `VOXEL_LIGHT` shader def, as before. The `rendering` module docs list every vertex output and its space. The default fragment shader picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`, so a voxel's top texture stays on its own top under a rotated `WorldRoot`.
+- The crate's vertex shaders output `local_position` at location 9 and `local_normal` at location 10 in every world, lit or not, and `light_tag` at location 11 only under the `VOXEL_LIGHT` shader def, as before. With the `sub_grids` feature, a lit world's vertex shaders also output `world_grid_position`, the centroid-sampled world position, at location 12 under the `SUB_GRIDS` shader def, and its fragment shaders read sub-grids' faces from it. The `rendering` module docs list every vertex output and its space. The default fragment shader picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`, so a voxel's top texture stays on its own top under a rotated `WorldRoot`.
 
-- Only a custom vertex shader that feeds the crate's fragment shader in an unlit world breaks: it must now write locations 9 and 10, which a lit world already required. A shader that declares those outputs but never writes them still compiles, and shows the side texture on every face. No Rust signature changed.
+- Only a custom vertex shader that feeds the crate's fragment shader in an unlit world breaks: it must now write locations 9 and 10, which a lit world already required. A shader that declares those outputs but never writes them still compiles, and shows the side texture on every face. A custom vertex shader in a lit world with `sub_grids` on must also write location 12: one that declares the crate's output but never writes location 12 still compiles, and lights sub-grids' faces as if they were at the world's origin. No Rust signature changed.
 
 ## 0.19.3
 

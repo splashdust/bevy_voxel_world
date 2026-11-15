@@ -48,9 +48,11 @@
 //! world's light: they block none of its light and spread none into it.
 //! A sub-grid's emissive voxels light the sub-grid itself, with the world's
 //! voxel reach, precision and shape, and `GridVoxels::light_at` reads that
-//! light on top of the world's light where the sub-grid is. Only voxel edits
-//! to the sub-grid and changes of light settings solve its light again:
-//! moving it costs no solve.
+//! light on top of the world's light where the sub-grid is. Its faces show
+//! the same: the shader reads the world's light at each face's world
+//! position, so a sub-grid darkens as it enters a cave and brightens as it
+//! passes the world's lamps. Only voxel edits to the sub-grid and changes
+//! of light settings solve its light again: moving it costs no solve.
 //!
 //! Each chunk is a child of the sub-grid's entity, placed by its chunk key as
 //! the world's chunks are under the world's root, so it moves with the

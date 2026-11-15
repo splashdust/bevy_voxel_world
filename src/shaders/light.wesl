@@ -4,7 +4,7 @@
 // bindings 200 and 201. The crate's vertex shaders output each face's local
 // position and local normal in every world, and the chunk's tag under the
 // `VOXEL_LIGHT` shader def. A fragment shader reads a face's light with
-// `sample_light` and applies it to Bevy's PBR input with
+// `sample_face_light` and applies it to Bevy's PBR input with
 // `apply_voxel_light`, the one place light meets the PBR calculation. A
 // shader without PBR can use `sky_brightness` and `voxel_brightness` instead.
 //
@@ -12,9 +12,10 @@
 // mesh: a cube face reads the voxel in front of it, and a face off the voxel
 // grid the 8 voxels around the point in front of it (see `read_front`).
 // A custom vertex shader outputs what the crate's do: the centroid-sampled
-// local position at location 9 and the local normal at 10 in every world, and
-// the flat tag at 11 under `VOXEL_LIGHT`. The crate's `rendering` module docs
-// list every output and its space.
+// local position at location 9 and the local normal at 10 in every world,
+// the flat tag at 11 under `VOXEL_LIGHT`, and the centroid-sampled position
+// in the world's grid at 12 under `SUB_GRIDS`. The crate's `rendering` module
+// docs list every output and its space.
 //
 // The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
 // chunk's slot in the texture: 34 texels a side, the chunk's voxels in its
@@ -37,6 +38,20 @@
 // Bit 30 marks a sub-grid's chunk, with or without a slot, and bits 28 and 29
 // are clear. Every read of a field masks it to its width, so a sub-grid's tag
 // reads the same slot, LOD level and levels it would without bit 30.
+//
+// With the crate's `sub_grids` feature, a lit world sets the `SUB_GRIDS`
+// shader def, and its material holds the world's tag map at binding 202: a
+// hash table from a level-0 world chunk position to the tag the world shows
+// there, for the world chunks around its sub-grids. `sample_face_light`
+// lights a sub-grid's face with the world's light where the face is, read
+// through the tag map by `world_light`, as well as with the sub-grid's own.
+// It reads the face's position in the world's grid from Bevy's world
+// position, so it assumes the world's `WorldRoot` is at the identity. A
+// shader that still calls `sample_light` lights a sub-grid's faces from the
+// sub-grid's own light alone: they don't darken in a cave or brighten by a
+// lamp of the world. Each fragment of a sub-grid's face costs one lookup in
+// the tag map and one more read's cells; a world chunk's face costs nothing
+// more.
 //
 // References:
 //
@@ -88,8 +103,22 @@ var light_texture: texture_3d<u32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(201)
 var<uniform> light_look: LightLook;
 
+// The world's tag map, under `SUB_GRIDS`: see `tag_map_tag`.
+@if(SUB_GRIDS)
+@group(constants::MATERIAL_BIND_GROUP) @binding(202)
+var tag_map: texture_2d<u32>;
+
 const HAS_SLOT: u32 = 0x80000000u;
 const SLOT_SIDE: u32 = 34u;
+
+// Bit 30 of a tag: the chunk is a sub-grid's.
+const SUB_GRID: u32 = 0x40000000u;
+
+// The tag of an empty entry of the tag map.
+const EMPTY: u32 = 0xFFFFFFFFu;
+
+// How many voxels a level-0 chunk spans on a side, as a shift.
+const CHUNK_SHIFT: u32 = 5u;
 
 // The look's `ao`, as `LightAo`: 0 is `IndirectLight`.
 const AO_BASE_COLOR: u32 = 1u;
@@ -348,6 +377,116 @@ fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLev
     let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));
     let levels = read_front(origin, local, n);
     return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(behind.z));
+}
+
+// The tag map's hash of the level-0 world chunk position `position`, the
+// entry its lookup starts from. It matches the crate's own: every step is a
+// wrapping `u32` multiply, xor or shift.
+fn tag_map_hash(position: vec3<i32>) -> u32 {
+    let p = bitcast<vec3<u32>>(position);
+    var hash = (p.x * 0x9E3779B1u) ^ (p.y * 0x85EBCA77u) ^ (p.z * 0xC2B2AE3Du);
+    hash ^= hash >> 16u;
+    hash *= 0x85EBCA6Bu;
+    hash ^= hash >> 13u;
+    hash *= 0xC2B2AE35u;
+    hash ^= hash >> 16u;
+    return hash;
+}
+
+// The tag the tag map holds for the level-0 world chunk at `position`, or
+// `EMPTY` if it holds none.
+//
+// It follows the crate's lookup exactly: from the hash masked by the
+// capacity, a power of two, step to the next entry, wrapping at the end,
+// until the position or an empty entry. Entry `i` is texel
+// `(i % width, i / width)`.
+@if(SUB_GRIDS)
+fn tag_map_tag(position: vec3<i32>) -> u32 {
+    let size = textureDimensions(tag_map);
+    let capacity = size.x * size.y;
+    let mask = capacity - 1u;
+    let key = bitcast<vec3<u32>>(position);
+    var index = tag_map_hash(position) & mask;
+    // The table always keeps empty entries, so the bound is never reached.
+    for (var probed = 0u; probed < capacity; probed++) {
+        let entry = textureLoad(tag_map, vec2<u32>(index % size.x, index / size.x), 0);
+        if entry.w == EMPTY {
+            break;
+        }
+        if all(entry.xyz == key) {
+            return entry.w;
+        }
+        index = (index + 1u) & mask;
+    }
+    return EMPTY;
+}
+
+// The world's light at a face of a sub-grid, from the face's position and
+// normal in the world's grid, which assumes the world's root at the
+// identity.
+//
+// It reads as `sample_light` would for a world face there: on the grid, the
+// cell in front of the face, and off it the 8 cells around the point in
+// front of it. It looks up one world chunk in the tag map, the one holding
+// the point half a voxel in front of the face, whose voxel is the nearest of
+// the cells read, and reads every cell from that chunk's slot, whose shell
+// holds its neighbours' cells. A chunk above LOD level 0 reads its cells, `1 << L`
+// voxels wide, from its own minimum corner. A position the tag map doesn't
+// hold reads open sky with no lamps. A face never glows from the world's
+// lamps.
+@if(SUB_GRIDS)
+fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevels {
+    let n = unit_normal(world_normal);
+    let nearest = vec3<i32>(floor(world_position + n * 0.5));
+    let chunk = nearest >> vec3<u32>(CHUNK_SHIFT);
+    let tag = tag_map_tag(chunk);
+    if tag == EMPTY {
+        return LightLevels(15.0, vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+    if (tag & HAS_SLOT) == 0u {
+        return tag_levels(tag);
+    }
+    // A coarse chunk's minimum corner is a multiple of its extent in
+    // level-0 chunks, `1 << L`.
+    let level = vec3<u32>((tag >> 24u) & 15u);
+    let corner = (chunk >> level) << level;
+    let offset = world_position - vec3<f32>(corner) * f32(1u << CHUNK_SHIFT);
+    let local = offset / cell_width(tag) + vec3<f32>(1.0);
+    let levels = read_front(slot_origin(tag), local, n);
+    return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(0.0));
+}
+
+// The light any chunk face shows, a world chunk's or a sub-grid's: the light
+// a fragment shader of a lit world reads. It takes the chunk's tag, the
+// face's position and normal in the chunk's padded local coordinates, and
+// its position and normal in the world's grid.
+//
+// A world chunk's face reads as `sample_light` reads it, and the world's
+// position and normal are unused. Under the `SUB_GRIDS` shader def, a
+// sub-grid chunk's face, whose tag has bit 30 set, also reads the world's
+// light with `world_light`. It shows the smaller of the world's sky light
+// and its own, which caps the world's sky by the sub-grid's enclosure, and
+// the larger of the world's voxel light and its own lamps'. Its glow is its
+// own.
+fn sample_face_light(
+    tag: u32,
+    local_position: vec3<f32>,
+    local_normal: vec3<f32>,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+) -> LightLevels {
+    let own = sample_light(tag, local_position, local_normal);
+    @if(SUB_GRIDS) {
+        if (tag & SUB_GRID) != 0u {
+            let world = world_light(world_position, world_normal);
+            return LightLevels(
+                min(world.sky, own.sky),
+                max(world.voxel, own.voxel),
+                own.own_voxel,
+            );
+        }
+    }
+    return own;
 }
 
 // The brightness of `level` in one of the look's tables, between entries for

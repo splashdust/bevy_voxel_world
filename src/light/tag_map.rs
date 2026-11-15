@@ -43,9 +43,16 @@
 //! varies, and making a slot's bytes grows with the chunk's voxels. Each
 //! entry takes 16 bytes of texture, and the table keeps at least twice as
 //! many entries' room as it holds. When it runs out of room it doubles,
-//! replacing its texture, and every entry is written again in that frame. It never shrinks. A world makes its tag map in the frame
-//! its first sub-grid exists, and a world without light propagation makes
-//! none.
+//! replacing its texture, and every entry is written again in that frame.
+//! It never shrinks. A world makes its tag map in the frame its first
+//! sub-grid exists, and a world without light propagation makes none.
+//!
+//! **The shader.** The world's materials bind the map's texture at binding
+//! 202, and the shader looks up the world chunk in front of a sub-grid's
+//! face in it: see [`material`](super::material). Until the world makes its
+//! tag map they bind a placeholder of one empty entry, where every lookup
+//! misses, which has no upkeep. Each time the table grows into a new
+//! texture, the materials bind it in the same frame.
 //!
 //! # Hinted air
 //!
@@ -414,8 +421,7 @@ impl TagMap {
         self.table.get(position)
     }
 
-    /// The map's texture.
-    #[cfg_attr(not(test), expect(dead_code, reason = "bound by tests"))]
+    /// The map's texture, which the world's materials bind.
     pub fn texture(&self) -> &Handle<Image> {
         &self.texture
     }
@@ -623,6 +629,23 @@ fn texture_image(capacity: usize) -> Image {
     );
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image
+}
+
+/// A texture laid out as a tag map's, of one empty entry, so that every
+/// lookup in it misses. A lit world's materials bind it until the world
+/// makes its tag map.
+pub(crate) fn placeholder_image() -> Image {
+    let mut texel = [0; 16];
+    texel[12..].copy_from_slice(&EMPTY.to_le_bytes());
+    let mut image = Image::new_fill(
+        Extent3d::default(),
+        TextureDimension::D2,
+        &texel,
+        TextureFormat::Rgba32Uint,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING;
     image
 }
 

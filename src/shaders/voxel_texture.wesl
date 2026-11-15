@@ -7,7 +7,7 @@ import bevy_pbr::render::{
 };
 
 @if(VOXEL_LIGHT)
-import bevy_voxel_world::light::{sample_light, apply_voxel_light};
+import bevy_voxel_world::light::{sample_face_light, apply_voxel_light};
 @if(VOXEL_LIGHT && !PREPASS_PIPELINE)
 import bevy_voxel_world::light::remove_unshadowed_sun;
 
@@ -62,6 +62,8 @@ fn vertex(vertex: VoxelVertex) -> VoxelVertexOutput {
     out.local_normal = vertex.normal;
     @if(VOXEL_LIGHT)
     out.light_tag = mesh_functions::get_tag(vertex.instance_index);
+    @if(SUB_GRIDS)
+    out.world_grid_position = out.world_position.xyz;
 
     return out;
 }
@@ -104,10 +106,20 @@ fn fragment(
 
 @if(PREPASS_PIPELINE)
     let out = deferred_output(in, pbr_input);
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE && SUB_GRIDS)
+    let grid_position = in.world_grid_position;
+@if(VOXEL_LIGHT && !PREPASS_PIPELINE && !SUB_GRIDS)
+    let grid_position = in.world_position.xyz;
 @if(VOXEL_LIGHT && !PREPASS_PIPELINE)
     apply_voxel_light(
         &pbr_input,
-        sample_light(in.light_tag, in.local_position, in.local_normal),
+        sample_face_light(
+            in.light_tag,
+            in.local_position,
+            in.local_normal,
+            grid_position,
+            in.world_normal,
+        ),
         in.color.r,
     );
 

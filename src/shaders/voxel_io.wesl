@@ -53,4 +53,9 @@ struct VoxelVertexOutput {
     // The chunk's tag, for the `bevy_voxel_world::light` module.
     @if(VOXEL_LIGHT)
     @location(11) @interpolate(flat) light_tag: u32,
+    // The face's position in the world's grid, `world_position` centroid-
+    // sampled as `local_position` is, for the `bevy_voxel_world::light`
+    // module to read the world's light at a sub-grid's face.
+    @if(SUB_GRIDS)
+    @location(12) @interpolate(perspective, centroid) world_grid_position: vec3<f32>,
 }

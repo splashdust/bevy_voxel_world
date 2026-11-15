@@ -7,11 +7,14 @@ use std::collections::HashSet;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureFormat;
 
 use super::super::{meshing_app, spawn_camera, update_until};
 use crate::grid_bench::{tag_map_stats, TagMapStats};
 use crate::light::route::{LightRoute, HAS_SLOT};
 use crate::prelude::*;
+use crate::rendering::VoxelWorldMaterial;
+use crate::voxel_material::DefaultVoxelMaterial;
 
 const STONE: u8 = 1;
 const LAMP: u8 = 2;
@@ -351,4 +354,56 @@ fn a_full_table_grows_into_a_new_texture_and_writes_every_entry() {
     for (position, answered) in answers {
         assert_eq!(answer(&app, position), answered, "{position}");
     }
+}
+
+/// The texture the world's material binds as its tag map.
+fn bound_tag_map(app: &App) -> Handle<Image> {
+    let materials = app
+        .world()
+        .resource::<Assets<VoxelWorldMaterial<DefaultVoxelMaterial>>>();
+    assert_eq!(materials.len(), 1);
+    let (_, material) = materials.iter().next().unwrap();
+    material.extension.tag_map().clone()
+}
+
+#[test]
+fn the_worlds_material_binds_a_tag_map_where_every_lookup_misses_until_its_first_sub_grid(
+) {
+    let mut app = app(FloorWorld::default());
+    let placeholder = bound_tag_map(&app);
+    let images = app.world().resource::<Assets<Image>>();
+    let image = images.get(&placeholder).unwrap();
+    // A table of one entry, which is empty, so a lookup starts and stops
+    // there.
+    assert_eq!(image.texture_descriptor.format, TextureFormat::Rgba32Uint);
+    assert_eq!(image.width() * image.height(), 1);
+    let tag = &image.data.as_ref().unwrap()[12..16];
+    assert_eq!(tag, u32::MAX.to_le_bytes());
+
+    spawn_sub_grid(&mut app, Transform::from_xyz(10.0, 5.0, 10.0), &CORNERS);
+    app.update();
+    let texture = route(&app).tag_map().unwrap().texture().clone();
+    assert_eq!(bound_tag_map(&app), texture);
+}
+
+#[test]
+fn the_worlds_material_binds_each_texture_its_tag_map_grows_into() {
+    let mut app = app(FloorWorld::default());
+    let spread = [IVec3::ZERO, IVec3::splat(100)];
+    spawn_sub_grid(&mut app, Transform::IDENTITY, &spread);
+    app.update();
+    let first = route(&app).tag_map().unwrap().texture().id();
+    assert_eq!(bound_tag_map(&app).id(), first);
+
+    // A second box of 125 positions fills the table past half.
+    spawn_sub_grid(&mut app, Transform::from_xyz(320.0, 0.0, 0.0), &spread);
+    app.update();
+    let grown = route(&app).tag_map().unwrap().texture().id();
+    assert_ne!(grown, first);
+    assert_eq!(bound_tag_map(&app).id(), grown);
+
+    // Nothing binds the first texture any more, so it's dropped.
+    app.update();
+    app.update();
+    assert!(app.world().resource::<Assets<Image>>().get(first).is_none());
 }
