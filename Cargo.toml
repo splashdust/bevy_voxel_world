@@ -71,7 +71,9 @@ path = "examples/multiple_cameras.rs"
 [[example]]
 name = "multiplayer_loopback"
 path = "examples/multiplayer_loopback.rs"
-required-features = ["serde"]
+required-features = ["serde", "sub_grids"]
+# Its tests run the sync between the three worlds without a window.
+test = true
 
 [[example]]
 name = "navigation"
