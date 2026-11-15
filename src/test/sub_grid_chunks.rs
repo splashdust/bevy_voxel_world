@@ -788,3 +788,73 @@ fn removing_the_sub_grid_marker_despawns_its_chunks_and_keeps_its_entity() {
     assert!(app.world().get_entity(entity).is_ok());
     assert!(chunks_of::<FloorWorld>(&mut app, entity).is_empty());
 }
+
+/// Fills a sub-grid with chunks at two positions, ends it with `end`, and
+/// checks that each of its chunks fired one `ChunkWillDespawn`, naming the
+/// sub-grid, in the frame after `end`.
+fn ending_fires_will_despawn_for_each_chunk(end: impl FnOnce(&mut App, Entity)) {
+    let mut app = app_of::<FloorWorld>();
+    record_chunk_messages::<ChunkWillDespawn<FloorWorld>>(&mut app);
+    let keys: Vec<ChunkKey> = [[0, 0, 0], [1, 0, 0]].map(level_0).to_vec();
+    let entity = spawn_filled::<FloorWorld>(
+        &mut app,
+        Transform::default(),
+        &[IVec3::new(5, 6, 7), IVec3::new(40, 6, 7)],
+        WorldVoxel::Solid(1),
+    );
+    until_ready::<FloorWorld>(&mut app, entity, &keys);
+    let chunks: std::collections::HashSet<(ChunkKey, Entity)> = keys
+        .iter()
+        .map(|key| (*key, chunk_entity::<FloorWorld>(&mut app, entity, *key)))
+        .collect();
+    let frame = app.world().resource::<bevy::diagnostic::FrameCount>().0;
+
+    end(&mut app, entity);
+    for _ in 0..3 {
+        app.update();
+    }
+    let despawned: Vec<(u32, ChunkKey, Entity)> =
+        recorded::<ChunkWillDespawn<FloorWorld>>(&app)
+            .messages
+            .iter()
+            .filter(|(_, message)| message.grid == Grid::SubGrid(entity))
+            .map(|(frame, message)| (*frame, message.chunk_key, message.entity))
+            .collect();
+    assert_eq!(
+        despawned
+            .iter()
+            .map(|(_, key, chunk)| (*key, *chunk))
+            .collect::<std::collections::HashSet<_>>(),
+        chunks
+    );
+    assert_eq!(despawned.len(), chunks.len(), "{despawned:?}");
+    assert!(
+        despawned.iter().all(|(at, ..)| *at == frame),
+        "{despawned:?} after {frame}"
+    );
+}
+
+#[test]
+fn despawning_a_sub_grid_fires_will_despawn_for_each_of_its_chunks() {
+    ending_fires_will_despawn_for_each_chunk(|app, entity| {
+        app.world_mut().entity_mut(entity).despawn();
+    });
+}
+
+#[test]
+fn removing_the_sub_grid_marker_fires_will_despawn_for_each_of_its_chunks() {
+    ending_fires_will_despawn_for_each_chunk(|app, entity| {
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<SubGrid<FloorWorld>>();
+    });
+}
+
+#[test]
+fn despawn_sub_grid_fires_will_despawn_for_each_of_its_chunks() {
+    ending_fires_will_despawn_for_each_chunk(|app, entity| {
+        run::<FloorWorld, _>(app, move |voxel_world| {
+            voxel_world.despawn_sub_grid(entity)
+        });
+    });
+}

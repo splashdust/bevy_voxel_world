@@ -664,3 +664,44 @@ fn despawning_a_sub_grid_drops_its_voxels_and_no_later_sub_grid_finds_them() {
         }
     }
 }
+
+#[test]
+fn an_entity_made_a_sub_grid_again_in_the_frame_its_marker_was_removed_is_a_new_sub_grid()
+{
+    let mut app = sub_grid_app();
+    let entity = spawn(&mut app, Transform::default());
+    set(&mut app, entity, &[A], WorldVoxel::Solid(1));
+    app.update();
+    let old = app
+        .world()
+        .get::<SubGrid<FloorWorld>>(entity)
+        .unwrap()
+        .grid();
+
+    app.world_mut()
+        .entity_mut(entity)
+        .remove::<SubGrid<FloorWorld>>();
+    let read = run::<FloorWorld, _>(&mut app, move |voxel_world| {
+        voxel_world.insert_sub_grid(entity);
+        let mut grid = voxel_world.grid_mut(Grid::SubGrid(entity)).unwrap();
+        grid.set_voxel(B, WorldVoxel::Solid(2));
+        let grid = voxel_world.grid(Grid::SubGrid(entity)).unwrap();
+        (grid.get_voxel(A), grid.get_voxel(B))
+    });
+    assert_eq!(read, (WorldVoxel::Air, WorldVoxel::Solid(2)));
+
+    for frame in 0..3 {
+        app.update();
+        assert_eq!(voxel(&mut app, entity, A), Some(WorldVoxel::Air), "{frame}");
+        assert_eq!(
+            voxel(&mut app, entity, B),
+            Some(WorldVoxel::Solid(2)),
+            "{frame}"
+        );
+    }
+    let new = app
+        .world()
+        .get::<SubGrid<FloorWorld>>(entity)
+        .map(SubGrid::grid);
+    assert!(new.is_some_and(|new| new != old), "{new:?} after {old:?}");
+}

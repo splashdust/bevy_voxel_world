@@ -160,9 +160,10 @@
 //!
 //! The crate keeps a record of each world's live sub-grids, which a system
 //! reads at once, before its commands apply, so the system that spawns a
-//! sub-grid can fill it. Once the crate sees a sub-grid's entity despawned,
-//! or its [`SubGrid<C>`] removed, in the next `PreUpdate` at the latest, the
-//! sub-grid's voxel edits and chunks go with it.
+//! sub-grid can fill it. As a sub-grid's entity despawns, or its
+//! [`SubGrid<C>`] is removed, the sub-grid ends and its voxel edits go with
+//! it. Its chunks despawn in the next `PreUpdate`, each with its
+//! [`ChunkWillDespawn`](crate::prelude::ChunkWillDespawn).
 //!
 //! After transform propagation in `PostUpdate`, the crate keeps each
 //! sub-grid's pose against the world's root, which [`GridVoxels::pose`]
@@ -219,15 +220,17 @@ pub enum Grid {
 ///
 /// It is added by [`VoxelWorld::spawn_sub_grid`] and
 /// [`VoxelWorld::insert_sub_grid`], and has no public constructor. Removing
-/// it, or despawning its entity, ends the sub-grid and drops its voxels and
-/// chunks. [`VoxelWorld::despawn_sub_grid`] despawns it once the handover
-/// holding its chunks, if one does, has landed.
+/// it, or despawning its entity, ends the sub-grid as the removal applies:
+/// its voxels go at once, and its chunks in the next `PreUpdate`.
+/// [`VoxelWorld::despawn_sub_grid`] despawns it once the handover holding
+/// its chunks, if one does, has landed.
 ///
 /// [`VoxelWorld::despawn_sub_grid`]: crate::prelude::VoxelWorld::despawn_sub_grid
 /// [`VoxelWorld::spawn_sub_grid`]: crate::prelude::VoxelWorld::spawn_sub_grid
 /// [`VoxelWorld::insert_sub_grid`]: crate::prelude::VoxelWorld::insert_sub_grid
 #[derive(Component)]
 #[require(Transform, Visibility)]
+#[component(on_remove)]
 pub struct SubGrid<C: VoxelWorldConfig> {
     grid: GridId,
     _world: PhantomData<fn() -> C>,
@@ -238,6 +241,25 @@ impl<C: VoxelWorldConfig> SubGrid<C> {
     #[allow(dead_code)]
     pub(crate) fn grid(&self) -> GridId {
         self.grid
+    }
+
+    /// Ends the sub-grid whose marker was removed or whose entity despawned,
+    /// so the record of live sub-grids drops it before any later system
+    /// reads it, and a [`VoxelWorld::insert_sub_grid`] of the same entity
+    /// makes a new sub-grid.
+    ///
+    /// [`VoxelWorld::insert_sub_grid`]: crate::prelude::VoxelWorld::insert_sub_grid
+    fn on_remove(
+        world: bevy::ecs::world::DeferredWorld,
+        context: bevy::ecs::lifecycle::HookContext,
+    ) {
+        let (Some(sub_grids), Some(edits)) = (
+            world.get_resource::<SubGrids<C>>(),
+            world.get_resource::<VoxelEdits<C, C::MaterialIndex>>(),
+        ) else {
+            return;
+        };
+        sub_grids.end_despawned(context.entity, edits);
     }
 }
 
@@ -400,9 +422,8 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         !self.record.lock().unwrap().live.is_empty()
     }
 
-    /// Ends the sub-grid `entity` ahead of its queued despawn, as
-    /// [`snapshot_poses`](Self::snapshot_poses) would once the despawn has
-    /// applied.
+    /// Ends the sub-grid `entity`, if it is live: ahead of its queued
+    /// despawn, or as its [`SubGrid<C>`] is removed.
     pub(crate) fn end_despawned(
         &self,
         entity: Entity,
@@ -423,28 +444,22 @@ impl<C: VoxelWorldConfig> SubGrids<C> {
         }
     }
 
-    /// Ends each sub-grid whose entity was despawned or lost its
-    /// [`SubGrid<C>`] since this last ran, and despawns the chunks of every
-    /// ended sub-grid, dropping them from the chunk index at once as
-    /// despawned chunks are. The chunk entities despawn later in the frame,
-    /// with the retired chunks, so this system has no `Commands` and needs no
+    /// Despawns the chunks of every ended sub-grid, dropping them from the
+    /// chunk index at once as despawned chunks are. The chunk entities
+    /// despawn later in the frame, with the retired chunks, each with its
+    /// `ChunkWillDespawn`, so this system has no `Commands` and needs no
     /// sync point before the commit it runs ahead of.
     ///
     /// An ended sub-grid's id is freed once the chunk map holds none of its
     /// chunks' data, which the chunk lifecycle removes later in the frame,
     /// so a later sub-grid given the id never finds the old one's chunks.
     pub fn forget_despawned(
-        mut removed: RemovedComponents<SubGrid<C>>,
         mut sub_grids: ResMut<Self>,
-        edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         mut index: ResMut<ChunkIndex<C>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     ) {
         let record = sub_grids.record.get_mut().unwrap();
-        for entity in removed.read() {
-            Self::end(record, entity, &edits);
-        }
         if record.ending.is_empty() {
             return;
         }

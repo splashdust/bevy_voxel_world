@@ -173,6 +173,11 @@ where
 }
 
 /// Fired when a chunk is about to be despawned.
+///
+/// With `sub_grids`, the chunks of a sub-grid whose entity was despawned, or
+/// whose `SubGrid<C>` was removed, fire it in the next `PreUpdate`, as the
+/// crate despawns them. By then a despawned sub-grid's chunks are gone with
+/// it, so the message names an entity that no longer exists.
 pub type ChunkWillDespawn<C> = ChunkEvent<C, WillDespawn>;
 pub struct WillDespawn;
 impl ChunkEventType for WillDespawn {}
@@ -285,6 +290,12 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// Makes `entity` a sub-grid of this world, leaving its parent and its
     /// transform alone. An entity that is a sub-grid of this world already
     /// stays as it is.
+    ///
+    /// An entity whose [`SubGrid<C>`](crate::prelude::SubGrid) was removed
+    /// is no sub-grid from the moment the removal applies, even in the same
+    /// frame, so this makes it a new, empty sub-grid with a new id. A
+    /// removal still queued in `Commands` when this is called ends the
+    /// sub-grid once it applies.
     ///
     /// The sub-grid is live at once, as with
     /// [`spawn_sub_grid`](Self::spawn_sub_grid), and its entity gets
