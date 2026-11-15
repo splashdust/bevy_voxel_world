@@ -86,10 +86,27 @@
 //!
 //! Run with `cargo run --example multiplayer_loopback --features
 //! serde,sub_grids`. With `-- audit` it plays a script instead of taking
-//! input: it edits the world through each fault, re-join and reset, checks
-//! both client worlds against the server after each, and exits with an error
-//! if any differ. `-- audit <file.png>` also saves a frame of both views
-//! partway through.
+//! input. Through each fault, a re-join and a reset, both clients edit the
+//! world, lift, edit and stamp pieces, and a piece drifts across the edge of
+//! client B's interest. Each step ends by holding every piece still until
+//! the lane settles. Then the audit checks both clients against the server,
+//! and the run exits with an error if any differ:
+//!
+//! - The world's edits, and the voxel `get_voxel` reads wherever the script
+//!   set or lifted one.
+//! - Each piece by game id: the same set of pieces within the client's
+//!   interest, and for each the same parent and pose, the same full delta of
+//!   every chunk in its `edited_chunks()`, the same voxel read wherever the
+//!   script set or lifted one, and the same `raycast_grids` hit on a ray cast
+//!   down onto it.
+//! - On client A only, whose lane is clean: that every chunk a server
+//!   message's deltas touch, padding neighbours included, publishes or
+//!   retires in one frame when the message holds a handover. B's faults can
+//!   split a handover into parts until the heartbeat heals it, so B is only
+//!   checked to converge.
+//!
+//! `-- audit <file.png>` also saves a frame of both views partway through,
+//! with a lifted piece hanging in both.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -100,6 +117,7 @@ use std::{
 use bevy::{
     app::{HierarchyPropagatePlugin, Propagate},
     camera::{visibility::RenderLayers, Viewport},
+    ecs::system::SystemParam,
     light::CascadeShadowConfigBuilder,
     platform::collections::{HashMap, HashSet},
     prelude::*,
@@ -640,6 +658,15 @@ impl ServerPieces {
     }
 }
 
+/// The centre of a sub-grid's solid voxels in the root's frame, or its
+/// origin if it holds none.
+fn voxel_centre<C: VoxelWorldConfig>(voxels: &GridVoxels<C>) -> Vec3 {
+    let pose = voxels.pose();
+    voxels.bounds().map_or(pose.translation(), |(min, max)| {
+        pose.transform_point((min + max).as_vec3() / 2.0)
+    })
+}
+
 /// Each client's pieces, by `Client::ID`.
 #[derive(Resource, Default)]
 struct Replicas([Replica; 2]);
@@ -786,7 +813,7 @@ impl Plugin for LoopbackSync {
     }
 }
 
-fn main() {
+fn main() -> AppExit {
     let audit = std::env::args().nth(1).as_deref() == Some("audit");
     let mut app = App::new();
     app.add_plugins(DefaultPlugins)
@@ -810,11 +837,13 @@ fn main() {
             ),
         );
     if audit {
-        app.init_resource::<Audit>().add_systems(Update, script);
+        app.init_resource::<Audit>()
+            .add_systems(Update, (record_landings, script));
     } else {
         app.add_systems(Update, (player_input, keys).chain());
     }
-    app.run();
+    // Returned, so an audit that fails exits with an error.
+    app.run()
 }
 
 fn setup(mut commands: Commands, mut gizmo_configs: ResMut<GizmoConfigStore>) {
@@ -936,6 +965,10 @@ fn tick_lane(mut lane: ResMut<Lane>, mut feedback: ResMut<Feedback>) {
 /// `world` comes before `commands`, so the parent and pose given to a piece
 /// here replace the ones `spawn_sub_grid` gives it: a system's commands
 /// apply in the order of its parameters.
+///
+/// During an audit, client A notes the chunks each message's deltas touch
+/// in the `Audit`, by the server frame that sent it.
+#[allow(clippy::too_many_arguments)]
 fn client_receive<C: Client>(
     mut world: VoxelWorld<C>,
     mut commands: Commands,
@@ -943,6 +976,7 @@ fn client_receive<C: Client>(
     mut lane: ResMut<Lane>,
     mut feedback: ResMut<Feedback>,
     mut replicas: ResMut<Replicas>,
+    mut audit: Option<ResMut<Audit>>,
 ) {
     let replica = &mut replicas.0[C::ID];
     let root = *root;
@@ -1002,6 +1036,8 @@ fn client_receive<C: Client>(
             lane.note(format!("{} joins pieces {ids:?}", C::NAME));
         }
 
+        // The chunks this message's deltas touch, by game name and by grid.
+        let mut touched: Vec<(GridName, Grid, IVec3)> = Vec::new();
         for (grid, delta) in msg.deltas {
             let (chunk, seq) = (delta.chunk, delta.seq);
             if delta.full {
@@ -1023,18 +1059,23 @@ fn client_receive<C: Client>(
                 .filter(|(g, p)| *g == grid && delta.iter().any(|(pos, _)| pos == *p))
                 .collect();
             let applied = match grid {
-                GridName::World => world.apply_delta(delta),
+                GridName::World => {
+                    touched.push((grid, Grid::World, chunk));
+                    world.apply_delta(delta)
+                }
                 GridName::Piece(id) => {
                     // Deltas for a piece the client doesn't hold belong to
                     // one that left its interest, or whose spawn is still on
                     // its way: the join brings its full deltas.
-                    let Some(mut voxels) = replica
+                    let Some((local, mut voxels)) = replica
                         .pieces
                         .get(&id)
-                        .and_then(|p| world.grid_mut(Grid::SubGrid(p.entity)))
+                        .map(|p| Grid::SubGrid(p.entity))
+                        .and_then(|g| Some((g, world.grid_mut(g)?)))
                     else {
                         continue;
                     };
+                    touched.push((grid, local, chunk));
                     voxels.apply_delta(delta)
                 }
             };
@@ -1079,10 +1120,12 @@ fn client_receive<C: Client>(
             piece.parent = at.parent;
         }
 
+        let mut despawned = HashSet::new();
         for id in msg.despawns {
             if replica.existence.get(&id).is_some_and(|f| *f > frame) {
                 continue;
             }
+            despawned.insert(id);
             // Through `despawn_sub_grid`, so a stamped piece shows until the
             // deltas emptying it, applied above, land.
             for entity in replica.remove(id, frame) {
@@ -1155,6 +1198,16 @@ fn client_receive<C: Client>(
             let pos = IVec3::from_array(pos);
             feedback.pending[C::ID].retain(|p| *p != (grid, pos));
             feedback.rejected[C::ID].push((grid, pos, lane.frame + FLASH_FRAMES));
+        }
+
+        if let Some(audit) = audit.as_mut().filter(|_| C::ID == ClientA::ID) {
+            // A message fills a piece it spawns, or empties one it
+            // despawns, when it carries that piece's deltas.
+            let handover = touched.iter().any(|(name, ..)| {
+                matches!(name, GridName::Piece(id) if spawned.contains(id) || despawned.contains(id))
+            });
+            let chunks = touched.into_iter().map(|(_, grid, chunk)| (grid, chunk));
+            audit.note_commit(frame, lane.frame, handover, chunks);
         }
     }
 }
@@ -1323,11 +1376,7 @@ fn lift(
     let piece = server.grid(Grid::SubGrid(entity)).expect("lifted at once");
     let source_pose = server.grid(source).expect("lifted from it").pose();
     let local = piece.pose().reparented_to(&source_pose);
-    let centre = piece
-        .bounds()
-        .map_or(piece.pose().translation(), |(min, max)| {
-            piece.pose().transform_point((min + max).as_vec3() / 2.0)
-        });
+    let centre = voxel_centre(&piece);
     let parent = match source_name {
         GridName::World => None,
         GridName::Piece(parent) => Some(parent),
@@ -1414,10 +1463,7 @@ fn server_send(
     // Interest takes a piece whole, by the top piece above it.
     let centre = |id: u32| {
         let voxels = server.grid(Grid::SubGrid(pieces.pieces[&id].entity))?;
-        let pose = voxels.pose();
-        Some(voxels.bounds().map_or(pose.translation(), |(min, max)| {
-            pose.transform_point((min + max).as_vec3() / 2.0)
-        }))
+        Some(voxel_centre(&voxels))
     };
     let centres: HashMap<u32, Option<Vec3>> = pieces
         .pieces
@@ -1907,43 +1953,235 @@ fn update_hud(
 // ---------------------------------------------------------------------------
 // The scripted audit, run with `-- audit`.
 
-/// Every voxel the script asked for, so the audit can check those whose edit
-/// is gone show the generated voxel again, and how many checks failed.
+/// What the audit keeps between checks: every voxel the script asked to set
+/// or lift, by grid, so the audit can read each back on every world, how
+/// many checks failed, and the server commits client A applied with the
+/// frames its chunks landed in.
 #[derive(Resource, Default)]
 struct Audit {
-    touched: HashSet<IVec3>,
+    touched: HashSet<(GridName, IVec3)>,
     failures: u32,
+    /// The server commits client A applied, by the server frame whose
+    /// message held them.
+    commits: BTreeMap<u32, ServerCommit>,
+    landed: Landings,
 }
 
-/// Edits from both clients through each fault, then a re-join and a reset,
-/// auditing both client worlds against the server after each step. Frames
-/// count from the first `PreUpdate`.
+/// The frames in which client A published or retired each chunk, by A's
+/// grid and the chunk's position.
+type Landings = HashMap<(Grid, IVec3), Vec<u32>>;
+
+/// One server commit as client A applied it.
+#[derive(Default)]
+struct ServerCommit {
+    /// The frame A applied the first part of it in.
+    applied: u32,
+    /// Whether it lands as one handover on A: it fills a piece A spawns or
+    /// empties one A despawns.
+    handover: bool,
+    /// The chunks its deltas touch, by A's grid.
+    deltas: HashSet<(Grid, IVec3)>,
+    /// The neighbours of those chunks, which the deltas make stale where
+    /// they change a voxel in the neighbour's padding.
+    beside: HashSet<(Grid, IVec3)>,
+}
+
+impl Audit {
+    /// Notes the chunks a message from server frame `server_frame` touched
+    /// on client A, which applied it in frame `applied`, and whether it holds
+    /// a handover. Parts of one server commit that arrive apart add to one
+    /// `ServerCommit`.
+    fn note_commit(
+        &mut self,
+        server_frame: u32,
+        applied: u32,
+        handover: bool,
+        chunks: impl IntoIterator<Item = (Grid, IVec3)>,
+    ) {
+        let mut chunks = chunks.into_iter().peekable();
+        if chunks.peek().is_none() {
+            return;
+        }
+        let commit = self
+            .commits
+            .entry(server_frame)
+            .or_insert_with(|| ServerCommit {
+                applied,
+                ..default()
+            });
+        commit.handover |= handover;
+        for (grid, chunk) in chunks {
+            commit.deltas.insert((grid, chunk));
+            for x in -1..=1 {
+                for y in -1..=1 {
+                    for z in -1..=1 {
+                        commit.beside.insert((grid, chunk + IVec3::new(x, y, z)));
+                    }
+                }
+            }
+        }
+        let ServerCommit { deltas, beside, .. } = commit;
+        beside.retain(|chunk| !deltas.contains(chunk));
+    }
+}
+
+impl ServerCommit {
+    /// The frames the handover's chunks landed in: one frame if it landed
+    /// whole.
+    ///
+    /// Each chunk of `deltas` counts in the first frame it landed in from
+    /// `applied` on. A chunk of `beside` counts only if it landed between
+    /// `applied` and the last of those, since one that landed later holds a
+    /// later edit, or wasn't made stale. A chunk that never landed is one A
+    /// doesn't have, outside its spawning distance.
+    fn landed_in(&self, landed: &Landings) -> BTreeSet<u32> {
+        let first = |chunk: &(Grid, IVec3)| {
+            landed
+                .get(chunk)?
+                .iter()
+                .copied()
+                .find(|frame| *frame >= self.applied)
+        };
+        let mut frames: BTreeSet<u32> = self.deltas.iter().filter_map(first).collect();
+        let Some(last) = frames.last().copied() else {
+            return frames;
+        };
+        frames.extend(self.beside.iter().filter_map(first).filter(|f| *f <= last));
+        frames
+    }
+}
+
+impl Audit {
+    /// Asks the server to set a voxel of a grid, as `client`.
+    fn set(
+        &mut self,
+        lane: &mut Lane,
+        feedback: &mut Feedback,
+        client: usize,
+        grid: GridName,
+        pos: IVec3,
+        voxel: WorldVoxel<u8>,
+    ) {
+        self.touched.insert((grid, pos));
+        request(lane, feedback, client, grid, pos, voxel);
+    }
+
+    /// Asks the server to lift the box `LIFT_REACH` around `at` out of a
+    /// grid, as `client` pressing `L` there would.
+    fn lift(&mut self, lane: &mut Lane, client: usize, grid: GridName, at: IVec3) {
+        let reach = IVec3::splat(LIFT_REACH);
+        let (min, max) = (at - reach, at + reach + 1);
+        for x in min.x..max.x {
+            for y in min.y..max.y {
+                for z in min.z..max.z {
+                    self.touched.insert((grid, IVec3::new(x, y, z)));
+                }
+            }
+        }
+        let (min, max) = (min.to_array(), max.to_array());
+        lane.send_to_server(client, &ToServer::Lift { grid, min, max });
+    }
+}
+
+/// The worlds and the sync state the audit reads and the script drives.
+#[derive(SystemParam)]
+struct Audited<'w, 's> {
+    server: VoxelWorld<'w, 's, Server>,
+    world_a: VoxelWorld<'w, 's, ClientA>,
+    world_b: VoxelWorld<'w, 's, ClientB>,
+    interest: Res<'w, Interest>,
+    pieces: ResMut<'w, ServerPieces>,
+    replicas: ResMut<'w, Replicas>,
+    placed: Query<'w, 's, (&'static Transform, &'static ChildOf)>,
+    live_a: Query<'w, 's, Entity, With<SubGrid<ClientA>>>,
+    live_b: Query<'w, 's, Entity, With<SubGrid<ClientB>>>,
+}
+
+/// Records the frame of each `ChunkPublished` and `ChunkWillDespawn` of
+/// client A, for the handover check. The chunk lifecycle writes them in
+/// `PreUpdate`, so they count in the frame that wrote them.
+fn record_landings(
+    lane: Res<Lane>,
+    mut audit: ResMut<Audit>,
+    mut published: MessageReader<ChunkPublished<ClientA>>,
+    mut retired: MessageReader<ChunkWillDespawn<ClientA>>,
+) {
+    let published = published.read().map(|m| (m.grid, m.chunk_key.position));
+    let retired = retired.read().map(|m| (m.grid, m.chunk_key.position));
+    for chunk in published.chain(retired) {
+        audit.landed.entry(chunk).or_default().push(lane.frame);
+    }
+}
+
+// The game ids of the pieces the script lifts. The server gives out ids in
+// the order it lifts, and the script asks for one lift at a time. The first
+// lift, game id 0, is the piece that drifts across the edge of client B's
+// interest.
+const FIRST: u32 = 1;
+const CHILD: u32 = 2;
+const SECOND: u32 = 3;
+const THIRD: u32 = 4;
+
+/// World edits and pieces from both clients through each fault, then a
+/// re-join and a reset, auditing both clients against the server after each
+/// step. Frames count from the first `PreUpdate`.
+///
+/// Under drop and reorder, client A lifts a piece in the corner client B's
+/// interest leaves out, and it drifts into B's interest. B lifts `FIRST`, A
+/// lifts `CHILD` out of it, both clients dig and lay in it, and B stamps it.
+/// Under delay, the first piece drifts out of B's interest again, A lifts
+/// `SECOND`, both clients edit it, and A stamps `CHILD`. After the re-join,
+/// B lifts `THIRD` and both clients edit it and `SECOND`. Each step ends by
+/// holding every piece still while the lane settles, so poses can be
+/// compared.
 #[allow(clippy::too_many_arguments)]
 fn script(
-    mut world_b: VoxelWorld<ClientB>,
     mut commands: Commands,
     mut lane: ResMut<Lane>,
     mut feedback: ResMut<Feedback>,
     mut audit: ResMut<Audit>,
-    mut pieces: ResMut<ServerPieces>,
-    mut replicas: ResMut<Replicas>,
-    interest: Res<Interest>,
-    server: VoxelWorld<Server>,
-    world_a: VoxelWorld<ClientA>,
+    mut w: Audited,
     cameras: Query<(&Camera, &GlobalTransform, &ViewCamera)>,
     mut exit: MessageWriter<AppExit>,
     mut generate: Local<Option<Generator>>,
 ) {
     let generate = generate.get_or_insert_with(generator);
-    let mut ask = |lane: &mut Lane, client: usize, pos: IVec3, voxel: WorldVoxel<u8>| {
-        audit.touched.insert(pos);
-        request(lane, &mut feedback, client, GridName::World, pos, voxel);
-    };
+    let (lane, feedback, audit) = (&mut *lane, &mut *feedback, &mut *audit);
+    let (a, b) = (ClientA::ID, ClientB::ID);
+    let world = GridName::World;
     let frame = lane.frame;
+    // The box around a piece's solid voxels on the server.
+    let bounds = |w: &Audited, id: u32| {
+        let piece = w.pieces.pieces.get(&id)?;
+        w.server.grid(Grid::SubGrid(piece.entity))?.bounds()
+    };
+    // Client A digs down a column of the piece, and B lays three voxels on
+    // its top.
+    let edit_piece = |w: &Audited,
+                      lane: &mut Lane,
+                      feedback: &mut Feedback,
+                      audit: &mut Audit,
+                      id: u32| {
+        let Some((min, max)) = bounds(w, id) else {
+            audit.failures += 1;
+            error!("audit: piece {id} isn't on the server to edit");
+            return;
+        };
+        let grid = GridName::Piece(id);
+        for y in min.y..max.y {
+            let pos = IVec3::new(max.x - 1, y, max.z - 1);
+            audit.set(lane, feedback, a, grid, pos, WorldVoxel::Air);
+        }
+        for x in 0..3 {
+            let pos = IVec3::new(min.x + x, max.y, min.z);
+            audit.set(lane, feedback, b, grid, pos, WorldVoxel::Solid(SNOW));
+        }
+    };
     match frame {
         120 => {
             lane.drop = true;
             lane.reorder = true;
+            audit.lift(lane, a, world, ground(generate, 33, 33));
         }
         // A pit one layer per frame, so several incremental deltas travel per
         // chunk and the drop fault has some to lose.
@@ -1952,133 +2190,101 @@ fn script(
             for dx in 3..=9 {
                 for dz in 3..=9 {
                     let y = surface(generate, dx, dz) - depth;
-                    ask(
-                        &mut lane,
-                        ClientA::ID,
-                        IVec3::new(dx, y, dz),
-                        WorldVoxel::Air,
-                    );
+                    let pos = IVec3::new(dx, y, dz);
+                    audit.set(lane, feedback, a, world, pos, WorldVoxel::Air);
                 }
             }
         }
         140..=145 => {
             let h = (frame - 140) as i32;
             for z in -4..4 {
-                let y = surface(generate, -8, z) + 1 + h;
-                ask(
-                    &mut lane,
-                    ClientA::ID,
-                    IVec3::new(-8, y, z),
-                    WorldVoxel::Solid(BRICK),
-                );
+                let pos = ground(generate, -8, z) + IVec3::Y * (1 + h);
+                audit.set(lane, feedback, a, world, pos, WorldVoxel::Solid(BRICK));
             }
         }
         150..=159 => {
-            let x = (frame - 150) as i32 - 5;
-            let y = surface(generate, x, -12) + 1;
-            ask(
-                &mut lane,
-                ClientB::ID,
-                IVec3::new(x, y, -12),
-                WorldVoxel::Solid(SNOW),
-            );
+            let pos = ground(generate, (frame - 150) as i32 - 5, -12) + IVec3::Y;
+            audit.set(lane, feedback, b, world, pos, WorldVoxel::Solid(SNOW));
         }
         // In the corner client B's interest leaves out.
         165 => {
-            let y = surface(generate, 40, 40) + 1;
-            ask(
-                &mut lane,
-                ClientA::ID,
-                IVec3::new(40, y, 40),
-                WorldVoxel::Solid(BRICK),
-            );
+            let pos = ground(generate, 40, 40) + IVec3::Y;
+            audit.set(lane, feedback, a, world, pos, WorldVoxel::Solid(BRICK));
         }
         // Outside the ring: the server refuses it.
         166 => {
-            let y = surface(generate, 0, 70) + 1;
-            ask(
-                &mut lane,
-                ClientA::ID,
-                IVec3::new(0, y, 70),
-                WorldVoxel::Solid(BRICK),
-            );
+            let pos = ground(generate, 0, 70) + IVec3::Y;
+            audit.set(lane, feedback, a, world, pos, WorldVoxel::Solid(BRICK));
         }
-        400 => {
-            check(
-                &mut audit,
-                "drop and reorder",
-                &interest,
-                &server,
-                &world_a,
-                &world_b,
-                generate,
-            );
-            lane.drop = false;
-            lane.reorder = false;
+        180 => audit.lift(lane, b, world, ground(generate, -16, -8)),
+        // A corner of `FIRST`.
+        200 => match bounds(&w, FIRST) {
+            Some((min, _)) => audit.lift(lane, a, GridName::Piece(FIRST), min),
+            None => {
+                audit.failures += 1;
+                error!("audit: piece {FIRST} isn't on the server to lift from");
+            }
+        },
+        220 => edit_piece(&w, lane, feedback, audit, FIRST),
+        260 => lane.send_to_server(b, &ToServer::Stamp { piece: FIRST }),
+        420 => settle(lane, &mut w.pieces),
+        600 => {
+            check(audit, "drop and reorder", &w, generate);
+            w.pieces.paused = false;
             lane.delay = true;
         }
-        410..=415 => {
-            let z = (frame - 410) as i32 - 2;
-            let y = surface(generate, 12, z);
-            ask(
-                &mut lane,
-                ClientB::ID,
-                IVec3::new(12, y, z),
-                WorldVoxel::Air,
-            );
+        610 => audit.lift(lane, a, world, ground(generate, -4, 10)),
+        640 => edit_piece(&w, lane, feedback, audit, SECOND),
+        660 => lane.send_to_server(a, &ToServer::Stamp { piece: CHILD }),
+        700..=705 => {
+            let pos = ground(generate, 12, (frame - 700) as i32 - 2);
+            audit.set(lane, feedback, b, world, pos, WorldVoxel::Air);
         }
-        // With a path after `audit`, a frame of both views goes there.
-        590 => {
+        // With a path after `audit`, a frame of both views goes there, with
+        // `SECOND` hanging in both.
+        780 => {
             if let Some(path) = std::env::args().nth(2) {
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(path));
             }
         }
-        600 => {
-            check(
-                &mut audit, "delay", &interest, &server, &world_a, &world_b, generate,
-            );
-            lane.delay = false;
-            let replica_b = &mut replicas.0[ClientB::ID];
-            rejoin_b(
-                &mut lane,
-                &mut feedback,
-                &mut world_b,
-                replica_b,
-                &mut commands,
-            );
+        800 => settle(lane, &mut w.pieces),
+        920 => {
+            check(audit, "delay", &w, generate);
+            w.pieces.paused = false;
+            let Audited {
+                world_b, replicas, ..
+            } = &mut w;
+            let replica_b = &mut replicas.0[b];
+            rejoin_b(lane, feedback, world_b, replica_b, &mut commands);
         }
-        720 => {
-            check(
-                &mut audit,
-                "join again",
-                &interest,
-                &server,
-                &world_a,
-                &world_b,
-                generate,
-            );
-            reset(&mut lane, &mut feedback, &mut pieces);
+        940 => audit.lift(lane, b, world, ground(generate, 10, -24)),
+        960 => edit_piece(&w, lane, feedback, audit, SECOND),
+        970 => edit_piece(&w, lane, feedback, audit, THIRD),
+        1000 => settle(lane, &mut w.pieces),
+        1040 => {
+            check(audit, "join again", &w, generate);
+            w.pieces.paused = false;
+            reset(lane, feedback, &mut w.pieces);
         }
-        880 => {
-            check(
-                &mut audit, "reset", &interest, &server, &world_a, &world_b, generate,
-            );
+        1160 => {
+            check(audit, "reset", &w, generate);
             // Both views look at `LOOK_AT`, so a ray through the centre of
             // each viewport lands near it if the cursor maths holds for both
             // halves of the window.
+            let every = |_: Grid| true;
+            let solid = |_: Grid, _: IVec3, _: WorldVoxel<u8>| true;
             for (camera, gtf, view) in &cameras {
                 let hit = camera
                     .logical_viewport_rect()
                     .and_then(|rect| camera.viewport_to_world(gtf, rect.center()).ok())
                     .and_then(|ray| match view.0 {
-                        0 => world_a.raycast(ray, &|_| true),
-                        _ => world_b.raycast(ray, &|_| true),
+                        0 => w.world_a.raycast_grids(ray, RAY_LENGTH, &every, &solid),
+                        _ => w.world_b.raycast_grids(ray, RAY_LENGTH, &every, &solid),
                     })
-                    .map(|hit| hit.voxel_pos());
-                let near =
-                    hit.is_some_and(|h| h.as_vec3().xz().distance(LOOK_AT.xz()) < 12.0);
+                    .map(|hit| hit.point);
+                let near = hit.is_some_and(|h| h.xz().distance(LOOK_AT.xz()) < 12.0);
                 if !near {
                     audit.failures += 1;
                     error!(
@@ -2100,17 +2306,50 @@ fn script(
     }
 }
 
-/// Checks both client worlds against the server: each chunk's full delta, and
-/// the voxel `get_voxel` reads at every position the script edited.
+/// Ends a step's faults and holds every piece still, so what is in flight
+/// lands, the heartbeat heals what was lost, and the clients' poses catch up
+/// with the server's.
+fn settle(lane: &mut Lane, pieces: &mut ServerPieces) {
+    lane.drop = false;
+    lane.reorder = false;
+    lane.delay = false;
+    pieces.paused = true;
+}
+
+/// The top solid voxel of the world's column at `x`, `z`.
+fn ground(
+    generate: &mut dyn FnMut(IVec3, Option<WorldVoxel<u8>>) -> WorldVoxel<u8>,
+    x: i32,
+    z: i32,
+) -> IVec3 {
+    IVec3::new(x, surface(generate, x, z), z)
+}
+
+/// Checks both clients against the server after a step, and counts what
+/// differs as failures: their world edits, their pieces, and the handovers
+/// client A applied since the last check.
 fn check(
     audit: &mut Audit,
     step: &str,
-    interest: &Interest,
-    server: &VoxelWorld<Server>,
-    world_a: &VoxelWorld<ClientA>,
-    world_b: &VoxelWorld<ClientB>,
+    w: &Audited,
     generate: &mut dyn FnMut(IVec3, Option<WorldVoxel<u8>>) -> WorldVoxel<u8>,
 ) {
+    let wrong =
+        check_world(audit, w, generate) + check_pieces(audit, w) + check_handovers(audit);
+    info!("audit after {step}: {wrong} differ");
+    audit.failures += wrong;
+}
+
+/// Compares each world chunk's full delta, and the voxel `get_voxel` reads
+/// at every position of the world the script set or lifted. Returns how many
+/// differ.
+fn check_world(
+    audit: &Audit,
+    w: &Audited,
+    generate: &mut dyn FnMut(IVec3, Option<WorldVoxel<u8>>) -> WorldVoxel<u8>,
+) -> u32 {
+    let (server, world_a, world_b) = (&w.server, &w.world_a, &w.world_b);
+    let interest = &w.interest;
     let mut wrong = 0;
     let mut chunks: HashSet<IVec3> =
         server.edited_chunks().into_iter().map(|(c, _)| c).collect();
@@ -2143,7 +2382,13 @@ fn check(
             }
         }
     }
-    for pos in &audit.touched {
+    let touched: Vec<IVec3> = audit
+        .touched
+        .iter()
+        .filter(|(grid, _)| *grid == GridName::World)
+        .map(|(_, pos)| *pos)
+        .collect();
+    for pos in &touched {
         let (chunk, _) = get_chunk_voxel_position(*pos);
         let edited = server
             .full_delta(chunk)
@@ -2166,11 +2411,210 @@ fn check(
         }
     }
     info!(
-        "audit after {step}: {} chunks and {} voxels checked, {wrong} differ",
+        "audit: {} world chunks and {} world voxels checked",
         chunks.len(),
-        audit.touched.len()
+        touched.len()
     );
-    audit.failures += wrong;
+    wrong
+}
+
+/// A piece as one world holds it, for comparing across worlds by game id.
+#[derive(Debug, PartialEq)]
+struct PieceView {
+    parent: Option<u32>,
+    /// Its `Transform` relative to its parent.
+    pose: Transform,
+    /// The full delta of every chunk in its `grid(g).edited_chunks()`.
+    deltas: Vec<EditDelta<u8>>,
+    /// What `get_voxel` reads at each position of it the script set or
+    /// lifted.
+    reads: Vec<(IVec3, WorldVoxel<u8>)>,
+    /// What `raycast_grids` hits on a ray cast straight down onto the centre
+    /// of its voxels on the server, past the world: a piece's game id and
+    /// the voxel's position on it.
+    ray: Option<(GridName, IVec3)>,
+}
+
+/// How far above a piece's voxels the audit's ray down onto it starts.
+const RAY_DROP: f32 = 64.0;
+
+/// What one world shows the audit of its pieces.
+struct Seen<'a, 'w, 's, C: VoxelWorldConfig> {
+    world: &'a VoxelWorld<'w, 's, C>,
+    touched: &'a HashSet<(GridName, IVec3)>,
+    /// The ray down onto each piece, by game id.
+    rays: &'a BTreeMap<u32, Ray3d>,
+    /// The game id of each piece's entity on this world.
+    ids: &'a HashMap<Entity, u32>,
+}
+
+impl<C: VoxelWorldConfig<MaterialIndex = u8>> Seen<'_, '_, '_, C> {
+    /// The piece `id` held as `entity` on this world, under `parent` at
+    /// `pose`.
+    fn view(
+        &self,
+        id: u32,
+        entity: Entity,
+        parent: Option<u32>,
+        pose: Transform,
+    ) -> PieceView {
+        let voxels = self.world.grid(Grid::SubGrid(entity));
+        let mut deltas = Vec::new();
+        if let Some(voxels) = &voxels {
+            let mut chunks = voxels.edited_chunks();
+            chunks.sort_by_key(|(chunk, _)| chunk.to_array());
+            deltas = chunks.iter().map(|(c, _)| voxels.full_delta(*c)).collect();
+        }
+        let mut reads: Vec<_> = self
+            .touched
+            .iter()
+            .filter(|(grid, _)| *grid == GridName::Piece(id))
+            .map(|(_, pos)| {
+                let read = voxels.as_ref().map(|v| v.get_voxel(*pos));
+                (*pos, read.unwrap_or(WorldVoxel::Unset))
+            })
+            .collect();
+        reads.sort_by_key(|(pos, _)| pos.to_array());
+        let ray = self.rays.get(&id).and_then(|ray| {
+            let past_world = |grid: Grid| grid != Grid::World;
+            let solid = |_: Grid, _: IVec3, _: WorldVoxel<u8>| true;
+            let hit =
+                self.world
+                    .raycast_grids(*ray, 2.0 * RAY_DROP, &past_world, &solid)?;
+            let Grid::SubGrid(hit_entity) = hit.grid else {
+                return None;
+            };
+            Some((GridName::Piece(*self.ids.get(&hit_entity)?), hit.position))
+        });
+        PieceView {
+            parent,
+            pose,
+            deltas,
+            reads,
+            ray,
+        }
+    }
+}
+
+/// Compares each client's pieces with the server's by game id: the same set
+/// within the client's interest, each with the same parent, pose, voxels
+/// and ray hit, and no other sub-grid live on the client. Returns how many
+/// pieces differ.
+fn check_pieces(audit: &Audit, w: &Audited) -> u32 {
+    let pieces = &w.pieces.pieces;
+    let centre_of = |id: u32| {
+        let voxels = w.server.grid(Grid::SubGrid(pieces.get(&id)?.entity))?;
+        Some(voxel_centre(&voxels))
+    };
+    let rays: BTreeMap<u32, Ray3d> = pieces
+        .keys()
+        .filter_map(|id| {
+            let above = centre_of(*id)? + Vec3::Y * RAY_DROP;
+            Some((*id, Ray3d::new(above, -Dir3::Y)))
+        })
+        .collect();
+    let server_ids: HashMap<Entity, u32> =
+        pieces.iter().map(|(id, p)| (p.entity, *id)).collect();
+    let seen = Seen {
+        world: &w.server,
+        touched: &audit.touched,
+        rays: &rays,
+        ids: &server_ids,
+    };
+    let server: BTreeMap<u32, PieceView> = pieces
+        .iter()
+        .map(|(id, p)| (*id, seen.view(*id, p.entity, p.parent, p.local)))
+        .collect();
+
+    let mut wrong = 0;
+    for client in CLIENTS {
+        let replica = &w.replicas.0[client];
+        // Interest takes a piece whole, by the top piece above it.
+        let wanted: BTreeSet<u32> = pieces
+            .keys()
+            .copied()
+            .filter(|id| {
+                let centre = centre_of(w.pieces.top(*id));
+                centre.is_some_and(|c| w.interest.covers_piece(client, c))
+            })
+            .collect();
+        let held: BTreeSet<u32> = replica.pieces.keys().copied().collect();
+        let view = |id: u32, entity: Entity| {
+            let (pose, child_of) = w.placed.get(entity).ok()?;
+            let parent = replica.ids.get(&child_of.parent()).copied();
+            let (touched, rays, ids) = (&audit.touched, &rays, &replica.ids);
+            Some(if client == ClientA::ID {
+                let seen = Seen {
+                    world: &w.world_a,
+                    touched,
+                    rays,
+                    ids,
+                };
+                seen.view(id, entity, parent, *pose)
+            } else {
+                let seen = Seen {
+                    world: &w.world_b,
+                    touched,
+                    rays,
+                    ids,
+                };
+                seen.view(id, entity, parent, *pose)
+            })
+        };
+        for id in wanted.union(&held) {
+            let expected = wanted.contains(id).then(|| &server[id]);
+            let got = replica.pieces.get(id).and_then(|p| view(*id, p.entity));
+            if expected != got.as_ref() {
+                wrong += 1;
+                error!(
+                    "audit: {} piece {id}: expected {expected:?}, holds {got:?}",
+                    name(client)
+                );
+            }
+        }
+        let live: Vec<Entity> = if client == ClientA::ID {
+            w.live_a.iter().collect()
+        } else {
+            w.live_b.iter().collect()
+        };
+        let unnamed = live
+            .iter()
+            .filter(|e| !replica.ids.contains_key(*e))
+            .count();
+        if unnamed > 0 {
+            wrong += unnamed as u32;
+            error!(
+                "audit: {} has {unnamed} sub-grids it holds no game id for",
+                name(client)
+            );
+        }
+        info!(
+            "audit: {} holds pieces {held:?}, expected {wanted:?}",
+            name(client)
+        );
+    }
+    wrong
+}
+
+/// Checks that each server commit client A applied as a handover landed
+/// whole, every chunk it touches publishing or retiring in one frame. Then
+/// forgets the commits and landings recorded so far, so the script leaves
+/// every handover time to land before a check. Returns how many handovers
+/// landed apart.
+fn check_handovers(audit: &mut Audit) -> u32 {
+    let commits = std::mem::take(&mut audit.commits);
+    let landed = std::mem::take(&mut audit.landed);
+    let mut wrong = 0;
+    let handovers: Vec<_> = commits.iter().filter(|(_, c)| c.handover).collect();
+    for (frame, commit) in &handovers {
+        let frames = commit.landed_in(&landed);
+        if frames.len() != 1 {
+            wrong += 1;
+            error!("audit: client A landed server frame {frame}'s handover in frames {frames:?}");
+        }
+    }
+    info!("audit: {} handovers on client A checked", handovers.len());
+    wrong
 }
 
 // ---------------------------------------------------------------------------
@@ -2768,6 +3212,85 @@ mod tests {
         run(&mut app, HEARTBEAT_FRAMES + 3);
         assert!(!holds(&app, ClientB::ID, id));
         assert_eq!(sub_grid_count::<ClientB>(&mut app), 0);
+    }
+
+    /// How many pieces the audit finds a client holding wrong.
+    fn audit_pieces(app: &mut App) -> u32 {
+        app.world_mut()
+            .run_system_once(|audit: Res<Audit>, w: Audited| check_pieces(&audit, &w))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_audit_counts_each_piece_a_client_holds_wrong() {
+        let mut app = app();
+        app.init_resource::<Audit>();
+        pause(&mut app);
+        let id = lift_at(&mut app, GridName::World, ground(0, 0));
+        run(&mut app, 3);
+        assert_eq!(audit_pieces(&mut app), 0);
+
+        // A pose neither client has heard of yet.
+        let home = server_pieces(&mut app)[&id].pose.translation;
+        move_piece(&mut app, id, home + Vec3::Y);
+        assert_eq!(audit_pieces(&mut app), 2);
+        run(&mut app, 3);
+        assert_eq!(audit_pieces(&mut app), 0);
+
+        // Out of client B's interest, B is right not to hold it.
+        move_piece(&mut app, id, Vec3::new(70.0, home.y, 70.0));
+        run(&mut app, 4);
+        assert!(!holds(&app, ClientB::ID, id));
+        assert_eq!(audit_pieces(&mut app), 0);
+
+        // A sub-grid B holds no game id for.
+        app.world_mut()
+            .run_system_once(|mut world_b: VoxelWorld<ClientB>| {
+                world_b.spawn_sub_grid(Transform::default());
+            })
+            .unwrap();
+        assert_eq!(audit_pieces(&mut app), 1);
+    }
+
+    #[test]
+    fn a_handover_lands_in_the_frame_its_chunks_first_land_after_it() {
+        let piece = Grid::SubGrid(Entity::from_raw_u32(7).unwrap());
+        let (world_chunk, piece_chunk) =
+            ((Grid::World, IVec3::ZERO), (piece, IVec3::ZERO));
+        let beside = (Grid::World, IVec3::X);
+        let record = ServerCommit {
+            applied: 10,
+            handover: true,
+            deltas: [world_chunk, piece_chunk].into(),
+            beside: [beside, (Grid::World, IVec3::Y)].into(),
+        };
+        let landed = |at: &[((Grid, IVec3), &[u32])]| -> Landings {
+            at.iter()
+                .map(|(chunk, frames)| (*chunk, frames.to_vec()))
+                .collect()
+        };
+
+        // The world chunk landed before the commit too, and the chunk above
+        // never lands: client A doesn't have it.
+        let together = landed(&[
+            (world_chunk, &[4, 12]),
+            (piece_chunk, &[12]),
+            (beside, &[12]),
+        ]);
+        assert_eq!(record.landed_in(&together), BTreeSet::from([12]));
+
+        let apart = landed(&[(world_chunk, &[13]), (piece_chunk, &[12])]);
+        assert_eq!(record.landed_in(&apart), BTreeSet::from([12, 13]));
+
+        // A neighbour landing between the commit and the rest of the
+        // handover landed apart from it. One landing after it shows a later
+        // edit, or a neighbour whose padding the commit left alone.
+        let early =
+            landed(&[(world_chunk, &[12]), (piece_chunk, &[12]), (beside, &[11])]);
+        assert_eq!(record.landed_in(&early), BTreeSet::from([11, 12]));
+        let later =
+            landed(&[(world_chunk, &[12]), (piece_chunk, &[12]), (beside, &[15])]);
+        assert_eq!(record.landed_in(&later), BTreeSet::from([12]));
     }
 
     #[test]
