@@ -10,7 +10,7 @@
 //
 // Light is read from a face's position and normal alone, so it reaches any
 // mesh: a cube face reads the voxel in front of it, and a face off the voxel
-// grid the 8 voxels around the point in front of it (see `sample_light`).
+// grid the 8 voxels around the point in front of it (see `read_front`).
 // A custom vertex shader outputs what the crate's do: the centroid-sampled
 // local position at location 9 and the local normal at 10 in every world, and
 // the flat tag at 11 under `VOXEL_LIGHT`. The crate's `rendering` module docs
@@ -281,52 +281,72 @@ fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
     );
 }
 
-// The light a chunk face sees, from the chunk's tag and the face's position
-// and normal in the chunk's padded local coordinates.
+// The one level of each channel that every face of a chunk sees, from the
+// chunk's tag when it names no slot.
+fn tag_levels(tag: u32) -> LightLevels {
+    var sky = f32(tag & 15u);
+    var voxel = f32((tag >> 4u) & 15u);
+    if light_look.steps_256 == 1u {
+        sky = f32(tag & 255u) / 17.0;
+        voxel = f32((tag >> 8u) & 255u) / 17.0;
+    }
+    return LightLevels(sky, vec3<f32>(voxel), vec3<f32>(0.0));
+}
+
+// How many voxels wide the cells of the slot `tag` names are: `1 << L` for a
+// chunk at LOD level L.
+fn cell_width(tag: u32) -> f32 {
+    return f32(1u << ((tag >> 24u) & 15u));
+}
+
+// `normal` divided by its length, with a floor, since a mesher's normals can
+// interpolate through zero, as across the top of a wall one voxel thick.
+fn unit_normal(normal: vec3<f32>) -> vec3<f32> {
+    return normal / max(length(normal), 1e-4);
+}
+
+// The sky and voxel light in front of a face at `local`, in the cells of the
+// slot whose rows begin at `origin`, with `n` its unit normal.
 //
 // A face on the grid, with its normal on an axis and its position on a plane
-// between voxels, reads the voxel in front of it, at `local + normal / 2`,
-// and with smoothed light its three nearest neighbours in the face's plane.
-// Any other face, such as a slope, may cut into a solid voxel, so the voxel
-// at `local + normal / 2` may be solid. It reads the 8 voxels around that
-// point instead, leaving out those with no light and those not joined to the
+// between cells, reads the cell in front of it, at `local + n / 2`, and with
+// smoothed light its three nearest neighbours in the face's plane. Any other
+// face, such as a slope, may cut into a solid voxel, so the cell at
+// `local + n / 2` may be solid. It reads the 8 cells around that point
+// instead, leaving out those with no light and those not joined to the
 // nearest of the 8. On a cube face that would read the same as the read on
 // the grid, which costs less.
-//
-// The normal is divided by its length, with a floor, since a mesher's normals
-// can interpolate through zero, as across the top of a wall one voxel thick.
-//
-// A chunk above LOD level 0 with a slot reads its cells, `1 << L` voxels
-// wide, after dividing `local` by that width.
-fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
-    if (tag & HAS_SLOT) == 0u {
-        var sky = f32(tag & 15u);
-        var voxel = f32((tag >> 4u) & 15u);
-        if light_look.steps_256 == 1u {
-            sky = f32(tag & 255u) / 17.0;
-            voxel = f32((tag >> 8u) & 255u) / 17.0;
-        }
-        return LightLevels(sky, vec3<f32>(voxel), vec3<f32>(0.0));
-    }
-    let width = f32(1u << ((tag >> 24u) & 15u));
-    let local = (chunk_local - vec3<f32>(1.0)) / width + vec3<f32>(1.0);
-    let origin = slot_origin(tag);
-    let n = normal / max(length(normal), 1e-4);
-    let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));
+fn read_front(origin: vec3<i32>, local: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     let front = local + n * 0.5;
-
     let axis = abs(n);
     let along = dot(local, step(vec3<f32>(0.999), axis));
     let on_grid = max(axis.x, max(axis.y, axis.z)) >= 0.999
         && abs(along - round(along)) <= 0.01;
-    var levels: vec2<f32>;
     if !on_grid {
-        levels = eight_read(origin, front);
+        return eight_read(origin, front);
     } else if light_look.smoothed == 1u {
-        levels = smoothed_read(origin, front, axis);
-    } else {
-        levels = load_cell(origin, vec3<i32>(floor(front))).xy;
+        return smoothed_read(origin, front, axis);
     }
+    return load_cell(origin, vec3<i32>(floor(front))).xy;
+}
+
+// The light a chunk face sees, from the chunk's tag and the face's position
+// and normal in the chunk's padded local coordinates.
+//
+// A tag with no slot gives its levels. Otherwise the face reads the slot's
+// cells in front of it, as `read_front` says, and glows if the cell behind
+// it is a lamp's. A chunk above LOD level 0 reads its cells, `1 << L` voxels
+// wide, after dividing the face's offset from the chunk's first voxel by
+// that width.
+fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
+    if (tag & HAS_SLOT) == 0u {
+        return tag_levels(tag);
+    }
+    let local = (chunk_local - vec3<f32>(1.0)) / cell_width(tag) + vec3<f32>(1.0);
+    let origin = slot_origin(tag);
+    let n = unit_normal(normal);
+    let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));
+    let levels = read_front(origin, local, n);
     return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(behind.z));
 }
 
