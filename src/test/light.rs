@@ -15,6 +15,8 @@ mod air_slots;
 mod coarse;
 #[cfg(feature = "light_propagation")]
 mod edits;
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+mod enclosure;
 #[cfg(feature = "light_propagation")]
 mod hinted_air;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]

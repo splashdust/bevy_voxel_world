@@ -107,6 +107,7 @@ pub(crate) struct ChunkLines {
 impl ChunkLines {
     /// The lines of a chunk whose voxels at chunk-local positions are solid
     /// where `solid` says so. Reads every voxel of the chunk.
+    #[cfg(test)]
     pub fn of(solid: impl Fn(UVec3) -> bool) -> Self {
         let mut lines = Self::default();
         for x in 0..CHUNK_SIZE_I {
@@ -119,6 +120,18 @@ impl ChunkLines {
                         }
                     }
                 }
+            }
+        }
+        lines
+    }
+
+    /// The lines of a chunk whose solid voxels are at the chunk-local
+    /// positions `solids`. Its cost grows with the solids.
+    pub fn of_solids(solids: impl IntoIterator<Item = UVec3>) -> Self {
+        let mut lines = Self::default();
+        for voxel in solids {
+            for axis in Axis::ALL {
+                lines.set(axis, axis.split(voxel.as_ivec3()).1.as_uvec2(), true);
             }
         }
         lines
@@ -150,6 +163,7 @@ impl ChunkLines {
 pub(crate) struct OpenLines(u8);
 
 impl OpenLines {
+    #[cfg(test)]
     pub fn is_open(self, direction: Direction) -> bool {
         self.0 & direction.bit() != 0
     }
@@ -246,6 +260,40 @@ impl LineRecord {
             t += step;
         }
         !self.row_holds_past(axis, across, chunk_along, direction.positive)
+    }
+
+    /// Which lines along `axis` hold a solid in some chunk of the row of
+    /// chunks at chunk position `across` across the axis, past the chunk at
+    /// `chunk_along` in the given direction. Returns them as one mask: bit
+    /// `v` of word `u` for the chunk-local line at (u, v) across the axis.
+    ///
+    /// A chunk the record doesn't hold counts as empty. The cost grows with
+    /// the sub-grid's extent in chunks along the axis.
+    pub fn lines_past(
+        &self,
+        axis: Axis,
+        across: IVec2,
+        chunk_along: i32,
+        positive: bool,
+    ) -> [u32; CHUNK] {
+        let mut mask = [0; CHUNK];
+        let Some((min, max)) = self.bounds else {
+            return mask;
+        };
+        let (along_min, along_max) = (axis.split(min).0, axis.split(max).0);
+        let chunks = if positive {
+            chunk_along + 1..=along_max
+        } else {
+            along_min..=chunk_along - 1
+        };
+        for chunk in chunks {
+            if let Some(lines) = self.chunks.get(&axis.join(chunk, across)) {
+                for (word, held) in mask.iter_mut().zip(&lines.masks[axis.index()]) {
+                    *word |= held;
+                }
+            }
+        }
+        mask
     }
 
     /// Whether a chunk of the row along `axis` through `across`, past the one

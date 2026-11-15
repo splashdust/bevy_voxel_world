@@ -24,16 +24,25 @@
 //! for it.
 //!
 //! A sub-grid's solve reads a chunk position of its grid that holds no chunk
-//! as air: light passes through it and nothing starts there. Every open voxel
-//! of a sub-grid chunk has direct sky, so its own sky is the top level
-//! everywhere.
+//! as air: light passes through it and nothing starts there. Under
+//! [`SubGridSky::Enclosed`] its own sky is its enclosure: sky spreads, with
+//! the world's sky reach, precision and shape, from each open voxel with a
+//! line along one of the sub-grid's axes that leaves the sub-grid without
+//! meeting a solid: see [`enclosure`](super::enclosure). Under
+//! [`SubGridSky::World`], every open
+//! voxel has direct sky, so its own sky is the top level everywhere.
 //!
 //! # What relights
 //!
 //! A voxel edit relights every chunk of the sub-grid whose solve box, the
 //! chunk and the world's reach past each face, holds a voxel the edit
-//! changed. A solve reads only its box, so no other chunk's light can
-//! change, and these relights relight nothing further when they land. A
+//! changed. Under `Enclosed` the reach is the longer of sky reach and voxel
+//! reach, and under `World` voxel reach alone. Under `Enclosed` the edit
+//! also relights every chunk whose solve box holds a voxel whose line test it
+//! flipped, however far from the edit. A solve reads only its box and the
+//! line record, so no other chunk's light can change, and these relights
+//! relight nothing further when they land. Switching `sub_grid_sky`
+//! relights every sub-grid chunk with an open voxel, and no world chunk. A
 //! settings relight relights the sub-grid's chunks too, nearest a camera
 //! first, placed by each sub-grid's last pose. Nothing else solves a
 //! sub-grid's light again: moving or turning a sub-grid, world edits and
@@ -47,6 +56,19 @@
 //! edit's cost grows with the sub-grid chunks within reach of the voxels it
 //! changed, and a burst of lifts with the chunks lifted. Moving a sub-grid
 //! costs no solve.
+//!
+//! Enclosure adds to that, and `World` skips all of it:
+//!
+//! - A solve's sky grows with sky reach, and ends at once for a chunk whose
+//!   open voxels all have direct sky. Finding the direct voxels grows with
+//!   the voxels of the 3×3×3 chunks around it and with the sub-grid's extent
+//!   in chunks.
+//! - An edit also follows the three lines through each edited voxel across
+//!   the sub-grid's extent, and relights the chunks around the voxels whose
+//!   line test flipped.
+//! - The line record's memory grows with the sub-grid's chunks.
+//! - Switching to `Enclosed` builds every sub-grid's line record, which
+//!   grows with their voxel edits.
 
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
@@ -56,7 +78,9 @@ use bevy::platform::collections::HashSet;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use super::edit::{reach_of, within_reach};
+use super::config::SubGridSky;
+use super::edit::{reach_of, within_reach, within_reach_of_box};
+use super::enclosure;
 use super::faces::FaceHashes;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::levels::LightLevels;
@@ -69,6 +93,7 @@ use crate::chunk::{chunk_containing, CHUNK_SIZE_I};
 use crate::chunk_lifecycle::{ChunkIndex, ChunkRequests};
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::{GridId, GridKey};
+use crate::sub_grid::SubGrids;
 use crate::voxel_edits::{EditBucket, VoxelEdits};
 
 /// The sub-grid chunks of world `C` whose inputs a commit wrote into the
@@ -101,7 +126,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     settings: Res<LightSettings<C>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
     mut new: ResMut<NewChunks<C>>,
+    sub_grids: Res<SubGrids<C>>,
 ) {
+    enclosure::forget_ended(&settings.view, &sub_grids);
     let sets = || {
         requests
             .edited
@@ -125,8 +152,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     let started = Instant::now();
     settings.edit_frame.fetch_add(1, Ordering::Relaxed);
     let task = &settings.task;
-    {
+    let flips = {
         let mut view = settings.view.write();
+        let flips = enclosure::follow_edits(&mut view, sets(), &edits, &sub_grids);
         for key in &changed {
             let bucket = edits
                 .buckets_in(key.grid(), std::iter::once(key.position()))
@@ -167,14 +195,31 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             view.chunks.insert(*key, chunk);
             new.keys.push(*key);
         }
-    }
-    let reach = reach_of(task);
+        flips
+    };
+    // Sky reach counts only where enclosure spreads sky.
+    let reach = match settings.config.sub_grid_sky {
+        SubGridSky::Enclosed => reach_of(task),
+        SubGridSky::World => task.voxel_scale.reach() as i32,
+    };
     let mut reached: HashSet<GridKey> = HashSet::new();
     for set in sets() {
         for (p, _) in &set.voxels {
             reached.extend(
                 within_reach(*p, reach)
                     .map(|position| GridKey::level_0(set.grid, position)),
+            );
+        }
+    }
+    // With sky light off, a flip changes no light.
+    if task.sky_scale.is_some() {
+        for (grid, flip) in &flips {
+            let mut voxels = flip.voxels();
+            let first = voxels.next().unwrap();
+            let last = voxels.last().unwrap_or(first);
+            reached.extend(
+                within_reach_of_box(first.min(last), first.max(last), reach)
+                    .map(|position| GridKey::level_0(*grid, position)),
             );
         }
     }

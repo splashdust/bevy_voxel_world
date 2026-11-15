@@ -44,6 +44,8 @@ pub mod prelude {
     #[cfg(feature = "sub_grids")]
     pub use crate::edits::SubGridEditsCommitted;
     pub use crate::edits::{EditDelta, EditGap, EditsCommitted};
+    #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+    pub use crate::light::config::SubGridSky;
     #[cfg(feature = "light_propagation")]
     pub use crate::light::config::{
         Emission, LevelCurve, LightAo, LightLook, LightPrecision, LightPropagation,

@@ -16,22 +16,23 @@
 //! through a texture of slots and a tag on each chunk ([`route`]).
 //!
 //! With the `sub_grids` feature, each sub-grid chunk holds light of its own,
-//! from the sub-grid's emissive voxels, which the world's light never sees:
-//! see the `sub_grid` module.
+//! from the sub-grid's emissive voxels and, under `SubGridSky::Enclosed`, its
+//! enclosure, which the world's light never sees: see the `sub_grid` module,
+//! which also says what enclosure costs, and the `enclosure` module.
 
 mod census;
 mod coarse;
 pub(crate) mod config;
 mod edit;
+#[cfg(feature = "sub_grids")]
+mod enclosure;
 mod faces;
 pub(crate) mod fill;
 pub(crate) mod hinted;
 mod inputs;
 mod kernel;
 mod levels;
-// Nothing reads the line record until sub-grid chunks solve their own sky.
 #[cfg(feature = "sub_grids")]
-#[allow(dead_code)]
 mod line_record;
 pub(crate) mod material;
 pub(crate) mod probe;
@@ -571,6 +572,10 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     let mut work = LightWork::<C>::default();
     work.tracks_fill = fill_on;
     let view = LightView::default();
+    #[cfg(feature = "sub_grids")]
+    if config.sub_grid_sky == config::SubGridSky::Enclosed {
+        view.write().lines = Some(Default::default());
+    }
     work.view = view.clone();
     app.insert_resource(LightSettings::<C> {
         sky_rule,
@@ -669,7 +674,10 @@ fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
 /// chunk again, since every level is stored in steps of it. A change of sky fill
 /// or of the sky rule first builds the sky fill field again, at once, from
 /// the loaded chunks and the cells the sky record holds, so the relights
-/// read the new fill. Values equal to those last applied start nothing.
+/// read the new fill. A change of `sub_grid_sky` builds or drops the
+/// sub-grids' line records at once and relights every sub-grid chunk with
+/// an open voxel, nearest a camera first, and no world chunk: see
+/// [`enclosure::switch`]. Values equal to those last applied start nothing.
 ///
 /// `shown`, and returning `None` after `Some`, are read once at plugin
 /// build: changing them logs a warning once and changes nothing.
@@ -684,6 +692,7 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     mut budget: ResMut<PoolBudget<C>>,
     chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
     edits: Res<VoxelEdits<C, C::MaterialIndex>>,
+    #[cfg(feature = "sub_grids")] sub_grids: Option<Res<crate::sub_grid::SubGrids<C>>>,
     mut commands: Commands,
 ) {
     let Some(config) = world.light_propagation() else {
@@ -737,6 +746,19 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     }
     if fill_changed && config.sky == Sky::Off {
         settings.config.sky_fill = config.sky_fill.clone();
+    }
+    #[cfg(feature = "sub_grids")]
+    if config.sub_grid_sky != settings.config.sub_grid_sky {
+        settings.config.sub_grid_sky = config.sub_grid_sky;
+        let keys = enclosure::switch(
+            &settings.view,
+            config.sub_grid_sky,
+            &edits,
+            sub_grids.as_deref(),
+        );
+        for key in keys {
+            work.trigger_again(key);
+        }
     }
     if !relights {
         return;

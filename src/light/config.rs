@@ -366,6 +366,15 @@ pub struct LightPropagation {
     ///
     /// Defaults to 4 ms.
     pub wasm_relight_budget: Duration,
+
+    /// What sky a sub-grid's faces show: the world's sky capped by the
+    /// sub-grid's enclosure, or the world's sky alone. See [`SubGridSky`].
+    ///
+    /// Relights every sub-grid chunk on change, and no world chunk.
+    ///
+    /// Defaults to [`SubGridSky::Enclosed`].
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_sky: SubGridSky,
 }
 
 impl Default for LightPropagation {
@@ -382,6 +391,8 @@ impl Default for LightPropagation {
             look: LightLook::default(),
             sky_record_cap: 16 * 1024 * 1024,
             wasm_relight_budget: Duration::from_millis(4),
+            #[cfg(feature = "sub_grids")]
+            sub_grid_sky: SubGridSky::default(),
         }
     }
 }
@@ -470,6 +481,37 @@ fn first_warning_for(name: &str) -> bool {
     }
     warned.push(name.to_owned());
     true
+}
+
+/// What sky a sub-grid's faces show, from
+/// [`LightPropagation::sub_grid_sky`].
+///
+/// A sub-grid's voxels never shade the world's light, so the world's sky
+/// alone lights a closed cabin's inside as brightly as the open air around
+/// it.
+#[cfg(feature = "sub_grids")]
+#[derive(Reflect, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SubGridSky {
+    /// The world's sky, capped by the sub-grid's enclosure. A voxel of the
+    /// sub-grid has direct sky where any of the six lines along the
+    /// sub-grid's axes from it leaves the sub-grid without meeting one of its
+    /// voxels, and sky spreads from there with the world's `sky_reach`,
+    /// `precision` and `shape`. So a closed cabin is dark inside under an
+    /// open sky, and its doorway fades inward the way a cave mouth does.
+    /// Which way up the sub-grid is changes nothing, so turning it solves
+    /// nothing.
+    ///
+    /// It costs memory and edit time. Each sub-grid keeps a record of which
+    /// of its lines hold a voxel, which grows with its chunks. A voxel edit
+    /// also follows the three lines through each edited voxel across the
+    /// sub-grid, and relights the chunks around the voxels whose direct sky
+    /// it changed, which can lie far from the edit.
+    #[default]
+    Enclosed,
+    /// The world's sky alone, wherever the sub-grid is, inside or out. A
+    /// cabin's inside is as bright as the air around it. Nothing is kept or
+    /// solved for enclosure.
+    World,
 }
 
 /// Where sky light enters the world.

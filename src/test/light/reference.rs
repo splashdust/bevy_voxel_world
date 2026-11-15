@@ -213,6 +213,52 @@ impl Reference {
         reference
     }
 
+    /// Works out sky light in the box from `min` to `max`, exclusive, spreading
+    /// from the open voxels `direct` says have direct sky, at level 15. Voxel
+    /// light is 0 everywhere.
+    ///
+    /// Light from outside the box doesn't enter it, so only voxels at least
+    /// `reach` inside its faces are sure to be right.
+    #[cfg(feature = "sub_grids")]
+    pub fn sky_from<I: Copy + PartialEq>(
+        min: IVec3,
+        max: IVec3,
+        reach: u32,
+        shape: LightShape,
+        voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+        direct: impl Fn(IVec3) -> bool,
+    ) -> Self {
+        let mut reference =
+            Self::voxel_light(min, max, reach, shape, &voxel_at, |_| None);
+        let size = reference.size;
+        let position = |i: usize| {
+            let i = i as i32;
+            min + IVec3::new(i % size.x, (i / size.x) % size.y, i / (size.x * size.y))
+        };
+        let direct: Vec<bool> = (0..reference.open.len())
+            .map(|i| reference.open[i] && direct(position(i)))
+            .collect();
+        let sources: Vec<(usize, u32)> = (0..direct.len())
+            .filter(|&i| direct[i])
+            .map(|i| (i, 0))
+            .collect();
+        let distances = reference.flood(&sources);
+        reference.sky = distances
+            .iter()
+            .enumerate()
+            .map(|(i, distance)| {
+                if direct[i] {
+                    reference.top as u8
+                } else if !reference.open[i] {
+                    0
+                } else {
+                    reference.level(*distance)
+                }
+            })
+            .collect();
+        reference
+    }
+
     /// The voxel light level at `position`, in steps.
     pub fn voxel_at(&self, position: IVec3) -> u8 {
         self.voxel[self.index(position).expect("a position in the box")]

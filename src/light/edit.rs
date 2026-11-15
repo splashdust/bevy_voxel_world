@@ -704,7 +704,7 @@ pub(super) fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> 
 /// The chunk positions whose light a change at any voxel of the box from
 /// `min` to `max` can reach: those whose box, `reach` past each face, holds a
 /// voxel of it. The box is within one chunk, both corners inclusive.
-fn within_reach_of_box(
+pub(super) fn within_reach_of_box(
     min: IVec3,
     max: IVec3,
     reach: i32,

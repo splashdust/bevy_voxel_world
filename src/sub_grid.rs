@@ -791,8 +791,15 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
     /// In a sub-grid, it reads the world's light at the world voxel holding
     /// the voxel's centre, placed by [`pose`](Self::pose), with the
     /// sub-grid's own voxel light, from its emissive voxels, taking the
-    /// brighter of the two. Sky light is the world's. A lamp on a sub-grid
-    /// lights only the sub-grid: the world's light never shows it.
+    /// brighter of the two. A lamp on a sub-grid lights only the sub-grid:
+    /// the world's light never shows it. Sky light is the world's, capped at
+    /// an open voxel by the sub-grid's enclosure under
+    /// [`SubGridSky::Enclosed`](crate::prelude::SubGridSky::Enclosed), so a
+    /// closed cabin's inside reads no sky. Where the sub-grid has no chunk,
+    /// such as deep inside a hangar, it reads the world's sky where a line
+    /// along the sub-grid's axes from the voxel leaves the sub-grid, and no
+    /// sky elsewhere, which is darker than the truth within sky reach of an
+    /// opening.
     ///
     /// Returns `None` when the world has no light propagation, or where the
     /// world's `light_at` says nothing of the world voxel.
@@ -816,10 +823,20 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         let centre = pose.transform_point(position.as_vec3() + 0.5);
         let world = world_light_at(centre.floor().as_ivec3())?;
         let Some(own) = light.settings.own_light_at(grid, position) else {
+            if light.settings.closed_in_at(grid, position) {
+                return Some(crate::light::LightLevels { sky: 0.0, ..world });
+            }
             return Some(world);
         };
+        let capped = light.settings.config.sub_grid_sky
+            == crate::light::config::SubGridSky::Enclosed
+            && !self.get_voxel(position).is_solid();
         Some(crate::light::LightLevels {
-            sky: world.sky,
+            sky: if capped {
+                world.sky.min(own.sky)
+            } else {
+                world.sky
+            },
             voxel: world.voxel.max(own.voxel),
         })
     }

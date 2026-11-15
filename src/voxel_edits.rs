@@ -1716,6 +1716,20 @@ impl<I: Copy + PartialEq> CommittedEdits<'_, I> {
             )
         })
     }
+
+    /// The committed edit at `position` in `grid`, if any.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    pub fn get_in(&self, grid: GridId, position: IVec3) -> Option<WorldVoxel<I>> {
+        self.0
+            .get(&GridKey::level_0(grid, chunk_containing(position)))?
+            .get(position)
+    }
+
+    /// The committed edits of the level-0 chunk at `key`, if any.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    pub fn bucket_in(&self, key: GridKey) -> Option<&EditBucket<I>> {
+        self.0.get(&key)
+    }
 }
 
 /// The offset of the `i`th of the 27 level-0 chunks around a chunk, x varying

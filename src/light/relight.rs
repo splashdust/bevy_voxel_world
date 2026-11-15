@@ -670,6 +670,28 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
+    /// Marks the chunk at `key` for a relight with the settings relights, as
+    /// [`trigger_settings`](Self::trigger_settings) does, after a change that
+    /// leaves the settings' generation alone, such as switching
+    /// `sub_grid_sky`. A relight running now read what the change replaced,
+    /// so the chunk relights again once it lands.
+    #[cfg(feature = "sub_grids")]
+    pub fn trigger_again(&mut self, key: GridKey) {
+        let Some(chunk) = self.chunks.get_mut(&key) else {
+            return;
+        };
+        match chunk.state {
+            LightState::Clean => {
+                chunk.state = LightState::Dirty;
+                self.settings_queue.insert(key);
+            }
+            LightState::Dirty => {}
+            LightState::Relighting { .. } => {
+                chunk.state = LightState::Relighting { dirty: true };
+            }
+        }
+    }
+
     /// Marks the chunk at `key` for a relight because a sky fill cell it
     /// reads changed, if it has light. The relight starts after chunk tasks,
     /// unless something else triggers it meanwhile. A chunk already dirty

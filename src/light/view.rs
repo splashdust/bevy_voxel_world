@@ -83,6 +83,11 @@ pub(crate) struct AirInputs {
 pub(crate) struct ViewMaps {
     pub chunks: HashMap<GridKey, ViewChunk>,
     pub air: HashMap<GridKey, AirInputs>,
+    /// Each sub-grid's line record, by grid, under
+    /// [`SubGridSky::Enclosed`](super::config::SubGridSky::Enclosed), and
+    /// `None` under `World`: see [`enclosure`](super::enclosure).
+    #[cfg(feature = "sub_grids")]
+    pub lines: Option<HashMap<GridId, super::enclosure::GridLines>>,
 }
 
 impl ViewMaps {
@@ -190,6 +195,10 @@ pub(crate) struct Snapshot {
     pub faces: [Option<(Arc<ChunkLight>, u64)>; 6],
     /// How the solve reads the positions of `neighbours` that hold nothing.
     pub missing: Missing,
+    /// The line record of a sub-grid chunk's grid, when enclosure caps its
+    /// sky. A sub-grid with no record yet reads an empty one.
+    #[cfg(feature = "sub_grids")]
+    pub lines: Option<Arc<super::line_record::LineRecord>>,
 }
 
 impl Snapshot {
@@ -212,10 +221,22 @@ impl Snapshot {
             Some((chunk.light.clone(), chunk.version))
         });
         debug_assert!(neighbours[neighbour_index(IVec3::ZERO)].is_none());
+        #[cfg(feature = "sub_grids")]
+        let lines = match (&view.lines, key.is_world()) {
+            (Some(lines), false) => Some(
+                lines
+                    .get(&key.grid())
+                    .map(|lines| lines.record.clone())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        };
         Self {
             neighbours,
             faces,
             missing,
+            #[cfg(feature = "sub_grids")]
+            lines,
         }
     }
 }
