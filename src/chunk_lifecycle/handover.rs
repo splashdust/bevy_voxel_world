@@ -410,7 +410,9 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         if let Some(light_work) = light_work.as_deref_mut() {
             self.wait_for_light(light_work);
         }
-        if self.held.is_empty() {
+        // A lit handover whose chunks have all left still waits for its
+        // relights, and holds their light until it lands.
+        if self.held.is_empty() && self.handovers.is_empty() {
             return;
         }
         self.held.retain(|entity, held| {

@@ -467,3 +467,42 @@ fn a_sub_grid_despawned_mid_handover_in_a_lit_world_lets_the_hole_land_with_its_
     hold.release();
     settle(&mut app, "light to settle");
 }
+
+#[test]
+fn a_lit_handover_whose_chunks_all_despawn_before_its_relights_solve_still_lands() {
+    // On the main thread, at the shortest budget, the lift's relights solve
+    // about one a frame, so they are still running when its chunks go.
+    let mut app = recording_app(
+        LampWorld {
+            light: Some(LightPropagation {
+                wasm_relight_budget: std::time::Duration::from_micros(100),
+                ..sky_light(Sky::default(), 30)
+            }),
+            ..overhang_world()
+        },
+        true,
+    );
+    let root = root(&mut app);
+    let (source, under) = place_of(UNDER_PIECE);
+    let (below, deep) = place_of(BELOW);
+    let (sub_grid, _) = lift_piece(&mut app);
+    app.update();
+    // The handover holds the source chunk and the sub-grid's chunk, and
+    // waits for the relights around the hole, the chunk below included.
+    let source_chunk = app
+        .world_mut()
+        .query::<(Entity, &Chunk<LampWorld>, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, chunk, child_of)| {
+            chunk.key() == ChunkKey::new(source, 0) && child_of.parent() == root
+        })
+        .map(|(entity, ..)| entity)
+        .unwrap();
+    assert!(!run(&mut app, |voxel_world| voxel_world.light_is_settled()));
+    app.world_mut().entity_mut(sub_grid).despawn();
+    app.world_mut().entity_mut(source_chunk).despawn();
+
+    settle(&mut app, "light to settle once the handover lands");
+    assert_eq!(shown_now(&app, root, below).at(deep).unwrap().0, 15);
+    assert_eq!(shown_now(&app, root, source).at(under).unwrap().0, 15);
+}
