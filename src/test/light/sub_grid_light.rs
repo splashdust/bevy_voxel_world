@@ -470,3 +470,33 @@ fn a_sub_grid_chunk_gone_all_air_leaves_its_light() {
     );
     assert_eq!(after[1], before[1], "the lamp's chunk keeps its light");
 }
+
+#[test]
+fn the_bench_stats_count_a_sub_grids_relights_apart_from_the_worlds() {
+    use crate::light_bench::light_stats;
+    let stats = |app: &App| light_stats::<LampWorld>(app.world()).unwrap();
+    let mut app = app(LampWorld::default());
+    settle(&mut app, "the world to settle");
+
+    let before = stats(&app);
+    run(&mut app, |voxel_world| {
+        voxel_world.set_voxel(IVec3::new(8, 16, 16), WorldVoxel::Solid(LAMP));
+    });
+    settle(&mut app, "the world's lamp to settle");
+    let lamp_in_world = stats(&app);
+    assert!(lamp_in_world.relights > before.relights);
+    assert_eq!(lamp_in_world.sub_grid_relights, before.sub_grid_relights);
+
+    // One voxel in the middle of a chunk gives the sub-grid one chunk, whose
+    // first solve is a relight.
+    spawn_holding(
+        &mut app,
+        Transform::from_xyz(0.0, 40.0, 0.0),
+        &[(IVec3::new(16, 16, 16), WorldVoxel::Solid(LAMP))],
+    );
+    settle(&mut app, "the sub-grid's light to settle");
+    let after = stats(&app);
+    assert_eq!(after.sub_grid_relights - lamp_in_world.sub_grid_relights, 1);
+    assert_eq!(after.relights - lamp_in_world.relights, 1);
+    assert_eq!(after.sub_grid_chunk_solves, 0);
+}

@@ -406,6 +406,13 @@ pub struct LightStats {
     pub snapshot_ms: f64,
     /// Relight tasks started.
     pub relights: u64,
+    /// Of those, the relight tasks started for sub-grid chunks. A new
+    /// sub-grid chunk's first solve is one of them.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_relights: u64,
+    /// Sub-grid chunks solved in their chunk tasks.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_chunk_solves: u64,
     /// Main-thread time spent landing light and starting relights, in
     /// milliseconds.
     pub main_thread_ms: f64,
@@ -572,6 +579,10 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         solve_ms: ms(&counters.solve_nanos),
         snapshot_ms: ms(&counters.snapshot_nanos),
         relights: counters.relights.load(Ordering::Relaxed),
+        #[cfg(feature = "sub_grids")]
+        sub_grid_relights: counters.sub_grid_relights.load(Ordering::Relaxed),
+        #[cfg(feature = "sub_grids")]
+        sub_grid_chunk_solves: counters.sub_grid_chunk_solves.load(Ordering::Relaxed),
         main_thread_ms: ms(&counters.main_thread_nanos),
         max_frame_ms: ms(&counters.max_frame_nanos),
         max_relight_frame_ms: ms(&counters.max_relight_frame_nanos),

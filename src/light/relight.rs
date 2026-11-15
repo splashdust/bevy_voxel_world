@@ -1449,6 +1449,13 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             cause,
         };
         settings.counters().relights.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "sub_grids")]
+        if key.grid() != crate::grid::GridId::WORLD {
+            settings
+                .counters()
+                .sub_grid_relights
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if settings.main_thread {
             let started = Instant::now();
             let solved = solve();

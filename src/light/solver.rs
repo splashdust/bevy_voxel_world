@@ -176,6 +176,14 @@ pub(crate) struct LightCounters {
     pub snapshot_nanos: AtomicU64,
     /// Relight tasks started.
     pub relights: AtomicU64,
+    /// Of those, the relight tasks started for sub-grid chunks.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_relights: AtomicU64,
+    /// Sub-grid chunks solved in their chunk tasks. A sub-grid's commit
+    /// leaves its chunks' solves to relights, so this counts only chunks
+    /// that got no inputs from a commit.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_chunk_solves: AtomicU64,
     /// Time relight tasks spent, from reading the world view to the end of
     /// their solve, in nanoseconds.
     pub relight_nanos: AtomicU64,
@@ -401,6 +409,13 @@ impl<I: Copy + PartialEq> LightTask<I> {
         let snapshot = read_snapshot(&self.view, key, missing, settings);
         let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
         let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding, direct);
+        #[cfg(feature = "sub_grids")]
+        if self.grid != GridId::WORLD {
+            settings
+                .counters
+                .sub_grid_chunk_solves
+                .fetch_add(1, Ordering::Relaxed);
+        }
         solved.sky = found;
         solved.own_edits = self.own_edits;
         solved.edit_frame = self.edit_frame;
