@@ -19,6 +19,8 @@ jobs:
   # pair. Sub-grids and dislodged fragments are tested on their own and
   # together with light propagation. Only the examples with tests are built
   # here: Clippy checks the rest, and the benchmarks, without linking them.
+  # An example can need more features than its row's library tests, so
+  # example_flags gives the features its tests build with.
   test:
     name: Test Suite (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -27,12 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         features:
-          - { name: default, flags: "", examples: "" }
-          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning" }
-          - { name: serde, flags: "--features serde", examples: "--example save_load" }
-          - { name: sub_grids, flags: "--features sub_grids", examples: "" }
-          - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "" }
-          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "" }
+          - { name: default, flags: "", examples: "", example_flags: "" }
+          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning", example_flags: "--features light_propagation" }
+          - { name: serde, flags: "--features serde", examples: "--example save_load", example_flags: "--features serde,sub_grids" }
+          - { name: sub_grids, flags: "--features sub_grids", examples: "", example_flags: "" }
+          - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "", example_flags: "" }
+          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "", example_flags: "" }
     env:
       RUSTFLAGS: "-C debuginfo=0"
     steps:
@@ -58,7 +60,7 @@ jobs:
         run: cargo test --doc ${{ matrix.features.flags }}
       - name: Run example tests
         if: (success() || failure()) && matrix.features.examples != ''
-        run: cargo test ${{ matrix.features.flags }} ${{ matrix.features.examples }}
+        run: cargo test ${{ matrix.features.example_flags }} ${{ matrix.features.examples }}
 
   # Run cargo clippy on every target, so the examples, benchmarks and tests
   # are checked too, with the default features, with light propagation, and
