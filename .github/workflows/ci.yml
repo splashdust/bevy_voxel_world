@@ -34,7 +34,7 @@ jobs:
           - { name: serde, flags: "--features serde", examples: "--example save_load --example multiplayer_loopback", example_flags: "--features serde,sub_grids" }
           - { name: sub_grids, flags: "--features sub_grids", examples: "", example_flags: "" }
           - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "--example dislodged_fragments", example_flags: "--features sub_grids,dislodged_fragments" }
-          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "--example airship", example_flags: "--features light_propagation,sub_grids" }
+          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "--example airship --example dislodged_fragments_tree", example_flags: "--features light_propagation,sub_grids,dislodged_fragments" }
     env:
       RUSTFLAGS: "-C debuginfo=0"
     steps:

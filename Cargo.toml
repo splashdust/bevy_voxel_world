@@ -113,6 +113,14 @@ required-features = ["sub_grids", "light_propagation"]
 test = true
 
 [[example]]
+name = "dislodged_fragments_tree"
+path = "examples/dislodged_fragments_tree/main.rs"
+required-features = ["sub_grids", "dislodged_fragments", "light_propagation"]
+# Its tests check that each branch falls on its own, and those of the module
+# it shares with `dislodged_fragments`.
+test = true
+
+[[example]]
 name = "save_load"
 path = "examples/save_load.rs"
 required-features = ["serde", "sub_grids"]
