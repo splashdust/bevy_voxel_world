@@ -976,6 +976,11 @@ fn pool(threads: usize) -> TaskPoolThreadAssignmentPolicy {
 
 fn build_app<C: VoxelWorldConfig<MaterialIndex = u8>>(config: C) -> App {
     let mut app = App::new();
+    // Bevy gives each system its span as the system is added, so the
+    // profiler's subscriber must be in place before any plugin adds one.
+    if PROFILING.load(Ordering::Relaxed) {
+        add_profiling(&mut app);
+    }
     let threads = IO_THREADS + ASYNC_COMPUTE_THREADS + COMPUTE_THREADS;
     let task_pool_options = TaskPoolOptions {
         min_total_threads: threads,
@@ -1002,9 +1007,6 @@ fn build_app<C: VoxelWorldConfig<MaterialIndex = u8>>(config: C) -> App {
         .add_systems(First, move_camera::<C>)
         .add_systems(Update, edit_storm::<C>)
         .add_systems(Last, track::<C>);
-    if PROFILING.load(Ordering::Relaxed) {
-        add_profiling(&mut app);
-    }
     app.finish();
     app.cleanup();
     app
