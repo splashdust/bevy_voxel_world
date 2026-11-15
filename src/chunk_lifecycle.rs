@@ -631,6 +631,10 @@ pub struct ChunkRequests<C: VoxelWorldConfig> {
     /// Whether this frame's commit lands as one handover.
     #[cfg(feature = "sub_grids")]
     handover: bool,
+    /// The sub-grids this frame's commit left with no solid voxel, whose
+    /// chunks all retire with it.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    emptied: Vec<GridId>,
     /// Whether the next commit lands as one handover whatever it changes:
     /// see [`mark_handover`](Self::mark_handover).
     #[cfg(feature = "sub_grids")]
@@ -647,6 +651,8 @@ impl<C: VoxelWorldConfig> Default for ChunkRequests<C> {
             regenerate: Mutex::default(),
             #[cfg(feature = "sub_grids")]
             handover: false,
+            #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+            emptied: Vec::new(),
             #[cfg(feature = "sub_grids")]
             handover_marked: Default::default(),
             _marker: PhantomData,
@@ -670,6 +676,20 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
     pub(crate) fn note_commit(&mut self, flipped: bool) {
         let marked = std::mem::take(self.handover_marked.get_mut());
         self.handover = flipped || marked;
+    }
+
+    /// Notes the sub-grids this frame's commit left with no solid voxel.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn note_emptied(&mut self, emptied: Vec<GridId>) {
+        self.emptied = emptied;
+    }
+
+    /// The sub-grids this frame's commit left with no solid voxel. Every
+    /// chunk of each retires with the commit, so light relights none of
+    /// them.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn emptied(&self) -> &[GridId] {
+        &self.emptied
     }
 
     /// Whether this frame's commit lands as one handover, until

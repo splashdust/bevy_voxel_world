@@ -1700,6 +1700,13 @@ impl<I> CommittedEdits<'_, I> {
 }
 
 impl<I: Copy + PartialEq> CommittedEdits<'_, I> {
+    /// Whether `grid` holds a solid voxel. Its cost grows with `grid`'s
+    /// chunks holding edits before the first holding a solid.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    pub fn holds_solid(&self, grid: GridId) -> bool {
+        holds_solid(&self.0, grid)
+    }
+
     /// Whether `grid` has a committed edit in the box from `min` to `max`,
     /// both inclusive. A sub-grid's committed edits are its solids, since its
     /// commit removes a voxel set to one that isn't solid. Its cost grows

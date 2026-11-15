@@ -234,6 +234,16 @@ where
         let sets = voxel_edits.commit_all(&mut flipped);
         #[cfg(feature = "sub_grids")]
         requests.note_commit(!flipped.is_empty());
+        #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+        if !flipped.is_empty() || !requests.emptied().is_empty() {
+            let committed = voxel_edits.committed();
+            let emptied = flipped
+                .iter()
+                .copied()
+                .filter(|grid| !committed.holds_solid(*grid))
+                .collect();
+            requests.note_emptied(emptied);
+        }
         // Only the world's chunks have a message here; a sub-grid's edits
         // never reach `EditsCommitted`.
         let world_sets = sets.iter().filter(|set| set.grid == GridId::WORLD);

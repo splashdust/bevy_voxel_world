@@ -41,7 +41,9 @@
 //! also relights every chunk whose solve box holds a voxel whose line test it
 //! flipped, however far from the edit. A solve reads only its box and the
 //! line record, so no other chunk's light can change, and these relights
-//! relight nothing further when they land. Switching `sub_grid_sky`
+//! relight nothing further when they land. A commit that leaves a sub-grid
+//! with no solid voxel, as a stamp does, relights none of its chunks, which
+//! all retire with it. Switching `sub_grid_sky`
 //! relights every sub-grid chunk with an open voxel, and no world chunk. A
 //! settings relight relights the sub-grid's chunks too, nearest a camera
 //! first, placed by each sub-grid's last pose. Nothing else solves a
@@ -55,10 +57,10 @@
 //! A sub-grid chunk's solve grows with reach, as a world chunk's does. An
 //! edit's cost grows with the sub-grid chunks within reach of the voxels it
 //! changed, and a burst of lifts with the chunks lifted. On the main thread,
-//! an edit rebuilds the light inputs of each sub-grid chunk it changed from
-//! all of that chunk's voxel edits, so that part grows with the chunk's
-//! solid voxels rather than with the voxels changed. Moving a sub-grid
-//! costs no solve.
+//! an edit updates the light inputs of each sub-grid chunk it changed from
+//! the voxels it changed, and its emissive voxels, and builds them from all
+//! of the chunk's voxel edits only for a chunk it spawned or whose edits it
+//! replaced. Moving a sub-grid costs no solve.
 //!
 //! Enclosure adds to that, and `World` skips all of it:
 //!
@@ -77,7 +79,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use bevy::platform::collections::HashSet;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
@@ -97,6 +99,7 @@ use crate::chunk_lifecycle::{ChunkIndex, ChunkRequests};
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::{GridId, GridKey};
 use crate::sub_grid::SubGrids;
+use crate::voxel::WorldVoxel;
 use crate::voxel_edits::{EditBucket, VoxelEdits};
 
 /// The sub-grid chunks of world `C` whose inputs a commit wrote into the
@@ -181,17 +184,59 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         work.capture_handover(Some(settings.edit_frame.load(Ordering::Relaxed)));
     }
     let task = &settings.task;
-    let flips = {
-        let mut view = settings.view.write();
-        let flips = enclosure::follow_edits(&mut view, sets(), &edits, &sub_grids);
-        for key in &changed {
+    let mut changes: HashMap<GridKey, ChunkChanges<C::MaterialIndex>> = HashMap::new();
+    for set in sets() {
+        let (voxels, moved) = changes
+            .entry(GridKey::level_0(set.grid, set.chunk))
+            .or_insert((Vec::new(), Some(0)));
+        voxels.extend_from_slice(&set.voxels);
+        *moved = moved
+            .filter(|_| !set.replaced)
+            .map(|n| n + set.voxels.len() as u64);
+    }
+    // Each changed chunk's new inputs: the view's updated by the voxels the
+    // commit changed, where the view holds the inputs from just before it,
+    // and otherwise built from the chunk's voxel edits, as for a chunk the
+    // commit spawned or whose edits it replaced. Worked out under a read
+    // lock, so solves reading the view don't wait for them.
+    let stamps: Vec<(GridKey, u64)> = changed
+        .iter()
+        .map(|key| (*key, edits.edit_stamp_in(*key)))
+        .collect();
+    let mut inputs: Vec<(GridKey, u64, Option<LightInputs>)> = {
+        let view = settings.view.read();
+        stamps
+            .into_iter()
+            .map(|(key, stamp)| {
+                let updated = changes.get(&key).and_then(|(voxels, moved)| {
+                    let before = moved.and_then(|n| stamp.checked_sub(n))?;
+                    let chunk = view.chunks.get(&key).filter(|c| c.edits == before)?;
+                    Some(inputs_updated(
+                        &chunk.light.inputs,
+                        key.position(),
+                        voxels,
+                        &task.emission,
+                    ))
+                });
+                (key, stamp, updated)
+            })
+            .collect()
+    };
+    for (key, _, inputs) in &mut inputs {
+        if inputs.is_none() {
             let bucket = edits
                 .buckets_in(key.grid(), std::iter::once(key.position()))
                 .pop()
                 .flatten();
-            let inputs = Arc::new(inputs_of(bucket, key.position(), &task.emission));
-            let stamp = edits.edit_stamp_in(*key);
-            if let Some(chunk) = view.chunks.get_mut(key) {
+            *inputs = Some(inputs_of(bucket, key.position(), &task.emission));
+        }
+    }
+    let flips = {
+        let mut view = settings.view.write();
+        let flips = enclosure::follow_edits(&mut view, sets(), &edits, &sub_grids);
+        for (key, stamp, inputs) in inputs {
+            let inputs = Arc::new(inputs.unwrap());
+            if let Some(chunk) = view.chunks.get_mut(&key) {
                 chunk.light = Arc::new(ChunkLight {
                     inputs,
                     sky: chunk.light.sky.clone(),
@@ -221,9 +266,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 emission: task.emission_generation,
                 fill_seeds: None,
             };
-            view.chunks.insert(*key, chunk);
-            new.keys.push(*key);
-            work.capture_new_chunk(*key);
+            view.chunks.insert(key, chunk);
+            new.keys.push(key);
+            work.capture_new_chunk(key);
         }
         flips
     };
@@ -232,8 +277,11 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         SubGridSky::Enclosed => reach_of(task),
         SubGridSky::World => task.voxel_scale.reach() as i32,
     };
+    // A sub-grid the commit emptied, as a stamp empties the sub-grid it
+    // stamps, has every chunk retiring with the commit, so none relights.
+    let emptied = requests.emptied();
     let mut reached: HashSet<GridKey> = HashSet::new();
-    for set in sets() {
+    for set in sets().filter(|set| !emptied.contains(&set.grid)) {
         for (p, _) in &set.voxels {
             reached.extend(
                 within_reach(*p, reach)
@@ -243,7 +291,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     // With sky light off, a flip changes no light.
     if task.sky_scale.is_some() {
-        for (grid, flip) in &flips {
+        for (grid, flip) in flips.iter().filter(|(grid, _)| !emptied.contains(grid)) {
             let mut voxels = flip.voxels();
             let first = voxels.next().unwrap();
             let last = voxels.last().unwrap_or(first);
@@ -316,17 +364,13 @@ fn inputs_of<I: Copy + PartialEq>(
     let mut emissive = Vec::new();
     let min = position * CHUNK_SIZE_I;
     for (at, voxel) in bucket.iter().flat_map(|bucket| bucket.iter()) {
-        let crate::voxel::WorldVoxel::Solid(material) = voxel else {
+        let WorldVoxel::Solid(material) = voxel else {
             continue;
         };
         let local = (at - min).as_uvec3();
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         occupancy.set(x, y, z, true);
-        let level = emission
-            .iter()
-            .find(|(emissive, _)| *emissive == material)
-            .map(|(_, level)| *level);
-        if let Some(level) = level {
+        if let Some(level) = emission_of(emission, material) {
             emissive.push(EmissiveVoxel {
                 x: x as u8,
                 y: y as u8,
@@ -342,6 +386,70 @@ fn inputs_of<I: Copy + PartialEq>(
         columns: ColumnAnswer::none(),
         ring: false,
     }
+}
+
+/// A voxel a commit changed: its position and its new edit, or `None` where
+/// its edit was removed.
+type VoxelChange<I> = (IVec3, Option<WorldVoxel<I>>);
+
+/// The voxels a commit changed in one chunk, in commit order, and how far
+/// the chunk's edit stamp moved, or `None` where the commit replaced its
+/// edits, so the stamp before it can't be told.
+type ChunkChanges<I> = (Vec<VoxelChange<I>>, Option<u64>);
+
+/// `old`, the inputs of the sub-grid chunk at `position` before a commit,
+/// with the voxels the commit changed there, `voxels`, applied in order. A
+/// voxel whose new edit isn't solid is air. Its cost grows with `voxels`
+/// and the chunk's emissive voxels, on top of copying its occupancy.
+fn inputs_updated<I: Copy + PartialEq>(
+    old: &LightInputs,
+    position: IVec3,
+    voxels: &[VoxelChange<I>],
+    emission: &[(I, u8)],
+) -> LightInputs {
+    let mut occupancy = old.occupancy.clone();
+    let min = position * CHUNK_SIZE_I;
+    // The last new voxel of each changed position, by its place in the
+    // chunk.
+    let mut placed: HashMap<(u8, u8, u8), Option<I>> = HashMap::new();
+    for (at, voxel) in voxels {
+        let local = (*at - min).as_uvec3();
+        let material = match voxel {
+            Some(WorldVoxel::Solid(material)) => Some(*material),
+            _ => None,
+        };
+        let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
+        occupancy.set(x, y, z, material.is_some());
+        placed.insert((x as u8, y as u8, z as u8), material);
+    }
+    occupancy.normalize();
+    let mut emissive: Vec<EmissiveVoxel> = old
+        .emissive
+        .iter()
+        .filter(|emitter| !placed.contains_key(&(emitter.x, emitter.y, emitter.z)))
+        .copied()
+        .collect();
+    for ((x, y, z), material) in placed {
+        if let Some(level) = material.and_then(|material| emission_of(emission, material))
+        {
+            emissive.push(EmissiveVoxel { x, y, z, level });
+        }
+    }
+    LightInputs {
+        occupancy,
+        emissive,
+        columns: ColumnAnswer::none(),
+        ring: false,
+    }
+}
+
+/// The level `material` emits at under the emissive list `emission`, if it
+/// is emissive.
+fn emission_of<I: PartialEq>(emission: &[(I, u8)], material: I) -> Option<u8> {
+    emission
+        .iter()
+        .find(|(emissive, _)| *emissive == material)
+        .map(|(_, level)| *level)
 }
 
 impl<C: VoxelWorldConfig> LightSettings<C> {

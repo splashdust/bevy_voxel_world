@@ -500,3 +500,88 @@ fn the_bench_stats_count_a_sub_grids_relights_apart_from_the_worlds() {
     assert_eq!(after.relights - lamp_in_world.relights, 1);
     assert_eq!(after.sub_grid_chunk_solves, 0);
 }
+
+#[test]
+fn a_sub_grid_edited_voxel_by_voxel_reads_the_light_of_one_built_with_its_voxels() {
+    let mut app = app(LampWorld::default());
+    settle(&mut app, "the world to settle");
+    let (first, second, stone) = (
+        IVec3::new(10, 16, 16),
+        IVec3::new(22, 16, 16),
+        IVec3::new(16, 16, 16),
+    );
+    let edited = spawn_holding(
+        &mut app,
+        Transform::default(),
+        &[
+            (first, WorldVoxel::Solid(LAMP)),
+            (stone, WorldVoxel::Solid(STONE)),
+            (stone + IVec3::Y, WorldVoxel::Solid(STONE)),
+        ],
+    );
+    settle(&mut app, "the sub-grid's light to settle");
+    // A lamp turned to stone, a stone taken out and a lamp put in, in one
+    // commit.
+    run(&mut app, move |voxel_world| {
+        let mut grid = voxel_world.grid_mut(Grid::SubGrid(edited)).unwrap();
+        grid.set_voxel(first, WorldVoxel::Solid(STONE));
+        grid.set_voxel(stone + IVec3::Y, WorldVoxel::Air);
+        grid.set_voxel(second, WorldVoxel::Solid(LAMP));
+    });
+    let built = spawn_holding(
+        &mut app,
+        Transform::from_xyz(0.0, 64.0, 0.0),
+        &[
+            (first, WorldVoxel::Solid(STONE)),
+            (stone, WorldVoxel::Solid(STONE)),
+            (second, WorldVoxel::Solid(LAMP)),
+        ],
+    );
+    settle(&mut app, "both sub-grids' light to settle");
+
+    let own = |app: &App, entity: Entity, p: IVec3| {
+        let grid = app
+            .world()
+            .get::<SubGrid<LampWorld>>(entity)
+            .unwrap()
+            .grid();
+        app.world()
+            .resource::<crate::light::LightSettings<LampWorld>>()
+            .own_light_at(grid, p)
+            .map(|levels| levels.voxel)
+    };
+    let positions = voxels_in(IVec3::new(0, 8, 8), IVec3::new(32, 24, 24));
+    for p in positions {
+        assert_eq!(own(&app, edited, p), own(&app, built, p), "at {p}");
+    }
+    assert_eq!(own(&app, edited, second + IVec3::X), Some(14.0));
+}
+
+#[test]
+fn stamping_a_lit_sub_grid_relights_none_of_its_chunks() {
+    use crate::light_bench::light_stats;
+    let stats = |app: &App| light_stats::<LampWorld>(app.world()).unwrap();
+    let mut app = app(LampWorld::default());
+    settle(&mut app, "the world to settle");
+    let entity = spawn_holding(
+        &mut app,
+        Transform::from_xyz(0.0, 8.0, 0.0),
+        &[
+            (IVec3::new(16, 16, 16), WorldVoxel::Solid(LAMP)),
+            (IVec3::new(40, 16, 16), WorldVoxel::Solid(STONE)),
+        ],
+    );
+    settle(&mut app, "the sub-grid's light to settle");
+    let before = stats(&app);
+
+    run(&mut app, move |voxel_world| {
+        voxel_world
+            .stamp(entity, Grid::World, incoming_replaces)
+            .unwrap();
+    });
+    settle(&mut app, "the stamp's light to settle");
+    assert!(app.world().get_entity(entity).is_err(), "the stamp landed");
+    let after = stats(&app);
+    assert!(after.relights > before.relights, "the world relights");
+    assert_eq!(after.sub_grid_relights, before.sub_grid_relights);
+}
