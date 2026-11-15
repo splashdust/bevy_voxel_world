@@ -80,6 +80,10 @@ use fill_worlds::FILL_SCENES;
 #[path = "common/vehicle_hull.rs"]
 mod vehicle_hull;
 
+#[cfg(feature = "sub_grids")]
+#[path = "common/lift_pieces.rs"]
+mod lift_pieces;
+
 /// Pool sizes are pinned so the machine's core count can't skew comparisons, and
 /// kept, with the main thread, below the M1 Max's 8 performance cores so
 /// background work has room to run beside the benchmark rather than on top of it.
@@ -1792,7 +1796,7 @@ const EDIT_MAIN_THREAD_GATE_US: f64 = 1000.0;
 
 /// The height of the sine terrain's surface at `x`, `z`: the first voxel of
 /// air above it.
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "sub_grids"))]
 fn sine_height(x: i32, z: i32) -> i32 {
     (8.0 * (x as f32 / 23.0).sin() + 8.0 * (z as f32 / 17.0).cos()) as i32
 }
@@ -2834,6 +2838,401 @@ fn scenario_vehicle() -> Metrics {
     metrics
 }
 
+/// Frames `lift_burst`'s pieces move between their lift and their stamp.
+#[cfg(feature = "sub_grids")]
+const BURST_MOVE_FRAMES: u32 = 300;
+
+/// How far a moving piece rises, in voxels, at the middle of its path.
+#[cfg(feature = "sub_grids")]
+const BURST_RISE: f32 = 24.0;
+
+/// How far a moving piece turns, in radians, at the middle of its path.
+#[cfg(feature = "sub_grids")]
+const BURST_TURN: f32 = 0.6;
+
+/// How far a piece ends its path from its start pose: turned by
+/// `BURST_END_TURN` radians, about 3 degrees, and moved by
+/// `BURST_END_DRIFT` voxels. The stamp snaps both away, so the piece lands
+/// where it was lifted from.
+#[cfg(feature = "sub_grids")]
+const BURST_END_TURN: f32 = 0.05;
+#[cfg(feature = "sub_grids")]
+const BURST_END_DRIFT: Vec3 = Vec3::new(0.3, 0.2, -0.25);
+
+/// The sub-grids whose `Lifted` and `Stamped` have arrived since a burst
+/// phase started.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct BurstLanded {
+    lifted: Vec<Entity>,
+    stamped: Vec<Entity>,
+}
+
+#[cfg(feature = "sub_grids")]
+fn record_burst_landed<C: VoxelWorldConfig>(
+    mut landed: ResMut<BurstLanded>,
+    mut lifted: MessageReader<Lifted<C>>,
+    mut stamped: MessageReader<Stamped<C>>,
+) {
+    landed
+        .lifted
+        .extend(lifted.read().map(|message| message.sub_grid));
+    landed
+        .stamped
+        .extend(stamped.read().map(|message| message.sub_grid));
+}
+
+/// A piece lifted out of the world, as it was when its lift landed.
+#[cfg(feature = "sub_grids")]
+#[derive(Clone, Copy)]
+struct LiftedPiece {
+    sub_grid: Entity,
+    /// The sub-grid's translation under the world's root when lifted.
+    start: Vec3,
+    /// The centre of the box holding the sub-grid's solid voxels, on its
+    /// own grid, which the piece turns about.
+    pivot: Vec3,
+    /// The sub-grid's level-0 chunks.
+    chunks: usize,
+}
+
+/// How a burst of lifts or stamps landed, from the frame of the calls to
+/// the frame the last `Lifted` or `Stamped` arrived.
+#[cfg(feature = "sub_grids")]
+struct BurstLanding {
+    frames: u32,
+    time_ms: f64,
+    worst_frame_ms: f64,
+    /// Handovers that landed in the span, and the chunks they held.
+    handovers: u64,
+    chunks: u64,
+    errors: usize,
+}
+
+#[cfg(feature = "sub_grids")]
+impl BurstLanding {
+    fn report(&self, prefix: &str, metrics: &mut Metrics) {
+        metrics.insert(format!("{prefix}.frames"), self.frames as f64);
+        metrics.insert(format!("{prefix}.time_ms"), self.time_ms);
+        metrics.insert(format!("{prefix}.worst_frame_ms"), self.worst_frame_ms);
+        metrics.insert(format!("{prefix}.handovers"), self.handovers as f64);
+        metrics.insert(
+            format!("{prefix}.chunks_per_handover"),
+            if self.handovers == 0 {
+                0.0
+            } else {
+                self.chunks as f64 / self.handovers as f64
+            },
+        );
+        metrics.insert(format!("{prefix}.errors"), self.errors as f64);
+    }
+}
+
+/// Runs `calls`, which returns how many sub-grids should land and how many
+/// calls failed, then runs frames until `landed` counts that many, or for
+/// at most `MAX_FRAMES`. The first frame's time includes the calls'.
+#[cfg(feature = "sub_grids")]
+fn land_burst<C: VoxelWorldConfig>(
+    app: &mut App,
+    calls: impl FnOnce(&mut App) -> (usize, usize),
+    landed: impl Fn(&BurstLanded) -> usize,
+) -> BurstLanding {
+    let stats = |app: &App| {
+        bevy_voxel_world::grid_bench::handover_stats::<C>(app.world()).unwrap()
+    };
+    *app.world_mut().resource_mut::<BurstLanded>() = BurstLanded::default();
+    let before = stats(app);
+    let start = Instant::now();
+    let (expected, errors) = calls(app);
+    let mut frame_start = start;
+    let mut frames = 0;
+    let mut worst_frame_ms: f64 = 0.0;
+    while frames < MAX_FRAMES {
+        app.update();
+        frames += 1;
+        worst_frame_ms = worst_frame_ms.max(frame_start.elapsed().as_secs_f64() * 1000.0);
+        frame_start = Instant::now();
+        if landed(app.world().resource::<BurstLanded>()) >= expected {
+            break;
+        }
+    }
+    let time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let landed = landed(app.world().resource::<BurstLanded>());
+    if landed < expected {
+        eprintln!("{landed} of {expected} sub-grids landed in {MAX_FRAMES} frames");
+    }
+    let after = stats(app);
+    BurstLanding {
+        frames,
+        time_ms,
+        worst_frame_ms,
+        handovers: after.handovers - before.handovers,
+        chunks: after.chunks - before.chunks,
+        errors,
+    }
+}
+
+/// Lifts every piece out of the world in one frame, each with every solid
+/// voxel in its box, and runs frames until every lift has landed. Returns
+/// the pieces that lifted, in the order of `pieces`, and how the burst
+/// landed.
+#[cfg(feature = "sub_grids")]
+fn lift_burst<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    pieces: &[lift_pieces::Piece],
+) -> (Vec<LiftedPiece>, BurstLanding) {
+    use bevy::ecs::system::RunSystemOnce;
+    let boxes: Vec<(IVec3, IVec3)> =
+        pieces.iter().map(|piece| (piece.min, piece.max)).collect();
+    let mut sub_grids = Vec::new();
+    let landing = land_burst::<C>(
+        app,
+        |app| {
+            let results = app
+                .world_mut()
+                .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+                    boxes
+                        .iter()
+                        .map(|(min, max)| {
+                            voxel_world.lift(Grid::World, *min, *max, |_, voxel| {
+                                matches!(voxel, WorldVoxel::Solid(_))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap();
+            sub_grids = results.iter().filter_map(|result| result.ok()).collect();
+            (sub_grids.len(), results.len() - sub_grids.len())
+        },
+        |landed| landed.lifted.len(),
+    );
+
+    let world = app.world_mut();
+    let mut chunks: HashMap<Entity, usize> = HashMap::new();
+    for (_, parent) in world.query::<(&Chunk<C>, &ChildOf)>().iter(world) {
+        *chunks.entry(parent.parent()).or_default() += 1;
+    }
+    let mut state = SystemState::<VoxelWorld<C>>::new(world);
+    let voxel_world = state.get(world).unwrap();
+    let pivots: Vec<Vec3> = sub_grids
+        .iter()
+        .map(|sub_grid| {
+            let (min, max) = voxel_world
+                .grid(Grid::SubGrid(*sub_grid))
+                .and_then(|grid| grid.bounds())
+                .unwrap_or_default();
+            (min + max).as_vec3() / 2.0
+        })
+        .collect();
+    let lifted = sub_grids
+        .iter()
+        .zip(pivots)
+        .map(|(sub_grid, pivot)| LiftedPiece {
+            sub_grid: *sub_grid,
+            start: world.get::<Transform>(*sub_grid).unwrap().translation,
+            pivot,
+            chunks: chunks.get(sub_grid).copied().unwrap_or(0),
+        })
+        .collect();
+    (lifted, landing)
+}
+
+/// The transform of the `index`th lifted piece at `frame` of its path,
+/// from 1 to `BURST_MOVE_FRAMES`, under the world's root.
+///
+/// The piece rises by up to `BURST_RISE` and turns by up to `BURST_TURN`
+/// about its pivot, on an axis of its own, and comes back down, ending
+/// `BURST_END_TURN` and `BURST_END_DRIFT` from its start pose.
+#[cfg(feature = "sub_grids")]
+fn burst_pose(index: usize, piece: &LiftedPiece, frame: u32) -> Transform {
+    let t = frame as f32 / BURST_MOVE_FRAMES as f32;
+    let arc = (std::f32::consts::PI * t).sin();
+    let axis = Vec3::new((index as f32).sin(), 2.0, (index as f32).cos()).normalize();
+    let rotation = Quat::from_axis_angle(axis, BURST_TURN * arc + BURST_END_TURN * t);
+    let pivot =
+        piece.start + piece.pivot + BURST_RISE * arc * Vec3::Y + BURST_END_DRIFT * t;
+    Transform {
+        translation: pivot - rotation * piece.pivot,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// Moves every lifted piece along its path for `BURST_MOVE_FRAMES` frames,
+/// setting its transform before each frame, and returns the frames' times.
+#[cfg(feature = "sub_grids")]
+fn move_burst(app: &mut App, pieces: &[LiftedPiece]) -> Vec<f64> {
+    let mut times = Vec::with_capacity(BURST_MOVE_FRAMES as usize);
+    for frame in 1..=BURST_MOVE_FRAMES {
+        let start = Instant::now();
+        for (index, piece) in pieces.iter().enumerate() {
+            if let Some(mut transform) =
+                app.world_mut().get_mut::<Transform>(piece.sub_grid)
+            {
+                *transform = burst_pose(index, piece, frame);
+            }
+        }
+        app.update();
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    times
+}
+
+/// Stamps every lifted piece back into the world in one frame, writing
+/// every voxel it holds, and runs frames until every stamp has landed.
+#[cfg(feature = "sub_grids")]
+fn stamp_burst<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    pieces: &[LiftedPiece],
+) -> BurstLanding {
+    use bevy::ecs::system::RunSystemOnce;
+    let sub_grids: Vec<Entity> = pieces.iter().map(|piece| piece.sub_grid).collect();
+    land_burst::<C>(
+        app,
+        |app| {
+            let errors = app
+                .world_mut()
+                .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+                    sub_grids
+                        .iter()
+                        .filter(|sub_grid| {
+                            voxel_world
+                                .stamp(**sub_grid, Grid::World, incoming_replaces)
+                                .is_err()
+                        })
+                        .count()
+                })
+                .unwrap();
+            (pieces.len() - errors, errors)
+        },
+        |landed| landed.stamped.len(),
+    )
+}
+
+/// Despawns every lifted piece in one frame and returns that frame's time,
+/// the calls included.
+#[cfg(feature = "sub_grids")]
+fn despawn_burst<C: VoxelWorldConfig>(app: &mut App, pieces: &[LiftedPiece]) -> f64 {
+    use bevy::ecs::system::RunSystemOnce;
+    let sub_grids: Vec<Entity> = pieces.iter().map(|piece| piece.sub_grid).collect();
+    let start = Instant::now();
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+            for sub_grid in &sub_grids {
+                voxel_world.despawn_sub_grid(*sub_grid);
+            }
+        })
+        .unwrap();
+    app.update();
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+/// A burst of lifts and stamps in a streamed world with its camera still:
+/// every piece of `lift_pieces` lifted in one frame, moved every frame for
+/// `BURST_MOVE_FRAMES`, stamped back in one frame, lifted again, and
+/// despawned in one frame. The app must hold `BurstLanded` and run
+/// `record_burst_landed` for the world `C`.
+///
+/// Reports how many pieces lifted into sub-grids of one chunk, of 2 to 4,
+/// and of more, and how many cross a chunk corner of the world. For the
+/// first lift, the stamp and the second lift (`relift`), it reports frames
+/// and time from the calls to the last sub-grid landing, the worst frame
+/// in that span, the handovers that landed and their chunks per handover,
+/// and the calls that returned an error. Pieces lifted in one frame share
+/// world chunks and fold into fewer handovers, which the handover count
+/// shows. Then frame metrics while the pieces move, and the time of the
+/// frame that despawns the second lift's pieces.
+///
+/// Each piece's path ends near its start pose, so the stamp snaps it back
+/// to where it was lifted from and the second lift takes the same voxels.
+/// A sub-grid whose chunk count differs from its piece's, or a second lift
+/// that starts somewhere else, prints a warning.
+#[cfg(feature = "sub_grids")]
+fn lift_burst_metrics<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    prefix: &str,
+) -> Metrics {
+    let pieces = lift_pieces::pieces(sine_height);
+    let mut metrics = Metrics::new();
+
+    let (lifted, landing) = lift_burst::<C>(app, &pieces);
+    landing.report(&format!("{prefix}.lift"), &mut metrics);
+    let mut counts = [0; 3];
+    for (index, (piece, sub_grid)) in pieces.iter().zip(&lifted).enumerate() {
+        if sub_grid.chunks != piece.chunks {
+            eprintln!(
+                "{prefix}: piece {index} has {} chunks, but should have {}",
+                sub_grid.chunks, piece.chunks
+            );
+        }
+        counts[match sub_grid.chunks {
+            0 | 1 => 0,
+            2..=4 => 1,
+            _ => 2,
+        }] += 1;
+    }
+    metrics.insert(format!("{prefix}.pieces"), lifted.len() as f64);
+    for (name, count) in [
+        "pieces_1_chunk",
+        "pieces_2_to_4_chunks",
+        "pieces_over_4_chunks",
+    ]
+    .into_iter()
+    .zip(counts)
+    {
+        metrics.insert(format!("{prefix}.{name}"), count as f64);
+    }
+    metrics.insert(
+        format!("{prefix}.pieces_on_chunk_corners"),
+        pieces
+            .iter()
+            .filter(|piece| piece.crosses_chunk_corner())
+            .count() as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.sub_grid_chunks"),
+        lifted.iter().map(|piece| piece.chunks).sum::<usize>() as f64,
+    );
+
+    let times = move_burst(app, &lifted);
+    frame_metrics(&format!("{prefix}.moving"), &times, &mut metrics);
+
+    let landing = stamp_burst::<C>(app, &lifted);
+    landing.report(&format!("{prefix}.stamp"), &mut metrics);
+
+    let (relifted, landing) = lift_burst::<C>(app, &pieces);
+    landing.report(&format!("{prefix}.relift"), &mut metrics);
+    let moved = lifted
+        .iter()
+        .zip(&relifted)
+        .filter(|(first, second)| {
+            first.start != second.start || first.chunks != second.chunks
+        })
+        .count();
+    if moved > 0 || relifted.len() != lifted.len() {
+        eprintln!(
+            "{prefix}: {} pieces lifted again, {moved} of them not as first lifted",
+            relifted.len()
+        );
+    }
+
+    metrics.insert(
+        format!("{prefix}.despawn_frame_ms"),
+        despawn_burst::<C>(app, &relifted),
+    );
+    metrics
+}
+
+/// `lift_burst_metrics` in the unlit sine world.
+#[cfg(feature = "sub_grids")]
+fn scenario_lift_burst() -> Metrics {
+    let mut app = build_app(SineWorld::default());
+    app.init_resource::<BurstLanded>()
+        .add_systems(Last, record_burst_landed::<SineWorld>);
+    stream_in::<SineWorld>(&mut app);
+    lift_burst_metrics::<SineWorld>(&mut app, "lift_burst")
+}
+
 /// Combines repeated samples of the same metrics into one, key by key.
 fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
     samples[0]
@@ -2849,8 +3248,9 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
 /// whole-run totals take their best run; everything else, already summarised over
 /// many frames, takes the median.
 ///
-/// `gate_failures` takes the worst run: a scenario's promise must hold in every
-/// run, and the median would read 0 for a promise broken in fewer than half.
+/// `gate_failures` and `errors` take the worst run: a scenario's promise must
+/// hold in every run, and the median would read 0 for a promise broken in
+/// fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
@@ -2858,7 +3258,7 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
             "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
                 percentile(values, 0.0)
             }
-            "chunks_per_s" | "gate_failures" => percentile(values, 1.0),
+            "chunks_per_s" | "gate_failures" | "errors" => percentile(values, 1.0),
             _ => percentile(values, 0.5),
         }
     })
@@ -3035,6 +3435,8 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("fragments", FRAGMENT_RUNS, &scenario_fragments);
     #[cfg(feature = "sub_grids")]
     step("vehicle", RUNS, &scenario_vehicle);
+    #[cfg(feature = "sub_grids")]
+    step("lift_burst", RUNS, &scenario_lift_burst);
     metrics
 }
 
@@ -3066,6 +3468,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("lod_scale")
         || key.starts_with("fragments")
         || key.starts_with("vehicle")
+        || key.starts_with("lift_burst")
     {
         return Gate::ReportOnly;
     }
