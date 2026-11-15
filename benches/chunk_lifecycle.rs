@@ -3175,6 +3175,44 @@ fn scenario_vehicle() -> Metrics {
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 const VEHICLE_HOVER_FRAMES: u32 = 60;
 
+/// The thresholds of `vehicle_lit`'s tag map counts, as (metric, the most it
+/// may reach), each about 20% above its first run. The hull's path is the
+/// same every run, so machine load moves them little.
+///
+/// The world air around the hull's path is open sky at one level, so it
+/// needs no slot, and any slot it takes is over.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+const VEHICLE_TAG_MAP_GATES: [(&str, f64); 2] = [
+    ("tumble.tag_entries_written_per_frame", 21.0),
+    ("tumble.air_slots", 0.0),
+];
+
+/// Runs frames until light is settled and the tag map has written no entry
+/// for `SETTLE_FRAMES` frames in a row, or for at most `MAX_FRAMES`.
+///
+/// `light_is_settled` doesn't wait for the tag map: the column answers of
+/// hinted air it holds land from tasks of their own, and an answer that
+/// changes its position's entry writes it.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn settle_tag_map<C: VoxelWorldConfig>(app: &mut App) {
+    let written = |app: &App| {
+        bevy_voxel_world::grid_bench::tag_map_stats::<C>(app.world())
+            .map_or(0, |stats| stats.entries_written)
+    };
+    let mut quiet = 0;
+    let mut last = written(app);
+    for _ in 0..MAX_FRAMES {
+        if quiet >= SETTLE_FRAMES && light_is_settled::<C>(app) {
+            return;
+        }
+        app.update();
+        let now = written(app);
+        quiet = if now == last { quiet + 1 } else { 0 };
+        last = now;
+    }
+    eprintln!("the tag map didn't settle in {MAX_FRAMES} frames");
+}
+
 /// Light work in a lit world over one frame or a span of frames, as
 /// `LightWatch` records it.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
@@ -3193,6 +3231,19 @@ struct LightFrame {
     /// Main thread spent landing light and starting relights, in
     /// microseconds: in a frame, or the most in any frame of a span.
     main_thread_us: f64,
+    /// The positions the tag map held after the frame, or the most after any
+    /// frame of a span. 0 before the world's first sub-grid.
+    tag_entries: u64,
+    /// Entries written into the tag map's texture, each entry of a full
+    /// rewrite counting.
+    tag_entries_written: u64,
+    /// Times the tag map's whole texture was written.
+    tag_full_rewrites: u64,
+    /// Main thread spent on the tag map's upkeep, in microseconds.
+    tag_upkeep_us: f64,
+    /// Slots held by world chunks of air the tag map holds, after the frame,
+    /// or the most after any frame of a span.
+    air_slots: u64,
 }
 
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
@@ -3222,6 +3273,7 @@ struct LightWatch<C> {
     /// Each phase's name and its first frame's index in `frames`.
     phases: Vec<(&'static str, usize)>,
     last: bevy_voxel_world::light_bench::LightStats,
+    last_tag_map: bevy_voxel_world::grid_bench::TagMapStats,
     world: std::marker::PhantomData<C>,
 }
 
@@ -3232,12 +3284,18 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
             frames: Vec::new(),
             phases: Vec::new(),
             last: Self::stats(app),
+            last_tag_map: Self::tag_map_stats(app),
             world: std::marker::PhantomData,
         }
     }
 
     fn stats(app: &App) -> bevy_voxel_world::light_bench::LightStats {
         bevy_voxel_world::light_bench::light_stats::<C>(app.world()).unwrap()
+    }
+
+    /// The tag map's stats, all 0 while the world has no tag map.
+    fn tag_map_stats(app: &App) -> bevy_voxel_world::grid_bench::TagMapStats {
+        bevy_voxel_world::grid_bench::tag_map_stats::<C>(app.world()).unwrap_or_default()
     }
 
     /// Starts the phase `name`, ending the one before.
@@ -3249,6 +3307,8 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
     fn frame(&mut self, app: &mut App) {
         let now = Self::stats(app);
         let last = self.last;
+        let tag_map = Self::tag_map_stats(app);
+        let last_tag_map = self.last_tag_map;
         self.frames.push(LightFrame {
             settled: light_is_settled::<C>(app),
             solves: now.solves - last.solves,
@@ -3256,8 +3316,14 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
             sub_grid_relights: now.sub_grid_relights - last.sub_grid_relights,
             sub_grid_chunk_solves: now.sub_grid_chunk_solves - last.sub_grid_chunk_solves,
             main_thread_us: (now.main_thread_ms - last.main_thread_ms) * 1000.0,
+            tag_entries: tag_map.entries,
+            tag_entries_written: tag_map.entries_written - last_tag_map.entries_written,
+            tag_full_rewrites: tag_map.full_rewrites - last_tag_map.full_rewrites,
+            tag_upkeep_us: (tag_map.upkeep_micros - last_tag_map.upkeep_micros) as f64,
+            air_slots: tag_map.air_slots,
         });
         self.last = now;
+        self.last_tag_map = tag_map;
     }
 
     /// Runs and records frames until light is settled, or for at most
@@ -3304,6 +3370,11 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
                 .iter()
                 .map(|frame| frame.main_thread_us)
                 .fold(0.0, f64::max),
+            tag_entries: frames.iter().map(|frame| frame.tag_entries).max().unwrap_or(0),
+            tag_entries_written: frames.iter().map(|frame| frame.tag_entries_written).sum(),
+            tag_full_rewrites: frames.iter().map(|frame| frame.tag_full_rewrites).sum(),
+            tag_upkeep_us: frames.iter().map(|frame| frame.tag_upkeep_us).sum(),
+            air_slots: frames.iter().map(|frame| frame.air_slots).max().unwrap_or(0),
         }
     }
 
@@ -3374,6 +3445,40 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
         metrics.insert(format!("{name}.max_main_thread_us"), work.main_thread_us);
         work.sub_grid_work()
     }
+
+    /// The tag map's entries written per frame in the phase `name`, on
+    /// average.
+    fn tag_entries_written_per_frame(&self, name: &str) -> f64 {
+        let (first, end) = self.phase(name);
+        self.sum(first, end).tag_entries_written as f64 / (end - first).max(1) as f64
+    }
+
+    /// Reports what the tag map did in the phase `name` under
+    /// `{prefix}.{name}`: the most entries it held after a frame, entries
+    /// written per frame and full rewrites, upkeep per frame, and the most
+    /// slots world chunks of air in it held after a frame. Returns the work
+    /// of the phase.
+    fn report_tag_map(&self, prefix: &str, name: &str, metrics: &mut Metrics) -> LightFrame {
+        let (first, end) = self.phase(name);
+        let work = self.sum(first, end);
+        let frames = (end - first).max(1) as f64;
+        let name = format!("{prefix}.{name}");
+        metrics.insert(format!("{name}.tag_entries"), work.tag_entries as f64);
+        metrics.insert(
+            format!("{name}.tag_entries_written_per_frame"),
+            work.tag_entries_written as f64 / frames,
+        );
+        metrics.insert(
+            format!("{name}.tag_full_rewrites"),
+            work.tag_full_rewrites as f64,
+        );
+        metrics.insert(
+            format!("{name}.tag_upkeep_us_per_frame"),
+            work.tag_upkeep_us / frames,
+        );
+        metrics.insert(format!("{name}.air_slots"), work.air_slots as f64);
+        work
+    }
 }
 
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
@@ -3434,7 +3539,8 @@ fn paced_hull_edits() -> Vec<(IVec3, WorldVoxel<u8>)> {
 }
 
 /// The vehicle hull with lamps in its cabin, in the lit sine world: built
-/// by voxel edits with its light settled before timing starts, it hovers
+/// by voxel edits with its light and tag map settled before timing starts
+/// (see `settle_tag_map`), it hovers
 /// for `VEHICLE_HOVER_FRAMES`, then flies and tumbles as in `vehicle`. Still
 /// tumbling, it takes `paced_hull_edits` one at a time with frames paced
 /// at 60 a second, as `edits_lit` does, and then an edit every frame as in
@@ -3447,13 +3553,20 @@ fn paced_hull_edits() -> Vec<(IVec3, WorldVoxel<u8>)> {
 /// time to publish, counting the edit's frame, and the most main thread
 /// light took in any of its frames. For the edits every frame, what
 /// `edit_vehicle_every_frame` reports, and the relights and most main
-/// thread in a frame from the phase's start until light settled.
+/// thread in a frame from the phase's start until light settled. For every
+/// phase, what `LightWatch::report_tag_map` reports: the tag map's entries,
+/// entries written per frame, full rewrites, upkeep per frame, and the slots
+/// world chunks of air around the hull hold.
 ///
 /// Gate, checked here and reported as `gate_failures`: no sub-grid solve or
-/// relight starts while the hull hovers, flies or tumbles with no edit, and
-/// each paced edit lands within 2 frames with at most 1 ms of main thread
-/// relighting in any frame. Each solve or relight and each edit missing its
-/// gate counts once. The edits every frame have no gate.
+/// relight starts while the hull hovers, flies or tumbles with no edit, no
+/// tag map entry is written while it hovers, and each paced edit lands
+/// within 2 frames with at most 1 ms of main thread relighting in any
+/// frame. Each solve, relight and entry written, and each edit missing its
+/// gate, counts once. While the hull tumbles, its entries written per frame
+/// and the air chunks' slots stay within `VEHICLE_TAG_MAP_GATES`, each one
+/// over counting once. The edits every frame have no gate, and no timing
+/// has a threshold.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 fn scenario_vehicle_lit() -> Metrics {
     type Lit = LitBenchWorld<SINE, true>;
@@ -3466,6 +3579,7 @@ fn scenario_vehicle_lit() -> Metrics {
     let mut metrics = Metrics::new();
     let hull = build_vehicle::<Lit>(&mut app, prefix, Some(LAMP), &mut metrics);
     settle_light::<Lit>(&mut app);
+    settle_tag_map::<Lit>(&mut app);
     let mut watch = LightWatch::<Lit>::new(&app);
 
     let mut still = 0;
@@ -3479,9 +3593,22 @@ fn scenario_vehicle_lit() -> Metrics {
         let times = timed_frames(&mut app, frames as usize, |app| watch.frame(app));
         frame_metrics(&format!("{prefix}.{name}"), &times, &mut metrics);
         still += watch.report_still(prefix, name, &mut metrics);
+        watch.report_tag_map(prefix, name, &mut metrics);
     }
     if still > 0 {
         eprintln!("{prefix}: {still} sub-grid solves and relights while the hull moved");
+    }
+    let hovered = watch.in_phase("hover").tag_entries_written;
+    if hovered > 0 {
+        eprintln!("{prefix}: {hovered} tag map entries written while the hull hovered");
+    }
+    let over: Vec<String> = VEHICLE_TAG_MAP_GATES
+        .iter()
+        .filter(|(name, most)| metrics[&format!("{prefix}.{name}")] > *most)
+        .map(|(name, most)| format!("{name} > {most}"))
+        .collect();
+    if !over.is_empty() {
+        eprintln!("{prefix}: missed its thresholds: {over:?}");
     }
 
     // Still tumbling.
@@ -3598,6 +3725,7 @@ fn scenario_vehicle_lit() -> Metrics {
         format!("{paced}.max_time_to_publish_ms"),
         max(&times_to_publish),
     );
+    watch.report_tag_map(prefix, "paced", &mut metrics);
 
     watch.start("edited");
     edit_vehicle_every_frame::<Lit>(
@@ -3609,10 +3737,11 @@ fn scenario_vehicle_lit() -> Metrics {
     );
     watch.settle(&mut app);
     watch.report_until_settled(prefix, "edited", &mut metrics);
+    watch.report_tag_map(prefix, "edited", &mut metrics);
 
     metrics.insert(
         format!("{prefix}.gate_failures"),
-        (still as usize + missed) as f64,
+        (still as usize + missed + hovered as usize + over.len()) as f64,
     );
     metrics
 }
@@ -4067,9 +4196,9 @@ fn scenario_lift_burst() -> Metrics {
 /// settles on, and in those frames the solves, the relights of the world's
 /// chunks and of sub-grid chunks, sub-grid chunks solved in their chunk
 /// tasks, and the most main thread light took in a frame. For `moving`, the
-/// sub-grid solves and relights and the most main thread in a frame while
-/// the pieces move. For `digs`, the same as for `lift`. Ratio lines compare
-/// the lift with the digs.
+/// sub-grid solves and relights, the most main thread in a frame, and the
+/// tag map's entries written per frame while the pieces move. For `digs`,
+/// the same as for `lift`. Ratio lines compare the lift with the digs.
 ///
 /// Gate, checked here and reported as `gate_failures`, each solve or relight
 /// against it counting once: no sub-grid solve or relight starts while the
@@ -4095,6 +4224,10 @@ fn scenario_lift_burst_lit() -> Metrics {
 
     let new_chunks = metrics[&format!("{prefix}.sub_grid_chunks")] as u64;
     let mut failures = watch.report_still(prefix, "moving", &mut metrics);
+    metrics.insert(
+        format!("{prefix}.moving.tag_entries_written_per_frame"),
+        watch.tag_entries_written_per_frame("moving"),
+    );
     let mut lift = LightFrame::default();
     for name in ["lift", "stamp", "relift", "despawn"] {
         let work = watch.report_until_settled(prefix, name, &mut metrics);

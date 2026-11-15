@@ -810,18 +810,23 @@ pub struct TagMapStats {
     /// Time spent on upkeep on the main thread, apart from light's own
     /// main-thread time.
     pub upkeep_micros: u64,
+    /// Slots held now by world chunks the map holds that show no mesh,
+    /// which are world chunks of air near sub-grids.
+    pub air_slots: u64,
 }
 
 /// What the tag map of world `C` has done, or `None` if the world has no
 /// tag map, as a world without light propagation, or one with no sub-grid
 /// yet, has none.
 pub fn tag_map_stats<C: VoxelWorldConfig>(world: &World) -> Option<TagMapStats> {
-    let map = world.get_resource::<LightRoute<C>>()?.tag_map()?;
+    let route = world.get_resource::<LightRoute<C>>()?;
+    let map = route.tag_map()?;
     Some(TagMapStats {
         entries: map.len() as u64,
         entries_written: map.counters.entries_written,
         full_rewrites: map.counters.full_rewrites,
         upkeep_micros: map.counters.upkeep_nanos / 1000,
+        air_slots: route.kept_unshown_slots() as u64,
     })
 }
 

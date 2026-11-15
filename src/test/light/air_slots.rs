@@ -293,3 +293,24 @@ fn an_air_chunks_slot_is_freed_as_its_entry_leaves_when_the_sub_grid_moves_away(
     assert!(answer(&app, SKY).is_some());
     assert_eq!(route(&app).slots_held(), held_before);
 }
+
+#[test]
+fn the_bench_stats_count_the_slots_the_halls_air_takes_while_a_sub_grid_is_near() {
+    let air_slots = |app: &App| {
+        crate::grid_bench::tag_map_stats::<LampWorld>(app.world())
+            .expect("a tag map")
+            .air_slots
+    };
+    let mut app = settled_hall(false, unfilled());
+    let entity = spawn_sub_grid(&mut app, in_the_sky());
+    settle(&mut app, "the sub-grid's own light to settle");
+    assert_eq!(air_slots(&app), 0);
+
+    move_to(&mut app, entity, across_the_hall());
+    app.update();
+    assert_eq!(air_slots(&app), HALL_AIR.len() as u64);
+
+    move_to(&mut app, entity, in_the_sky());
+    app.update();
+    assert_eq!(air_slots(&app), 0);
+}

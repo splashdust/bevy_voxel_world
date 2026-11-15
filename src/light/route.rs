@@ -1709,6 +1709,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.tag_map.as_mut()?.map.take_writes()
     }
 
+    /// How many slots are held by chunks kept for the tag map that don't
+    /// show a mesh: world chunks of air near sub-grids.
+    #[cfg(feature = "sub_grids")]
+    pub fn kept_unshown_slots(&self) -> usize {
+        self.chunks
+            .values()
+            .filter(|chunk| chunk.kept && !chunk.shown && chunk.slot.is_some())
+            .count()
+    }
+
     /// How many slots chunks hold.
     #[cfg(all(test, feature = "sub_grids"))]
     pub fn slots_held(&self) -> usize {
