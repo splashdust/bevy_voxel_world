@@ -214,12 +214,12 @@ $ cargo run -r --example light_tuning --features light_propagation,sub_grids
 
 ### Light demo
 
-The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates.
+The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates. Its trees can be felled, which uses the `sub_grids` and `dislodged_fragments` features too.
 
 <img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/house.webp" />
 
 ```bash
-$ cargo run -r --example light_mountain_house --features light_propagation
+$ cargo run -r --example light_mountain_house --features light_propagation,sub_grids,dislodged_fragments
 ```
 
 ## Syncing and saving voxel edits
@@ -271,21 +271,21 @@ $ cargo add bevy_voxel_world --features sub_grids
 
 `VoxelWorld::lift` moves the voxels a game picks out of any grid into a new sub-grid, and `VoxelWorld::stamp` writes a sub-grid's voxels back into any other grid at the nearest pose that lines up with it. Either way the voxels never show twice or not at all: every chunk the move touches changes in the same frame. `VoxelWorld::raycast_grids` casts a ray through every grid. In a lit world, a sub-grid's lamps light it, its own voxels keep sky out of its insides, and its faces show the world's light where it is, so it darkens as it flies into a cave.
 
-The [`airship` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/airship/main.rs) lifts a ship off its dock, flies it through a cave and a lamp-lit hall while you edit it, and stamps it back down.
+The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) walks through the feature on a few pillars and rods: cut them apart, build on them, drop new rods and stamp them back into the world.
 
 ```bash
-$ cargo run -r --example airship --features sub_grids,light_propagation
+$ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,light_propagation
 ```
 
 ## Dislodged fragments
 
 With the opt-in `dislodged_fragments` feature, a world can ask the crate to find the voxels an edit cuts off from the rest of their grid, by returning settings from `VoxelWorldConfig::detect_dislodged_fragments`. Each piece arrives as a `FragmentDislodged` message. With `sub_grids` too, the crate can lift each piece into a sub-grid for the game to drop.
 
-The [`dislodged_fragments` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/dislodged_fragments/main.rs) carves overhangs and floating islands that fall under physics, and the [`dislodged_fragments_tree` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/dislodged_fragments_tree/main.rs) cuts branches off a tree lit only by lamps.
+The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) lifts each piece you cut off a pillar or a rod, and the [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) fells a tree when you cut through its trunk.
 
 ```bash
-$ cargo run -r --example dislodged_fragments --features sub_grids,dislodged_fragments
-$ cargo run -r --example dislodged_fragments_tree --features sub_grids,dislodged_fragments,light_propagation
+$ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,light_propagation
+$ cargo run -r --example light_mountain_house --features light_propagation,sub_grids,dislodged_fragments
 ```
 
 ## AI Disclosure
