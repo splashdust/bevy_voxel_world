@@ -2846,6 +2846,20 @@ mod tests {
             .count()
     }
 
+    /// Runs until client B has no sub-grids left, after B was told to drop
+    /// every piece it held.
+    ///
+    /// B despawns a piece through `despawn_sub_grid`, which keeps it alive
+    /// until the handover holding its chunks lands. The lift that made the
+    /// piece is such a handover, and it lands only once B's world chunks
+    /// around it have generated. On a busy machine that takes more frames
+    /// than the tests otherwise run.
+    fn await_b_despawns(app: &mut App) {
+        run_until(app, 600, "B despawns its pieces", |app| {
+            sub_grid_count::<ClientB>(app) == 0
+        });
+    }
+
     /// Checks that A holds every server piece, and B the ones in `b_holds`,
     /// each with the server's parent, pose and voxels.
     fn pieces_converged(app: &mut App, b_holds: &[u32]) {
@@ -2959,7 +2973,7 @@ mod tests {
         run(&mut app, 4);
         assert!(holds(&app, ClientA::ID, id));
         assert!(!holds(&app, ClientB::ID, id), "B despawns it");
-        assert_eq!(sub_grid_count::<ClientB>(&mut app), 0);
+        await_b_despawns(&mut app);
 
         // An edit B can't hear of while the piece is away.
         let pos = IVec3::new(1, 2 * LIFT_REACH + 2, 1).to_array();
@@ -3063,13 +3077,16 @@ mod tests {
         run(&mut app, 5);
 
         app.world_mut().resource_mut::<ServerPieces>().reset = true;
-        run(&mut app, 5);
+        // Each world despawns its pieces once the lifts' handovers land; see
+        // `await_b_despawns`.
+        run_until(&mut app, 600, "every world despawns its pieces", |app| {
+            sub_grid_count::<Server>(app) == 0
+                && sub_grid_count::<ClientA>(app) == 0
+                && sub_grid_count::<ClientB>(app) == 0
+        });
         for (world, deltas) in ["server", "A", "B"].iter().zip(world_deltas(&mut app)) {
             assert!(deltas.iter().all(|d| d.is_empty()), "{world} keeps edits");
         }
-        assert_eq!(sub_grid_count::<Server>(&mut app), 0);
-        assert_eq!(sub_grid_count::<ClientA>(&mut app), 0);
-        assert_eq!(sub_grid_count::<ClientB>(&mut app), 0);
         world_converged(&mut app);
     }
 
@@ -3241,6 +3258,7 @@ mod tests {
         move_piece(&mut app, id, Vec3::new(70.0, home.y, 70.0));
         run(&mut app, 4);
         assert!(!holds(&app, ClientB::ID, id));
+        await_b_despawns(&mut app);
         assert_eq!(audit_pieces(&mut app), 0);
 
         // A sub-grid B holds no game id for.
