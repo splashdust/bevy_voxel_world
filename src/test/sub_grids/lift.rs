@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I};
 use crate::prelude::*;
 use crate::chunk_lifecycle::ChunkLifecycle;
+use crate::chunk_map::ChunkMap;
 use crate::test::{
     chunk_status_of, record_chunk_messages, recorded, spawn_camera, test_plugins,
     update_until,
@@ -856,6 +857,70 @@ fn a_lift_made_between_a_commit_and_its_requests_lands_with_its_own_commit() {
     assert_eq!(
         lifted(&app),
         [(landing, Lifted::new(Grid::World, entity))].as_slice()
+    );
+}
+
+#[test]
+fn a_lift_waits_to_land_while_another_thread_reads_the_chunk_map() {
+    let mut app = lift_app();
+    let (min, max) = slab();
+    let commit = next_frame(&app);
+    let entity = run(&mut app, move |voxel_world| {
+        voxel_world
+            .lift(Grid::World, min, max, |_, _| true)
+            .unwrap()
+    });
+    let world_chunks = padded_chunks(min, max);
+    let sub_grid_chunks = BTreeSet::from([[0, 0, 0]]);
+    let keys = |chunks: &BTreeSet<[i32; 3]>| -> Vec<ChunkKey> {
+        chunks
+            .iter()
+            .map(|chunk| ChunkKey::new(IVec3::from_array(*chunk), 0))
+            .collect()
+    };
+    let (world_keys, sub_grid_keys) = (keys(&world_chunks), keys(&sub_grid_chunks));
+
+    // A reader such as a task reading voxels, holding the chunk map while
+    // every chunk of the lift finishes its task.
+    let map = app
+        .world()
+        .resource::<ChunkMap<LiftWorld, u8>>()
+        .get_map();
+    let reading = map.read().unwrap();
+    update_until(&mut app, "every chunk of the lift to finish", |app| {
+        let (world_keys, sub_grid_keys) = (world_keys.clone(), sub_grid_keys.clone());
+        run(app, move |voxel_world| {
+            let ready = Some(ChunkStatus::Ready);
+            let sub_grid = voxel_world.grid(Grid::SubGrid(entity)).unwrap();
+            world_keys
+                .iter()
+                .all(|key| voxel_world.chunk_state(*key) == ready)
+                && sub_grid_keys
+                    .iter()
+                    .all(|key| sub_grid.chunk_state(*key) == ready)
+        })
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(published_since(&app, commit, Grid::World, &world_chunks).is_empty());
+    assert!(lifted(&app).is_empty());
+
+    drop(reading);
+    until_lifted(&mut app, entity);
+    let mut frames = published_since(&app, commit, Grid::World, &world_chunks);
+    frames.extend(published_since(
+        &app,
+        commit,
+        Grid::SubGrid(entity),
+        &sub_grid_chunks,
+    ));
+    assert_eq!(frames.len(), world_chunks.len() + 1, "{frames:?}");
+    let landing: BTreeSet<u32> = frames.iter().map(|(_, frame)| *frame).collect();
+    assert_eq!(
+        landing.into_iter().collect::<Vec<_>>(),
+        [lifted(&app)[0].0],
+        "{frames:?}"
     );
 }
 

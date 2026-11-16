@@ -959,15 +959,24 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         >,
         #[cfg(feature = "sub_grids")] landing: (
             ResMut<crate::sub_grid::handover::Handovers<C>>,
+            Res<ChunkMap<C, C::MaterialIndex>>,
             ResMut<ChunkMapRemoveBuffer<C>>,
+            MessageWriter<ChunkPublished<C>>,
+            MessageWriter<ChunkWillSpawn<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
         #[cfg(feature = "sub_grids")]
-        let (mut handovers, mut chunk_map_remove_buffer, mut ev_chunk_will_despawn) =
-            landing;
+        let (
+            mut handovers,
+            chunk_map,
+            mut chunk_map_remove_buffer,
+            mut ev_chunk_published,
+            mut ev_chunk_will_spawn,
+            mut ev_chunk_will_despawn,
+        ) = landing;
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
         let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
@@ -1086,9 +1095,13 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         handovers.land_ready(
             &mut index,
             &mut commands,
-            &mut chunk_map_update_buffer,
-            &mut chunk_map_remove_buffer,
-            &mut ev_chunk_will_despawn,
+            &chunk_map,
+            (&mut chunk_map_update_buffer, &mut chunk_map_remove_buffer),
+            (
+                &mut ev_chunk_published,
+                &mut ev_chunk_will_spawn,
+                &mut ev_chunk_will_despawn,
+            ),
             #[cfg(feature = "light_propagation")]
             light_work.as_deref_mut(),
         );

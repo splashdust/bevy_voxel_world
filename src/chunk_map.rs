@@ -1,6 +1,6 @@
 use std::{
     marker::PhantomData,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::{
@@ -207,6 +207,13 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         self.map.clone()
     }
 
+    /// The chunk map held for writing, or `None` if another thread holds it
+    /// now. It never waits for the lock, so a thread reading the chunk map
+    /// never stalls the frame.
+    pub(crate) fn try_write(&self) -> Option<RwLockWriteGuard<'_, ChunkMapData<I>>> {
+        self.map.try_write().ok()
+    }
+
     pub(crate) fn apply_buffers(
         &self,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
@@ -218,62 +225,73 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         if update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
         }
+        // A held lock leaves the data for a later flush, while the chunks'
+        // meshes already show.
+        if let Some(mut write_lock) = self.try_write() {
+            Self::write_buffers(
+                &mut write_lock,
+                update_buffer,
+                remove_buffer,
+                ev_chunk_published,
+                ev_chunk_will_spawn,
+                index,
+            );
+        }
+    }
 
-        // A held read lock leaves the data for a later flush, while the
-        // chunks' meshes already show. A landing handover can't wait, since
-        // every chunk in it must be readable in the frame its mesh shows.
-        #[cfg(feature = "sub_grids")]
-        let lock = if std::mem::take(&mut update_buffer.must_land) {
-            Ok(self.map.write().unwrap())
-        } else {
-            self.map.try_write().map_err(|_| ())
-        };
-        #[cfg(not(feature = "sub_grids"))]
-        let lock = self.map.try_write();
-        if let Ok(mut write_lock) = lock {
-            for (key, chunk_data, entity) in update_buffer.iter() {
-                // A sub-grid's chunk despawned while its data waited for the
-                // lock publishes nothing, so its grid holds no data once its
-                // chunks are gone.
-                if !key.is_world() && index.get_in(*key) != Some(*entity) {
-                    continue;
-                }
-                let previous = write_lock.insert(
-                    *key,
-                    ChunkData {
-                        key: key.key(),
-                        ..chunk_data.clone()
-                    },
-                );
-                // A chunk is published for the first time when the key has no
-                // data, or still holds the data of a despawned chunk.
-                if previous.map(|data| data.entity) != Some(*entity) {
-                    if let Some(message) = index.message(*key, *entity) {
-                        ev_chunk_will_spawn.write(message);
-                    }
-                }
+    /// Writes the data and the removals waiting in the buffers into
+    /// `write_lock`, the chunk map held for writing, and empties the
+    /// buffers. It writes a `ChunkPublished` for each chunk it publishes.
+    pub(crate) fn write_buffers(
+        write_lock: &mut ChunkMapData<I>,
+        update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
+        remove_buffer: &mut ChunkMapRemoveBuffer<C>,
+        ev_chunk_published: &mut MessageWriter<ChunkPublished<C>>,
+        ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
+        index: &ChunkIndex<C>,
+    ) {
+        for (key, chunk_data, entity) in update_buffer.iter() {
+            // A sub-grid's chunk despawned while its data waited for the
+            // lock publishes nothing, so its grid holds no data once its
+            // chunks are gone.
+            if !key.is_world() && index.get_in(*key) != Some(*entity) {
+                continue;
+            }
+            let previous = write_lock.insert(
+                *key,
+                ChunkData {
+                    key: key.key(),
+                    ..chunk_data.clone()
+                },
+            );
+            // A chunk is published for the first time when the key has no
+            // data, or still holds the data of a despawned chunk.
+            if previous.map(|data| data.entity) != Some(*entity) {
                 if let Some(message) = index.message(*key, *entity) {
-                    ev_chunk_published.write(message);
+                    ev_chunk_will_spawn.write(message);
                 }
             }
-            update_buffer.clear();
+            if let Some(message) = index.message(*key, *entity) {
+                ev_chunk_published.write(message);
+            }
+        }
+        update_buffer.clear();
 
-            let mut rebuild: Vec<GridId> = Vec::new();
-            for (key, entity) in remove_buffer.iter() {
-                // The chunk may have spawned again and published while this
-                // removal waited for the lock. Its data stays.
-                if write_lock.get_in(key).map(|data| data.entity) != Some(*entity) {
-                    continue;
-                }
-                if write_lock.remove(key) && !rebuild.contains(&key.grid()) {
-                    rebuild.push(key.grid());
-                }
+        let mut rebuild: Vec<GridId> = Vec::new();
+        for (key, entity) in remove_buffer.iter() {
+            // The chunk may have spawned again and published while this
+            // removal waited for the lock. Its data stays.
+            if write_lock.get_in(key).map(|data| data.entity) != Some(*entity) {
+                continue;
             }
-            remove_buffer.clear();
+            if write_lock.remove(key) && !rebuild.contains(&key.grid()) {
+                rebuild.push(key.grid());
+            }
+        }
+        remove_buffer.clear();
 
-            for grid in rebuild {
-                write_lock.rebuild_bounds(grid);
-            }
+        for grid in rebuild {
+            write_lock.rebuild_bounds(grid);
         }
     }
 }
@@ -305,11 +323,6 @@ impl<C, I> Default for ChunkMap<C, I> {
 pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I> {
     #[deref]
     queued: Vec<(GridKey, chunk::ChunkData<I>, Entity)>,
-    /// Whether the next flush waits for the chunk map's lock rather than
-    /// trying it, so the queued data is readable in the frame its meshes
-    /// show. A landing handover sets it.
-    #[cfg(feature = "sub_grids")]
-    pub must_land: bool,
     _world: PhantomData<C>,
 }
 
