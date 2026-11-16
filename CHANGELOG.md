@@ -30,6 +30,8 @@ When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to au
 
 - `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature.
 
+- `multiplayer_loopback` is now a short example of the sync over a reliable lane. Its network faults, interest, heartbeat, rejoin and reset are gone; the `edits` module docs describe those flows.
+
 - `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
 
 ### Other changes
