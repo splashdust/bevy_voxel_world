@@ -25,4 +25,16 @@ npm run dev
 
 `npm run build:demo` puts the demo in `public/voxel_demo`, with the `light_mountain_house` example's voxel texture from `assets/`. The first run takes several minutes. Re-run it after changing `voxel_demo/`, the example or the crate.
 
+## Docs section (prototype)
+
+`docs/index.html` shows the crate's API by topic, from the rustdoc JSON of a nightly toolchain. `npm run build:api` runs `api_extract/`, which builds that JSON once with every feature that adds API and once without each of them, and writes `api.json`: each public item's signature, docs, members and the features it needs. `scripts/api-topics.ts` sorts the items into topics, and the build stops if an item is in none.
+
+```bash
+rustup toolchain install nightly
+npm run build:api
+npm run dev
+```
+
+Set `API_DOCS_TOOLCHAIN` to use a nightly other than `nightly`; it must write the rustdoc JSON format that `api_extract` reads. In `npm run dev`, a bar at the bottom of the docs page flips between three layouts: `?variant=A` (topic pages), `B` (search first) and `C` (explorer columns).
+
 `npm run build` writes the static site to `dist`. Pushing to `main` builds and publishes it to GitHub Pages through `.github/workflows/pages.yml`.

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+import { api } from './scripts/api.ts';
 import { examples } from './scripts/examples.ts';
 import { markdown } from './scripts/markdown.ts';
 
@@ -19,7 +20,7 @@ export default defineConfig({
   // Each page is its own HTML file, and Bevy can't be stopped once it's running,
   // so leaving the demo page must be a real page load.
   appType: 'mpa',
-  plugins: [markdown(), examples(), react()],
+  plugins: [markdown(), examples(), api(), react()],
   define: {
     __CRATE_VERSION__: JSON.stringify(crateVersion),
     __BEVY_VERSION__: JSON.stringify(bevyVersion),
@@ -32,6 +33,7 @@ export default defineConfig({
         page('changelog/index.html'),
         page('demo/index.html'),
         page('examples/index.html'),
+        page('docs/index.html'),
       ],
     },
   },

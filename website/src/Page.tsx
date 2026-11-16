@@ -11,6 +11,7 @@ const PAGES = [
   { id: 'changelog', label: 'Changelog', path: 'changelog/' },
   { id: 'demo', label: 'Demo', path: 'demo/' },
   { id: 'examples', label: 'Examples', path: 'examples/' },
+  { id: 'docs', label: 'Docs', path: 'docs/' },
 ] as const;
 
 type PageId = (typeof PAGES)[number]['id'];

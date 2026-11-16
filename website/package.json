@@ -6,7 +6,8 @@
     "dev": "vite",
     "build:demo": "node scripts/build-demo.mjs",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:api": "cargo run --release --manifest-path api_extract/Cargo.toml"
   },
   "dependencies": {
     "@fontsource-variable/martian-mono": "^5.3.0",

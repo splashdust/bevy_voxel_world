@@ -4,13 +4,13 @@ import type { Plugin } from 'vite';
 
 export type Heading = { id: string; text: string; depth: number };
 
-const CODE_THEME = 'vitesse-dark';
+export const CODE_THEME = 'vitesse-dark';
 /** Swaps the theme's black background for the site's --dirt-deep. */
-const CODE_COLORS = { '#121212': '#241900' };
+export const CODE_COLORS = { '#121212': '#241900' };
 
-const highlighter = createHighlighter({
+export const highlighter = createHighlighter({
   themes: [CODE_THEME],
-  langs: ['rust', 'bash', 'toml'],
+  langs: ['rust', 'bash', 'toml', 'wgsl'],
 });
 
 /** Makes the same anchors as GitHub, so links to a section work on both sites. */
