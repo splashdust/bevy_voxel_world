@@ -1,6 +1,15 @@
 //! What a chunk's light shows its six face neighbours: a hash per face of when
 //! light reached it, and the comparison an arriving chunk makes with each
 //! neighbour's light.
+//!
+//! The comparison looks at each pair of touching open voxels on the shared
+//! face, and at each emissive voxel on the face. An emissive voxel is solid,
+//! so it holds no light to compare, yet its light crosses the face into the
+//! open voxel beside it. Where no open voxel of its own chunk on the face
+//! carries that light across, as with an emissive voxel set in a solid wall,
+//! comparing open voxels alone would never relight the neighbour, which would
+//! keep light dimmer than solving it again gives. Only voxel light needs this:
+//! direct sky, the other source on a face, is held by open voxels.
 
 use bevy::prelude::*;
 
@@ -52,12 +61,33 @@ impl Face {
     /// along the other two axes in x, y, z order. A face and its opposite
     /// give touching voxels the same `u` and `v`.
     pub fn voxel(self, u: usize, v: usize) -> (usize, usize, usize) {
-        let far = self as usize & 1 == 1;
-        let side = if far { CHUNK - 1 } else { 0 };
+        let side = self.side();
         match self {
             Face::NegX | Face::PosX => (side, u, v),
             Face::NegY | Face::PosY => (u, side, v),
             Face::NegZ | Face::PosZ => (u, v, side),
+        }
+    }
+
+    /// The `u` and `v` of the chunk's voxel at `x`, `y`, `z` on this face, or
+    /// `None` when the voxel isn't on it.
+    pub fn uv(self, x: usize, y: usize, z: usize) -> Option<(usize, usize)> {
+        let (across, u, v) = match self {
+            Face::NegX | Face::PosX => (x, y, z),
+            Face::NegY | Face::PosY => (y, x, z),
+            Face::NegZ | Face::PosZ => (z, x, y),
+        };
+        (across == self.side()).then_some((u, v))
+    }
+
+    /// The coordinate of the chunk's voxels on this face along its axis: 0, or
+    /// `CHUNK - 1` for a face toward positive coordinates.
+    fn side(self) -> usize {
+        let far = self as usize & 1 == 1;
+        if far {
+            CHUNK - 1
+        } else {
+            0
         }
     }
 }
@@ -106,6 +136,10 @@ impl FaceHashes {
 /// last distance that holds `to`'s, with level 0 counting as `reach + 1`.
 /// Direct sky, at the top level, is a source itself, so a neighbour beside it
 /// is one step from a source. `sky_scale` is `None` with sky light off.
+///
+/// It also holds when an emissive voxel of `from` on the face could light the
+/// open voxel of `to` across it sooner than `to`'s voxel light there says:
+/// see [`emissive_reaches_sooner`].
 pub(crate) fn could_reach_sooner(
     from: &ChunkLight,
     to: &ChunkLight,
@@ -142,5 +176,39 @@ pub(crate) fn could_reach_sooner(
         false
     };
     channel_reaches(voxel_scale, |light| &light.voxel)
+        || emissive_reaches_sooner(from, to, face, voxel_scale)
         || sky_scale.is_some_and(|scale| channel_reaches(scale, |light| &light.sky))
+}
+
+/// Whether an emissive voxel of `from` on `face` could light the open voxel of
+/// `to` across it sooner than `to`'s voxel light there says light got there.
+///
+/// Light from an emissive voxel starts at the distance [`LevelScale::start`]
+/// gives for its level, and the voxels beside it are lit at the next distance.
+/// So it lights the voxel across the face one step past its start, unlike an
+/// open voxel, whose light can cross a face at the distance that reached it.
+///
+/// It looks at every emissive voxel of `from`, so its cost grows with how many
+/// the chunk has.
+fn emissive_reaches_sooner(
+    from: &ChunkLight,
+    to: &ChunkLight,
+    face: Face,
+    scale: &LevelScale,
+) -> bool {
+    let back = face.opposite();
+    from.inputs.emissive.iter().any(|voxel| {
+        let Some((u, v)) = face.uv(voxel.x as usize, voxel.y as usize, voxel.z as usize)
+        else {
+            return false;
+        };
+        let (tx, ty, tz) = back.voxel(u, v);
+        if to.inputs.occupancy.is_solid(tx, ty, tz) {
+            return false;
+        }
+        let Some(start) = scale.start(scale.precision().of_whole(voxel.level)) else {
+            return false;
+        };
+        start as u32 + 1 < scale.last_distance(to.voxel.at(tx, ty, tz))
+    })
 }
