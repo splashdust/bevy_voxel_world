@@ -1,9 +1,9 @@
-// PROTOTYPE: what every docs variant shares: signatures, feature chips, the
-// feature filter and one item's full docs.
+// PROTOTYPE: what the docs pages share: signatures, feature chips, the feature
+// filter, the API search box and one item's full docs.
 
 import { Fragment, useEffect, useState } from 'react';
 import type { ApiView, ItemView, MemberView, Token, TopicView } from '../../scripts/api.ts';
-import { REPOSITORY } from '../Page';
+import { pageUrl, REPOSITORY } from '../Page';
 
 export type { ApiView, ItemView, MemberView, Token, TopicView };
 
@@ -76,9 +76,30 @@ export function FeatureChips({ features }: { features: string[] }) {
   );
 }
 
+/** Where the feature filter is remembered, so it follows the reader from page to page. */
+const FILTER_KEY = 'bevy_voxel_world.docs.features-off';
+
+function rememberedOff(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(FILTER_KEY) ?? '[]');
+  } catch {
+    return [];
+  }
+}
+
 /** Which of the crate's features the reader's build has, to hide what it doesn't. */
 export function useFeatureFilter(all: string[]) {
-  const [enabled, setEnabled] = useState(() => new Set(all));
+  const [enabled, setEnabled] = useState(() => {
+    const off = rememberedOff();
+    return new Set(all.filter((feature) => !off.includes(feature)));
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILTER_KEY, JSON.stringify(all.filter((feature) => !enabled.has(feature))));
+    } catch {
+      // Without storage, the filter lasts until the page is left.
+    }
+  }, [all, enabled]);
   return {
     all,
     enabled,
@@ -92,6 +113,19 @@ export function useFeatureFilter(all: string[]) {
         return next;
       }),
   };
+}
+
+/** The Guides page of a topic, at a key's anchor if one is given. */
+export const guideHref = (topic: string, key?: string) =>
+  `${pageUrl('guides')}?topic=${topic}${key ? `#${key}` : ''}`;
+
+/** A search field that opens the API page with its results. */
+export function ApiSearchBox({ placeholder = 'Search the API' }: { placeholder?: string }) {
+  return (
+    <form className="api-search-box" action={pageUrl('api')} method="get" role="search">
+      <input type="search" name="q" placeholder={placeholder} aria-label="Search the API" />
+    </form>
+  );
 }
 
 export type FeatureFilter = ReturnType<typeof useFeatureFilter>;
@@ -334,14 +368,14 @@ export function Elsewhere({ api, topic, filter }: { api: ApiView; topic: TopicVi
   );
 }
 
-/** The crate's features, what each adds, and the topics. */
+/** The crate's features and what each adds. */
 export function FeaturesOverview({ api, topicHref }: { api: ApiView; topicHref: (id: string) => string }) {
   return (
     <div className="prose features-overview">
       <h2 id="features">Cargo features</h2>
       <p>
-        These docs show the whole API, with every feature on. A chip marks what needs a feature.
-        Turn a feature off to hide what your build doesn't have.
+        The guides and the API show every feature. A chip marks what needs one, and turning a
+        feature off in the filter hides what your build doesn't have.
       </p>
       <table>
         <tbody>
@@ -365,14 +399,6 @@ export function FeaturesOverview({ api, topicHref }: { api: ApiView; topicHref: 
           ))}
         </tbody>
       </table>
-      <h2 id="topics">Topics</h2>
-      <ul>
-        {api.topics.map((topic) => (
-          <li key={topic.id}>
-            <a href={topicHref(topic.id)}>{topic.title}</a> ({topic.items.length} items)
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

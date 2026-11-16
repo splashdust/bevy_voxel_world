@@ -1,11 +1,16 @@
 # Website
 
-The bevy_voxel_world site, built with Vite and React. It has three pages, each with its own HTML file:
+The bevy_voxel_world site, built with Vite and React. Each page has its own HTML file:
 
-- `index.html` renders the repository's `README.md`
-- `changelog/index.html` renders its `CHANGELOG.md`
+- `index.html`, Home, renders the repository's `README.md`
+- `docs/index.html` is where the documentation starts, and leads to:
+  - `docs/guides/index.html`, the guides in `guide/` with the API each one uses
+  - `docs/api/index.html`, the whole API on one searchable page
+  - `docs/examples/index.html`, the crate's examples
 - `demo/index.html` runs a live demo built from `voxel_demo/`, a Bevy app compiled to WebAssembly that runs the `light_mountain_house` example
-- `examples/index.html` lists the crate's examples
+- `changelog/index.html` renders its `CHANGELOG.md`
+
+`examples/index.html` sends old links on to `docs/examples/`.
 
 The examples page is generated from what `cargo metadata` reports. Each example's description is the `//!` comment at the top of its file, and the build stops with an error if an example doesn't have one. A PNG with the same name next to the source file, like `examples/bombs.png`, becomes its screenshot, and an example without one shows no image.
 
@@ -27,7 +32,7 @@ npm run dev
 
 ## Docs section (prototype)
 
-`docs/index.html` shows the guide in `guide/` with the crate's API, from the rustdoc JSON of a nightly toolchain. `npm run build:api` runs `api_extract/`, which builds that JSON once with every feature that adds API and once without each of them, and writes `api.json`: each public item's signature, docs, members and the features it needs.
+The guides and API pages show the crate's API from the rustdoc JSON of a nightly toolchain. `npm run build:api` runs `api_extract/`, which builds that JSON once with every feature that adds API and once without each of them, and writes `api.json`: each public item's signature, docs, members and the features it needs.
 
 Each file in `guide/` is one topic, in the order of the file names. The number at the start of a name only sets that order, so `08-light.md` is the topic `light`. Its front matter gives the title and lists the API items whose reference follows the guide:
 
@@ -49,6 +54,6 @@ npm run build:api
 npm run dev
 ```
 
-Set `API_DOCS_TOOLCHAIN` to use a nightly other than `nightly`; it must write the rustdoc JSON format that `api_extract` reads. In `npm run dev`, a bar at the bottom of the docs page flips between three layouts: `?variant=A` (topic pages), `B` (search first) and `C` (explorer columns).
+Set `API_DOCS_TOOLCHAIN` to use a nightly other than `nightly`; it must write the rustdoc JSON format that `api_extract` reads. A guide is at `docs/guides/?topic=light`, and the API page takes a search as `docs/api/?q=stamp`.
 
 `npm run build` writes the static site to `dist`. Pushing to `main` builds and publishes it to GitHub Pages through `.github/workflows/pages.yml`.

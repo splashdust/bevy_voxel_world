@@ -94,12 +94,6 @@ code {
   border-bottom-color: var(--grass-deep);
 }
 
-.site-nav-landing {
-  font-weight: 800;
-  font-stretch: 75%;
-  letter-spacing: -0.02em;
-}
-
 .site-nav-external {
   margin-left: auto;
 }

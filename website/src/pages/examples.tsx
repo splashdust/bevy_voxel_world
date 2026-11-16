@@ -1,11 +1,12 @@
 import examples from 'virtual:examples';
 import { CopyCommand } from '../CopyCommand';
-import { mountPage, PageHeader, REPOSITORY } from '../Page';
+import '../docs/docs.css';
+import { DocsHeader, mountPage, REPOSITORY } from '../Page';
 
 mountPage(
   'examples',
   <div className="narrow-page">
-    <PageHeader title="Examples" />
+    <DocsHeader current="examples" title="Examples" />
     <main className="doc-section">
       <div className="example-list">
         <p>
