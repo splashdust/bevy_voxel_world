@@ -8,7 +8,7 @@ Add an off-by-default `sub_grids` feature.
 
 A sub-grid is a set of voxels on a grid of its own, which a game moves freely against the world's grid: a ship, a vehicle, or a falling piece of rock.
 
-Sub-grids can be created either from scratch, by creating an empty subgrid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the tree example)
+Sub-grids can be created either from scratch, by creating an empty subgrid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
 
 ### Sub-grid lighting
 
@@ -24,9 +24,9 @@ When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to au
 
 ### Examples
 
-- `airship`: Flies an editable, lit ship through a cave and a lamp-lit hall, and lifts and stamps it in every direction.
+- `sub_grids`: A walkthrough of sub-grids on a few pillars and rods, which can be cut, built on, and stamped back into the world.
 
-- `dislodged_fragments_tree` examples drop the pieces under avian3d physics, and stamp a piece into the world when it's right-clicked.
+- `light_mountain_house`: Trees can now be felled. It needs `sub_grids` and `dislodged_fragments` as well.
 
 - `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature.
 

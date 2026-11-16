@@ -83,7 +83,7 @@ required-features = ["navigation"]
 [[example]]
 name = "light_mountain_house"
 path = "examples/light_mountain_house.rs"
-required-features = ["light_propagation"]
+required-features = ["light_propagation", "sub_grids", "dislodged_fragments"]
 
 [[example]]
 name = "light_flythrough"
@@ -98,27 +98,9 @@ required-features = ["light_propagation", "sub_grids"]
 test = true
 
 [[example]]
-name = "dislodged_fragments"
-path = "examples/dislodged_fragments/main.rs"
-required-features = ["sub_grids", "dislodged_fragments"]
-# Its tests check the colliders, the easing and the panel's settings.
-test = true
-
-[[example]]
-name = "airship"
-path = "examples/airship/main.rs"
-required-features = ["sub_grids", "light_propagation"]
-# Its tests check that the autopilot's loop clears the world, and that the
-# dock's lift takes the whole airship and leaves the dock.
-test = true
-
-[[example]]
-name = "dislodged_fragments_tree"
-path = "examples/dislodged_fragments_tree/main.rs"
+name = "sub_grids"
+path = "examples/sub_grids.rs"
 required-features = ["sub_grids", "dislodged_fragments", "light_propagation"]
-# Its tests check that each branch falls on its own, and those of the module
-# it shares with `dislodged_fragments`.
-test = true
 
 [[example]]
 name = "save_load"
@@ -170,8 +152,8 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-# Physics for the `dislodged_fragments` example: colliders built from voxels,
-# without the mesh, scene or picking support it doesn't use.
+# Physics for the `sub_grids` and `light_mountain_house` examples: colliders
+# built from voxels, without the mesh, scene or picking support they don't use.
 avian3d = { version = "0.8.0", default-features = false, features = [
   "3d",
   "parry-f32",
