@@ -95,6 +95,9 @@ struct LightLook {
     ao: u32,
     // 1 at 256 levels, 0 at 16.
     steps_256: u32,
+    // 1 when a sub-grid's enclosure caps the world's voxel light its faces
+    // show, as it caps the world's sky: see `sample_face_light`.
+    enclosure_caps_voxel: u32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(200)
@@ -464,10 +467,12 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
 // A world chunk's face reads as `sample_light` reads it, and the world's
 // position and normal are unused. Under the `SUB_GRIDS` shader def, a
 // sub-grid chunk's face, whose tag has bit 30 set, also reads the world's
-// light with `world_light`. It shows the smaller of the world's sky light
-// and its own, which caps the world's sky by the sub-grid's enclosure, and
-// the larger of the world's voxel light and its own lamps'. Its glow is its
-// own.
+// light with `world_light`. Its own sky is its enclosure, so the smaller of
+// the world's sky and its own caps the world's sky by how closed in the face
+// is. When `light_look.enclosure_caps_voxel` is set, the world's voxel light
+// is capped the same way, so the world's lamps don't shine through a closed
+// cabin's walls. The face then shows the larger of that and its own lamps'
+// light. Its glow is its own.
 fn sample_face_light(
     tag: u32,
     local_position: vec3<f32>,
@@ -479,9 +484,13 @@ fn sample_face_light(
     @if(SUB_GRIDS) {
         if (tag & SUB_GRID) != 0u {
             let world = world_light(world_position, world_normal);
+            var world_voxel = world.voxel;
+            if light_look.enclosure_caps_voxel == 1u {
+                world_voxel = min(world_voxel, vec3<f32>(own.sky));
+            }
             return LightLevels(
                 min(world.sky, own.sky),
-                max(world.voxel, own.voxel),
+                max(world_voxel, own.voxel),
                 own.own_voxel,
             );
         }

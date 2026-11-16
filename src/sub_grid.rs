@@ -844,14 +844,16 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
     /// the voxel's centre, placed by [`pose`](Self::pose), with the
     /// sub-grid's own voxel light, from its emissive voxels, taking the
     /// brighter of the two. A lamp on a sub-grid lights only the sub-grid:
-    /// the world's light never shows it. Sky light is the world's, capped at
-    /// an open voxel by the sub-grid's enclosure under
-    /// [`SubGridSky::Enclosed`](crate::prelude::SubGridSky::Enclosed), so a
-    /// closed cabin's inside reads no sky. Where the sub-grid has no chunk,
-    /// such as deep inside a hangar, it reads the world's sky where a line
-    /// along the sub-grid's axes from the voxel leaves the sub-grid, and no
-    /// sky elsewhere, which is darker than the truth within sky reach of an
-    /// opening.
+    /// the world's light never shows it.
+    ///
+    /// Under [`SubGridSky::Enclosed`](crate::prelude::SubGridSky::Enclosed),
+    /// the sub-grid's enclosure caps the world's light at an open voxel: its
+    /// sky, and with sky light on its voxel light too. So a closed cabin's
+    /// inside reads no sky, and the world's lamps don't light it through its
+    /// walls. Where the sub-grid has no chunk, such as deep inside a hangar,
+    /// the voxel is open where a line along the sub-grid's axes from it
+    /// leaves the sub-grid, and closed in elsewhere, which is darker than the
+    /// truth within sky reach of an opening.
     ///
     /// Returns `None` when the world has no light propagation, or where the
     /// world's `light_at` says nothing of the world voxel.
@@ -874,22 +876,31 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         };
         let centre = pose.transform_point(position.as_vec3() + 0.5);
         let world = world_light_at(centre.floor().as_ivec3())?;
+        let config = &light.settings.config;
+        let caps_voxel = config.enclosure_caps_voxel_light();
         let Some(own) = light.settings.own_light_at(grid, position) else {
             if light.settings.closed_in_at(grid, position) {
-                return Some(crate::light::LightLevels { sky: 0.0, ..world });
+                return Some(crate::light::LightLevels {
+                    sky: 0.0,
+                    voxel: if caps_voxel { 0.0 } else { world.voxel },
+                });
             }
             return Some(world);
         };
-        let capped = light.settings.config.sub_grid_sky
-            == crate::light::config::SubGridSky::Enclosed
+        let capped = config.sub_grid_sky == crate::light::config::SubGridSky::Enclosed
             && !self.get_voxel(position).is_solid();
+        let world_voxel = if capped && caps_voxel {
+            world.voxel.min(own.sky)
+        } else {
+            world.voxel
+        };
         Some(crate::light::LightLevels {
             sky: if capped {
                 world.sky.min(own.sky)
             } else {
                 world.sky
             },
-            voxel: world.voxel.max(own.voxel),
+            voxel: world_voxel.max(own.voxel),
         })
     }
 }

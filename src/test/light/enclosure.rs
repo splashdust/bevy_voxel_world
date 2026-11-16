@@ -2,6 +2,7 @@
 //! voxels close it in, read through `grid(g).light_at`.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
@@ -9,7 +10,7 @@ use bevy::prelude::*;
 use super::edits::settle;
 use super::reference::Reference;
 use super::sky_light::{light_is_settled, sky_light};
-use super::voxel_light::{app, LampWorld, LAMP, STONE};
+use super::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 use crate::prelude::*;
 
 /// Runs `f` on the voxel world in a system of its own, whose commands apply
@@ -200,6 +201,17 @@ fn open_sky(sky_reach: u8) -> LampWorld {
     LampWorld {
         light: Some(sky_light(Sky::default(), sky_reach)),
         ..default()
+    }
+}
+
+/// [`open_sky`] with a lamp of the world at each of `lamps`.
+fn open_sky_with_lamps(sky_reach: u8, lamps: Vec<IVec3>) -> LampWorld {
+    LampWorld {
+        scene: Arc::new(move |position| match lamps.contains(&position) {
+            true => WorldVoxel::Solid(LAMP),
+            false => WorldVoxel::Air,
+        }),
+        ..open_sky(sky_reach)
     }
 }
 
@@ -520,4 +532,50 @@ fn with_sky_light_off_a_cabin_reads_no_sky_inside_or_out() {
     assert!(grid_sky(&mut app, entity, &positions)
         .iter()
         .all(|sky| *sky == 0.0));
+}
+
+#[test]
+fn a_world_lamp_lights_a_closed_cabins_inside_only_where_no_enclosure_caps_it() {
+    // The cabin's walls run from -5 to 5 in the world across x and z, and the
+    // world's lamp stands 3 voxels past its +X wall.
+    let (min, max) = (IVec3::ZERO, IVec3::new(10, 8, 10));
+    let offset = IVec3::new(-5, 0, -5);
+    let lamp = IVec3::new(8, 4, 0);
+    let inside = IVec3::new(9, 4, 5);
+    let outside = IVec3::new(11, 4, 5);
+    for (sky, sub_grid_sky, capped) in [
+        (Sky::default(), SubGridSky::Enclosed, true),
+        (Sky::default(), SubGridSky::World, false),
+        (Sky::Off, SubGridSky::Enclosed, false),
+    ] {
+        let mut world = open_sky_with_lamps(12, vec![lamp]);
+        let light = world.light.as_mut().unwrap();
+        light.sky = sky.clone();
+        light.sub_grid_sky = sub_grid_sky;
+        let mut app = app(world);
+        settle(&mut app, "the world to settle");
+        let entity = spawn_holding(
+            &mut app,
+            Transform::from_translation(offset.as_vec3()),
+            &hollow(min, max),
+            &[],
+        );
+        settle_light(&mut app, "the cabin's light to settle");
+
+        let world_voxel =
+            |app: &mut App, p: IVec3| light_at(app, p + offset).unwrap().voxel;
+        let (inside_world, outside_world) = (
+            world_voxel(&mut app, inside),
+            world_voxel(&mut app, outside),
+        );
+        assert!(
+            inside_world > 0.0,
+            "the lamp lights the place of the inside"
+        );
+        let read = grid_light(&mut app, entity, &[inside, outside]);
+        let what = format!("under {sky:?} and {sub_grid_sky:?}");
+        let expected = if capped { 0.0 } else { inside_world };
+        assert_eq!(read[0].voxel, expected, "inside {what}");
+        assert_eq!(read[1].voxel, outside_world, "outside {what}");
+    }
 }

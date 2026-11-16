@@ -77,10 +77,14 @@
 //! which the world's light never sees, and its tag has bit 30 set. The
 //! shader's `sample_face_light` reads such a face's own light with
 //! `sample_light`, and the world's light at the face with `world_light`,
-//! from its position and normal in the world's grid. The face shows the smaller of the two sky levels, so a sub-grid's
-//! enclosure caps the world's sky, and the larger of the two voxel levels, so
-//! its own lamps add to the world's. The sun gate reads that capped sky. A
-//! world chunk's face reads as `sample_light` reads it.
+//! from its position and normal in the world's grid. The face shows the
+//! smaller of the two sky levels, so a sub-grid's enclosure caps the world's
+//! sky. Under [`SubGridSky::Enclosed`](super::config::SubGridSky) with sky
+//! light on, the look's `enclosure_caps_voxel` caps the world's voxel light by
+//! the same sky level, so the world's lamps don't light a closed cabin's
+//! inside through its walls. The face shows the larger of that and its own
+//! voxel level, so its own lamps add to the world's. The sun gate reads the
+//! capped sky. A world chunk's face reads as `sample_light` reads it.
 //!
 //! `world_light` reads as `sample_light` would for a world face at the same
 //! place: a face on the world's grid, as every face of a sub-grid at a pose
@@ -230,7 +234,7 @@ pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 /// With the `sub_grids` feature, a fragment shader lights any face, a world
 /// chunk's or a sub-grid's, with the `bevy_voxel_world::light` module's
 /// `sample_face_light`. A sub-grid's face shows the world's light where it
-/// is, with the world's sky capped by its own and its own lamps on top. A
+/// is, capped by its enclosure, with its own lamps on top. A
 /// shader that still calls `sample_light` lights a sub-grid's faces from the
 /// sub-grid's own light alone, so they don't darken as the sub-grid enters a
 /// cave or brighten as it passes a lamp of the world. The shader reads Bevy's
@@ -334,6 +338,9 @@ pub(crate) struct LookUniform {
     /// 1 at [`LightPrecision::Steps256`], whose texels and tags hold 8 bits
     /// per channel, 0 at 16 levels.
     pub steps_256: u32,
+    /// 1 when a sub-grid's enclosure caps the world's voxel light its faces
+    /// show, as it caps the world's sky. 0 without the `sub_grids` feature.
+    pub enclosure_caps_voxel: u32,
 }
 
 impl LookUniform {
@@ -363,6 +370,10 @@ impl LookUniform {
                 LightAo::Off => 2,
             },
             steps_256: (config.precision == LightPrecision::Steps256) as u32,
+            #[cfg(feature = "sub_grids")]
+            enclosure_caps_voxel: config.enclosure_caps_voxel_light() as u32,
+            #[cfg(not(feature = "sub_grids"))]
+            enclosure_caps_voxel: 0,
         }
     }
 }

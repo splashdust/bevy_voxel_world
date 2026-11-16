@@ -368,7 +368,8 @@ pub struct LightPropagation {
     pub wasm_relight_budget: Duration,
 
     /// What sky a sub-grid's faces show: the world's sky capped by the
-    /// sub-grid's enclosure, or the world's sky alone. See [`SubGridSky`].
+    /// sub-grid's enclosure, or the world's sky alone. The enclosure caps
+    /// the world's voxel light too. See [`SubGridSky`].
     ///
     /// Relights every sub-grid chunk on change, and no world chunk.
     ///
@@ -431,6 +432,15 @@ impl LightPropagation {
         config.look = config.look.clamped();
         config
     }
+
+    /// Whether a sub-grid's enclosure caps the world's voxel light its faces
+    /// show, as it caps the world's sky: under [`SubGridSky::Enclosed`] with
+    /// sky light on. With sky light off no enclosure is solved, so there is
+    /// nothing to cap with.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn enclosure_caps_voxel_light(&self) -> bool {
+        self.sky != Sky::Off && self.sub_grid_sky == SubGridSky::Enclosed
+    }
 }
 
 /// The shortest and longest `wasm_relight_budget`.
@@ -487,8 +497,8 @@ fn first_warning_for(name: &str) -> bool {
 /// [`LightPropagation::sub_grid_sky`].
 ///
 /// A sub-grid's voxels never shade the world's light, so the world's sky
-/// alone lights a closed cabin's inside as brightly as the open air around
-/// it.
+/// and lamps alone light a closed cabin's inside as brightly as the open air
+/// around it.
 #[cfg(feature = "sub_grids")]
 #[derive(Reflect, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SubGridSky {
@@ -501,6 +511,13 @@ pub enum SubGridSky {
     /// Which way up the sub-grid is changes nothing, so turning it solves
     /// nothing.
     ///
+    /// The enclosure caps the world's voxel light the same way, so a world
+    /// lamp outside a closed cabin lights its outside and not its inside.
+    /// The cap says how open a voxel is to the outside, not which way, so
+    /// light from a world lamp beside the cabin still shows under an opening
+    /// in its roof. With sky light off no enclosure is solved, and the
+    /// world's voxel light shows inside as it does under `World`.
+    ///
     /// It costs memory and edit time. Each sub-grid keeps a record of which
     /// of its lines hold a voxel, which grows with its chunks. A voxel edit
     /// also follows the three lines through each edited voxel across the
@@ -508,9 +525,9 @@ pub enum SubGridSky {
     /// it changed, which can lie far from the edit.
     #[default]
     Enclosed,
-    /// The world's sky alone, wherever the sub-grid is, inside or out. A
-    /// cabin's inside is as bright as the air around it. Nothing is kept or
-    /// solved for enclosure.
+    /// The world's light alone, wherever the sub-grid is, inside or out. A
+    /// cabin's inside is as bright as the air around it, from the world's
+    /// sky and its lamps. Nothing is kept or solved for enclosure.
     World,
 }
 
