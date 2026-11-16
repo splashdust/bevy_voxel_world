@@ -79,13 +79,15 @@ use super::hinted::air_inputs;
 use super::inputs::LightInputs;
 use super::probe::SkyProbes;
 use super::relight::LightWork;
-use super::sky::{walkable, Columns, Hinted, SkyRule};
-use super::solver::ChunkLight;
-use super::view::{ViewMaps, ENTRY};
+use super::sky::{walkable, Columns, SkyRule};
+use super::solver::{ChunkLight, LightTaskSettings};
+use super::view::{in_world, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::chunk_lifecycle::ChunkRequests;
 use crate::configuration::VoxelWorldConfig;
+use crate::grid::GridId;
+use crate::level_0_reader::{edit_step, ChunkLookups, Hinted};
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::VoxelEdits;
 
@@ -129,7 +131,15 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     mut probes: Option<ResMut<SkyProbes<C>>>,
     configuration: Res<C>,
 ) {
-    if requests.edited.is_empty() {
+    // The world's light holds only the world's voxels. A sub-grid's edits
+    // change only its own light, which the sub-grid module works out.
+    let world_sets = || {
+        requests
+            .edited
+            .iter()
+            .filter(|set| set.grid == GridId::WORLD)
+    };
+    if world_sets().next().is_none() {
         return;
     }
     #[cfg(feature = "trace")]
@@ -139,7 +149,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     // then a commit, takes the last one's.
     let mut changed: HashMap<IVec3, Option<WorldVoxel<C::MaterialIndex>>> =
         HashMap::new();
-    for set in &requests.edited {
+    for set in world_sets() {
         changed.extend(set.voxels.iter().copied());
     }
     let mut by_chunk: HashMap<IVec3, Vec<IVec3>> = HashMap::new();
@@ -151,7 +161,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     // can't be told and light takes the path for a chunk it has no inputs
     // for.
     let mut moved: HashMap<IVec3, Option<u64>> = HashMap::new();
-    for set in &requests.edited {
+    for set in world_sets() {
         let n = moved.entry(set.chunk).or_insert(Some(0));
         *n = n
             .filter(|_| !set.replaced)
@@ -164,12 +174,14 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     settings.walks.lock().unwrap().clear();
     let quiet = work.is_settled();
     let reader = edits.reader();
+    // The world's voxel lookups this commit makes, made at the first.
+    let mut lookups: Option<ChunkLookups<C::MaterialIndex>> = None;
     // A removed edit leaves the voxel the world generates there, which only
     // the world's voxel lookup knows. A chunk's removed voxels are looked up
     // while they fit in what is left of `LOOKED_UP_REMOVALS`.
     let mut generated = HashMap::new();
     let mut lookups_left = LOOKED_UP_REMOVALS;
-    for (position, voxels) in &by_chunk {
+    for voxels in by_chunk.values() {
         if lookups_left == 0 {
             break;
         }
@@ -183,9 +195,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             continue;
         }
         lookups_left -= removed.len();
-        let mut lookup = (configuration.voxel_lookup_delegate())(*position, 0, None);
+        let lookups = made(&mut lookups, configuration.as_ref());
         for p in removed {
-            generated.insert(p, lookup(p, None));
+            generated.insert(p, lookups.lookup(p));
         }
     }
     // The voxel at a changed position, from the change sets rather than the
@@ -202,12 +214,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             .map(|(_, level)| *level),
         _ => None,
     };
-    let reach = settings
-        .task
-        .sky_scale
-        .as_ref()
-        .map_or(0, |scale| scale.reach())
-        .max(settings.task.voxel_scale.reach()) as i32;
+    let reach = reach_of(&settings.task);
 
     let mut relight: HashSet<IVec3> = HashSet::new();
     let mut view = settings.view.write();
@@ -260,7 +267,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         {
             let own = chunk_containing(*p);
             for position in within_reach(*p, 1).filter(|position| *position != own) {
-                let Some(chunk) = view.get_mut(&position) else {
+                let Some(chunk) = view.chunks.get_mut(&in_world(position)) else {
                     continue;
                 };
                 let inputs = &chunk.light.inputs;
@@ -291,9 +298,9 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     for (position, voxels) in &by_chunk {
         let count = edits.edit_stamp(*position);
         let before = sequence_before(*position);
-        if view.is_air(*position) {
+        if view.is_air(in_world(*position)) {
             // Hinted air's voxels are its hint with the edits over them.
-            let old = view.air[position].inputs.clone();
+            let old = view.air[&in_world(*position)].inputs.clone();
             let air = air_inputs(*position, &edits, emission, old.columns.clone());
             for p in voxels {
                 let local = local(*p);
@@ -304,14 +311,15 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 }
             }
             old_occupancy.insert(*position, old.occupancy.solid_columns());
-            view.air.insert(*position, air);
+            view.air.insert(in_world(*position), air);
             relight.insert(*position);
             current.insert(*position);
-            work.fill_touch(*position);
+            work.fill_touch(in_world(*position));
             continue;
         }
         let chunk = view
-            .get_mut(position)
+            .chunks
+            .get_mut(&in_world(*position))
             .filter(|chunk| Some(chunk.edits) == before);
         let Some(chunk) = chunk else {
             // The chunk's next chunk task works out its inputs. Each column
@@ -373,7 +381,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         });
         chunk.edits = count;
         current.insert(*position);
-        work.hinted_touch(*position);
+        work.hinted_touch(in_world(*position));
     }
 
     // The sky record, and the direct sky of the chunks below.
@@ -406,12 +414,16 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             // tells: at an unloaded position the record doesn't hold, its
             // voxels are left for a sky probe to look up.
             let blocked = if current.contains(position) {
-                Some(column_blocked_in(view.inputs(*position).unwrap(), *x, *z))
+                Some(column_blocked_in(
+                    view.inputs(in_world(*position)).unwrap(),
+                    *x,
+                    *z,
+                ))
             } else if placed {
                 Some(true)
             } else if mask.is_some() {
                 Some(column_looked_up(
-                    configuration.as_ref(),
+                    made(&mut lookups, configuration.as_ref()),
                     &reader,
                     *position,
                     *x,
@@ -435,7 +447,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         for (position, mask) in &masks {
             let count = edits.edit_stamp(*position);
             if current.contains(position) {
-                let occupancy = &view.inputs(*position).unwrap().occupancy;
+                let occupancy = &view.inputs(in_world(*position)).unwrap().occupancy;
                 let open = record.keeps_cells().then(|| open_cells(occupancy));
                 record.insert(*position, &occupancy.solid_columns(), open, count);
             } else if let Some(mask) = mask {
@@ -467,7 +479,11 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             if let Some(chunk) = view.get(&above).filter(|chunk| chunk.edits == count) {
                 return Some(column_blocked_in(&chunk.light.inputs, x, z));
             }
-            if let Some(air) = view.air.get(&above).filter(|air| air.edits == count) {
+            if let Some(air) = view
+                .air
+                .get(&in_world(above))
+                .filter(|air| air.edits == count)
+            {
                 return Some(column_blocked_in(&air.inputs, x, z));
             }
             if let Some(mask) = settings.record.lock().unwrap().get(above, count) {
@@ -495,7 +511,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 }
                 let (entity, inputs) = match view.get(&below) {
                     Some(chunk) => (chunk.entity, &chunk.light.inputs),
-                    None => match view.air.get(&below) {
+                    None => match view.air.get(&in_world(below)) {
                         Some(air) => (ENTRY, &air.inputs),
                         None => continue,
                     },
@@ -535,7 +551,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                         reachable == window,
                     )
                 };
-                match view.get_mut(&below) {
+                match view.chunks.get_mut(&in_world(below)) {
                     Some(chunk) => {
                         let light = &chunk.light;
                         chunk.light = std::sync::Arc::new(ChunkLight {
@@ -546,11 +562,11 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                         });
                     }
                     None => {
-                        let air = view.air.get_mut(&below).unwrap();
+                        let air = view.air.get_mut(&in_world(below)).unwrap();
                         air.inputs = std::sync::Arc::new(air.inputs.with_columns(new));
                     }
                 }
-                work.fill_touch(below);
+                work.fill_touch(in_world(below));
                 if quiet {
                     relight.insert(below);
                 } else {
@@ -561,14 +577,21 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
     }
     drop(view);
 
+    // A handover waits for the relights its commit starts.
+    #[cfg(feature = "sub_grids")]
+    if requests.lands_as_handover() {
+        work.capture_handover(Some(settings.edit_frame.load(Ordering::Relaxed)));
+    }
     // Hinted air holding no light entry passes its relight on.
     for position in relight {
         if by_chunk.contains_key(&position) {
-            work.trigger_edited(position);
+            work.trigger_edited(in_world(position));
         } else {
-            work.trigger_urgent(position);
+            work.trigger_urgent(in_world(position));
         }
     }
+    #[cfg(feature = "sub_grids")]
+    work.capture_handover(None);
     work.add_edit_time(started);
 }
 
@@ -610,7 +633,7 @@ fn touches_light(view: &View, p: IVec3, solid: bool) -> bool {
 fn open_light(view: &View, p: IVec3) -> Option<bool> {
     let local = local(p);
     let Some(chunk) = view.get(&chunk_containing(p)) else {
-        let air = view.air.get(&chunk_containing(p))?;
+        let air = view.air.get(&in_world(chunk_containing(p)))?;
         return (!air.inputs.occupancy.is_solid(local.x, local.y, local.z))
             .then_some(true);
     };
@@ -626,7 +649,7 @@ fn open_light(view: &View, p: IVec3) -> Option<bool> {
 
 /// Whether the voxel at `p` is emissive.
 fn emits(view: &View, p: IVec3) -> bool {
-    let Some(inputs) = view.inputs(chunk_containing(p)) else {
+    let Some(inputs) = view.inputs(in_world(chunk_containing(p))) else {
         return false;
     };
     let local = local(p);
@@ -641,34 +664,54 @@ fn column_blocked_in(inputs: &LightInputs, x: usize, z: usize) -> bool {
     (0..CHUNK).any(|y| inputs.occupancy.is_solid(x, y, z))
 }
 
-/// Whether the column at `x`, `z` of the chunk position `position` holds a
-/// solid, looked up through the world's lookups and voxel edits: at most 32
-/// lookups.
-fn column_looked_up<C: VoxelWorldConfig>(
+/// The voxel lookups in `lookups`, made from `world`'s delegate if there are
+/// none yet.
+fn made<'a, C: VoxelWorldConfig>(
+    lookups: &'a mut Option<ChunkLookups<C::MaterialIndex>>,
     world: &C,
-    edits: &crate::voxel_edits::VoxelEditReader<C::MaterialIndex>,
+) -> &'a mut ChunkLookups<C::MaterialIndex> {
+    lookups.get_or_insert_with(|| ChunkLookups::new(world.voxel_lookup_delegate()))
+}
+
+/// Whether the column at `x`, `z` of the chunk position `position` holds a
+/// solid, looked up through `lookups` and voxel edits `edits`: at most 32
+/// lookups.
+fn column_looked_up<I: Copy + PartialEq>(
+    lookups: &mut ChunkLookups<I>,
+    edits: &crate::voxel_edits::VoxelEditReader<I>,
     position: IVec3,
     x: usize,
     z: usize,
 ) -> bool {
-    let mut lookup = (world.voxel_lookup_delegate())(position, 0, None);
     let min = position * CHUNK_SIZE_I;
     (0..CHUNK_SIZE_I).any(|y| {
         let at = min + IVec3::new(x as i32, y, z as i32);
-        edits.get(at).unwrap_or_else(|| lookup(at, None)).is_solid()
+        edit_step(edits, at)
+            .unwrap_or_else(|| lookups.lookup(at))
+            .is_solid()
     })
+}
+
+/// How far, in voxels, a change can move light under `settings`: the longer
+/// of the two channels' reaches.
+pub(super) fn reach_of<I>(settings: &LightTaskSettings<I>) -> i32 {
+    settings
+        .sky_scale
+        .as_ref()
+        .map_or(0, |scale| scale.reach())
+        .max(settings.voxel_scale.reach()) as i32
 }
 
 /// The chunk positions whose light a change at the voxel `p` can reach: those
 /// whose box, `reach` past each face, holds it.
-fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> {
+pub(super) fn within_reach(p: IVec3, reach: i32) -> impl Iterator<Item = IVec3> {
     within_reach_of_box(p, p, reach)
 }
 
 /// The chunk positions whose light a change at any voxel of the box from
 /// `min` to `max` can reach: those whose box, `reach` past each face, holds a
 /// voxel of it. The box is within one chunk, both corners inclusive.
-fn within_reach_of_box(
+pub(super) fn within_reach_of_box(
     min: IVec3,
     max: IVec3,
     reach: i32,

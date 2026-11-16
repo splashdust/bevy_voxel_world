@@ -58,6 +58,7 @@ use bevy::prelude::*;
 use super::config::Sky;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
 use crate::configuration::{FillHint, VoxelLookupDelegate};
+use crate::level_0_reader::Hinted;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 const PADDED: usize = PADDED_CHUNK_SIZE as usize;
@@ -135,26 +136,6 @@ impl SkyRule {
             SkyRule::Ceiling(top) => {
                 (top as i64 - chunk_y as i64).clamp(0, u32::MAX as i64) as u32
             }
-        }
-    }
-}
-
-/// What a fill hint says about a chunk position above a chunk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Hinted {
-    Unknown,
-    Air,
-    Solid,
-}
-
-impl Hinted {
-    /// What `hint` says, or `Unknown` for a chunk position voxel edits reach.
-    pub fn of<I: Copy + PartialEq>(hint: FillHint<I>, edited: bool) -> Self {
-        match hint {
-            _ if edited => Hinted::Unknown,
-            FillHint::Unknown => Hinted::Unknown,
-            FillHint::Uniform(voxel) if voxel.is_solid() => Hinted::Solid,
-            FillHint::Uniform(_) => Hinted::Air,
         }
     }
 }

@@ -209,17 +209,17 @@ When Some config is returned, the light calculations are performed in the chunk 
 Every setting is documented in [`LightPropagation`](https://docs.rs/bevy_voxel_world/latest/bevy_voxel_world/prelude/struct.LightPropagation.html), along with what light can't do. The [`light_tuning` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_tuning/main.rs) puts every setting in a panel that says what it does and where in its world to look for the change. Use the example to test out values interactiely to better understand the config options.
 
 ```bash
-$ cargo run -r --example light_tuning --features light_propagation
+$ cargo run -r --example light_tuning --features light_propagation,sub_grids
 ```
 
 ### Light demo
 
-The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates.
+The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates. Its trees can be felled, which uses the `sub_grids` and `dislodged_fragments` features too.
 
 <img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/house.webp" />
 
 ```bash
-$ cargo run -r --example light_mountain_house --features light_propagation
+$ cargo run -r --example light_mountain_house --features light_propagation,sub_grids,dislodged_fragments
 ```
 
 ## Syncing and saving voxel edits
@@ -253,8 +253,53 @@ The opt-in `serde` feature serialises voxels and deltas in any format. The [`edi
 The [`multiplayer_loopback` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/multiplayer_loopback.rs) runs a server and two clients in one app over a fake network, and the [`save_load` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/save_load.rs) saves edits and the terrain seed to a file and loads them back.
 
 ```bash
-$ cargo run -r --example multiplayer_loopback --features serde
-$ cargo run -r --example save_load --features serde
+$ cargo run -r --example multiplayer_loopback --features serde,sub_grids
+$ cargo run -r --example save_load --features serde,sub_grids
+```
+
+Both examples also lift and stamp sub-grids, so they need the `sub_grids` feature too.
+
+## Sub-grids
+
+A sub-grid is a set of voxels on a grid of its own, with its own transform, that moves freely against the world's grid: a ship, a vehicle, a falling piece of rock. It sits behind the opt-in `sub_grids` feature.
+
+```bash
+$ cargo add bevy_voxel_world --features sub_grids
+```
+
+Sub-grids can be created either from scratch, by creating an empty sub-grid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
+
+In a lit world, sug-grids are lit by their own lights, the sky, and lights from the regular world. However, lights in sub-grids does not light the regular world or other sub-grids. Regular Bevy lights can be added to achive that instead.
+
+Main ways to interact with sub-grids are:
+
+- `VoxelWorld::spawn_sub_grid` creaes an empty sub-grid.
+- `VoxelWorld::grid` and `VoxelWorld::grid_mut` returns an access object with `set_voxel` methods, so the grid can be edited the same way as the regular world.
+- `VoxelWorld::lift` grabs a range of voxels from the world and make a sub-grid from them, leaving air behind in the parent world.
+- `VoxelWorld::stamp` writes a sub-grid's voxels back into any other grid at the nearest pose that lines up with it.
+- `VoxelWorld::raycast_grids` casts a ray through every grid, including the regular world.
+
+A sub-grid has no generator, so every voxel it holds is a voxel edit. It has chunks of its own, built by the world's chunk tasks, mesher and material, and its chunks are children of its entity, so they move with it.
+
+The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) walks through and demos the feature.
+
+```bash
+$ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,light_propagation
+```
+
+## Dislodged fragments
+
+Another off-by-default feature called `dislodged_fragments` finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`.
+
+When a dislodged fragment is detected, a `FragmentDislodged<C>` message is sent, with its bounding box, its voxel count and `contains`. The largest piece of a cut keeps its place (typically that's the world itself).
+
+When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to automatically turn dislodged fragments into sub-grids.
+
+The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) lifts each piece you cut off a pillar or a rod, and the [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) fells a tree when you cut through its trunk.
+
+```bash
+$ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,light_propagation
+$ cargo run -r --example light_mountain_house --features light_propagation,sub_grids,dislodged_fragments
 ```
 
 ## AI Disclosure

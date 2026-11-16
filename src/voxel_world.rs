@@ -7,13 +7,23 @@ use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
+pub(crate) mod raycast;
+
+#[cfg(feature = "sub_grids")]
+pub use crate::sub_grid::raycast::{GridRaycastFn, GridRaycastHit};
+
+#[cfg(feature = "sub_grids")]
+use crate::sub_grid::{
+    Grid, GridVoxels, GridVoxelsMut, LiftError, StampError, StampPreview, StampVoxel,
+    SubGrids,
+};
 use crate::{
     chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I},
     chunk_lifecycle::{ChunkIndex, ChunkRequests, ChunkStateOf, ChunkStatus},
     chunk_map::{ChunkMap, ChunkMapData},
-    configuration::{FillHint, VoxelWorldConfig},
+    configuration::VoxelWorldConfig,
     edits::{EditDelta, EditGap},
-    traversal_alg::voxel_line_traversal,
+    level_0_reader::{edit_step, hint_step},
     voxel::WorldVoxel,
     voxel_edits::{VoxelEditReader, VoxelEdits},
 };
@@ -96,6 +106,13 @@ impl<C> std::fmt::Debug for VoxelWorldSet<C> {
 pub trait ChunkEventType: Send + Sync + 'static {}
 
 /// A message about a chunk, which it names by its chunk key and its entity.
+///
+/// With `sub_grids`, the chunk messages fire for the chunks of sub-grids too,
+/// and `grid` names the chunk's grid. A sub-grid's chunk key is on the
+/// sub-grid's own grid, so it can equal the key of a world chunk somewhere
+/// else entirely: a reader that places things by chunk position checks
+/// `grid`, and reads the chunk through `VoxelWorld::grid(message.grid)`
+/// rather than the world's [`VoxelWorld::get_chunk_data`].
 #[derive(Event)]
 pub struct ChunkEvent<C, E>
 where
@@ -104,6 +121,9 @@ where
 {
     pub chunk_key: ChunkKey,
     pub entity: Entity,
+    /// The chunk's grid: [`Grid::World`] for the world's chunks.
+    #[cfg(feature = "sub_grids")]
+    pub grid: Grid,
     _marker: (PhantomData<C>, PhantomData<E>),
 }
 
@@ -112,11 +132,23 @@ where
     C: VoxelWorldConfig,
     E: ChunkEventType,
 {
+    /// A message about the world's chunk at `chunk_key`.
     pub fn new(chunk_key: ChunkKey, entity: Entity) -> Self {
         Self {
             chunk_key,
             entity,
+            #[cfg(feature = "sub_grids")]
+            grid: Grid::World,
             _marker: (PhantomData, PhantomData),
+        }
+    }
+
+    /// A message about the chunk at `chunk_key` on `grid`.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn in_grid(chunk_key: ChunkKey, entity: Entity, grid: Grid) -> Self {
+        Self {
+            grid,
+            ..Self::new(chunk_key, entity)
         }
     }
 
@@ -124,6 +156,8 @@ where
         Self {
             chunk_key: self.chunk_key,
             entity: self.entity,
+            #[cfg(feature = "sub_grids")]
+            grid: self.grid,
             _marker: (PhantomData, PhantomData),
         }
     }
@@ -137,6 +171,11 @@ where
 }
 
 /// Fired when a chunk is about to be despawned.
+///
+/// With `sub_grids`, the chunks of a sub-grid whose entity was despawned, or
+/// whose `SubGrid<C>` was removed, fire it in the next `PreUpdate`, as the
+/// crate despawns them. By then a despawned sub-grid's chunks are gone with
+/// it, so the message names an entity that no longer exists.
 pub type ChunkWillDespawn<C> = ChunkEvent<C, WillDespawn>;
 pub struct WillDespawn;
 impl ChunkEventType for WillDespawn {}
@@ -206,9 +245,10 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_requests: Res<'w, ChunkRequests<C>>,
-    chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    configuration: Res<'w, ConfigCopy<C>>,
+    pub(crate) chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    pub(crate) voxel_edits:
+        Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    pub(crate) configuration: Res<'w, ConfigCopy<C>>,
     #[cfg(feature = "light_propagation")]
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
     #[cfg(feature = "light_propagation")]
@@ -219,6 +259,280 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     light_route: Option<Res<'w, crate::light::route::LightRoute<C>>>,
     #[cfg(feature = "light_propagation")]
     sky_fill: Option<Res<'w, crate::light::fill::driver::SkyFillWork<C>>>,
+    #[cfg(feature = "sub_grids")]
+    pub(crate) sub_grids: Res<'w, SubGrids<C>>,
+    #[cfg(feature = "sub_grids")]
+    handovers: Res<'w, crate::sub_grid::handover::Handovers<C>>,
+    #[cfg(feature = "sub_grids")]
+    commands: Commands<'w, 's>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
+    /// Spawns a sub-grid of this world at `transform`, as a child of the
+    /// world's root, and returns its entity.
+    ///
+    /// The sub-grid is live at once: the same system can fill it through
+    /// [`grid_mut`](Self::grid_mut). Its entity gets [`SubGrid<C>`](crate::prelude::SubGrid),
+    /// `transform` and `Visibility` when the system's commands apply, and
+    /// takes components of the game's own through `Commands` like any other
+    /// entity. Its [`pose`](GridVoxels::pose) is `transform` until the
+    /// frame's transforms have propagated.
+    ///
+    /// # Panics
+    ///
+    /// When this world has 65,535 live sub-grids, the most it can hold.
+    pub fn spawn_sub_grid(&mut self, transform: Transform) -> Entity {
+        crate::sub_grid::world::spawn(&self.sub_grids, &mut self.commands, transform)
+    }
+
+    /// Makes `entity` a sub-grid of this world, leaving its parent and its
+    /// transform alone. An entity that is a sub-grid of this world already
+    /// stays as it is.
+    ///
+    /// An entity whose [`SubGrid<C>`](crate::prelude::SubGrid) was removed
+    /// is no sub-grid from the moment the removal applies, even in the same
+    /// frame, so this makes it a new, empty sub-grid with a new id. A
+    /// removal still queued in `Commands` when this is called ends the
+    /// sub-grid once it applies.
+    ///
+    /// The sub-grid is live at once, as with
+    /// [`spawn_sub_grid`](Self::spawn_sub_grid), and its entity gets
+    /// [`SubGrid<C>`](crate::prelude::SubGrid) when the system's commands apply, with a `Transform`
+    /// and `Visibility` if it has none. Its [`pose`](GridVoxels::pose) is
+    /// the identity until the frame's transforms have propagated.
+    ///
+    /// # Panics
+    ///
+    /// When this world has 65,535 live sub-grids, the most it can hold.
+    pub fn insert_sub_grid(&mut self, entity: Entity) {
+        crate::sub_grid::world::insert(&self.sub_grids, &mut self.commands, entity);
+    }
+
+    /// Despawns the sub-grid `entity` of this world, with its voxels and
+    /// chunks, in step with the handover holding its chunks, if one does.
+    ///
+    /// With no handover holding its chunks, the sub-grid despawns when the
+    /// system's commands apply. While one holds them, it despawns in the
+    /// `PostUpdate` of the frame that handover lands, so its chunks show
+    /// until the chunks taking its voxels do. Edits of the sub-grid not yet
+    /// committed count as held, since their commit may form a handover: a
+    /// system that empties a sub-grid into another grid and despawns it
+    /// lands both in one frame.
+    ///
+    /// A client applying a server's edit deltas routes the server's despawn
+    /// of a sub-grid through this, so the sub-grid stays until the deltas
+    /// that emptied it land. Despawning the entity any other way despawns it
+    /// at once, and its chunks drop out of any handover.
+    ///
+    /// An entity that isn't a live sub-grid of this world is left alone.
+    pub fn despawn_sub_grid(&mut self, entity: Entity) {
+        let Some((grid, _)) = self.sub_grids.live(entity) else {
+            return;
+        };
+        if self.handovers.holds_grid(grid) || self.voxel_edits.has_pending_in(grid) {
+            self.handovers.despawn_after_landing(entity);
+        } else {
+            self.commands.entity(entity).try_despawn();
+        }
+    }
+
+    /// Reads `grid`: the world's voxels, or a sub-grid's. Returns `None` for
+    /// an entity that isn't a live sub-grid of this world, such as one
+    /// despawned, or a sub-grid of another world.
+    ///
+    /// [`Grid::World`] reads what this world's own methods read.
+    pub fn grid(&self, grid: Grid) -> Option<GridVoxels<'_, C>> {
+        let voxels = GridVoxels::new(
+            grid,
+            &self.sub_grids,
+            &self.voxel_edits,
+            &self.chunk_map,
+            &self.chunk_index,
+            &self.chunk_states,
+            &self.configuration.0,
+        )?;
+        #[cfg(feature = "light_propagation")]
+        let voxels =
+            voxels.with_light(self.light.as_deref().zip(self.light_work.as_deref()).map(
+                |(settings, work)| crate::light::LightReads {
+                    settings,
+                    work,
+                    route: self.light_route.as_deref(),
+                },
+            ));
+        Some(voxels)
+    }
+
+    /// Reads and edits `grid`, as [`grid`](Self::grid) reads it. Returns
+    /// `None` for an entity that isn't a live sub-grid of this world.
+    ///
+    /// [`Grid::World`] edits what this world's own methods edit.
+    pub fn grid_mut(&mut self, grid: Grid) -> Option<GridVoxelsMut<'_, C>> {
+        self.grid(grid).map(GridVoxelsMut::new)
+    }
+
+    /// Lifts the solid voxels `pick` chooses in the box from `min` inclusive
+    /// to `max` exclusive out of `source` into a new sub-grid, and returns
+    /// the sub-grid's entity.
+    ///
+    /// `pick` sees each position of the box with its voxel as the screen
+    /// shows it up close, never a coarse chunk's sample: the voxel edit, else
+    /// the voxel in the published level-0 chunk holding it, else that chunk's
+    /// [fill hint](VoxelWorldConfig::chunk_fill_hint), else the world's voxel
+    /// lookup. In a sub-grid it sees the sub-grid's voxels, those set this
+    /// frame included, and air. Only solid voxels lift: a chosen air or
+    /// `WorldVoxel::Unset` voxel gets no edit in either grid.
+    ///
+    /// The new sub-grid's grid origin sits one voxel below the minimum
+    /// corner of the lifted voxels, so that corner is at (1, 1, 1) and the
+    /// sub-grid spans the fewest chunks. It spawns as a child of the source
+    /// grid's entity, the world's root or the source sub-grid, with that
+    /// offset as its translation, no rotation and scale 1, so nothing looks
+    /// different until it moves. Its [`pose`](GridVoxels::pose) is the
+    /// source's pose followed by the offset from the call on. Under the
+    /// world's root, it picks up the `RenderLayers` the root propagates
+    /// until the game gives it another parent. Despawning a source sub-grid
+    /// before re-parenting the new one despawns the new one too, as its
+    /// child.
+    ///
+    /// The source is left with air: the world gets air edits at the lifted
+    /// positions, and a sub-grid loses the lifted voxels. A sub-grid lifted
+    /// bare lives on with no [`bounds`](GridVoxels::bounds).
+    ///
+    /// The sub-grid is live at once, so the same system can edit it and lift
+    /// from it. Both grids' edits commit together in the next
+    /// `PreUpdate`, as one handover: every chunk the lift touches, in both
+    /// grids, keeps showing what it showed until all of them publish in the
+    /// same frame. [`Lifted`](crate::prelude::Lifted) is written in that
+    /// frame, which is when a game typically re-parents the sub-grid,
+    /// keeping its world pose, and starts its physics.
+    ///
+    /// A lift has no size limit. Its cost grows with the box, and with the
+    /// chunk positions it covers that have no published level-0 chunk and no
+    /// uniform fill hint, as where no chunk is loaded: at each, the world's
+    /// voxel lookup runs on the caller's thread. Every chunk the lift
+    /// touches joins its handover, so a larger lift holds more chunks back
+    /// until they can all publish.
+    ///
+    /// # Errors
+    ///
+    /// [`LiftError::NoSolid`] when `pick` chose no solid voxel: no sub-grid
+    /// spawns and nothing is edited. [`LiftError::NoSuchGrid`] when `source`
+    /// names an entity that isn't a live sub-grid of this world.
+    pub fn lift(
+        &mut self,
+        source: Grid,
+        min: IVec3,
+        max: IVec3,
+        pick: impl FnMut(IVec3, WorldVoxel<C::MaterialIndex>) -> bool,
+    ) -> Result<Entity, LiftError> {
+        crate::sub_grid::lift(
+            crate::sub_grid::LiftParts {
+                sub_grids: &self.sub_grids,
+                edits: &self.voxel_edits,
+                chunk_map: &self.chunk_map,
+                configuration: &self.configuration.0,
+                handovers: &self.handovers,
+                commands: &mut self.commands,
+            },
+            source,
+            min,
+            max,
+            pick,
+        )
+    }
+
+    /// What [`stamp`](Self::stamp) would do with the sub-grid `sub_grid`
+    /// and `target` now, without changing anything: the snapped pose, what
+    /// the snap takes away, and each target position where a solid voxel
+    /// would land on a solid voxel.
+    ///
+    /// It reads what `stamp` reads, so a game can refuse a stamp that
+    /// overlaps too much or snaps too far, or move the sub-grid to the
+    /// preview's pose first, so the snap doesn't show. An empty sub-grid
+    /// snaps about its grid origin and overlaps nothing. Its cost grows as
+    /// `stamp`'s does.
+    ///
+    /// Returns `None` where `stamp` would refuse: `sub_grid` isn't a live
+    /// sub-grid, `target` names an entity that isn't one, or `target` is
+    /// the sub-grid or one of its descendants.
+    pub fn stamp_preview(&self, sub_grid: Entity, target: Grid) -> Option<StampPreview> {
+        crate::sub_grid::preview(self.stamp_parts(), sub_grid, target)
+    }
+
+    /// Stamps the sub-grid `sub_grid` into `target`: writes its voxels into
+    /// the target grid at the nearest pose that lines up with it, empties
+    /// it, and despawns it once the move lands.
+    ///
+    /// The stamp always snaps: to the nearest of the 24
+    /// [`GridRotation`](crate::prelude::GridRotation)s against the target
+    /// grid, the nearest voxel and scale 1. It turns the sub-grid about the
+    /// centre of the box holding its solid voxels, so a long sub-grid's far
+    /// end doesn't swing. The pose it snaps is the one
+    /// [`pose`](GridVoxels::pose) reads at the call, the one shown last
+    /// frame, for both grids. A sub-grid moved to its
+    /// [`stamp_preview`](Self::stamp_preview) pose this frame snaps from its
+    /// old pose to the same result. The sub-grid's `Transform` is left
+    /// alone, so the snap shows when the move lands.
+    ///
+    /// `rule` sees each solid voxel of the sub-grid as a [`StampVoxel`],
+    /// with the target position it lands on and the target's voxel there,
+    /// and returns the voxel to write, or `None` to leave the target's voxel
+    /// as it is. [`incoming_replaces`](crate::prelude::incoming_replaces)
+    /// writes every incoming voxel. A rule can record the voxels it
+    /// overwrites, and turn a facing it keeps in the material index by the
+    /// stamp's rotation.
+    ///
+    /// From the call on, every voxel reads from one grid: the sub-grid reads
+    /// air throughout, and the target reads the voxels written. A sub-grid
+    /// lifted this frame stamps the voxels the lift gave it, at the pose the
+    /// lift gave it. Both grids' edits commit together in the next
+    /// `PreUpdate`, as one handover: the target's chunks keep showing what
+    /// they showed, and the sub-grid's keep showing its voxels, until all of
+    /// them change in the same frame. [`Stamped`](crate::prelude::Stamped)
+    /// is written in that frame, the sub-grid's child sub-grids move onto
+    /// the target grid's entity, keeping their world pose, and the sub-grid
+    /// despawns in that frame's `PostUpdate`, with its other children. A
+    /// stamp of an empty sub-grid writes nothing, and lands in the next
+    /// frame.
+    ///
+    /// Its cost grows with the box holding the sub-grid's solid voxels, and
+    /// with the target's chunk positions they land on that have no published
+    /// level-0 chunk and no uniform fill hint: at each, the world's voxel
+    /// lookup runs on the caller's thread. Every chunk the stamp touches, in
+    /// both grids, joins its handover.
+    ///
+    /// # Errors
+    ///
+    /// [`StampError::NoSuchSubGrid`] when `sub_grid` isn't a live sub-grid
+    /// of this world, [`StampError::NoSuchTarget`] when `target` names an
+    /// entity that isn't one, and [`StampError::IntoItself`] when `target`
+    /// is the sub-grid or one of its descendants. Nothing is changed. A
+    /// sub-grid counts as a descendant of the sub-grids above it in the
+    /// hierarchy as it was when last frame's transforms propagated, or from
+    /// the call for one lifted this frame.
+    pub fn stamp(
+        &mut self,
+        sub_grid: Entity,
+        target: Grid,
+        rule: impl FnMut(
+            &StampVoxel<C::MaterialIndex>,
+        ) -> Option<WorldVoxel<C::MaterialIndex>>,
+    ) -> Result<(), StampError> {
+        crate::sub_grid::stamp(self.stamp_parts(), sub_grid, target, rule)
+    }
+
+    fn stamp_parts(&self) -> crate::sub_grid::StampParts<'_, C> {
+        crate::sub_grid::StampParts {
+            sub_grids: &self.sub_grids,
+            edits: &self.voxel_edits,
+            chunk_map: &self.chunk_map,
+            configuration: &self.configuration.0,
+            handovers: &self.handovers,
+            requests: &self.chunk_requests,
+        }
+    }
 }
 
 impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
@@ -251,6 +565,24 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
             &self.chunk_map.get_map(),
             self.configuration.0.as_ref(),
             position,
+        )
+    }
+
+    /// The published data of every grid's chunks, found by grid key.
+    pub(crate) fn chunk_map(&self) -> &ChunkMap<C, C::MaterialIndex> {
+        &self.chunk_map
+    }
+
+    /// A read session of the [level-0 reader](crate::level_0_reader::Level0Reader),
+    /// which reads voxels as the screen shows them up close, running the
+    /// world's generator on the caller's thread where no level-0 chunk is
+    /// published.
+    #[cfg(test)]
+    pub(crate) fn level_0_reader(&self) -> crate::level_0_reader::Level0Reader<C> {
+        crate::level_0_reader::Level0Reader::new(
+            self.configuration.0.clone(),
+            self.voxel_edits.reader(),
+            self.chunk_map.get_map(),
         )
     }
 
@@ -316,7 +648,8 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// A voxel edit makes it false from when it is set until its light has
     /// landed, including the light of chunks re-meshed for it, which waits
-    /// for their new meshes.
+    /// for their new meshes. With the `sub_grids` feature that holds for a
+    /// sub-grid's edits too, and the first light of the chunks they spawn.
     ///
     /// A change of light settings that relights makes it false from the frame
     /// the change is applied until the light of every chunk it relights has
@@ -648,11 +981,18 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// Get the first solid voxel intersecting with the given ray.
     /// The `filter` function can be used to filter out voxels that should not be considered for the raycast.
     ///
+    /// The ray and the hit are in the world's grid space, which is world
+    /// space while the world's root sits at the identity. Under a moved or
+    /// turned root, carry a world-space ray into the root's frame first.
+    /// Only the world's own voxels are hit, so the ray passes through
+    /// sub-grids; with the `sub_grids` feature, `raycast_grids` tests them
+    /// too.
+    ///
     /// The ray is traced through the bounds of the published chunks, reading
     /// voxels as [`get_voxel`](Self::get_voxel) does, so within those bounds a
     /// voxel no chunk covers is what its chunk's fill hint says.
     ///
-    /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in world space.
+    /// Returns a `VoxelRaycastResult` with position, normal and voxel info. The position is given in the world's grid space.
     /// Returns `None` if no voxel was intersected
     ///
     /// # Example
@@ -687,57 +1027,31 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         raycast_fn(ray, filter)
     }
 
-    /// Get a sendable closure that can be used to raycast into the voxel world
+    /// Get a sendable closure that can be used to raycast into the voxel world.
+    ///
+    /// It casts as [`raycast`](Self::raycast) does: the ray and the hit are
+    /// in the world's grid space, which is world space while the world's
+    /// root sits at the identity, and only the world's own voxels are hit.
     pub fn raycast_fn(&self) -> Arc<RaycastFn<C::MaterialIndex>> {
         let chunk_map = self.chunk_map.get_map();
         let get_voxel = self.get_voxel_fn();
 
         Arc::new(move |ray, filter| {
-            let p = ray.origin;
-            let d = ray.direction;
-
-            let loaded_aabb = ChunkMap::<C, C::MaterialIndex>::get_world_bounds(
+            let bounds = ChunkMap::<C, C::MaterialIndex>::get_world_bounds(
                 &chunk_map.read().unwrap(),
             );
-            let trace_start = if p.cmplt(loaded_aabb.min.into()).any()
-                || p.cmpgt(loaded_aabb.max.into()).any()
-            {
-                {
-                    let trace_start_t = RayCast3d::from_ray(ray, f32::MAX)
-                        .aabb_intersection_at(&loaded_aabb)?;
-                    ray.get_point(trace_start_t)
-                }
-            } else {
-                p
-            };
-
-            let trace_end = bounds_exit(trace_start, *d, &loaded_aabb);
-
-            let mut raycast_result = None;
-            voxel_line_traversal(trace_start, trace_end, |voxel_coords, _time, face| {
-                let voxel = get_voxel(voxel_coords);
-
-                if !voxel.is_unset() && filter.call((voxel_coords.as_vec3(), voxel)) {
-                    if voxel.is_solid() {
-                        raycast_result = Some(VoxelRaycastResult {
-                            position: voxel_coords.as_vec3(),
-                            normal: face.try_into().ok(),
-                            voxel,
-                        });
-
-                        // Found solid voxel - stop traversing
-                        false
-                    } else {
-                        // Voxel is not solid - continue traversing
-                        true
-                    }
-                } else {
-                    // Ignoring this voxel bc of filter - continue traversing
-                    true
-                }
-            });
-
-            raycast_result
+            let hit = raycast::trace(
+                ray,
+                &bounds,
+                f32::MAX,
+                &*get_voxel,
+                |position, voxel| filter.call((position.as_vec3(), voxel)),
+            )?;
+            Some(VoxelRaycastResult {
+                position: hit.position.as_vec3(),
+                normal: hit.face.try_into().ok(),
+                voxel: hit.voxel,
+            })
         })
     }
 }
@@ -751,38 +1065,16 @@ pub fn get_chunk_voxel_position(position: IVec3) -> (IVec3, UVec3) {
     (chunk_position, voxel_position)
 }
 
-/// Where a ray from `start`, a point within `bounds`, leaves them. `direction`
-/// must not be zero.
-///
-/// The ray stops at the nearest of the faces it heads towards. Measuring from
-/// `start` keeps the result precise however large the bounds are.
-fn bounds_exit(start: Vec3, direction: Vec3, bounds: &Aabb3d) -> Vec3 {
-    let (min, max) = (Vec3::from(bounds.min), Vec3::from(bounds.max));
-    let mut distance = f32::INFINITY;
-    for axis in 0..3 {
-        let face = if direction[axis] > 0.0 {
-            max[axis]
-        } else if direction[axis] < 0.0 {
-            min[axis]
-        } else {
-            continue;
-        };
-        distance = distance.min((face - start[axis]) / direction[axis]);
-    }
-    // Rounding can leave `start` just outside the bounds.
-    start + direction * distance.max(0.0)
-}
-
 /// The voxel at `position`: its voxel edit if it has one, else its voxel in the
 /// published data of the finest chunk covering it, else the voxel the fill hint
 /// of its level-0 chunk says is everywhere in it.
-fn voxel_at<C: VoxelWorldConfig>(
+pub(crate) fn voxel_at<C: VoxelWorldConfig>(
     voxel_edits: &VoxelEditReader<C::MaterialIndex>,
     chunk_map: &RwLock<ChunkMapData<C::MaterialIndex>>,
     configuration: &C,
     position: IVec3,
 ) -> WorldVoxel<C::MaterialIndex> {
-    if let Some(voxel) = voxel_edits.get(position) {
+    if let Some(voxel) = edit_step(voxel_edits, position) {
         return voxel;
     }
     let published = chunk_map
@@ -790,11 +1082,9 @@ fn voxel_at<C: VoxelWorldConfig>(
         .unwrap()
         .finest_covering(position)
         .and_then(|chunk_data| chunk_data.get_voxel_at_world_position(position));
-    match published {
-        Some(voxel) => voxel,
-        None => match configuration.chunk_fill_hint(ChunkKey::containing(position, 0)) {
-            FillHint::Uniform(voxel) => voxel,
-            FillHint::Unknown => WorldVoxel::Unset,
-        },
-    }
+    published
+        .or_else(|| {
+            hint_step(configuration.chunk_fill_hint(ChunkKey::containing(position, 0)))
+        })
+        .unwrap_or(WorldVoxel::Unset)
 }

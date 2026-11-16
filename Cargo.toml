@@ -27,6 +27,10 @@ trace = ["bevy/trace"]
 trace_tracy = ["trace", "bevy/trace_tracy"]
 # `Serialize` and `Deserialize` on voxels and edit deltas, in any format.
 serde = ["dep:serde"]
+# Sub-grids: sets of voxels on grids of their own that move freely in the world.
+sub_grids = []
+# Dislodged fragments: finding the voxels an edit cuts off from the rest of a grid.
+dislodged_fragments = []
 
 [[example]]
 name = "fast_traversal_ray"
@@ -67,7 +71,7 @@ path = "examples/multiple_cameras.rs"
 [[example]]
 name = "multiplayer_loopback"
 path = "examples/multiplayer_loopback.rs"
-required-features = ["serde"]
+required-features = ["serde", "sub_grids"]
 
 [[example]]
 name = "navigation"
@@ -77,7 +81,7 @@ required-features = ["navigation"]
 [[example]]
 name = "light_mountain_house"
 path = "examples/light_mountain_house.rs"
-required-features = ["light_propagation"]
+required-features = ["light_propagation", "sub_grids", "dislodged_fragments"]
 
 [[example]]
 name = "light_flythrough"
@@ -87,15 +91,20 @@ required-features = ["light_propagation"]
 [[example]]
 name = "light_tuning"
 path = "examples/light_tuning/main.rs"
-required-features = ["light_propagation"]
+required-features = ["light_propagation", "sub_grids"]
 # Its tests check that the config it prints is the Rust that builds it.
 test = true
 
 [[example]]
+name = "sub_grids"
+path = "examples/sub_grids.rs"
+required-features = ["sub_grids", "dislodged_fragments", "light_propagation"]
+
+[[example]]
 name = "save_load"
 path = "examples/save_load.rs"
-required-features = ["serde"]
-# Its tests check the save file's envelope.
+required-features = ["serde", "sub_grids"]
+# Its tests check the save file's envelope and its sub-grid records.
 test = true
 
 # Pixel checks that need a GPU, run by hand: see the file's docs.
@@ -141,6 +150,12 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = [
 ] }
 
 [dev-dependencies]
+# Physics for the `sub_grids` and `light_mountain_house` examples: colliders
+# built from voxels, without the mesh, scene or picking support they don't use.
+avian3d = { version = "0.8.0", default-features = false, features = [
+  "3d",
+  "parry-f32",
+] }
 bevy_northstar = { version = "0.8.0" }
 # `bevy_feathers` draws the `light_tuning` example's settings panel.
 bevy = { version = "0.20", default-features = false, features = [

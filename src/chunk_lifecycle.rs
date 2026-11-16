@@ -18,19 +18,24 @@ use bevy::{
 use futures_lite::future;
 
 use crate::{
-    chunk::{chunk_containing, padding_depth, Chunk, ChunkKey, ChunkTask, LevelCounts},
+    chunk::{
+        chunk_containing, padding_depth, Chunk, ChunkData, ChunkKey, ChunkTask,
+        LevelCounts,
+    },
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
-    configuration::{FillHint, LodLevel, VoxelWorldConfig},
+    configuration::{FillHint, LodLevel, VoxelLookupFn, VoxelWorldConfig},
+    grid::{GridId, GridKey, GridTable, PerGrid},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     pool_budget::{JobKind, PendingChunks, PoolBudget},
     prelude::default_chunk_meshing_delegate,
     streaming_policy::{CameraPosition, StartOrder},
+    voxel::WorldVoxel,
     voxel_edits::{chunks_including_box, ChangeSet, ChunkRange, EditedBox, VoxelEdits},
     voxel_world::{
-        ChunkPublished, ChunkWillDespawn, ChunkWillRemesh, ChunkWillSpawn,
-        ChunkWillUpdate, VoxelWorldCamera,
+        ChunkEvent as ChunkMessage, ChunkEventType, ChunkPublished, ChunkWillDespawn,
+        ChunkWillRemesh, ChunkWillSpawn, ChunkWillUpdate, VoxelWorldCamera,
     },
-    voxel_world_internal::{NeedsMaterial, SpawnMeshes, WorldRoot},
+    voxel_world_internal::{NeedsMaterial, SpawnMeshes},
 };
 
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
@@ -41,6 +46,10 @@ pub enum ChunkStatus {
     /// The chunk's task is running.
     Generating,
     /// The chunk's latest task has been published. It may have no mesh.
+    ///
+    /// With `sub_grids`, a chunk a handover holds is Ready once its task has
+    /// finished, and its result is published when the handover lands, as
+    /// `ChunkPublished` tells.
     Ready,
     /// The chunk will be despawned on the next frame.
     Retiring,
@@ -52,9 +61,10 @@ pub enum ChunkStatus {
 #[derive(Component)]
 pub enum ChunkState<T: Send + Sync + 'static> {
     /// `priority` chunks start their chunk task before the others. They are
-    /// the follow-ups of superseded tasks, and chunks remeshing after a voxel
-    /// edit. A `from_scratch` chunk regenerates: its task starts with none of
-    /// the chunk's published voxel data.
+    /// the follow-ups of superseded tasks, chunks remeshing after a voxel
+    /// edit and chunks spawned with priority. A `from_scratch` chunk
+    /// regenerates: its task starts with none of the chunk's published voxel
+    /// data.
     Pending {
         priority: bool,
         from_scratch: bool,
@@ -252,17 +262,29 @@ pub(crate) type ChunkTaskHandle<C> =
 /// The chunk state component of the voxel world `C`.
 pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 
-/// The live chunks of the voxel world `C` by chunk key, from spawning until
+/// The live chunks of the voxel world `C` by grid key, from spawning until
 /// despawning.
+///
+/// The methods that take a `ChunkKey` or a voxel position read the world's
+/// grid.
 ///
 /// Public only because `VoxelWorld` reads it; this module isn't exported.
 #[derive(Resource)]
 pub struct ChunkIndex<C> {
-    entities: HashMap<ChunkKey, Entity>,
-    /// The chunk key of every live chunk.
-    keys: HashMap<Entity, ChunkKey>,
-    /// How many chunks there are at each LOD level.
-    levels: LevelCounts,
+    entities: GridTable<ChunkKey, Entity>,
+    /// The grid key of every live chunk.
+    pub(crate) keys: HashMap<Entity, GridKey>,
+    /// How many chunks each grid has at each LOD level.
+    levels: PerGrid<LevelCounts>,
+    /// The entity of each sub-grid with live chunks, which its chunks'
+    /// messages name.
+    #[cfg(feature = "sub_grids")]
+    owners: HashMap<GridId, Entity>,
+    /// Chunks of ended sub-grids, dropped from the index, for
+    /// `despawn_retired_chunks` to despawn: each chunk's entity and key, and
+    /// the entity of its sub-grid.
+    #[cfg(feature = "sub_grids")]
+    ended: Vec<(Entity, GridKey, Entity)>,
     // Chunks by chunk state, so each lifecycle system only visits the chunks it
     // acts on. Ready chunks aren't tracked.
     /// Pending chunks with priority, oldest first. May hold chunks that have
@@ -271,7 +293,7 @@ pub struct ChunkIndex<C> {
     /// The other Pending chunks, with their chunk keys.
     pending: HashMap<Entity, ChunkKey>,
     generating: HashSet<Entity>,
-    retiring: HashSet<Entity>,
+    pub(crate) retiring: HashSet<Entity>,
     /// How many generated chunks disagreed with their fill hint. Counted in
     /// debug builds; the first one is reported.
     pub(crate) hint_mismatches: usize,
@@ -281,9 +303,13 @@ pub struct ChunkIndex<C> {
 impl<C> Default for ChunkIndex<C> {
     fn default() -> Self {
         Self {
-            entities: HashMap::new(),
+            entities: GridTable::default(),
             keys: HashMap::new(),
-            levels: LevelCounts::new(),
+            levels: PerGrid::new(LevelCounts::new()),
+            #[cfg(feature = "sub_grids")]
+            owners: HashMap::new(),
+            #[cfg(feature = "sub_grids")]
+            ended: Vec::new(),
             priority: VecDeque::new(),
             pending: HashMap::new(),
             generating: HashSet::new(),
@@ -296,18 +322,34 @@ impl<C> Default for ChunkIndex<C> {
 
 impl<C> ChunkIndex<C> {
     pub fn get(&self, key: ChunkKey) -> Option<Entity> {
+        self.get_in(GridKey::world(key))
+    }
+
+    #[inline]
+    pub(crate) fn get_in(&self, key: GridKey) -> Option<Entity> {
         self.entities.get(&key).copied()
     }
 
     pub fn contains(&self, key: ChunkKey) -> bool {
-        self.entities.contains_key(&key)
+        self.contains_in(GridKey::world(key))
+    }
+
+    #[inline]
+    pub(crate) fn contains_in(&self, key: GridKey) -> bool {
+        self.entities.contains(&key)
+    }
+
+    /// Whether the world's chunk at `key` exists and is Retiring.
+    pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
+        self.get(key)
+            .is_some_and(|entity| self.retiring.contains(&entity))
     }
 
     /// Whether the chunk at `key` exists and is Retiring.
-    pub(crate) fn is_retiring(&self, key: ChunkKey) -> bool {
-        self.entities
-            .get(&key)
-            .is_some_and(|entity| self.retiring.contains(entity))
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn is_retiring_in(&self, key: GridKey) -> bool {
+        self.get_in(key)
+            .is_some_and(|entity| self.retiring.contains(&entity))
     }
 
     /// The key of the finest chunk that covers the voxel at `voxel_position`,
@@ -316,33 +358,83 @@ impl<C> ChunkIndex<C> {
         self.covering_chunk(chunk_containing(voxel_position))
     }
 
-    /// The key of the finest chunk that covers the level-0 chunk at
+    /// The key of the world's finest chunk that covers the level-0 chunk at
     /// `chunk_position`, if any chunk does.
     pub(crate) fn covering_chunk(&self, chunk_position: IVec3) -> Option<ChunkKey> {
-        self.levels.in_use().find_map(|lod_level| {
-            let key = ChunkKey::containing_chunk(chunk_position, lod_level);
-            self.entities.contains_key(&key).then_some(key)
+        self.covering_chunk_in(GridId::WORLD, chunk_position)
+            .map(|key| key.key())
+    }
+
+    /// The key of `grid`'s finest chunk that covers the level-0 chunk at
+    /// `chunk_position`, if any chunk does.
+    pub(crate) fn covering_chunk_in(
+        &self,
+        grid: GridId,
+        chunk_position: IVec3,
+    ) -> Option<GridKey> {
+        self.levels_in_use_in(grid).find_map(|lod_level| {
+            let key =
+                GridKey::new(grid, ChunkKey::containing_chunk(chunk_position, lod_level));
+            self.entities.contains(&key).then_some(key)
         })
     }
 
-    /// The LOD levels with chunks, finest first.
-    pub(crate) fn levels_in_use(&self) -> impl Iterator<Item = LodLevel> {
-        self.levels.in_use()
+    /// The world's LOD levels with chunks, finest first.
+    pub(crate) fn levels_in_use(&self) -> impl Iterator<Item = LodLevel> + '_ {
+        self.levels_in_use_in(GridId::WORLD)
     }
 
-    fn spawned(&mut self, key: ChunkKey, entity: Entity) {
+    /// `grid`'s LOD levels with chunks, finest first.
+    pub(crate) fn levels_in_use_in(
+        &self,
+        grid: GridId,
+    ) -> impl Iterator<Item = LodLevel> + '_ {
+        self.levels.get(grid).unwrap_or(&LevelCounts::NONE).in_use()
+    }
+
+    /// How many live chunks `grid` has.
+    pub(crate) fn chunk_count(&self, grid: GridId) -> usize {
+        self.levels.get(grid).map_or(0, LevelCounts::total)
+    }
+
+    /// Adds a chunk that spawned Pending, with or without `priority`. A
+    /// sub-grid's chunk spawns with the sub-grid's entity as `parent`.
+    fn spawned(
+        &mut self,
+        key: GridKey,
+        entity: Entity,
+        priority: bool,
+        parent: Option<Entity>,
+    ) {
+        #[cfg(feature = "sub_grids")]
+        if let (false, Some(parent)) = (key.is_world(), parent) {
+            self.owners.insert(key.grid(), parent);
+        }
+        let _ = parent;
         self.entities.insert(key, entity);
         self.keys.insert(entity, key);
-        self.levels.add(key.lod_level);
-        self.pending.insert(entity, key);
+        self.levels
+            .get_or_insert_with(key.grid(), LevelCounts::new)
+            .add(key.lod_level());
+        if priority {
+            self.priority.push_back(entity);
+        } else {
+            self.pending.insert(entity, key.key());
+        }
     }
 
     /// Removes the chunk from the index, so its key can spawn again. Returns its
-    /// chunk key, or `None` if the index no longer holds it.
-    fn despawned(&mut self, entity: Entity) -> Option<ChunkKey> {
+    /// grid key, or `None` if the index no longer holds it.
+    pub(crate) fn despawned(&mut self, entity: Entity) -> Option<GridKey> {
         let key = self.keys.remove(&entity)?;
         self.entities.remove(&key);
-        self.levels.remove(key.lod_level);
+        self.levels
+            .get_or_insert_with(key.grid(), LevelCounts::new)
+            .remove(key.lod_level());
+        #[cfg(feature = "sub_grids")]
+        if !key.is_world() && self.chunk_count(key.grid()) == 0 {
+            self.owners.remove(&key.grid());
+        }
         self.pending.remove(&entity);
         self.generating.remove(&entity);
         self.retiring.remove(&entity);
@@ -405,6 +497,114 @@ impl<C> ChunkIndex<C> {
     }
 }
 
+impl<C: VoxelWorldConfig> ChunkIndex<C> {
+    /// The message `E` about the chunk `entity` at `key`, naming the chunk's
+    /// grid. `None` for a sub-grid's chunk once the index holds no chunk of
+    /// its grid.
+    #[inline]
+    pub(crate) fn message<E: ChunkEventType>(
+        &self,
+        key: GridKey,
+        entity: Entity,
+    ) -> Option<ChunkMessage<C, E>> {
+        #[cfg(feature = "sub_grids")]
+        if !key.is_world() {
+            return self.sub_grid_message(key, entity);
+        }
+        Some(ChunkMessage::new(key.key(), entity))
+    }
+
+    /// [`message`](Self::message) for a sub-grid's chunk.
+    #[cfg(feature = "sub_grids")]
+    #[cold]
+    #[inline(never)]
+    fn sub_grid_message<E: ChunkEventType>(
+        &self,
+        key: GridKey,
+        entity: Entity,
+    ) -> Option<ChunkMessage<C, E>> {
+        let owner = *self.owners.get(&key.grid())?;
+        Some(ChunkMessage::in_grid(
+            key.key(),
+            entity,
+            crate::sub_grid::Grid::SubGrid(owner),
+        ))
+    }
+
+    /// Drops every chunk of `grid`, a sub-grid that has ended, from the index
+    /// at once, queuing their data for removal and their entities for
+    /// [`despawn_retired_chunks`](ChunkLifecycle::despawn_retired_chunks) to
+    /// despawn later in the frame. So the caller needs no `Commands`, and no
+    /// sync point after it. Its cost grows with the grid's chunks.
+    ///
+    /// A chunk out of the index is no longer visited by the chunk lifecycle,
+    /// so it only waits there to despawn, and fires its `ChunkWillDespawn`
+    /// as it does. Light hears of the despawn in the next frame, as of any
+    /// chunk despawned late in the frame.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn despawn_grid(
+        &mut self,
+        grid: GridId,
+        chunk_map_remove_buffer: &mut ChunkMapRemoveBuffer<C>,
+    ) {
+        let Some(&owner) = self.owners.get(&grid) else {
+            return;
+        };
+        let chunks: Vec<Entity> = self
+            .entities
+            .grid_entries(grid)
+            .map(|(_, entity)| *entity)
+            .collect();
+        for entity in chunks {
+            if let Some(key) = self.despawned(entity) {
+                self.ended.push((entity, key, owner));
+                chunk_map_remove_buffer.push((key, entity));
+            }
+        }
+    }
+}
+
+/// A chunk to spawn, and where and how it starts.
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnRequest {
+    pub(crate) key: GridKey,
+    /// The entity the chunk spawns as a child of, if any.
+    pub parent: Option<Entity>,
+    /// Whether the chunk's first task starts ahead of the chunks without
+    /// priority. Chunks with priority start oldest first.
+    pub priority: bool,
+    /// The chunk's transform, relative to `parent`.
+    pub transform: Transform,
+}
+
+impl SpawnRequest {
+    /// A chunk the streaming policy spawns: no priority, placed by its chunk
+    /// key under `root`, the world's root when the world attaches its chunks
+    /// to it.
+    pub(crate) fn streamed(key: ChunkKey, root: Option<Entity>) -> Self {
+        Self {
+            key: GridKey::world(key),
+            parent: root,
+            priority: false,
+            transform: Transform::from_translation(key.world_position() - 1.0),
+        }
+    }
+
+    /// A chunk of the sub-grid whose entity is `sub_grid`, at the level-0
+    /// `key` on its grid: a child of the sub-grid placed by its chunk key, as
+    /// the world's chunks are under the root. It comes from a commit, so it
+    /// starts with priority, as edited chunks do.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn sub_grid_chunk(key: GridKey, sub_grid: Entity) -> Self {
+        Self {
+            key,
+            parent: Some(sub_grid),
+            priority: true,
+            transform: Transform::from_translation(key.key().world_position() - 1.0),
+        }
+    }
+}
+
 /// What the rest of the crate asks of the chunk lifecycle this frame.
 ///
 /// Requests other than spawns are ignored for chunks that don't exist or are
@@ -419,12 +619,23 @@ pub struct ChunkRequests<C: VoxelWorldConfig> {
     /// voxel is now stale.
     pub(crate) edited: Vec<ChangeSet<C::MaterialIndex>>,
     /// Chunks to spawn.
-    pub spawn: Vec<ChunkKey>,
+    pub spawn: Vec<SpawnRequest>,
     /// Chunks to despawn.
-    pub retire: Vec<ChunkKey>,
+    pub(crate) retire: Vec<GridKey>,
     /// Boxes of voxels whose chunks must regenerate: see
     /// [`regenerate`](Self::regenerate).
     regenerate: Mutex<Vec<EditedBox>>,
+    /// Whether this frame's commit lands as one handover.
+    #[cfg(feature = "sub_grids")]
+    handover: bool,
+    /// The sub-grids this frame's commit left with no solid voxel, whose
+    /// chunks all retire with it.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    emptied: Vec<GridId>,
+    /// Whether the next commit lands as one handover whatever it changes:
+    /// see [`mark_handover`](Self::mark_handover).
+    #[cfg(feature = "sub_grids")]
+    handover_marked: std::sync::atomic::AtomicBool,
     _marker: PhantomData<C>,
 }
 
@@ -435,15 +646,61 @@ impl<C: VoxelWorldConfig> Default for ChunkRequests<C> {
             spawn: Vec::new(),
             retire: Vec::new(),
             regenerate: Mutex::default(),
+            #[cfg(feature = "sub_grids")]
+            handover: false,
+            #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+            emptied: Vec::new(),
+            #[cfg(feature = "sub_grids")]
+            handover_marked: Default::default(),
             _marker: PhantomData,
         }
     }
 }
 
+#[cfg(feature = "sub_grids")]
 impl<C: VoxelWorldConfig> ChunkRequests<C> {
-    /// Asks every spawned chunk, at any LOD level, whose padded voxels
-    /// include a voxel of the box from `min` to `max`, both inclusive, to
-    /// regenerate: its next chunk task starts with none of its published
+    /// Makes the next commit land as one handover, as a commit that fills or
+    /// empties a sub-grid does, for an operation whose commit leaves every
+    /// sub-grid as full or empty as it was. It takes a shared borrow, so
+    /// `VoxelWorld` can mark its edits.
+    pub(crate) fn mark_handover(&self) {
+        self.handover_marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Notes this frame's commit, which `flipped` says filled or emptied a
+    /// sub-grid: it lands as one handover if it did, or if it was marked.
+    pub(crate) fn note_commit(&mut self, flipped: bool) {
+        let marked = std::mem::take(self.handover_marked.get_mut());
+        self.handover = flipped || marked;
+    }
+
+    /// Notes the sub-grids this frame's commit left with no solid voxel.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn note_emptied(&mut self, emptied: Vec<GridId>) {
+        self.emptied = emptied;
+    }
+
+    /// The sub-grids this frame's commit left with no solid voxel. Every
+    /// chunk of each retires with the commit, so light relights none of
+    /// them.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn emptied(&self) -> &[GridId] {
+        &self.emptied
+    }
+
+    /// Whether this frame's commit lands as one handover, until
+    /// `apply_requests` takes the commit's requests.
+    #[cfg(feature = "light_propagation")]
+    pub(crate) fn lands_as_handover(&self) -> bool {
+        self.handover
+    }
+}
+
+impl<C: VoxelWorldConfig> ChunkRequests<C> {
+    /// Asks every spawned chunk of the world, at any LOD level, whose padded
+    /// voxels include a voxel of the box from `min` to `max`, both inclusive,
+    /// to regenerate: its next chunk task starts with none of its published
     /// voxel data, so it publishes the generator's voxels with the voxel
     /// edits over them.
     ///
@@ -451,11 +708,12 @@ impl<C: VoxelWorldConfig> ChunkRequests<C> {
     /// in the task that follows. It takes a shared borrow, so `VoxelWorld`
     /// can ask too; the next `apply_requests` picks the box up.
     pub(crate) fn regenerate(&self, min: IVec3, max: IVec3) {
-        self.regenerate_boxes([EditedBox { min, max }]);
+        self.regenerate_boxes([EditedBox::world(min, max)]);
     }
 
-    /// Asks the chunks including a voxel of any of `boxes` to regenerate, as
-    /// [`regenerate`](Self::regenerate) does for one box.
+    /// Asks the chunks of each box's grid including a voxel of any of `boxes`
+    /// to regenerate, as [`regenerate`](Self::regenerate) does for one box of
+    /// the world.
     pub(crate) fn regenerate_boxes(&self, boxes: impl IntoIterator<Item = EditedBox>) {
         self.regenerate.lock().unwrap().extend(boxes);
     }
@@ -483,38 +741,35 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 
     /// Applies this frame's requests: edits, then spawns and retirements.
+    ///
+    /// With `sub_grids`, the chunks a commit landing as a handover makes
+    /// stale, spawns or retires join that handover, and a sub-grid chunk it
+    /// retires keeps showing until the handover lands.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn apply_requests(
         mut commands: Commands,
         mut requests: ResMut<ChunkRequests<C>>,
         mut index: ResMut<ChunkIndex<C>>,
         mut chunks: Query<&mut ChunkStateOf<C>>,
-        world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         mut budget: ResMut<PoolBudget<C>>,
         mut messages: (
             MessageWriter<ChunkWillUpdate<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
+        #[cfg(feature = "sub_grids")] mut handovers: ResMut<
+            crate::sub_grid::handover::Handovers<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("apply_requests").entered();
         let (ev_update, ev_despawn) = &mut messages;
         let requests = &mut *requests;
+        #[cfg(feature = "sub_grids")]
+        let mut joining = handovers.joining(std::mem::take(&mut requests.handover));
 
-        // The LOD levels with chunks, each with its padding depth, for the
-        // edits and regenerate requests, if there are any.
-        let asked = !requests.edited.is_empty()
-            || !requests.regenerate.get_mut().unwrap().is_empty();
-        let levels: Vec<(LodLevel, IVec3)> = index
-            .levels_in_use()
-            .filter(|_| asked)
-            .map(|lod_level| {
-                let shape = configuration.chunk_data_shape(lod_level);
-                (lod_level, padding_depth(shape, lod_level))
-            })
-            .collect();
-        let mut stale: HashSet<ChunkKey> = HashSet::new();
+        let mut levels = GridLevels::default();
+        let mut stale: HashSet<GridKey> = HashSet::new();
         for set in requests.edited.drain(..) {
             // A set that changed no voxel moved only its chunk's edit
             // sequence, as two applied deltas setting a voxel and back do.
@@ -523,13 +778,12 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             // level-0 chunk takes a new task, which reads them at the new one.
             #[cfg(feature = "light_propagation")]
             if set.voxels.is_empty() {
-                stale.insert(ChunkKey::new(set.chunk, 0));
+                stale.insert(GridKey::level_0(set.grid, set.chunk));
             }
+            let levels = levels.of(set.grid, &index, configuration.as_ref());
             for voxels in set.stale_boxes() {
-                for &(lod_level, padding) in &levels {
-                    stale.extend(chunks_including_box(
-                        voxels.min, voxels.max, lod_level, padding,
-                    ));
+                for &(lod_level, padding) in levels {
+                    stale.extend(chunks_including_box(voxels, lod_level, padding));
                 }
             }
         }
@@ -537,59 +791,86 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             requests,
             &mut index,
             &mut chunks,
-            &levels,
+            &mut levels,
+            configuration.as_ref(),
             &mut stale,
             ev_update,
         );
         for key in stale {
-            let Some(entity) = index.get(key) else {
+            let Some(entity) = index.get_in(key) else {
                 continue;
             };
             if let Ok(mut state) = chunks.get_mut(entity) {
-                index.apply(entity, key, &mut state, ChunkEvent::Edited);
+                index.apply(entity, key.key(), &mut state, ChunkEvent::Edited);
+                #[cfg(feature = "sub_grids")]
+                match state.status() {
+                    ChunkStatus::Retiring => {}
+                    status => {
+                        joining.stale(entity, key, status == ChunkStatus::Generating)
+                    }
+                }
             }
-            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+            if let Some(message) = index.message(key, entity) {
+                ev_update.write(message);
+            }
         }
 
-        let world_root = world_root.single().unwrap();
-        let attach_to_root = configuration.attach_chunks_to_root();
-        for key in requests.spawn.drain(..) {
-            if index.contains(key) {
+        for request in requests.spawn.drain(..) {
+            let key = request.key;
+            if index.contains_in(key) {
                 continue;
             }
             let mut chunk_entity = commands.spawn((
                 ChunkStateOf::<C>::Pending {
-                    priority: false,
+                    priority: request.priority,
                     from_scratch: false,
                 },
-                Transform::from_translation(key.world_position() - 1.0),
+                request.transform,
             ));
             let entity = chunk_entity.id();
             chunk_entity.insert(Chunk::<C>::new(
                 key,
                 entity,
-                configuration.chunk_data_shape(key.lod_level),
-                configuration.chunk_meshing_shape(key.lod_level),
+                configuration.chunk_data_shape(key.lod_level()),
+                configuration.chunk_meshing_shape(key.lod_level()),
             ));
-            if attach_to_root {
-                commands.entity(world_root).add_child(entity);
+            // A parent despawned before the commands apply, as a sub-grid
+            // can be, leaves the chunk with no parent.
+            if let Some(parent) = request.parent {
+                chunk_entity.insert(ChildOf(parent));
             }
-            index.spawned(key, entity);
+            index.spawned(key, entity, request.priority, request.parent);
+            // Only a commit spawns a sub-grid's chunks.
+            #[cfg(feature = "sub_grids")]
+            if !key.is_world() {
+                joining.spawned(entity, key);
+            }
         }
 
         for key in requests.retire.drain(..) {
-            let Some(entity) = index.get(key) else {
+            let Some(entity) = index.get_in(key) else {
                 continue;
             };
+            // Only a commit retires a sub-grid's chunks, so a handover holds
+            // them, where the streaming policy's retire of a world chunk
+            // takes it out of its handover.
+            #[cfg(feature = "sub_grids")]
+            if !key.is_world() && handovers.holds_retire(&mut joining, entity, key) {
+                continue;
+            }
             let Ok(mut state) = chunks.get_mut(entity) else {
                 continue;
             };
-            if index.apply(entity, key, &mut state, ChunkEvent::Retire)
+            if index.apply(entity, key.key(), &mut state, ChunkEvent::Retire)
                 == Effect::AnnounceRetiring
             {
-                ev_despawn.write(ChunkWillDespawn::<C>::new(key, entity));
+                if let Some(message) = index.message(key, entity) {
+                    ev_despawn.write(message);
+                }
             }
         }
+        #[cfg(feature = "sub_grids")]
+        handovers.join(joining);
         // Retiring a chunk drops its running task.
         index.report_running(&mut budget);
     }
@@ -645,8 +926,14 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         budget.start_chunk_tasks(cap, &mut pending);
     }
 
-    /// Collects finished chunk tasks, queues their data for publishing and, when
-    /// the world spawns meshes, gives each chunk its mesh.
+    /// Collects finished chunk tasks and publishes each one.
+    ///
+    /// A task whose cached mesh expired before it finished isn't published: its
+    /// chunk goes back to Pending to start again.
+    ///
+    /// With `sub_grids`, a chunk a handover holds keeps its task's result
+    /// unpublished, and each handover whose chunks are all ready lands here:
+    /// see the `handover` module.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn collect_chunk_tasks(
         mut commands: Commands,
@@ -663,9 +950,17 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         #[cfg(feature = "light_propagation")] mut light_work: Option<
             ResMut<crate::light::relight::LightWork<C>>,
         >,
+        #[cfg(feature = "sub_grids")] landing: (
+            ResMut<crate::sub_grid::handover::Handovers<C>>,
+            ResMut<ChunkMapRemoveBuffer<C>>,
+            MessageWriter<ChunkWillDespawn<C>>,
+        ),
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
+        #[cfg(feature = "sub_grids")]
+        let (mut handovers, mut chunk_map_remove_buffer, mut ev_chunk_will_despawn) =
+            landing;
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
         let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
@@ -705,71 +1000,91 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 }
             }
 
-            if let Some(mesh_assets) = mesh_assets.as_mut() {
-                let hash = chunk_task.voxels_hash();
-                let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
-                    None
-                } else if let Some(mesh_handle) = mesh_cache.get_mesh_handle(&hash) {
-                    if let Some(user_bundle) = mesh_cache.get_user_bundle(&hash) {
-                        commands.entity(entity).insert(user_bundle);
-                    }
-                    Some(mesh_handle)
-                } else if let Some(mesh) = chunk_task.mesh.take() {
-                    // Bevy 0.19 mesh slab allocator can emit use-after-free
-                    // errors if zero-vertex meshes are uploaded.
-                    if mesh.count_vertices() == 0 {
+            let mut user_bundle = None;
+            let mesh = match mesh_assets.as_mut() {
+                None => MeshDecision::Unchanged,
+                Some(mesh_assets) => {
+                    let hash = chunk_task.voxels_hash();
+                    let mesh_handle = if chunk_task.is_empty() || chunk_task.is_full() {
                         None
-                    } else {
-                        let mesh_ref = Arc::new(mesh_assets.add(mesh));
-                        let user_bundle = chunk_task.user_bundle.take();
-                        mesh_cache_insert_buffer.push((
-                            hash,
-                            mesh_ref.clone(),
-                            user_bundle.clone(),
-                        ));
-                        if let Some(bundle) = user_bundle {
-                            commands.entity(entity).insert(bundle);
+                    } else if let Some(mesh_handle) = mesh_cache.get_mesh_handle(&hash) {
+                        user_bundle = mesh_cache.get_user_bundle(&hash);
+                        Some(mesh_handle)
+                    } else if let Some(mesh) = chunk_task.mesh.take() {
+                        // Bevy 0.19 mesh slab allocator can emit use-after-free
+                        // errors if zero-vertex meshes are uploaded.
+                        if mesh.count_vertices() == 0 {
+                            None
+                        } else {
+                            let mesh_ref = Arc::new(mesh_assets.add(mesh));
+                            user_bundle = chunk_task.user_bundle.take();
+                            mesh_cache_insert_buffer.push((
+                                hash,
+                                mesh_ref.clone(),
+                                user_bundle.clone(),
+                            ));
+                            Some(mesh_ref)
                         }
-                        Some(mesh_ref)
+                    } else {
+                        index.apply(
+                            entity,
+                            chunk.key,
+                            &mut state,
+                            ChunkEvent::CachedMeshExpired,
+                        );
+                        #[cfg(feature = "sub_grids")]
+                        handovers.task_dropped(entity);
+                        continue;
+                    };
+                    match mesh_handle {
+                        Some(mesh) => MeshDecision::Shown {
+                            mesh,
+                            transform: *transform,
+                        },
+                        None => MeshDecision::Hidden,
                     }
-                } else {
-                    index.apply(
-                        entity,
-                        chunk.key,
-                        &mut state,
-                        ChunkEvent::CachedMeshExpired,
-                    );
-                    continue;
-                };
-
-                if let Some(mesh_handle) = mesh_handle {
-                    commands.entity(entity).try_insert((
-                        *transform,
-                        MeshRef(mesh_handle),
-                        NeedsMaterial::<C>::new(),
-                    ));
-                } else {
-                    commands
-                        .entity(entity)
-                        .remove::<Mesh3d>()
-                        .remove::<MeshRef>()
-                        .remove::<NeedsMaterial<C>>()
-                        .remove::<C::ChunkUserBundle>();
                 }
-            }
+            };
 
+            // The transition comes before publishing, so a superseded task's
+            // follow-up starts whenever its result is published.
             if index.apply(entity, chunk.key, &mut state, ChunkEvent::TaskFinished)
                 == Effect::Publish
             {
-                #[cfg(feature = "light_propagation")]
-                if let (Some(work), Some(solved)) =
-                    (light_work.as_mut(), chunk_task.solved_light.take())
-                {
-                    work.arrive(chunk.key, entity, solved);
-                }
-                chunk_map_update_buffer.push((chunk.key, chunk_task.chunk_data, entity));
+                let finished = Finished::<C> {
+                    entity,
+                    key: chunk.grid_key(),
+                    chunk_data: chunk_task.chunk_data,
+                    mesh,
+                    user_bundle,
+                    #[cfg(feature = "light_propagation")]
+                    solved_light: chunk_task.solved_light.take(),
+                };
+                // A chunk a handover holds keeps its result until the
+                // handover lands.
+                #[cfg(feature = "sub_grids")]
+                let Some(finished) = handovers.keep(finished) else {
+                    continue;
+                };
+                publish(
+                    finished,
+                    &mut commands,
+                    &mut chunk_map_update_buffer,
+                    #[cfg(feature = "light_propagation")]
+                    light_work.as_deref_mut(),
+                );
             }
         }
+        #[cfg(feature = "sub_grids")]
+        handovers.land_ready(
+            &mut index,
+            &mut commands,
+            &mut chunk_map_update_buffer,
+            &mut chunk_map_remove_buffer,
+            &mut ev_chunk_will_despawn,
+            #[cfg(feature = "light_propagation")]
+            light_work.as_deref_mut(),
+        );
         // Also counts the tasks of chunks despawned since the last report.
         index.report_running(&mut budget);
     }
@@ -782,6 +1097,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         mut ev_chunk_published: MessageWriter<ChunkPublished<C>>,
         mut ev_chunk_will_spawn: MessageWriter<ChunkWillSpawn<C>>,
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
+        index: Res<ChunkIndex<C>>,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("flush_chunk_map_buffers").entered();
@@ -790,6 +1106,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             &mut chunk_map_remove_buffer,
             &mut ev_chunk_published,
             &mut ev_chunk_will_spawn,
+            &index,
         );
     }
 
@@ -803,14 +1120,30 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
     }
 
     /// Despawns chunks that have been retiring for a frame.
+    ///
+    /// With `sub_grids`, it also despawns the chunks of ended sub-grids,
+    /// which `SubGrids::forget_despawned` dropped from the index this frame,
+    /// each with its `ChunkWillDespawn`.
     pub fn despawn_retired_chunks(
         mut commands: Commands,
         mut chunks: Query<(&Chunk<C>, &mut ChunkStateOf<C>)>,
         mut index: ResMut<ChunkIndex<C>>,
         mut chunk_map_remove_buffer: ResMut<ChunkMapRemoveBuffer<C>>,
+        #[cfg(feature = "sub_grids")] mut ev_chunk_will_despawn: MessageWriter<
+            ChunkWillDespawn<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("despawn_retired_chunks").entered();
+        #[cfg(feature = "sub_grids")]
+        for (entity, key, owner) in std::mem::take(&mut index.ended) {
+            ev_chunk_will_despawn.write(ChunkWillDespawn::in_grid(
+                key.key(),
+                entity,
+                crate::sub_grid::Grid::SubGrid(owner),
+            ));
+            commands.entity(entity).try_despawn();
+        }
         let retiring: Vec<Entity> = index.retiring.iter().copied().collect();
         for entity in retiring {
             let Ok((chunk, mut state)) = chunks.get_mut(entity) else {
@@ -820,8 +1153,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 == Effect::Despawn
             {
                 commands.entity(entity).despawn();
-                index.despawned(entity);
-                chunk_map_remove_buffer.push((chunk.key, entity));
+                if let Some(key) = index.despawned(entity) {
+                    chunk_map_remove_buffer.push((key, entity));
+                }
             }
         }
     }
@@ -838,57 +1172,175 @@ fn regenerate_requested<C: VoxelWorldConfig>(
     requests: &mut ChunkRequests<C>,
     index: &mut ChunkIndex<C>,
     chunks: &mut Query<&mut ChunkStateOf<C>>,
-    levels: &[(LodLevel, IVec3)],
-    stale: &mut HashSet<ChunkKey>,
+    levels: &mut GridLevels,
+    configuration: &C,
+    stale: &mut HashSet<GridKey>,
     ev_update: &mut MessageWriter<ChunkWillUpdate<C>>,
 ) {
     let boxes = std::mem::take(requests.regenerate.get_mut().unwrap());
     if boxes.is_empty() {
         return;
     }
-    let mut reached: HashSet<ChunkKey> = HashSet::new();
+    let mut reached: HashSet<GridKey> = HashSet::new();
     for voxels in boxes {
+        let levels = levels.of(voxels.grid, index, configuration);
         let ranges: Vec<(LodLevel, ChunkRange)> = levels
             .iter()
             .map(|&(lod_level, padding)| {
-                let range =
-                    ChunkRange::including_box(voxels.min, voxels.max, lod_level, padding);
-                (lod_level, range)
+                (
+                    lod_level,
+                    ChunkRange::including_box(voxels, lod_level, padding),
+                )
             })
             .collect();
-        // A box can reach far more chunk positions than there are chunks, as
-        // one asking every chunk to regenerate does, so such a box is checked
-        // against each chunk instead.
+        // A box can reach far more chunk positions than its grid has chunks,
+        // as one asking every chunk to regenerate does, so such a box is
+        // checked against each of the grid's chunks instead.
         let positions = ranges
             .iter()
             .map(|(_, range)| range.chunk_count())
             .fold(0, i64::saturating_add);
-        if positions > index.entities.len() as i64 {
-            reached.extend(index.entities.keys().copied().filter(|key| {
+        if positions > index.chunk_count(voxels.grid) as i64 {
+            reached.extend(index.entities.grid_keys(voxels.grid).filter(|key| {
                 ranges.iter().any(|(lod_level, range)| {
-                    *lod_level == key.lod_level && range.contains(*key)
+                    *lod_level == key.lod_level() && range.contains(*key)
                 })
             }));
             continue;
         }
         for &(lod_level, padding) in levels {
             reached.extend(
-                chunks_including_box(voxels.min, voxels.max, lod_level, padding)
-                    .filter(|key| index.contains(*key)),
+                chunks_including_box(voxels, lod_level, padding)
+                    .filter(|key| index.contains_in(*key)),
             );
         }
     }
     for key in reached {
-        let Some(entity) = index.get(key) else {
+        let Some(entity) = index.get_in(key) else {
             continue;
         };
         if let Ok(mut state) = chunks.get_mut(entity) {
-            index.apply(entity, key, &mut state, ChunkEvent::Regenerate);
+            index.apply(entity, key.key(), &mut state, ChunkEvent::Regenerate);
         }
         if !stale.contains(&key) {
-            ev_update.write(ChunkWillUpdate::<C>::new(key, entity));
+            if let Some(message) = index.message(key, entity) {
+                ev_update.write(message);
+            }
         }
     }
+}
+
+/// The LOD levels in use on each grid that edits or regenerate requests
+/// reached this frame, each with its padding depth, worked out once per grid.
+#[derive(Default)]
+struct GridLevels(Vec<(GridId, Vec<(LodLevel, IVec3)>)>);
+
+impl GridLevels {
+    fn of<C: VoxelWorldConfig>(
+        &mut self,
+        grid: GridId,
+        index: &ChunkIndex<C>,
+        configuration: &C,
+    ) -> &[(LodLevel, IVec3)] {
+        let at = match self.0.iter().position(|(seen, _)| *seen == grid) {
+            Some(at) => at,
+            None => {
+                let levels = index
+                    .levels_in_use_in(grid)
+                    .map(|lod_level| {
+                        let shape = configuration.chunk_data_shape(lod_level);
+                        (lod_level, padding_depth(shape, lod_level))
+                    })
+                    .collect();
+                self.0.push((grid, levels));
+                self.0.len() - 1
+            }
+        };
+        &self.0[at].1
+    }
+}
+
+/// What publishing a finished chunk task does to the chunk's mesh.
+pub(crate) enum MeshDecision {
+    /// The world spawns no meshes, so the chunk's components stay as they are.
+    Unchanged,
+    /// The chunk shows no mesh: its voxels are all air or all solid, or they
+    /// meshed to no vertices.
+    Hidden,
+    /// The chunk shows `mesh` at `transform` once the world's material is
+    /// ready.
+    Shown {
+        mesh: Arc<Handle<Mesh>>,
+        transform: Transform,
+    },
+}
+
+/// A finished chunk task, collected and ready to publish.
+pub(crate) struct Finished<C: VoxelWorldConfig> {
+    pub entity: Entity,
+    pub key: GridKey,
+    /// The voxel data the chunk map takes for the chunk.
+    pub chunk_data: ChunkData<C::MaterialIndex>,
+    pub mesh: MeshDecision,
+    /// The components a shown mesh comes with, from the meshing delegate or
+    /// the mesh cache.
+    pub user_bundle: Option<C::ChunkUserBundle>,
+    /// The light the task solved, in a world with light propagation.
+    #[cfg(feature = "light_propagation")]
+    pub solved_light: Option<crate::light::SolvedLight>,
+}
+
+/// Publishes a finished chunk task: gives the chunk its mesh, lands its solved
+/// light with `light_work`, and queues its voxel data for the chunk map. The
+/// next `flush_chunk_map_buffers` makes the data readable and writes
+/// `ChunkPublished`.
+///
+/// This is the only place a chunk is published.
+pub(crate) fn publish<C: VoxelWorldConfig>(
+    finished: Finished<C>,
+    commands: &mut Commands,
+    chunk_map_update_buffer: &mut ChunkMapUpdateBuffer<C, C::MaterialIndex>,
+    #[cfg(feature = "light_propagation")] light_work: Option<
+        &mut crate::light::relight::LightWork<C>,
+    >,
+) {
+    let Finished {
+        entity,
+        key,
+        chunk_data,
+        mesh,
+        user_bundle,
+        #[cfg(feature = "light_propagation")]
+        solved_light,
+    } = finished;
+    match mesh {
+        MeshDecision::Unchanged => {}
+        MeshDecision::Hidden => {
+            commands
+                .entity(entity)
+                .remove::<Mesh3d>()
+                .remove::<MeshRef>()
+                .remove::<NeedsMaterial<C>>()
+                .remove::<C::ChunkUserBundle>();
+        }
+        MeshDecision::Shown { mesh, transform } => {
+            if let Some(bundle) = user_bundle {
+                commands.entity(entity).insert(bundle);
+            }
+            commands.entity(entity).try_insert((
+                transform,
+                MeshRef(mesh),
+                NeedsMaterial::<C>::new(),
+            ));
+        }
+    }
+    // A sub-grid's chunk arrives too, so the light its commit's relight
+    // holds for its mesh lands with it.
+    #[cfg(feature = "light_propagation")]
+    if let (Some(work), Some(solved)) = (light_work, solved_light) {
+        work.arrive(key, entity, solved);
+    }
+    chunk_map_update_buffer.push((key, chunk_data, entity));
 }
 
 /// The Pending chunks of the voxel world `C`, as the [`PoolBudget`] starts
@@ -960,14 +1412,31 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         };
 
         let key = chunk.key;
-        // Data left by a despawned chunk at this key isn't this chunk's, and a
-        // chunk that regenerates reuses none of its own.
-        let previous_chunk_data =
-            ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map)
-                .filter(|data| data.entity == entity && !from_scratch);
-        let lookup_delegate = self.configuration.voxel_lookup_delegate();
-        let voxel_data_fn =
-            lookup_delegate(key.position, key.lod_level, previous_chunk_data.clone());
+        let grid_key = chunk.grid_key();
+        // A world chunk's voxels come from the world's voxel lookup over its
+        // published data. A sub-grid has no generator: its chunk's voxels are
+        // its voxel edits over air, worked out afresh each time, since its
+        // published data still shows voxels whose edits were removed.
+        let in_world = grid_key.is_world();
+        let (previous_chunk_data, voxel_data_fn, hint, lookup_delegate) = if in_world {
+            // Data left by a despawned chunk at this key isn't this
+            // chunk's, and a chunk that regenerates reuses none of its own.
+            let previous_chunk_data =
+                ChunkMap::<C, C::MaterialIndex>::get(&key, self.chunk_map)
+                    .filter(|data| data.entity == entity && !from_scratch);
+            let lookup_delegate = self.configuration.voxel_lookup_delegate();
+            let voxel_data_fn =
+                lookup_delegate(key.position, key.lod_level, previous_chunk_data.clone());
+            (
+                previous_chunk_data,
+                voxel_data_fn,
+                self.configuration.chunk_fill_hint(key),
+                Some(lookup_delegate),
+            )
+        } else {
+            let air: VoxelLookupFn<C::MaterialIndex> = Box::new(|_, _| WorldVoxel::Air);
+            (None, air, FillHint::Unknown, None)
+        };
         let data_shape = chunk.data_shape;
         let mesh_shape = chunk.mesh_shape;
         let chunk_meshing_fn = (self
@@ -988,14 +1457,18 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
             data_shape,
             mesh_shape,
             self.voxel_edits
-                .chunk_edits(key, padding_depth(data_shape, key.lod_level)),
-            self.configuration.chunk_fill_hint(key),
+                .chunk_edits_in(grid_key, padding_depth(data_shape, key.lod_level)),
+            hint,
         );
 
+        #[cfg(not(feature = "light_propagation"))]
+        let _ = lookup_delegate;
+        // A sub-grid's chunk has no lookup delegate, which only the world's
+        // sky walks need.
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light {
             chunk_task.light = light.task_for(
-                key,
+                grid_key,
                 entity,
                 data_shape,
                 self.configuration,
@@ -1027,7 +1500,9 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
         });
 
         index.apply(entity, key, &mut state, ChunkEvent::TaskStarted(task));
-        ev_chunk_will_remesh.write(ChunkWillRemesh::<C>::new(key, chunk.entity));
+        if let Some(message) = index.message(grid_key, chunk.entity) {
+            ev_chunk_will_remesh.write(message);
+        }
         true
     }
 }

@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::{
+    grid::{GridId, GridKey},
     mesh_cache::WeakMeshMap,
     prelude::{
         ChunkMeshingFn, FillHint, LodLevel, TextureIndexMapperFn, VoxelWorldConfig,
@@ -93,21 +94,12 @@ impl ChunkKey {
 
     /// The key of the chunk one level above this one that contains it.
     pub fn parent(&self) -> Self {
-        debug_assert!(self.lod_level < MAX_LOD_LEVEL, "{self} has no parent");
-        Self::containing_chunk(self.position, self.lod_level + 1)
+        GridKey::world(*self).parent().key()
     }
 
     /// The keys of the eight chunks one level below this one that it contains.
     pub fn children(&self) -> impl Iterator<Item = Self> {
-        debug_assert!(self.lod_level > 0, "{self} has no children");
-        let lod_level = self.lod_level.saturating_sub(1);
-        let half = 1 << lod_level;
-        let position = self.position;
-        (0..8).map(move |corner: i32| Self {
-            position: position
-                + IVec3::new(corner & 1, (corner >> 1) & 1, corner >> 2) * half,
-            lod_level,
-        })
+        GridKey::world(*self).children().map(|child| child.key())
     }
 
     /// How many level-0 chunks the chunk spans on a side.
@@ -158,7 +150,10 @@ pub(crate) struct LevelCounts {
 }
 
 impl LevelCounts {
-    pub fn new() -> Self {
+    /// No chunk at any level.
+    pub const NONE: Self = Self::new();
+
+    pub const fn new() -> Self {
         Self {
             counts: [0; MAX_LOD_LEVEL as usize + 1],
             in_use: 0,
@@ -176,6 +171,11 @@ impl LevelCounts {
         if *count == 0 {
             self.in_use &= !(1 << lod_level);
         }
+    }
+
+    /// How many chunks there are at every level together.
+    pub fn total(&self) -> usize {
+        self.counts.iter().sum()
     }
 
     /// The levels with chunks, finest first.
@@ -489,6 +489,8 @@ impl<I: Hash + Copy + PartialEq> Default for ChunkData<I> {
 #[derive(Component, Clone)]
 pub struct Chunk<C> {
     pub(crate) key: ChunkKey,
+    /// The grid the chunk belongs to: the world's, or a sub-grid's.
+    grid: GridId,
     pub(crate) entity: Entity,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
@@ -497,13 +499,14 @@ pub struct Chunk<C> {
 
 impl<C> Chunk<C> {
     pub(crate) fn new(
-        key: ChunkKey,
+        key: GridKey,
         entity: Entity,
         data_shape: UVec3,
         mesh_shape: UVec3,
     ) -> Self {
         Self {
-            key,
+            key: key.key(),
+            grid: key.grid(),
             entity,
             data_shape,
             mesh_shape,
@@ -511,9 +514,15 @@ impl<C> Chunk<C> {
         }
     }
 
-    /// The chunk's key: its position and LOD level.
+    /// The chunk's key: its position and LOD level, on its own grid.
     pub fn key(&self) -> ChunkKey {
         self.key
+    }
+
+    /// The chunk's grid key: its grid and its chunk key.
+    #[inline]
+    pub(crate) fn grid_key(&self) -> GridKey {
+        GridKey::new(self.grid, self.key)
     }
 
     /// The chunk position, in level-0 chunks.

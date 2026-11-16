@@ -3,12 +3,18 @@
 //
 // Its vertex shader reads Bevy's own vertex layout, so it draws any mesh,
 // including one without the crate's texture index, such as a marching cubes
-// mesh. It outputs Bevy's usual values and, at locations 9-11, what the
-// `bevy_voxel_world::light` module reads. The fragment shader is Bevy's
-// forward PBR with `apply_voxel_light` before Bevy's lighting and
-// `remove_unshadowed_sun` after it. Vertex colours tint the
-// base colour as in Bevy's own shader. They belong to the mesher, so they are
-// not read as ambient occlusion, and the look's AO setting doesn't apply.
+// mesh. It outputs Bevy's usual values, the local position and normal at
+// locations 9 and 10 that every crate vertex shader outputs, the tag at 11,
+// and the position in the world's grid at 12 under `SUB_GRIDS`, as the
+// crate's `rendering` module docs list them. It only ever runs in a lit
+// world, so it writes the tag without testing `VOXEL_LIGHT`, and the
+// `bevy_voxel_world::light` module reads them all.
+//
+// The fragment shader is Bevy's forward PBR, with the light
+// `sample_face_light` reads applied by `apply_voxel_light` before Bevy's
+// lighting and `remove_unshadowed_sun` after it. Vertex colours tint the base
+// colour as in Bevy's own shader. They belong to the mesher, so they
+// are not read as ambient occlusion, and the look's AO setting doesn't apply.
 //
 // Chunk meshes are never skinned or morphed, so neither is handled here.
 
@@ -20,7 +26,7 @@ import bevy_pbr::render::{
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
 };
-import bevy_voxel_world::light::{sample_light, apply_voxel_light, remove_unshadowed_sun};
+import bevy_voxel_world::light::{sample_face_light, apply_voxel_light, remove_unshadowed_sun};
 
 struct LitVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -38,12 +44,17 @@ struct LitVertexOutput {
     @location(6) @interpolate(flat) instance_index: u32,
 
     // The face's position and normal in the chunk's padded local coordinates,
-    // and the chunk's tag. The position is centroid-sampled because with MSAA
-    // a pixel centre can lie outside its triangle, and the position there
-    // would read the light of a voxel beyond the face.
+    // which stay with the chunk however it moves, and the chunk's tag. The
+    // position is centroid-sampled because with MSAA a pixel centre can lie
+    // outside its triangle, and the position there would read the light of a
+    // voxel beyond the face.
     @location(9) @interpolate(perspective, centroid) local_position: vec3<f32>,
     @location(10) local_normal: vec3<f32>,
     @location(11) @interpolate(flat) light_tag: u32,
+    // The face's position in the world's grid, centroid-sampled for the same
+    // reason, under `SUB_GRIDS`.
+    @if(SUB_GRIDS)
+    @location(12) @interpolate(perspective, centroid) world_grid_position: vec3<f32>,
 }
 
 @vertex
@@ -73,6 +84,8 @@ fn vertex(vertex_in: Vertex) -> LitVertexOutput {
     out.local_position = vertex.position;
     out.local_normal = vertex.normal;
     out.light_tag = mesh_functions::get_tag(vertex_in.instance_index);
+    @if(SUB_GRIDS)
+    out.world_grid_position = out.world_position.xyz;
     return out;
 }
 
@@ -103,11 +116,21 @@ fn fragment(
         pbr_input.material.base_color
     );
 
+    @if(SUB_GRIDS)
+    let grid_position = in.world_grid_position;
+    @if(!SUB_GRIDS)
+    let grid_position = in.world_position.xyz;
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         apply_voxel_light(
             &pbr_input,
-            sample_light(in.light_tag, in.local_position, in.local_normal),
+            sample_face_light(
+                in.light_tag,
+                in.local_position,
+                in.local_normal,
+                grid_position,
+                in.world_normal,
+            ),
             1.0,
         );
         out.color = apply_pbr_lighting(pbr_input);

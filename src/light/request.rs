@@ -2,7 +2,7 @@
 //! coarse chunk with no mesh, and in hinted air holding no light entry.
 //!
 //! No chunk holds light there, so a reading walks up the column above the
-//! asked voxel on the caller's thread, along the rows a coarse chunk's walk
+//! asked voxel, along the rows a coarse chunk's walk
 //! takes (see [`CoarseWalk`](super::coarse::CoarseWalk)): starting one cell
 //! above it, a cell's width apart, doubling the step every 8 rows, up to
 //! where the world's sky rule stops looking. Each row reads the voxel edit
@@ -11,17 +11,21 @@
 //! light 15, if no row is solid; otherwise it reads 0. Rows can step past a
 //! roof thinner than the step, so the answer is plausible rather than exact.
 //!
-//! Answers go in a [`WalkCache`], so a game reading the same voxel every
-//! frame walks it once.
+//! `light_at` walks on the caller's thread, and its answers go in a
+//! [`WalkCache`], so a game reading the same voxel every frame walks it
+//! once. With `sub_grids`, the tag map walks the same way in tasks of its
+//! own, for hinted air around sub-grids: see
+//! [`tag_map`](super::sub_grid::tag_map#hinted-air).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use super::sky::{Hinted, SkyRule};
-use crate::chunk::{chunk_containing, ChunkKey, CHUNK_SIZE_I};
-use crate::configuration::{VoxelLookupFn, VoxelWorldConfig};
+use super::sky::SkyRule;
+use crate::chunk::{chunk_containing, CHUNK_SIZE_I};
+use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::{ChunkLookups, Hinted};
 use crate::voxel_edits::VoxelEditReader;
 
 /// How many walked voxels the cache keeps answers for.
@@ -36,10 +40,13 @@ pub(crate) const WALK_CACHE_CAP: usize = 4096;
 /// The answers of walks on request: whether the column above a voxel is open,
 /// by the voxel and the width of the cells its rows step by.
 ///
-/// Any voxel edit, a `reset_light` and a change of light settings empty it.
+/// Any voxel edit, a `reset_light` and a change of light settings empty it,
+/// and move its generation on, so answers worked out elsewhere can tell they
+/// may be stale.
 #[derive(Default)]
 pub(crate) struct WalkCache {
     answers: HashMap<(IVec3, u32), bool>,
+    generation: u64,
 }
 
 impl WalkCache {
@@ -54,8 +61,17 @@ impl WalkCache {
         self.answers.insert((position, width), open);
     }
 
+    /// Empties the cache, for a change that can change any walk's answer.
     pub fn clear(&mut self) {
         self.answers.clear();
+        self.generation += 1;
+    }
+
+    /// How many times [`clear`](Self::clear) has run. A walk's answer is
+    /// stale once this has moved since the walk started.
+    #[cfg_attr(not(feature = "sub_grids"), allow(dead_code))]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The bytes the cache holds now, counting the table's spare room.
@@ -90,9 +106,7 @@ pub(crate) fn column_is_open<C: VoxelWorldConfig>(
         SkyRule::Ceiling(chunk) => (chunk as i64 + 1) * CHUNK_SIZE_I as i64,
     }
     .min(i32::MAX as i64);
-    let delegate = world.voxel_lookup_delegate();
-    let mut hints: HashMap<IVec3, Hinted> = HashMap::new();
-    let mut lookups: HashMap<IVec3, VoxelLookupFn<C::MaterialIndex>> = HashMap::new();
+    let mut lookups = ChunkLookups::new(world.voxel_lookup_delegate());
     let mut made = 0;
     let (mut y, mut step, mut rows) = (position.y as i64, width as i64, 0);
     let open = loop {
@@ -107,25 +121,16 @@ pub(crate) fn column_is_open<C: VoxelWorldConfig>(
         let at = IVec3::new(position.x, y as i32, position.z);
         let voxel = match edits.get(at) {
             Some(voxel) => voxel,
-            None => {
-                let chunk = chunk_containing(at);
-                let hinted = *hints.entry(chunk).or_insert_with(|| {
-                    // The edit at the voxel was read first, so the hint
-                    // speaks for the voxel whatever else is edited there.
-                    Hinted::of(world.chunk_fill_hint(ChunkKey::new(chunk, 0)), false)
-                });
-                match hinted {
-                    Hinted::Air => continue,
-                    Hinted::Solid => break false,
-                    Hinted::Unknown => {
-                        made += 1;
-                        let lookup = lookups
-                            .entry(chunk)
-                            .or_insert_with(|| delegate(chunk, 0, None));
-                        lookup(at, None)
-                    }
+            // The edit at the voxel was read first, so the hint speaks for
+            // the voxel whatever else is edited there.
+            None => match lookups.hinted(world, chunk_containing(at)) {
+                Hinted::Air => continue,
+                Hinted::Solid => break false,
+                Hinted::Unknown => {
+                    made += 1;
+                    lookups.lookup(at)
                 }
-            }
+            },
         };
         if voxel.is_solid() {
             break false;

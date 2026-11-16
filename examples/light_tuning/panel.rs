@@ -625,7 +625,8 @@ fn keys(
     if keys.just_pressed(KeyCode::KeyP) {
         print_config(&mut panel, &world);
     }
-    const DIGITS: [KeyCode; 8] = [
+    // One key per place, so a place added without a key doesn't compile.
+    const DIGITS: [KeyCode; Place::ALL.len()] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
@@ -634,6 +635,7 @@ fn keys(
         KeyCode::Digit6,
         KeyCode::Digit7,
         KeyCode::Digit8,
+        KeyCode::Digit9,
     ];
     for (place, key) in Place::ALL.into_iter().zip(DIGITS) {
         if keys.just_pressed(key) {

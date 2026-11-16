@@ -75,7 +75,7 @@ A chunk's count of how many of its voxel edits have ever changed in a commit. It
 _Avoid_: edit counter, version, revision
 
 **Clear**:
-Removing a voxel edit, so its position shows the generated voxel again. A chunk's clear reaches other worlds as a full delta, so the chunk's edit sequence keeps moving forward.
+Removing a voxel edit, so its position shows the generated voxel again. A chunk's clear reaches other worlds as a full delta, so the chunk's edit sequence keeps moving forward. In a sub-grid, which has no generator, a cleared voxel shows air and reaches other worlds as air.
 _Avoid_: revert, delete edit, reset (the light's operation)
 
 **Forget**:
@@ -103,6 +103,36 @@ _Avoid_: coarsen, collapse
 **Fill hint**:
 A world's declaration that a chunk is uniformly one voxel, or that it doesn't know. An optional accelerator for the streaming policy; the world works fully without it.
 _Avoid_: air hint, solid hint
+
+### Sub-grids
+
+**Sub-grid**:
+A set of voxels on a grid of its own, with its own transform, that belongs to one voxel world and moves freely against the world's grid. A game spawns and despawns sub-grids as it plays. A sub-grid has no generator, so every voxel it holds is a voxel edit, and they go when it despawns. The world's streamed voxels are not a sub-grid.
+_Avoid_: voxel body, contraption, child world
+
+**Grid**:
+Either a world's streamed voxels or one of its sub-grids: voxels laid out on one grid with one pose. A voxel position means something only on the grid it names.
+_Avoid_: volume, layer, space
+
+**Lift**:
+Moving a set of voxels out of a grid into a new sub-grid that holds them at the pose they had, so nothing looks different until the sub-grid moves. Which voxels to lift is the game's choice.
+_Avoid_: detach, sever, cut, split (a streaming term)
+
+**Stamp**:
+Writing a sub-grid's voxels into another grid at the nearest pose that lines up with it, and despawning the sub-grid.
+_Avoid_: merge (a streaming term), settle, place, weld
+
+**Handover**:
+How voxels move from one grid to another without a frame that shows them twice or not at all. Every chunk the move touches, in every grid, keeps showing what it showed until all of them can show the result, and then all of them change in the same frame. Lift and stamp each end in a handover. So does any change that fills an empty sub-grid or empties one, which is how a lift or stamp received from another world lands.
+_Avoid_: swap, transfer, transition
+
+**Dislodged fragment**:
+Voxels of one grid that an edit cut off from the rest of that grid, small enough that they count as no longer held up. Only connections within the grid count, so a fragment resting on a sub-grid is still dislodged. Of the fragments a cut leaves, the largest keeps its place and isn't dislodged.
+_Avoid_: loose piece, island (a floating island the generator makes), debris, chunk
+
+**Enclosure**:
+How much sky a sub-grid's own voxels let through to a place on it, with the sky coming from every side. A place is fully open where a line along one of the sub-grid's axes leaves it without meeting one of its voxels, and enclosure fades inward from there as sky light does. In a lit world it caps the sky light and the world's voxel light a sub-grid's faces show, so the inside of a cabin goes dark under an open sky and beside the world's lamps. It doesn't depend on which way up the sub-grid is.
+_Avoid_: openness (sky openness is a way of working out sky fill), interior light, own sky
 
 ### Light
 
@@ -219,12 +249,16 @@ A voxel whose material a world declares to be a source of voxel light.
 _Avoid_: light block, torch
 
 **Slot**:
-Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces see more than one light level in a channel.
+Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces, or the faces of a sub-grid passing through it, see more than one light level in a channel.
 _Avoid_: page, atlas entry
 
 **Tag**:
-The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level.
+The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
 _Avoid_: mesh tag (the Bevy component that carries it), light index
+
+**Tag map**:
+A world's map from a chunk position to that chunk's tag, held for the chunks around its sub-grids, so a sub-grid's face can read the world's light at its world position.
+_Avoid_: light index, lookup table
 
 **Shell**:
 The layer one voxel deep around a chunk's voxels in its slot, holding copies of its face neighbours' border planes, so a face on the chunk's boundary reads the light in front of it. It's only for display and never feeds back into light.

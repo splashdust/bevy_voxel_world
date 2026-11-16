@@ -22,7 +22,17 @@
 //! is exactly `StandardMaterial`: Bevy's shader for it can't read light, so
 //! the extension picks the crate's lit PBR shader, which can. The extension
 //! adds the `VOXEL_LIGHT` shader def, under which the crate's vertex shaders
-//! output what that module reads.
+//! also output the chunk's tag. That module reads the tag with the local
+//! position and normal they output in every world.
+//!
+//! With the `sub_grids` feature the extension also binds the world's tag map
+//! at 202, a placeholder of one empty entry until the world has a sub-grid,
+//! and adds the `SUB_GRIDS` shader def, under which the crate's vertex
+//! shaders also output the face's position in the world's grid. The shader
+//! reads the world's light at a sub-grid's faces from both: see
+//! [Sub-grids](#sub-grids). The tag map's texture is replaced each time it
+//! grows, and the world's materials bind the new one in the same frame, as
+//! they do the light texture once it's made.
 //!
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
 //! extension alone, so the extension passes on the wrapped material's. It
@@ -60,6 +70,76 @@
 //! A face reads light blended between voxels, so the gate is a step between
 //! direct sky and the level beside it, worked out from sky reach and
 //! precision.
+//!
+//! # Sub-grids
+//!
+//! With the `sub_grids` feature, a sub-grid's chunk holds light of its own,
+//! which the world's light never sees, and its tag has bit 30 set. The
+//! shader's `sample_face_light` reads such a face's own light with
+//! `sample_light`, and the world's light at the face with `world_light`,
+//! from its position and normal in the world's grid. The face shows the
+//! smaller of the two sky levels, so a sub-grid's enclosure caps the world's
+//! sky. Under [`SubGridSky::Enclosed`](super::config::SubGridSky) with sky
+//! light on, the look's `enclosure_caps_voxel` caps the world's voxel light by
+//! the same sky level, so the world's lamps don't light a closed cabin's
+//! inside through its walls. The face shows the larger of that and its own
+//! voxel level, so its own lamps add to the world's. The sun gate reads the
+//! capped sky. A world chunk's face reads as `sample_light` reads it.
+//!
+//! `world_light` reads as `sample_light` would for a world face at the same
+//! place: a face on the world's grid, as every face of a sub-grid at a pose
+//! a stamp keeps is, reads the voxel in front of it, and any other face the
+//! 8 voxels around the point in front of it. So a sub-grid at such a pose,
+//! with sky of its own at the top level and no lamps, looks as its voxels
+//! would set in the world. It looks up one world chunk in the world's tag
+//! map, kept by the `tag_map` module: the chunk holding the voxel in front
+//! of the face, the nearest of those it reads. It reads every voxel from
+//! that chunk's slot, whose shell holds the cells across its faces. A
+//! coarse chunk's entry is read in its own cells, `1 << L` voxels wide. A position the tag map doesn't hold reads
+//! open sky with no lamps, so a sub-grid far from any camera never goes
+//! black.
+//!
+//! The shader takes Bevy's world position as a position in the world's
+//! grid, so it assumes the world's `WorldRoot` is at the identity. A custom
+//! shader that still calls `sample_light` lights a sub-grid's faces from the
+//! sub-grid's own light alone.
+//!
+//! What it costs grows with:
+//!
+//! - On the GPU, each fragment of a sub-grid's face: one lookup in the tag
+//!   map's hash table, and one more read's cells. A world chunk's face costs
+//!   nothing more, and each vertex of a lit world carries one more output.
+//! - On the CPU, the world chunks that sub-grids' boxes touch, which a
+//!   tumbling sub-grid's box touches more of.
+//! - Slots, for the chunks of air near sub-grids whose light varies.
+//! - Texture memory, 16 bytes for each entry of the tag map.
+//! - One column answer for each position of hinted air a sub-grid comes to
+//!   touch.
+//!
+//! Nothing hides where a sub-grid's light and the world's differ. A
+//! sub-grid's lamps light only the sub-grid, and its voxels cast no sky
+//! shadow on the world, though Bevy's shadow map still draws its shadow
+//! from the sun. A lamp that should light the world around it can carry a
+//! Bevy point light as a child of the sub-grid's entity, which moves with
+//! it:
+//!
+//! ```
+//! use bevy::prelude::*;
+//!
+//! /// Lights the world around the lamp at `lamp`, a voxel position on the
+//! /// grid of the sub-grid `sub_grid`.
+//! fn light_the_world_around(commands: &mut Commands, sub_grid: Entity, lamp: IVec3) {
+//!     commands.entity(sub_grid).with_child((
+//!         PointLight {
+//!             color: Color::srgb(1.0, 0.8, 0.5),
+//!             range: 14.0,
+//!             ..default()
+//!         },
+//!         // The middle of the lamp's voxel.
+//!         Transform::from_translation(lamp.as_vec3() + Vec3::splat(0.5)),
+//!     ));
+//! }
+//! ```
 //!
 //! # References
 //!
@@ -129,33 +209,48 @@ pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 /// to the mesher. Any other `M`, `ExtendedMaterial<StandardMaterial, _>`
 /// included, reads light in its own shader by importing the
 /// `bevy_voxel_world::light` module, which declares bindings 200 and 201.
-/// Bindings 200 to 219 are the crate's.
+/// With the `sub_grids` feature it also binds the world's tag map at 202 and
+/// adds the `SUB_GRIDS` shader def. Bindings 200 to 219 are the crate's.
 ///
 /// # Meshes and vertex shaders
 ///
 /// Light comes from voxels, not from the mesh: a shaft the mesh rounds away
 /// still lets light through, and a wall it doesn't draw still blocks it. The
-/// shader finds a face's voxels from its position and normal, so a custom
-/// mesh uses the chunk's padded local coordinates, where voxel `i` spans
-/// `i..i + 1`, as the crate's mesher does, with normals pointing out of the
-/// solid. A surface sunk more than about half a voxel into solid voxels can
-/// read black along convex edges, where it lies more than a voxel from open
-/// air.
+/// shader finds a face's voxels from its local position and normal, so a
+/// custom mesh is built in the chunk's padded local coordinates, as the
+/// [`rendering`](crate::rendering) module docs describe them, with normals
+/// pointing out of the solid. A surface sunk more than about half a voxel
+/// into solid voxels can read black along convex edges, where it lies more
+/// than a voxel from open air.
 ///
-/// A custom vertex shader must output, under the `VOXEL_LIGHT` shader def,
-/// the vertex's local position at location 9 with
-/// `@interpolate(perspective, centroid)`, its local normal at 10, and the
-/// chunk's `MeshTag` at 11 with `@interpolate(flat)`, as
-/// `bevy_voxel_world::voxel_io::VoxelVertexOutput` does. The position must be
-/// centroid-sampled because with MSAA a pixel centre can lie outside its
-/// triangle, and the position there would read the light of a voxel beyond
-/// the face.
+/// A custom vertex shader outputs what the [`rendering`](crate::rendering)
+/// module docs list. Light reads the local position at location 9, the local
+/// normal at 10 and the chunk's `MeshTag` at 11, the last only under the
+/// `VOXEL_LIGHT` shader def this extension adds, and under `SUB_GRIDS` the
+/// position in the world's grid at 12.
+///
+/// # Sub-grids
+///
+/// With the `sub_grids` feature, a fragment shader lights any face, a world
+/// chunk's or a sub-grid's, with the `bevy_voxel_world::light` module's
+/// `sample_face_light`. A sub-grid's face shows the world's light where it
+/// is, capped by its enclosure, with its own lamps on top. A
+/// shader that still calls `sample_light` lights a sub-grid's faces from the
+/// sub-grid's own light alone, so they don't darken as the sub-grid enters a
+/// cave or brighten as it passes a lamp of the world. The shader reads Bevy's
+/// world position as a position in the world's grid, so it assumes the
+/// world's `WorldRoot` is at the identity.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct VoxelWorldBindings<M: Material> {
     #[texture(200, dimension = "3d", sample_type = "u_int")]
     light_texture: Handle<Image>,
     #[uniform(201)]
     look: LookUniform,
+    /// The world's tag map, or a placeholder of one empty entry until the
+    /// world has a sub-grid.
+    #[cfg(feature = "sub_grids")]
+    #[texture(202, sample_type = "u_int")]
+    tag_map: Handle<Image>,
     _material: PhantomData<fn() -> M>,
 }
 
@@ -164,6 +259,12 @@ impl<M: Material> VoxelWorldBindings<M> {
     #[cfg(test)]
     pub(crate) fn look(&self) -> &LookUniform {
         &self.look
+    }
+
+    /// The tag map the shader reads.
+    #[cfg(all(test, feature = "sub_grids"))]
+    pub(crate) fn tag_map(&self) -> &Handle<Image> {
+        &self.tag_map
     }
 }
 
@@ -190,10 +291,13 @@ impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        let def = ShaderDefVal::Bool("VOXEL_LIGHT".into(), true);
-        descriptor.vertex.shader_defs.push(def.clone());
+        let mut defs = vec![ShaderDefVal::Bool("VOXEL_LIGHT".into(), true)];
+        if cfg!(feature = "sub_grids") {
+            defs.push(ShaderDefVal::Bool("SUB_GRIDS".into(), true));
+        }
+        descriptor.vertex.shader_defs.extend(defs.iter().cloned());
         if let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment.shader_defs.push(def);
+            fragment.shader_defs.extend(defs);
         }
         Ok(())
     }
@@ -234,6 +338,9 @@ pub(crate) struct LookUniform {
     /// 1 at [`LightPrecision::Steps256`], whose texels and tags hold 8 bits
     /// per channel, 0 at 16 levels.
     pub steps_256: u32,
+    /// 1 when a sub-grid's enclosure caps the world's voxel light its faces
+    /// show, as it caps the world's sky. 0 without the `sub_grids` feature.
+    pub enclosure_caps_voxel: u32,
 }
 
 impl LookUniform {
@@ -263,6 +370,10 @@ impl LookUniform {
                 LightAo::Off => 2,
             },
             steps_256: (config.precision == LightPrecision::Steps256) as u32,
+            #[cfg(feature = "sub_grids")]
+            enclosure_caps_voxel: config.enclosure_caps_voxel_light() as u32,
+            #[cfg(not(feature = "sub_grids"))]
+            enclosure_caps_voxel: 0,
         }
     }
 }
@@ -346,13 +457,23 @@ where
         &mut app.world_mut().resource_mut::<Assets<Image>>(),
     );
     let look = LookUniform::new(&config);
+    #[cfg(feature = "sub_grids")]
+    let tag_map =
+        TagMapBinding::<C>::new(&mut app.world_mut().resource_mut::<Assets<Image>>());
+    let textures = Textures {
+        light: route.texture(),
+        #[cfg(feature = "sub_grids")]
+        tag_map: tag_map.bound(&route),
+    };
     let handle = base.map(|base| {
-        let material = wrap(base, route.texture(), look);
+        let material = wrap(base, textures, look);
         app.world_mut()
             .resource_mut::<Assets<VoxelWorldMaterial<M>>>()
             .add(material)
     });
     app.insert_resource(route);
+    #[cfg(feature = "sub_grids")]
+    app.insert_resource(tag_map);
     route::add_render_systems::<C>(app);
 
     // A hand-added material is wrapped by `wrap_hand_added_material`, not
@@ -386,23 +507,54 @@ where
                 .before(AssetEventSystems),
         ),
     );
+    // The tag map reads this frame's poses, and the tags every system before
+    // it set. A slot it gives a chunk can be the first, which makes the
+    // texture. It reads the live sub-grids after those despawning this
+    // frame have ended.
+    #[cfg(feature = "sub_grids")]
+    app.add_systems(
+        PostUpdate,
+        (
+            super::sub_grid::tag_map::upkeep::<C>
+                .run_if(super::sub_grid::tag_map::has_upkeep::<C>)
+                .after(crate::sub_grid::SubGrids::<C>::snapshot_poses)
+                .after(crate::sub_grid::handover::Handovers::<C>::despawn_landed)
+                .after(super::follow_config::<C>)
+                .before(make_texture::<C, M>),
+            super::sub_grid::tag_map::set_changed_tags::<C>
+                .run_if(super::sub_grid::tag_map::has_upkeep::<C>)
+                .after(super::sub_grid::tag_map::upkeep::<C>),
+            bind_tag_map::<C, M>
+                .after(super::sub_grid::tag_map::upkeep::<C>)
+                .before(AssetEventSystems),
+        ),
+    );
     app.world_mut()
         .resource_mut::<WorldMaterial<C, VoxelWorldMaterial<M>>>()
         .insert_chunk_components = route::tag_chunk::<C>;
     handle
 }
 
-/// `base` wrapped with a world's light texture and look.
+/// The textures a world's material binds for the shader to read light.
+struct Textures {
+    light: Handle<Image>,
+    #[cfg(feature = "sub_grids")]
+    tag_map: Handle<Image>,
+}
+
+/// `base` wrapped with a world's textures and look.
 fn wrap<M: Material>(
     base: M,
-    light_texture: Handle<Image>,
+    textures: Textures,
     look: LookUniform,
 ) -> VoxelWorldMaterial<M> {
     ExtendedMaterial {
         base,
         extension: VoxelWorldBindings {
-            light_texture,
+            light_texture: textures.light,
             look,
+            #[cfg(feature = "sub_grids")]
+            tag_map: textures.tag_map,
             _material: PhantomData,
         },
     }
@@ -434,6 +586,7 @@ fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
     mut world_material: ResMut<WorldMaterial<C, VoxelWorldMaterial<M>>>,
     route: Res<LightRoute<C>>,
     settings: Res<LightSettings<C>>,
+    #[cfg(feature = "sub_grids")] tag_map: Res<TagMapBinding<C>>,
 ) {
     let Some(hand_added) = hand_added else {
         return;
@@ -446,7 +599,12 @@ fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
         return;
     };
     let look = LookUniform::new(&settings.config);
-    let handle = wrapped.add(wrap(base, route.texture(), look));
+    let textures = Textures {
+        light: route.texture(),
+        #[cfg(feature = "sub_grids")]
+        tag_map: tag_map.bound(&route),
+    };
+    let handle = wrapped.add(wrap(base, textures, look));
     state.wrapped_from = Some(id);
     world_material.handle = Some(handle.clone());
     commands.insert_resource(VoxelWorldMaterialHandle { handle });
@@ -540,6 +698,78 @@ where
     for id in ours {
         if let Some(mut material) = materials.get_mut(id) {
             material.extension.light_texture = texture.clone();
+        }
+    }
+}
+
+/// What world `C`'s materials bind as its tag map: its placeholder until the
+/// world has a sub-grid, then its tag map's texture, a new one each time the
+/// tag map grows.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource)]
+struct TagMapBinding<C> {
+    /// A texture of one empty entry, which the shader reads as a tag map
+    /// where every lookup misses. It has no upkeep.
+    placeholder: Handle<Image>,
+    /// The texture the world's materials bind now.
+    bound: AssetId<Image>,
+    _world: PhantomData<C>,
+}
+
+#[cfg(feature = "sub_grids")]
+impl<C: VoxelWorldConfig> TagMapBinding<C> {
+    fn new(images: &mut Assets<Image>) -> Self {
+        let placeholder = images.add(super::sub_grid::tag_map::placeholder_image());
+        Self {
+            bound: placeholder.id(),
+            placeholder,
+            _world: PhantomData,
+        }
+    }
+
+    /// The texture a material made now binds: the tag map's, once `route`
+    /// has one, or else the placeholder.
+    fn bound(&self, route: &LightRoute<C>) -> Handle<Image> {
+        route
+            .tag_map()
+            .map(|map| map.texture().clone())
+            .unwrap_or_else(|| self.placeholder.clone())
+    }
+}
+
+/// Gives world `C`'s materials its tag map's texture in place of the one
+/// they bind, when the world makes its tag map and each time the tag map
+/// grows into a new texture. The texture they bound is dropped once no
+/// material binds it.
+///
+/// It runs after the tag map's upkeep and before Bevy sends this frame's
+/// asset events, so the frame that extracts the new texture's entries
+/// renders with it.
+#[cfg(feature = "sub_grids")]
+fn bind_tag_map<C: VoxelWorldConfig, M: Material>(
+    route: Res<LightRoute<C>>,
+    mut binding: ResMut<TagMapBinding<C>>,
+    mut materials: ResMut<Assets<VoxelWorldMaterial<M>>>,
+) where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let texture = binding.bound(&route);
+    if texture.id() == binding.bound {
+        return;
+    }
+    let old = std::mem::replace(&mut binding.bound, texture.id());
+    // Each world has its own placeholder and tag map, so the materials binding
+    // the old texture are this world's: its material, and any earlier copy
+    // of a hand-added material that chunks still show.
+    let ours: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| material.extension.tag_map.id() == old)
+        .map(|(id, _)| id)
+        .collect();
+    for id in ours {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.tag_map = texture.clone();
         }
     }
 }

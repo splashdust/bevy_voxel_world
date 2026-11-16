@@ -13,11 +13,16 @@
 //! each lamp also has a warm point light, and distance fog and a volume of mist
 //! add haze.
 //!
-//! Run with
-//! `cargo run --release --example light_mountain_house --features light_propagation`.
+//! The trees can be felled. Remove a voxel of a trunk, and the tree above it
+//! is cut loose. The world asks the crate to lift such a piece into a
+//! sub-grid, which falls under avian3d physics and stays where it lands. The
+//! "Felling trees" section below shows how.
+//!
+//! Run with `cargo run --release --example light_mountain_house --features
+//! light_propagation,sub_grids,dislodged_fragments`.
 //! Walk with WASD, hold Shift to run, jump with Space and look with the mouse.
 //! A left click places a voxel against the face under the crosshair, a right
-//! click removes the voxel there, and 1 to 4 choose stone, timber, a lantern or
+//! click removes the voxel there or fells a tree, and 1 to 4 choose stone, timber, a lantern or
 //! a crystal to place. `[` and `]` lower and raise the sun, L carries a lantern
 //! into the dark, H hides the help, and Esc frees the mouse.
 //!
@@ -33,6 +38,7 @@
 
 use std::sync::{Arc, LazyLock};
 
+use avian3d::prelude::{AngularVelocity, Collider, PhysicsPlugins, RigidBody};
 use bevy::{
     camera::Exposure,
     camera::RenderTarget,
@@ -51,7 +57,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureFormat},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use bevy_voxel_world::prelude::*;
+use bevy_voxel_world::{custom_meshing::CHUNK_SIZE_I, prelude::*};
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 
 // Materials.
@@ -669,13 +675,19 @@ fn hash(x: i32, z: i32) -> u32 {
 
 /// Plants spruces on gentle slopes below the snow, away from the ledge, and a
 /// few beside the house.
+///
+/// The trees stand far enough apart that no two share leaves, so a tree cut
+/// through its trunk falls on its own. The forest has one tree in each
+/// `CELL` by `CELL` square at most, moved up to 4 voxels from its corner, so
+/// two trunks are at least 8 voxels apart along x or z. A spruce's leaves
+/// reach 3 voxels out along x and z, which leaves a gap of at least one voxel.
 fn plant_trees(b: &mut Blueprint, terrain: &Terrain) {
     b.origin = IVec3::ZERO;
-    const CELL: i32 = 7;
-    for cell_x in -36..=36 {
-        for cell_z in -36..=1 {
+    const CELL: i32 = 12;
+    for cell_x in -21..=21 {
+        for cell_z in -21..=1 {
             let h = hash(cell_x, cell_z);
-            if h % 100 > 72 {
+            if h % 100 > 85 {
                 continue;
             }
             let x = cell_x * CELL + (h >> 8) as i32 % 5;
@@ -689,7 +701,10 @@ fn plant_trees(b: &mut Blueprint, terrain: &Terrain) {
             spruce(b, terrain, base, 8 + (h >> 16) as i32 % 9);
         }
     }
-    for (x, z, height) in [(24, -12, 13), (-52, 2, 15), (34, -8, 12), (40, 4, 14)] {
+    // The trees beside the house stand on the ledge, where the forest has
+    // none, far enough from its edge, the boulders and each other that their
+    // leaves touch nothing.
+    for (x, z, height) in [(24, -12, 13), (-30, -6, 15), (40, -10, 12), (44, 10, 14)] {
         spruce(b, terrain, IVec3::new(x, LEDGE_TOP + 1, z), height);
     }
 }
@@ -725,11 +740,20 @@ fn spruce(b: &mut Blueprint, terrain: &Terrain, base: IVec3, height: i32) {
                 if rim && hash(x * 31 + y, z * 17 - y).is_multiple_of(4) {
                     continue;
                 }
-                // Leaves on a slope stop at the ground.
-                let ground = *ground
-                    .entry((x, z))
-                    .or_insert_with(|| terrain.height(x as f32, z as f32));
-                if ((base.y + y) as f32) >= ground {
+                // Leaves on a slope stop short of the ground. A leaf sharing
+                // a face with the ground would hold the tree up after its
+                // trunk is cut, so none touches it from above or beside.
+                let leaf = (base.y + y) as f32;
+                let mut ground_at = |x: i32, z: i32| {
+                    *ground
+                        .entry((x, z))
+                        .or_insert_with(|| terrain.height(x as f32, z as f32))
+                };
+                let clear = leaf - 1.0 >= ground_at(x, z)
+                    && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .into_iter()
+                        .all(|(dx, dz)| leaf >= ground_at(x + dx, z + dz));
+                if clear {
                     b.set([x, base.y + y, z], Solid(LEAVES));
                 }
             }
@@ -861,6 +885,17 @@ impl VoxelWorldConfig for MountainWorld {
             (CRYSTAL, Emission::level(9.0)),
         ]
     }
+
+    // Lift each piece that an edit cuts loose into a sub-grid, such as a tree
+    // whose trunk was cut. "Felling trees" below makes it fall.
+    fn detect_dislodged_fragments(
+        &self,
+    ) -> Option<FragmentDetection<Self::MaterialIndex>> {
+        Some(FragmentDetection {
+            auto_lift: true,
+            ..default()
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,26 +929,40 @@ pub struct MountainHousePlugin;
 
 impl Plugin for MountainHousePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(VoxelWorldPlugin::with_config(MountainWorld))
-            .insert_resource(Sun::DUSK)
-            .init_resource::<Placing>()
-            .add_systems(Startup, (setup, spawn_lamps, spawn_smoke))
-            .add_systems(
-                Update,
-                (
-                    // `edit_voxels` goes before `grab_mouse`, so the click that
-                    // captures the mouse doesn't also place a voxel.
-                    (look_around, walk, edit_voxels, grab_mouse).chain(),
-                    choose_voxel,
-                    turn_sun,
-                    follow_sun.run_if(resource_changed::<Sun>),
-                    fit_scene_image,
-                    flicker,
-                    drift_smoke,
-                    carry_lantern,
-                    toggle_help,
-                ),
-            );
+        app.add_plugins((
+            VoxelWorldPlugin::with_config(MountainWorld),
+            PhysicsPlugins::default(),
+        ))
+        .insert_resource(Sun::DUSK)
+        .init_resource::<Placing>()
+        .init_resource::<GroundColliders>()
+        .add_systems(Startup, (setup, spawn_lamps, spawn_smoke))
+        // Right after the voxel world's own systems, in the frame a lift's
+        // voxels first show in its sub-grid, so the piece and the ground
+        // under it have colliders before the next physics step.
+        .add_systems(
+            PreUpdate,
+            (start_falling, build_piece_colliders, build_ground_colliders)
+                .chain()
+                .after(VoxelWorldSet::<MountainWorld>::default()),
+        )
+        .add_systems(
+            Update,
+            (
+                // `edit_voxels` goes before `grab_mouse`, so the click that
+                // captures the mouse doesn't also place a voxel.
+                (look_around, walk, edit_voxels, grab_mouse).chain(),
+                choose_voxel,
+                turn_sun,
+                follow_sun.run_if(resource_changed::<Sun>),
+                fit_scene_image,
+                flicker,
+                drift_smoke,
+                carry_lantern,
+                toggle_help,
+                drop_lost_pieces,
+            ),
+        );
     }
 }
 
@@ -1206,7 +1255,7 @@ fn help(placing: usize) -> String {
         "WASD  walk, Shift runs\n\
          Space  jump\n\
          left click  place {}\n\
-         right click  remove\n\
+         right click  remove, or fell a tree\n\
          1-4  stone, timber, lantern, crystal\n\
          [ ]  lower or raise the sun\n\
          L  carry a lantern\n\
@@ -1812,7 +1861,8 @@ fn choose_voxel(
 const REACH: f32 = 8.0;
 
 /// While the mouse is captured, a left click places the chosen voxel against
-/// the face under the crosshair, and a right click removes the voxel there.
+/// the face under the crosshair, and a right click removes the voxel there,
+/// in the world or in a felled tree.
 ///
 /// Light propagation relights the voxels around an edit on its own. The Bevy
 /// lights that colour the lamps are the example's, so it adds one in front of
@@ -1835,15 +1885,19 @@ fn edit_voxels(
     let (transform, walker) = *camera;
     let eye = transform.translation;
     let ray = Ray3d::new(eye, transform.forward());
-    let Some(hit) = voxel_world.raycast(ray, &|_| true) else {
+    // `raycast_grids` checks the world and every felled tree, which is a
+    // sub-grid, and returns the nearest hit. The hit names its grid, and its
+    // position and normal are on that grid, which `grid_mut` edits with the
+    // same calls for either.
+    let Some(hit) = voxel_world.raycast_grids(ray, REACH, &|_| true, &|_, _, _| true)
+    else {
         return;
     };
-    if (hit.position + 0.5).distance(eye) > REACH {
-        return;
-    }
 
     if remove {
-        voxel_world.set_voxel(hit.voxel_pos(), WorldVoxel::Air);
+        if let Some(mut grid) = voxel_world.grid_mut(hit.grid) {
+            grid.set_voxel(hit.position, WorldVoxel::Air);
+        }
         for (lamp, transform) in &lamps {
             if !lamp_voxel_near(&voxel_world, transform.translation) {
                 commands.entity(lamp).despawn();
@@ -1851,14 +1905,23 @@ fn edit_voxels(
         }
         return;
     }
-    let Some(normal) = hit.voxel_normal() else {
+    let Some(normal) = hit.normal else {
         return;
     };
-    let at = hit.voxel_pos() + normal;
+    let at = hit.position + normal;
+    let (_, material, _) = PLACEABLE[placing.0];
+    if hit.grid != Grid::World {
+        // A voxel placed on a felled tree gets no Bevy light, which would
+        // stay behind as the tree moves. A lamp there still lights the tree
+        // itself through light propagation.
+        if let Some(mut grid) = voxel_world.grid_mut(hit.grid) {
+            grid.set_voxel(at, WorldVoxel::Solid(material));
+        }
+        return;
+    }
     if body_hits(walker.feet, &|position| position == at) {
         return;
     }
-    let (_, material, _) = PLACEABLE[placing.0];
     voxel_world.set_voxel(at, WorldVoxel::Solid(material));
     let light_at = at.as_vec3() + 0.5 + normal.as_vec3() * 0.9;
     match material {
@@ -1874,5 +1937,270 @@ fn toggle_help(
 ) {
     if keys.just_pressed(KeyCode::KeyH) {
         help_text.toggle_inherited_hidden();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Felling trees
+//
+// The world returns `FragmentDetection` with `auto_lift` on, so after each
+// edit the crate looks for voxels the edit cut off from the rest of the world,
+// and lifts each such piece into a new sub-grid: a set of voxels on a grid of
+// its own, with a `Transform`. Cutting through a trunk lifts the tree above
+// the cut. The systems below make a piece fall:
+//
+// 1. `start_falling` gives a new piece a dynamic body in avian3d, turning
+//    away from the camera, so a tree standing on its stump tips over.
+// 2. `build_piece_colliders` gives the piece's chunks colliders made of its
+//    voxels.
+// 3. `build_ground_colliders` gives the world's chunks around each piece
+//    colliders, so it has something to land on. The world is large, so only
+//    the chunks near a piece get them.
+// 4. `drop_lost_pieces` despawns a piece that falls out of the world, or has
+//    no voxels left.
+//
+// A piece stays a sub-grid where it lands. The walker passes through it, since
+// it walks on the world's voxels only, but clicks reach it, so a felled tree
+// can be cut again. A cut through a piece lifts the smaller part into a new
+// piece of its own.
+
+/// A piece cut loose from the world.
+#[derive(Component)]
+struct Piece;
+
+/// How fast a new piece starts turning away from the camera, in radians per
+/// second.
+const FELLING_SPIN: f32 = 0.6;
+
+/// A piece below this height has fallen out of the world, and despawns.
+const LOST_BELOW: f32 = -64.0;
+
+/// The smallest box holding the voxels of the sub-grid `piece`, in the frame
+/// of the world's root, as its minimum and maximum corners.
+fn piece_box(
+    voxel_world: &VoxelWorld<MountainWorld>,
+    piece: Entity,
+) -> Option<(Vec3, Vec3)> {
+    let grid = voxel_world.grid(Grid::SubGrid(piece))?;
+    let (min, max) = grid.bounds()?;
+    let pose = grid.pose();
+    let (min, max) = (min.as_vec3(), max.as_vec3());
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+    ]
+    .map(|corner| pose.transform_point(corner));
+    let low = corners.into_iter().reduce(Vec3::min)?;
+    let high = corners.into_iter().reduce(Vec3::max)?;
+    Some((low, high))
+}
+
+/// Gives each piece whose lift has landed a dynamic body, turning so that its
+/// top moves away from the camera.
+///
+/// `Lifted` arrives in the frame the piece's voxels first show in its
+/// sub-grid. A lift spawns the piece as a child of the grid it was cut from.
+/// A piece cut from the world is a child of the world's root already. One
+/// cut from another piece would move along with that piece, so it moves to
+/// the world's root, which is that piece's parent, keeping its place.
+fn start_falling(
+    mut lifted: MessageReader<Lifted<MountainWorld>>,
+    voxel_world: VoxelWorld<MountainWorld>,
+    camera: Single<&Transform, With<Viewer>>,
+    parents: Query<&ChildOf>,
+    mut commands: Commands,
+) {
+    for message in lifted.read() {
+        let piece = message.sub_grid;
+        if let Grid::SubGrid(source) = message.source {
+            if let Ok(&ChildOf(root)) = parents.get(source) {
+                commands.entity(piece).set_parent_in_place(root);
+            }
+        }
+        let Some((low, high)) = piece_box(&voxel_world, piece) else {
+            continue;
+        };
+        // Turning about this axis moves the piece's top along `away`.
+        let away = ((low + high) / 2.0 - camera.translation)
+            .with_y(0.0)
+            .normalize_or_zero();
+        let axis = Vec3::Y.cross(away);
+        commands.entity(piece).try_insert((
+            RigidBody::Dynamic,
+            AngularVelocity(axis * FELLING_SPIN),
+            Piece,
+        ));
+    }
+}
+
+/// Gives each chunk of a piece that just showed new voxels a collider made of
+/// its solid voxels.
+///
+/// A sub-grid's chunks are children of the sub-grid, so avian adds their
+/// colliders to the piece's body.
+fn build_piece_colliders(
+    mut published: MessageReader<ChunkPublished<MountainWorld>>,
+    voxel_world: VoxelWorld<MountainWorld>,
+    mut commands: Commands,
+) {
+    for message in published.read() {
+        if message.grid == Grid::World {
+            continue;
+        }
+        let Some(chunk) = voxel_world
+            .grid(message.grid)
+            .and_then(|grid| grid.get_chunk_data(message.chunk_key))
+        else {
+            continue;
+        };
+        // The chunk's entity sits one voxel below its first voxel, so its
+        // voxels are at 1 to `CHUNK_SIZE` on each axis.
+        let voxels: Vec<IVec3> =
+            solid_voxels(chunk.key().min_voxel(), false, |position| {
+                chunk.get_voxel_at_world_position(position)
+            })
+            .into_iter()
+            .map(|offset| offset + IVec3::ONE)
+            .collect();
+        if voxels.is_empty() {
+            commands.entity(message.entity).try_remove::<Collider>();
+        } else {
+            commands
+                .entity(message.entity)
+                .try_insert(Collider::voxels(Vec3::ONE, &voxels));
+        }
+    }
+}
+
+/// The world's chunks that have colliders, with the entity holding each one's
+/// collider.
+#[derive(Resource, Default)]
+struct GroundColliders(HashMap<ChunkKey, Entity>);
+
+/// How far around a piece the world's chunks get colliders, in voxels.
+const GROUND_MARGIN: f32 = 4.0;
+
+/// Gives the world's chunks around each piece colliders, and rebuilds the
+/// collider of each such chunk whose voxels changed.
+///
+/// Each collider holds only the chunk's surface voxels, those with a face
+/// against a voxel that isn't solid, since the ground is mostly buried rock.
+fn build_ground_colliders(
+    mut published: MessageReader<ChunkPublished<MountainWorld>>,
+    pieces: Query<Entity, With<Piece>>,
+    voxel_world: VoxelWorld<MountainWorld>,
+    mut ground: ResMut<GroundColliders>,
+    mut commands: Commands,
+) {
+    let mut chunks: Vec<ChunkKey> = published
+        .read()
+        .filter(|message| message.grid == Grid::World)
+        .map(|message| message.chunk_key)
+        .filter(|key| ground.0.contains_key(key))
+        .collect();
+    for piece in &pieces {
+        let Some((low, high)) = piece_box(&voxel_world, piece) else {
+            continue;
+        };
+        let size = CHUNK_SIZE_I as f32;
+        let first = ((low - GROUND_MARGIN) / size).floor().as_ivec3();
+        let last = ((high + GROUND_MARGIN) / size).floor().as_ivec3();
+        for z in first.z..=last.z {
+            for y in first.y..=last.y {
+                for x in first.x..=last.x {
+                    let key = ChunkKey::containing_chunk(IVec3::new(x, y, z), 0);
+                    if !ground.0.contains_key(&key) && !chunks.contains(&key) {
+                        chunks.push(key);
+                    }
+                }
+            }
+        }
+    }
+
+    for key in chunks {
+        let first = key.min_voxel();
+        let entity = *ground.0.entry(key).or_insert_with(|| {
+            commands
+                .spawn((
+                    RigidBody::Static,
+                    Transform::from_translation(first.as_vec3()),
+                ))
+                .id()
+        });
+        // A chunk not generated yet gets its collider when it publishes,
+        // since it is in `GroundColliders` now.
+        let voxels = voxel_world
+            .get_chunk_data(key)
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| {
+                solid_voxels(first, true, |position| {
+                    chunk.get_voxel_at_world_position(position)
+                })
+            })
+            .unwrap_or_default();
+        if voxels.is_empty() {
+            commands.entity(entity).try_remove::<Collider>();
+        } else {
+            commands
+                .entity(entity)
+                .try_insert(Collider::voxels(Vec3::ONE, &voxels));
+        }
+    }
+}
+
+/// The solid voxels of the level-0 chunk whose first voxel is `first`, as
+/// offsets from `first`. `voxel_at` reads the chunk's voxel at a position on
+/// its grid. With `surface_only`, it keeps only the voxels with a face against
+/// a voxel that isn't solid.
+///
+/// A chunk's data repeats its neighbours' voxels in a border one voxel wide,
+/// so `voxel_at` can tell whether a voxel at the chunk's edge is on the
+/// surface.
+fn solid_voxels(
+    first: IVec3,
+    surface_only: bool,
+    voxel_at: impl Fn(IVec3) -> Option<WorldVoxel>,
+) -> Vec<IVec3> {
+    let solid = |position| voxel_at(position).is_some_and(|voxel| voxel.is_solid());
+    let buried = |position: IVec3| {
+        [IVec3::X, IVec3::Y, IVec3::Z]
+            .into_iter()
+            .all(|axis| solid(position - axis) && solid(position + axis))
+    };
+    let mut voxels = Vec::new();
+    for z in 0..CHUNK_SIZE_I {
+        for y in 0..CHUNK_SIZE_I {
+            for x in 0..CHUNK_SIZE_I {
+                let offset = IVec3::new(x, y, z);
+                let position = first + offset;
+                if solid(position) && !(surface_only && buried(position)) {
+                    voxels.push(offset);
+                }
+            }
+        }
+    }
+    voxels
+}
+
+/// Despawns each piece that has fallen out of the world, and each piece
+/// whose last voxel was removed. The crate keeps an empty sub-grid until the
+/// game despawns it.
+fn drop_lost_pieces(
+    mut voxel_world: VoxelWorld<MountainWorld>,
+    pieces: Query<(Entity, &GlobalTransform), With<Piece>>,
+) {
+    for (entity, transform) in &pieces {
+        let empty = voxel_world
+            .grid(Grid::SubGrid(entity))
+            .is_some_and(|grid| grid.bounds().is_none());
+        if empty || transform.translation().y < LOST_BELOW {
+            voxel_world.despawn_sub_grid(entity);
+        }
     }
 }

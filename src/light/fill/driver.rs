@@ -42,13 +42,14 @@ use super::{
 };
 use crate::chunk::{ChunkKey, CHUNK_SIZE_F};
 use crate::configuration::VoxelWorldConfig;
+use crate::level_0_reader::Hinted;
 use crate::light::config::LightPropagation;
 use crate::light::inputs::LightInputs;
 use crate::light::probe::{probe_position, ProbeRead, SkyProbes};
 use crate::light::record::SkyRecord;
 use crate::light::relight::LightWork;
-use crate::light::sky::{walkable, Hinted, SkyRule};
-use crate::light::view::LightView;
+use crate::light::sky::{walkable, SkyRule};
+use crate::light::view::{in_world, LightView};
 use crate::light::LightSettings;
 use crate::pool_budget::{first_in_start_order, JobKind, PoolBudget};
 use crate::voxel_edits::VoxelEdits;
@@ -142,7 +143,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         *self = Self::new(field, self.cells.clone());
     }
 
-    /// Learns every loaded chunk and every position the record holds cells
+    /// Learns every loaded world chunk and every position the record holds cells
     /// for, and brings the field up to date at once, for a change of
     /// settings. Loaded chunks' cells go into the record.
     #[allow(clippy::too_many_arguments)]
@@ -155,16 +156,17 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         edits: &VoxelEdits<C, C::MaterialIndex>,
         world: &C,
     ) {
-        for (position, chunk) in view.read().iter() {
+        for (position, chunk) in view.read().world_chunks() {
             let occupancy = &chunk.light.inputs.occupancy;
-            let count = edits.edit_stamp(*position);
+            let count = edits.edit_stamp(position);
             if chunk.edits == count {
                 let open = Some(open_cells(occupancy));
-                record.insert(*position, &occupancy.solid_columns(), open, count);
+                record.insert(position, &occupancy.solid_columns(), open, count);
             }
-            self.dirty.insert(*position);
+            self.dirty.insert(position);
         }
-        self.dirty.extend(view.read().air.keys().copied());
+        self.dirty
+            .extend(view.read().world_air().map(|(position, _)| position));
         for (position, _) in record.all_cells() {
             self.dirty.insert(position);
         }
@@ -194,7 +196,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
         for position in std::mem::take(&mut self.dirty) {
             let count = edits.edit_stamp(position);
             // Hinted air is learned from its hint, with no lookups.
-            let inputs = view.inputs(position);
+            let inputs = view.inputs(in_world(position));
             let open = match inputs {
                 Some(inputs) => Some(open_cells(&inputs.occupancy)),
                 None => record.cells(position, count).map(|cells| cells.open),
@@ -360,7 +362,7 @@ impl<C: VoxelWorldConfig> SkyFillWork<C> {
                             .get(&around)
                             .is_some_and(|chunk| takes_fill(&chunk.light.inputs))
                     {
-                        work.trigger_fill(around);
+                        work.trigger_fill(in_world(around));
                     }
                 }
             }
@@ -466,7 +468,7 @@ pub(crate) fn takes_fill(inputs: &LightInputs) -> bool {
 fn top_from_record<C: VoxelWorldConfig>(
     position: IVec3,
     rule: SkyRule,
-    view: &bevy::platform::collections::HashMap<IVec3, crate::light::view::ViewChunk>,
+    view: &crate::light::view::ViewMaps,
     record: &mut SkyRecord,
     edits: &VoxelEdits<C, C::MaterialIndex>,
     world: &C,

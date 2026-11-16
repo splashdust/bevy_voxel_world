@@ -16,8 +16,11 @@ jobs:
   # Run the library tests and doc tests for each feature set in its own job,
   # so the sets run side by side. No code depends on serde and light
   # propagation together, so serde is tested on its own; Clippy checks the
-  # pair. Only the examples with tests are built here: Clippy checks the
-  # rest, and the benchmarks, without linking them.
+  # pair. Sub-grids and dislodged fragments are tested on their own and
+  # together with light propagation. Only the examples with tests are built
+  # here: Clippy checks the rest, and the benchmarks, without linking them.
+  # An example can need more features than its row's library tests, so
+  # example_flags gives the features its tests build with.
   test:
     name: Test Suite (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -26,9 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         features:
-          - { name: default, flags: "", examples: "" }
-          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning" }
-          - { name: serde, flags: "--features serde", examples: "--example save_load" }
+          - { name: default, flags: "", examples: "", example_flags: "" }
+          - { name: light_propagation, flags: "--features light_propagation", examples: "--example light_tuning", example_flags: "--features light_propagation,sub_grids" }
+          - { name: serde, flags: "--features serde", examples: "--example save_load --example multiplayer_loopback", example_flags: "--features serde,sub_grids" }
+          - { name: sub_grids, flags: "--features sub_grids", examples: "", example_flags: "" }
+          - { name: dislodged_fragments, flags: "--features dislodged_fragments", examples: "", example_flags: "" }
+          - { name: light_propagation-sub_grids-dislodged_fragments, flags: "--features light_propagation,sub_grids,dislodged_fragments", examples: "", example_flags: "" }
     env:
       RUSTFLAGS: "-C debuginfo=0"
     steps:
@@ -54,11 +60,12 @@ jobs:
         run: cargo test --doc ${{ matrix.features.flags }}
       - name: Run example tests
         if: (success() || failure()) && matrix.features.examples != ''
-        run: cargo test ${{ matrix.features.flags }} ${{ matrix.features.examples }}
+        run: cargo test ${{ matrix.features.example_flags }} ${{ matrix.features.examples }}
 
   # Run cargo clippy on every target, so the examples, benchmarks and tests
-  # are checked too, with the default features, with light propagation, and
-  # with serde and light propagation together
+  # are checked too, with the default features, with light propagation, with
+  # serde and light propagation together, and with every feature, which
+  # builds every example
   clippy_check:
     name: Clippy (${{ matrix.features.name }})
     runs-on: ubuntu-latest
@@ -70,6 +77,7 @@ jobs:
           - { name: default, flags: "" }
           - { name: light_propagation, flags: "--features light_propagation" }
           - { name: serde-light_propagation, flags: "--features serde,light_propagation" }
+          - { name: all-features, flags: "--all-features" }
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4

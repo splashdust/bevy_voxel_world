@@ -9,11 +9,16 @@
 //!
 //! Sky light spreads from voxels with direct sky, each from its own chunk's
 //! column answer (see [`sky`](super::sky)). Voxel light spreads from emissive
-//! voxels. A channel with no source in its box does no work.
+//! voxels. A channel with no source in its box does no work. A solve can
+//! instead be given its box's voxels with direct sky as [`DirectSky::Cells`],
+//! so sky can enter a voxel from any side, and can be told to take no sky fill.
 //!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
-//! and it holds no sources. Air a fill hint keeps from spawning reads as
-//! what its hint says instead: see [`hinted`](super::hinted). Nothing is kept for chunks that have retired, so
+//! and it holds no sources. A solve can be told to read it as air instead,
+//! with [`Missing`]. Air a fill hint keeps from spawning reads as what its
+//! hint says: see [`hinted`](super::hinted). Every world solve reads missing
+//! neighbours as solid, takes its direct sky from column answers and takes sky
+//! fill where the world has it. Nothing is kept for chunks that have retired, so
 //! light beside a chunk that isn't loaded, whether it hasn't arrived yet or has
 //! retired, can be darker than the truth, never brighter. It is exact for a
 //! chunk whose whole box is loaded.
@@ -55,8 +60,9 @@ use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
 use super::slot::{own_faces_see, slot_bytes, FacesSee};
-use super::view::{LightView, Snapshot};
+use super::view::{world_position, LightView, Missing, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
+use crate::grid::{GridId, GridKey};
 use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -170,6 +176,14 @@ pub(crate) struct LightCounters {
     pub snapshot_nanos: AtomicU64,
     /// Relight tasks started.
     pub relights: AtomicU64,
+    /// Of those, the relight tasks started for sub-grid chunks.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_relights: AtomicU64,
+    /// Sub-grid chunks solved in their chunk tasks. A sub-grid's commit
+    /// leaves its chunks' solves to relights, so this counts only chunks
+    /// that got no inputs from a commit.
+    #[cfg(feature = "sub_grids")]
+    pub sub_grid_chunk_solves: AtomicU64,
     /// Time relight tasks spent, from reading the world view to the end of
     /// their solve, in nanoseconds.
     pub relight_nanos: AtomicU64,
@@ -234,6 +248,67 @@ pub(crate) struct LightCounters {
 /// `(x + 1) + (y + 1) × 3 + (z + 1) × 9` for offsets from -1 to 1.
 pub(crate) type Neighbourhood = [Option<Arc<LightInputs>>; 27];
 
+/// A plane of voxels for each chunk position of a [`Neighbourhood`], at the
+/// same index, or `None` where none is set.
+pub(crate) type DirectCells = [Option<Box<Plane>>; 27];
+
+/// Where a solve finds the voxels of its box that have direct sky.
+pub(crate) enum DirectSky {
+    /// In each chunk's column answer: in each column the answer lets sky
+    /// light into, the open voxels from the chunk's top down to the first
+    /// solid voxel. Sky light only enters going down the grid's -Y.
+    Columns,
+    /// In these cells, worked out before the solve, which can give a voxel
+    /// direct sky from any side. Every cell set must be open. A column answer
+    /// adds nothing to them.
+    Cells(Box<DirectCells>),
+}
+
+/// How a solve of the chunk at `key` reads its box: how it reads positions
+/// holding nothing, and whether it takes sky fill.
+///
+/// A world chunk reads missing chunks as solid and takes sky fill. A
+/// sub-grid's chunk reads its grid's missing chunks as air and takes no sky
+/// fill.
+fn reading(key: GridKey) -> (Missing, bool) {
+    if key.is_world() {
+        (Missing::Solid, true)
+    } else {
+        (Missing::Air, false)
+    }
+}
+
+/// Where the solve of the chunk at `key`, whose own inputs are `inputs`,
+/// finds direct sky in the box `snapshot` read, with sky light on.
+///
+/// A world chunk takes it from column answers. A sub-grid's chunk takes it
+/// from its enclosure where the snapshot holds its grid's line record: see
+/// the `enclosure` module. Otherwise every open voxel of its own
+/// has direct sky, so its own sky is the top level everywhere.
+fn direct_sky(key: GridKey, snapshot: &Snapshot, inputs: &LightInputs) -> DirectSky {
+    if key.is_world() {
+        return DirectSky::Columns;
+    }
+    #[cfg(feature = "sub_grids")]
+    if let Some(lines) = &snapshot.lines {
+        return DirectSky::Cells(super::sub_grid::enclosure::direct_cells(
+            &snapshot.neighbours,
+            inputs,
+            key.position(),
+            lines,
+        ));
+    }
+    #[cfg(not(feature = "sub_grids"))]
+    let _ = snapshot;
+    let mut own: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    for (index, column) in own.iter_mut().enumerate() {
+        *column = !inputs.occupancy.solid_column(index % CHUNK, index / CHUNK);
+    }
+    let mut cells: Box<DirectCells> = Box::new(std::array::from_fn(|_| None));
+    cells[neighbour_index(IVec3::ZERO)] = Some(own);
+    DirectSky::Cells(cells)
+}
+
 pub(crate) fn neighbour_index(offset: IVec3) -> usize {
     ((offset.x + 1) + (offset.y + 1) * 3 + (offset.z + 1) * 9) as usize
 }
@@ -293,6 +368,8 @@ impl Solved {
 /// and, with sky light on, what the chunk needs to work out its direct sky.
 pub(crate) struct LightTask<I> {
     pub settings: Arc<LightTaskSettings<I>>,
+    /// The grid of the chunk the task solves.
+    pub grid: GridId,
     pub view: LightView,
     pub walk: Option<SkyWalk<I>>,
     /// The edit stamp of the chunk's position when the task started.
@@ -326,9 +403,19 @@ impl<I: Copy + PartialEq> LightTask<I> {
                 .emissive_scans
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let seeding = seeding(settings, &inputs, chunk.key.position);
-        let snapshot = read_snapshot(&self.view, chunk.key.position, settings);
-        let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding);
+        let key = GridKey::new(self.grid, chunk.key);
+        let (missing, take_fill) = reading(key);
+        let seeding = seeding(settings, &inputs, key, take_fill);
+        let snapshot = read_snapshot(&self.view, key, missing, settings);
+        let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
+        let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding, direct);
+        #[cfg(feature = "sub_grids")]
+        if self.grid != GridId::WORLD {
+            settings
+                .counters
+                .sub_grid_chunk_solves
+                .fetch_add(1, Ordering::Relaxed);
+        }
         solved.sky = found;
         solved.own_edits = self.own_edits;
         solved.edit_frame = self.edit_frame;
@@ -376,8 +463,9 @@ impl<I> KeptTask<I> {
     }
 }
 
-/// Solves the light of the chunk at `position` again from the world view, as a
-/// relight does. Returns `None` if the chunk is no longer in the view.
+/// Solves the light of the chunk at `key` again from the world view, as a
+/// relight does, reading the chunks around it on its grid. Returns `None` if
+/// the chunk is no longer in the view.
 ///
 /// With `rescan`, it first finds the chunk's emissive voxels again under the
 /// world's emissive list, for a chunk whose emissive voxels were found under
@@ -385,11 +473,11 @@ impl<I> KeptTask<I> {
 pub(crate) fn relight<I: Copy + PartialEq>(
     settings: &LightTaskSettings<I>,
     view: &LightView,
-    position: IVec3,
+    key: GridKey,
     rescan: Option<Rescan<I>>,
     unless_seeds: Option<u64>,
 ) -> Option<Solved> {
-    let read = view.read().get(&position)?.light.inputs.clone();
+    let read = view.read().chunks.get(&key)?.light.inputs.clone();
     let (inputs, rescanned) = match rescan {
         Some(rescan) => {
             if !settings.emission.is_empty() {
@@ -398,12 +486,13 @@ pub(crate) fn relight<I: Copy + PartialEq>(
                     .emissive_scans
                     .fetch_add(1, Ordering::Relaxed);
             }
-            let inputs = read.rescanned(position, &rescan, &settings.emission);
+            let inputs = read.rescanned(key.position(), &rescan, &settings.emission);
             (Arc::new(inputs), Some(read))
         }
         None => (read, None),
     };
-    let seeding = seeding(settings, &inputs, position);
+    let (missing, take_fill) = reading(key);
+    let seeding = seeding(settings, &inputs, key, take_fill);
     if let (Some(seeding), Some(solved_from)) = (&seeding, unless_seeds) {
         if seeding.hash == solved_from && rescanned.is_none() {
             settings
@@ -413,20 +502,43 @@ pub(crate) fn relight<I: Copy + PartialEq>(
             return None;
         }
     }
-    let snapshot = read_snapshot(view, position, settings);
-    let mut solved = solve(snapshot, inputs, settings, seeding);
+    let snapshot = read_snapshot(view, key, missing, settings);
+    let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
+    let mut solved = solve(snapshot, inputs, settings, seeding, direct);
     solved.rescanned = rescanned;
     Some(solved)
 }
 
-/// The sky fill seeds of the chunk at `position` with `inputs`, for a chunk
-/// that takes sky fill in a world with sky light and sky fill on.
+/// The [`direct_sky`] of the chunk at `key`, worked out only with sky light
+/// on. With it off no solve reads direct sky, so it gives the column answers,
+/// which cost nothing to name.
+fn direct_sky_if_lit<I>(
+    settings: &LightTaskSettings<I>,
+    key: GridKey,
+    snapshot: &Snapshot,
+    inputs: &LightInputs,
+) -> DirectSky {
+    if settings.sky_scale.is_none() {
+        return DirectSky::Columns;
+    }
+    direct_sky(key, snapshot, inputs)
+}
+
+/// The sky fill seeds of the chunk at `key` with `inputs`, for a chunk
+/// that takes sky fill in a world with sky light and sky fill on. A solve
+/// that doesn't `take_fill` seeds none. Only the world has sky fill, so
+/// another grid's chunk takes none either way.
 fn seeding<I>(
     settings: &LightTaskSettings<I>,
     inputs: &LightInputs,
-    position: IVec3,
+    key: GridKey,
+    take_fill: bool,
 ) -> Option<Seeding> {
+    if !take_fill {
+        return None;
+    }
     let (cells, scale) = (settings.fill.as_ref()?, settings.sky_scale.as_ref()?);
+    let position = world_position(&key)?;
     if !inputs.touches_solid() {
         return None;
     }
@@ -435,11 +547,12 @@ fn seeding<I>(
 
 fn read_snapshot<I>(
     view: &LightView,
-    position: IVec3,
+    key: GridKey,
+    missing: Missing,
     settings: &LightTaskSettings<I>,
 ) -> Snapshot {
     let started = Instant::now();
-    let snapshot = Snapshot::read(&view.read(), position);
+    let snapshot = Snapshot::read(&view.read(), key, missing);
     settings
         .counters
         .snapshot_nanos
@@ -448,13 +561,15 @@ fn read_snapshot<I>(
 }
 
 /// Solves the light of the chunk whose own inputs are `inputs`, among the
-/// chunks around it in `snapshot`, with its sky fill seeds `seeding`, and
-/// compares it with its face neighbours' light.
+/// chunks around it in `snapshot`, with its sky fill seeds `seeding` and its
+/// box's direct sky from `direct`, and compares it with its face neighbours'
+/// light.
 fn solve<I>(
     mut snapshot: Snapshot,
     inputs: Arc<LightInputs>,
     settings: &LightTaskSettings<I>,
     seeding: Option<Seeding>,
+    direct: DirectSky,
 ) -> Solved {
     snapshot.neighbours[neighbour_index(IVec3::ZERO)] = Some(inputs.clone());
     let started = Instant::now();
@@ -462,6 +577,8 @@ fn solve<I>(
     let (sky, sky_faces) = match &settings.sky_scale {
         Some(scale) => solve_sky(
             &snapshot.neighbours,
+            snapshot.missing,
+            direct,
             scale,
             settings.shape,
             seeding.as_ref(),
@@ -469,8 +586,12 @@ fn solve<I>(
         ),
         None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
     };
-    let (voxel, voxel_faces) =
-        solve_voxel(&snapshot.neighbours, &settings.voxel_scale, settings.shape);
+    let (voxel, voxel_faces) = solve_voxel(
+        &snapshot.neighbours,
+        snapshot.missing,
+        &settings.voxel_scale,
+        settings.shape,
+    );
     let counters = &settings.counters;
     counters.solves.fetch_add(1, Ordering::Relaxed);
     counters
@@ -532,10 +653,12 @@ thread_local! {
     static TWO_WORD_BOX: RefCell<Option<LightBox<TwoWords>>> = const { RefCell::new(None) };
 }
 
-/// Solves voxel light for the chunk at the centre of `neighbours`. Returns it
-/// with its face hashes, indexed by [`Face`].
+/// Solves voxel light for the chunk at the centre of `neighbours`, reading
+/// the positions that hold nothing as `missing` says. Returns it with its
+/// face hashes, indexed by [`Face`].
 pub(crate) fn solve_voxel(
     neighbours: &Neighbourhood,
+    missing: Missing,
     scale: &LevelScale,
     shape: LightShape,
 ) -> (ChannelLight, [u64; 6]) {
@@ -548,7 +671,7 @@ pub(crate) fn solve_voxel(
     if seeds.is_empty() {
         return unlit;
     }
-    let (planes, faces) = spread(neighbours, scale, shape, &seeds, None, None);
+    let (planes, faces) = spread(neighbours, missing, scale, shape, &seeds, None, None);
     (channel_light(planes, &centre.occupancy), faces)
 }
 
@@ -562,16 +685,19 @@ fn read_cells(cells: &FillCells, position: IVec3) -> CellsAround {
     })
 }
 
-/// Solves sky light for the chunk at the centre of `neighbours`, from the
-/// voxels with direct sky around it and, for a chunk that takes sky fill,
-/// the sky fill seeds `fill` found from the cells around it, and the voxels
-/// of the cells sky fill counts as direct sky. Returns it with its face
-/// hashes, indexed by [`Face`].
+/// Solves sky light for the chunk at the centre of `neighbours`, reading the
+/// positions that hold nothing as `missing` says. It spreads from the voxels
+/// `direct` gives direct sky and, for a chunk that takes sky fill, the sky
+/// fill seeds `fill` found from the cells around it, and the voxels of the
+/// cells sky fill counts as direct sky. Returns it with its face hashes,
+/// indexed by [`Face`].
 ///
 /// Direct sky holds the top level and doesn't fade. A chunk whose open voxels
 /// all have direct sky needs no spreading, and takes no sky fill.
 pub(crate) fn solve_sky(
     neighbours: &Neighbourhood,
+    missing: Missing,
+    direct: DirectSky,
     scale: &LevelScale,
     shape: LightShape,
     fill: Option<&Seeding>,
@@ -582,11 +708,14 @@ pub(crate) fn solve_sky(
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
-    let mut direct: [Option<Box<Plane>>; 27] = std::array::from_fn(|index| {
-        neighbours[index]
-            .as_ref()
-            .and_then(|inputs| inputs.direct_sky())
-    });
+    let mut direct: DirectCells = match direct {
+        DirectSky::Columns => std::array::from_fn(|index| {
+            neighbours[index]
+                .as_ref()
+                .and_then(|inputs| inputs.direct_sky())
+        }),
+        DirectSky::Cells(cells) => *cells,
+    };
     if let Some(seeding) = fill {
         add_sunlit(&mut direct, neighbours, &seeding.sunlit);
     }
@@ -609,6 +738,7 @@ pub(crate) fn solve_sky(
     }
     let (mut planes, faces) = spread(
         neighbours,
+        missing,
         scale,
         shape,
         &[],
@@ -627,11 +757,7 @@ pub(crate) fn solve_sky(
 
 /// Adds to `direct` the voxels of the cells `sunlit` holds for each position
 /// of `neighbours` that has inputs, which sky fill counts as direct sky.
-fn add_sunlit(
-    direct: &mut [Option<Box<Plane>>; 27],
-    neighbours: &Neighbourhood,
-    sunlit: &[u64; 27],
-) {
+fn add_sunlit(direct: &mut DirectCells, neighbours: &Neighbourhood, sunlit: &[u64; 27]) {
     for (index, (plane, cells)) in direct.iter_mut().zip(sunlit).enumerate() {
         if *cells == 0 || neighbours[index].is_none() {
             continue;
@@ -669,30 +795,33 @@ type Filling<'a> = (&'a FillSeeds, Duration, &'a LightCounters);
 
 /// Spreads light through the box around the chunk at the centre of
 /// `neighbours`, from `seeds`, from the voxels set in `lit`, a plane per
-/// chunk of the neighbourhood, and from sky fill's seeds in `fill`. Returns
-/// the chunk's levels and face hashes.
+/// chunk of the neighbourhood, and from sky fill's seeds in `fill`. The
+/// positions of `neighbours` that hold nothing read as `missing` says.
+/// Returns the chunk's levels and face hashes.
 fn spread(
     neighbours: &Neighbourhood,
+    missing: Missing,
     scale: &LevelScale,
     shape: LightShape,
     seeds: &[Seed],
-    lit: Option<&[Option<Box<Plane>>; 27]>,
+    lit: Option<&DirectCells>,
     fill: Option<Filling<'_>>,
 ) -> (Box<[Plane]>, [u64; 6]) {
+    let around = (neighbours, missing);
     if scale.reach() <= MAX_ONE_WORD_REACH {
-        spread_in(&ONE_WORD_BOX, neighbours, scale, shape, seeds, lit, fill)
+        spread_in(&ONE_WORD_BOX, around, scale, shape, seeds, lit, fill)
     } else {
-        spread_in(&TWO_WORD_BOX, neighbours, scale, shape, seeds, lit, fill)
+        spread_in(&TWO_WORD_BOX, around, scale, shape, seeds, lit, fill)
     }
 }
 
 fn spread_in<R: Row>(
     cached: &'static LocalKey<RefCell<Option<LightBox<R>>>>,
-    neighbours: &Neighbourhood,
+    (neighbours, missing): (&Neighbourhood, Missing),
     scale: &LevelScale,
     shape: LightShape,
     seeds: &[Seed],
-    lit: Option<&[Option<Box<Plane>>; 27]>,
+    lit: Option<&DirectCells>,
     fill: Option<Filling<'_>>,
 ) -> (Box<[Plane]>, [u64; 6]) {
     cached.with_borrow_mut(|light_box| {
@@ -702,8 +831,11 @@ fn spread_in<R: Row>(
         };
         let reach = light_box.reach();
         fill_rows(light_box.open_rows_mut(), reach, |index, x, y| {
-            let inputs = neighbours[index].as_ref()?;
-            Some(!inputs.occupancy.solid_column(x, y))
+            match (&neighbours[index], missing) {
+                (Some(inputs), _) => Some(!inputs.occupancy.solid_column(x, y)),
+                (None, Missing::Solid) => None,
+                (None, Missing::Air) => Some(!0),
+            }
         });
         if let Some(lit) = lit {
             fill_rows(light_box.lit_rows_mut(), reach, |index, x, y| {
@@ -863,4 +995,254 @@ fn one_level(planes: &[Plane], occupancy: &Occupancy) -> Option<u8> {
         }
     }
     Some(level.unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::light::fill::CellFill;
+    use crate::light::inputs::EmissiveVoxel;
+    use crate::light::view::{in_world, Missing};
+
+    /// A chunk whose voxels are all solid except `open`.
+    fn solid_except(open: impl IntoIterator<Item = (usize, usize, usize)>) -> Occupancy {
+        let mut occupancy = Occupancy::Solid;
+        for (x, y, z) in open {
+            occupancy.set(x, y, z, false);
+        }
+        occupancy.normalize();
+        occupancy
+    }
+
+    fn inputs(
+        occupancy: Occupancy,
+        emissive: Vec<EmissiveVoxel>,
+        columns: ColumnAnswer,
+    ) -> Arc<LightInputs> {
+        Arc::new(LightInputs {
+            occupancy,
+            emissive,
+            columns,
+            ring: true,
+        })
+    }
+
+    fn around(chunks: &[(IVec3, Arc<LightInputs>)]) -> Neighbourhood {
+        let mut neighbours: Neighbourhood = Default::default();
+        for (offset, inputs) in chunks {
+            neighbours[neighbour_index(*offset)] = Some(inputs.clone());
+        }
+        neighbours
+    }
+
+    /// At 16 levels and reach 14, light loses one level per step.
+    fn scale() -> LevelScale {
+        LevelScale::new(14, LightPrecision::Steps16)
+    }
+
+    fn sky_columns() -> ColumnAnswer {
+        ColumnAnswer {
+            sky: [!0; CHUNK],
+            provisional: [0; CHUNK],
+        }
+    }
+
+    #[test]
+    fn lamp_light_passes_through_a_missing_neighbour_read_as_air() {
+        // The chunk is solid but for one open voxel on its +X face, and a lamp
+        // ten voxels along that face. The only way between them runs outside
+        // the chunk, through the +X neighbour, which isn't loaded.
+        let lamp = EmissiveVoxel {
+            x: 31,
+            y: 10,
+            z: 20,
+            level: 15,
+        };
+        let centre = inputs(
+            solid_except([(31, 10, 10)]),
+            vec![lamp],
+            ColumnAnswer::none(),
+        );
+        let alone = around(&[(IVec3::ZERO, centre.clone())]);
+        let shape = LightShape::Diamond;
+
+        let (air, _) = solve_voxel(&alone, Missing::Air, &scale(), shape);
+        // One step out of the lamp, ten along z, one step back in.
+        assert_eq!(air.at(31, 10, 10), 15 - 12);
+        let open_beside = around(&[
+            (IVec3::ZERO, centre.clone()),
+            (
+                IVec3::X,
+                inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()),
+            ),
+        ]);
+        let (open, _) = solve_voxel(&open_beside, Missing::Solid, &scale(), shape);
+        assert_eq!(air, open);
+
+        let (solid, _) = solve_voxel(&alone, Missing::Solid, &scale(), shape);
+        assert_eq!(solid, ChannelLight::Uniform(0));
+    }
+
+    #[test]
+    fn direct_cells_a_column_answer_marks_light_as_the_column_answer_does() {
+        // A floor below y = 4 and a roof at y = 20 over x < 16, under sky in
+        // every column. Sky light spreads in under the roof from the side.
+        let mut occupancy = Occupancy::Open;
+        for x in 0..CHUNK {
+            for z in 0..CHUNK {
+                for y in 0..4 {
+                    occupancy.set(x, y, z, true);
+                }
+                if x < 16 {
+                    occupancy.set(x, 20, z, true);
+                }
+            }
+        }
+        let mut centre_cells: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+        for y in 0..CHUNK {
+            for x in 0..CHUNK {
+                if (x < 16 && y > 20) || (x >= 16 && y >= 4) {
+                    centre_cells[x + y * CHUNK] = !0;
+                }
+            }
+        }
+        let mut cells: DirectCells = Default::default();
+        cells[neighbour_index(IVec3::ZERO)] = Some(centre_cells);
+        cells[neighbour_index(IVec3::Y)] = Some(Box::new([!0; CHUNK * CHUNK]));
+
+        let answered = around(&[
+            (
+                IVec3::ZERO,
+                inputs(occupancy.clone(), Vec::new(), sky_columns()),
+            ),
+            (IVec3::Y, inputs(Occupancy::Open, Vec::new(), sky_columns())),
+        ]);
+        let unanswered = around(&[
+            (
+                IVec3::ZERO,
+                inputs(occupancy, Vec::new(), ColumnAnswer::none()),
+            ),
+            (
+                IVec3::Y,
+                inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()),
+            ),
+        ]);
+        let counters = LightCounters::default();
+        for shape in [LightShape::Round, LightShape::Diamond] {
+            let from_columns = solve_sky(
+                &answered,
+                Missing::Solid,
+                DirectSky::Columns,
+                &scale(),
+                shape,
+                None,
+                &counters,
+            );
+            let from_cells = solve_sky(
+                &unanswered,
+                Missing::Solid,
+                DirectSky::Cells(Box::new(cells.clone())),
+                &scale(),
+                shape,
+                None,
+                &counters,
+            );
+            assert_eq!(from_cells, from_columns);
+            // Under the roof, two steps in from its edge.
+            assert_eq!(from_cells.0.at(14, 10, 5), 15 - 2);
+        }
+    }
+
+    #[test]
+    fn sky_spreads_from_a_direct_cell_open_toward_a_side() {
+        // A tunnel along x at y = 10, z = 10, roofed all along, opening into
+        // open air across +X. Its mouth is the one direct cell.
+        let tunnel = solid_except((0..CHUNK).map(|x| (x, 10, 10)));
+        let neighbours = around(&[
+            (
+                IVec3::ZERO,
+                inputs(tunnel, Vec::new(), ColumnAnswer::none()),
+            ),
+            (
+                IVec3::X,
+                inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()),
+            ),
+        ]);
+        let mut mouth: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+        mouth[31 + 10 * CHUNK] = 1 << 10;
+        let mut cells: DirectCells = Default::default();
+        cells[neighbour_index(IVec3::ZERO)] = Some(mouth);
+        let counters = LightCounters::default();
+
+        let (sky, _) = solve_sky(
+            &neighbours,
+            Missing::Solid,
+            DirectSky::Cells(Box::new(cells)),
+            &scale(),
+            LightShape::Diamond,
+            None,
+            &counters,
+        );
+
+        for steps in 0..CHUNK {
+            let expected = if steps > 14 { 0 } else { 15 - steps as u8 };
+            assert_eq!(sky.at(31 - steps, 10, 10), expected, "{steps} steps in");
+        }
+        let (columns, _) = solve_sky(
+            &neighbours,
+            Missing::Solid,
+            DirectSky::Columns,
+            &scale(),
+            LightShape::Diamond,
+            None,
+            &counters,
+        );
+        assert_eq!(columns, ChannelLight::Uniform(0));
+    }
+
+    fn settings_with_fill(fill: FillCells) -> LightTaskSettings<u8> {
+        LightTaskSettings {
+            precision: LightPrecision::Steps16,
+            voxel_scale: scale(),
+            sky_scale: Some(scale()),
+            shape: LightShape::Round,
+            routed: false,
+            emission: Vec::new(),
+            counters: Arc::new(LightCounters::default()),
+            generation: 0,
+            sky_generation: 0,
+            emission_generation: 0,
+            fill: Some(fill),
+        }
+    }
+
+    #[test]
+    fn a_solve_that_takes_no_fill_seeds_none_and_a_world_solve_seeds_its_cells() {
+        // Each position around the chunk has one sunlit cell of its own.
+        let position = IVec3::new(3, -1, 2);
+        let fill = FillCells::default();
+        let sunlit = |index: usize| 1u64 << index;
+        for index in 0..27 {
+            let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
+            fill.write().insert(
+                position + offset,
+                Arc::new(CellFill {
+                    open: !0,
+                    direct: sunlit(index as usize),
+                    sunlit: sunlit(index as usize),
+                    levels: [128; 64],
+                }),
+            );
+        }
+        let settings = settings_with_fill(fill);
+        let mixed = inputs(solid_except([(0, 0, 0)]), Vec::new(), ColumnAnswer::none());
+
+        let world = seeding(&settings, &mixed, in_world(position), true)
+            .expect("a world solve takes its cells' fill");
+        let expected: [u64; 27] = std::array::from_fn(sunlit);
+        assert_eq!(world.sunlit, expected);
+        assert!(world.seeds.is_some());
+
+        assert!(seeding(&settings, &mixed, in_world(position), false).is_none());
+    }
 }

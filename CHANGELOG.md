@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased
+
+### Sub-grids
+
+Add an off-by-default `sub_grids` feature.
+
+A sub-grid is a set of voxels on a grid of its own, which a game moves freely against the world's grid: a ship, a vehicle, or a falling piece of rock.
+
+Sub-grids can be created either from scratch, by creating an empty subgrid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
+
+### Sub-grid lighting
+
+Light propagation works withing sub-grids, where a emissive voxel in the grid lights that grid. Sub-grids will also pick up light from the sky and from the parent world, but will not currently light the world or other sub-grids. Regular Bevy lights can be used for that purpose instead.
+
+### Dislodged fragments
+
+Another off-by-default feature called `dislodged_fragments` finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`.
+
+When a dislodged fragment is detected, a `FragmentDislodged<C>` message is sent, with its bounding box, its voxel count and `contains`. The largest piece of a cut keeps its place (typically that's the world itself).
+
+When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to automatically turn dislodged fragments into sub-grids.
+
+### Examples
+
+- `sub_grids`: A walkthrough of sub-grids on a few pillars and rods, which can be cut, built on, and stamped back into the world.
+
+- `light_mountain_house`: Trees can now be felled. It needs `sub_grids` and `dislodged_fragments` as well.
+
+- `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature.
+
+- `multiplayer_loopback` updated for brevity, and now also shows how sub-grid edits may be sent over network. Need the `sub_grids` feature.
+
+- `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
+
+### Other changes
+
+- Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
+- The `rendering` module docs list every vertex output and its space.
+- `raycast` and `raycast_fn` now document what they cast through: the world's voxels only, not sub-grids.
+
+### Bug fixes
+
+- Fix: a voxel's top texture stays on its own top under a rotated `WorldRoot`. The default fragment shader now picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`.
+- Fix: all six circles of a voxel gizmo sit on the faces of the voxel it marks. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
+- Fix: `debug_draw_chunks` puts each chunk's box through the chunk's whole transform, so the box stays on the chunk under a rotated or scaled `WorldRoot`.
+
+### Migrating from 0.19.3
+
+No Rust signature changed. Only the cases below break.
+
+#### 1. A custom vertex shader in an unlit world must write `local_position` and `local_normal`
+
+This applies only to a custom vertex shader that feeds the crate's fragment shader. The outputs at locations 9 and 10 used to exist only in a lit world, and now exist in every world. A shader that declares them but never writes them still compiles, and shows the side texture on every face.
+
+```wesl
+// 0.19.3, unlit world: nothing to write
+
+// now, in every world
+out.local_position = vertex.position;
+out.local_normal = vertex.normal;
+```
+
+#### 2. With `sub_grids`, a custom vertex shader in a lit world must write `world_grid_position`
+
+A lit world's vertex shaders now also output `world_grid_position`, the centroid-sampled world position, at location 12 under the `SUB_GRIDS` shader def. The crate's fragment shaders read sub-grids' faces from it. A shader that declares the crate's output but never writes location 12 still compiles, and lights sub-grids' faces as if they were at the world's origin.
+
+```wesl
+// now, after out.world_position is set
+@if(SUB_GRIDS)
+out.world_grid_position = out.world_position.xyz;
+```
+
+#### 3. `LightPropagation` has a new field
+
+With `sub_grids` and `light_propagation` both on, `LightPropagation` gains `sub_grid_sky`. A `LightPropagation` written out in full needs it, or `..default()`:
+
+```rust
+// now
+LightPropagation {
+    sky_reach: 15,
+    ..default()
+}
+```
+
 ## 0.19.3
 
 ### Syncing and saving voxel edits

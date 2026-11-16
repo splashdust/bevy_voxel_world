@@ -7,10 +7,11 @@ use std::marker::PhantomData;
 
 use crate::{
     chunk::*,
-    chunk_lifecycle::{ChunkIndex, ChunkRequests},
+    chunk_lifecycle::{ChunkIndex, ChunkRequests, SpawnRequest},
     chunk_map::*,
     configuration::{LodLevel, VoxelWorldConfig},
     edits::{EditDelta, EditsCommitted},
+    grid::{GridId, GridKey},
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
@@ -125,6 +126,11 @@ where
                 Transform::default(),
             ))
             .id();
+        #[cfg(feature = "sub_grids")]
+        {
+            commands.insert_resource(crate::sub_grid::SubGrids::<C>::new(world_root));
+            commands.init_resource::<crate::sub_grid::handover::Handovers<C>>();
+        }
         configuration.init_root(commands, world_root)
     }
 
@@ -137,6 +143,7 @@ where
         chunk_map: Res<ChunkMap<C, C::MaterialIndex>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         chunks: Query<&Chunk<C>>,
+        world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
     ) {
@@ -170,42 +177,94 @@ where
 
         #[cfg(feature = "trace")]
         let _plan_span = bevy::log::info_span!("streaming_policy_plan").entered();
+        // The policy checks every chunk each frame. It walks the chunk
+        // entities, which sit roughly in the order they spawned, rather than
+        // `ChunkIndex`, whose hash map scatters neighbouring chunks: those
+        // checks run measurably slower in the scattered order.
         let plan = streaming_policy::plan(
             configuration.as_ref(),
             &cameras,
-            chunks.iter().map(|chunk| chunk.key),
+            chunks
+                .iter()
+                .filter(|chunk| chunk.grid_key().is_world())
+                .map(Chunk::key),
             &lookup,
             budget
                 .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),
             &mut rand::rng(),
         );
-        requests.spawn.extend(plan.spawn);
-        requests.retire.extend(plan.retire);
+        let root = configuration
+            .attach_chunks_to_root()
+            .then(|| world_root.single().unwrap());
+        requests.spawn.extend(
+            plan.spawn
+                .into_iter()
+                .map(|key| SpawnRequest::streamed(key, root)),
+        );
+        requests
+            .retire
+            .extend(plan.retire.into_iter().map(GridKey::world));
     }
 
-    /// Commits the voxel edits set since the last frame, writes an
-    /// [`EditsCommitted`] for each level-0 chunk whose edits changed, and
-    /// requests that the chunks they make stale be updated.
+    /// Commits the voxel edits of every grid set since the last frame, writes
+    /// an [`EditsCommitted`] for each of the world's level-0 chunks whose
+    /// edits changed, and requests that the chunks they make stale be
+    /// updated.
     ///
     /// A chunk whose edits were replaced reports its full delta, and the
     /// chunks showing an edit that was removed regenerate, since their
     /// published voxels have it baked in. Edits forgotten since the last
     /// frame make their chunks regenerate too, with no message.
+    ///
+    /// With `sub_grids`, a `SubGridEditsCommitted` goes out for each sub-grid
+    /// chunk whose edits changed, and a commit that gives a sub-grid its
+    /// first solid voxel or takes its last lands as one handover.
     pub fn commit_voxel_edits(
         mut requests: ResMut<ChunkRequests<C>>,
         voxel_edits: Res<VoxelEdits<C, C::MaterialIndex>>,
         mut committed: MessageWriter<EditsCommitted<C>>,
+        #[cfg(feature = "sub_grids")] sub_grids: Res<crate::sub_grid::SubGrids<C>>,
+        #[cfg(feature = "sub_grids")] mut sub_grid_committed: MessageWriter<
+            crate::edits::SubGridEditsCommitted<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
-        let sets = voxel_edits.commit();
-        committed.write_batch(sets.iter().map(|set| EditsCommitted {
+        let mut flipped = Vec::new();
+        let sets = voxel_edits.commit_all(&mut flipped);
+        #[cfg(feature = "sub_grids")]
+        requests.note_commit(!flipped.is_empty());
+        #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+        if !flipped.is_empty() || !requests.emptied().is_empty() {
+            let committed = voxel_edits.committed();
+            let emptied = flipped
+                .iter()
+                .copied()
+                .filter(|grid| !committed.holds_solid(*grid))
+                .collect();
+            requests.note_emptied(emptied);
+        }
+        // Only the world's chunks have a message here; a sub-grid's edits
+        // never reach `EditsCommitted`.
+        let world_sets = sets.iter().filter(|set| set.grid == GridId::WORLD);
+        committed.write_batch(world_sets.map(|set| EditsCommitted {
             delta: if set.replaced {
                 voxel_edits.full_delta(set.chunk)
             } else {
                 EditDelta::from_change_set(set)
             },
         }));
+        #[cfg(feature = "sub_grids")]
+        sub_grid_committed.write_batch(
+            sets.iter()
+                .filter(|set| set.grid != GridId::WORLD)
+                .filter_map(|set| {
+                    Some(crate::edits::SubGridEditsCommitted {
+                        sub_grid: sub_grids.entity_of(set.grid)?,
+                        delta: voxel_edits.sub_grid_delta(set),
+                    })
+                }),
+        );
         // Forgotten edits change chunks as removed edits do, but no other
         // world hears of them.
         let forgotten = voxel_edits.take_forgotten();

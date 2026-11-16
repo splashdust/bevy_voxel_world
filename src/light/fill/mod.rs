@@ -104,6 +104,22 @@ pub(crate) fn cell_bit(x: usize, y: usize, z: usize) -> u64 {
     1 << (x + y * 4 + z * 16)
 }
 
+/// The sky light, a whole level, that the cell of `fill` holding the voxel
+/// at `local` in its chunk position gives: its level rounded to the nearest
+/// whole level, or 0 for a cell that isn't open.
+///
+/// `light_at` reads it for a chunk whose solve takes no sky fill: see
+/// [`LightInputs::reads_fill_cells`](super::inputs::LightInputs::reads_fill_cells).
+pub(crate) fn cell_level(fill: &CellFill, local: UVec3) -> u8 {
+    let cell = local / CELL as u32;
+    let bit = cell_bit(cell.x as usize, cell.y as usize, cell.z as usize);
+    if fill.open & bit == 0 {
+        return 0;
+    }
+    let sixteenths = fill.levels[bit.trailing_zeros() as usize] as u32;
+    ((sixteenths + 8) / 16).min(15) as u8
+}
+
 /// The cells of a chunk with `occupancy` that hold no solid voxel.
 pub(crate) fn open_cells(occupancy: &Occupancy) -> u64 {
     let columns = match occupancy {

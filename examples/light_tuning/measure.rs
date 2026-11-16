@@ -10,9 +10,9 @@ use bevy_voxel_world::prelude::*;
 
 use crate::{
     add_lights, camera_transform,
-    scene::Place,
+    scene::{spawn_cabin, Place},
     settings::{setting_named, Tuning, SETTINGS},
-    TuningWorld,
+    settling, Chunks, TuningWorld,
 };
 
 /// The settings the `measure` mode changes one step and back, by label.
@@ -65,7 +65,7 @@ pub fn measure() {
         )
         .add_plugins(VoxelWorldPlugin::with_config(TuningWorld::default()))
         .init_resource::<Measuring>()
-        .add_systems(Startup, setup_measure)
+        .add_systems(Startup, (setup_measure, spawn_cabin))
         .add_systems(Update, change_and_measure)
         .run();
 }
@@ -86,16 +86,13 @@ fn setup_measure(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 fn change_and_measure(
     mut measuring: ResMut<Measuring>,
     mut world: ResMut<TuningWorld>,
-    chunks: Query<&Chunk<TuningWorld>>,
+    chunks: Chunks,
     voxel_world: VoxelWorld<TuningWorld>,
     mut exit: MessageWriter<AppExit>,
 ) {
     measuring.frame += 1;
     let frame = measuring.frame;
-    let busy = !voxel_world.light_is_settled()
-        || chunks.iter().any(|chunk| {
-            voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready)
-        });
+    let busy = settling(&voxel_world, &chunks);
     if busy {
         measuring.last_busy = frame;
         measuring.last_busy_at = Some(Instant::now());

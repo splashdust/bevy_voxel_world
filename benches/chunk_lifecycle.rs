@@ -3,25 +3,47 @@
 //! Runs scripted scenarios against a headless App (no window, no GPU) that still
 //! exercises the full chunk lifecycle: spawn, generate, mesh, publish, retire, despawn.
 //!
-//! Record a run:
-//!     cargo bench --bench chunk_lifecycle -- run <label>
+//! Record a run of every scenario, or only of those listed:
+//!     cargo bench --bench chunk_lifecycle -- run <label> [<scenario>,…]
 //! Compare recorded runs (exits non-zero if a gated metric regressed); each side
 //! may be a comma-separated list of labels, combined by their median:
 //!     cargo bench --bench chunk_lifecycle -- compare <before>[,<before>…] <after>[,<after>…]
+//! A metric found on one side only prints as `new` (after only) or `gone`
+//! (before only) and gates nothing, so a scenario one build lacks still shows.
+//! Ratio lines, listed in `RATIO_LINES`, print the ratio of two metrics within
+//! the before build and within the after build, and the change between them;
+//! they gate nothing either.
 //!
 //! Background load on a desktop drifts by more than the gates over minutes, so
 //! comparisons alternate the two builds instead of reusing an old recording:
 //!     cargo bench --bench chunk_lifecycle -- save-binary baseline   # on the baseline commit
-//!     cargo bench --bench chunk_lifecycle -- ab baseline            # on the candidate
+//!     cargo bench --bench chunk_lifecycle -- ab baseline [<scenario>,…]   # on the candidate
 //! `ab` runs the saved baseline binary and this build alternately, `AB_ROUNDS`
-//! times each, then compares them. Build both sides with one codegen unit:
-//!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- …
-//! The voxel world's generic code is compiled inside this crate, and how the
-//! default sixteen units group it has moved flat terrain's generation
-//! throughput by 15% between builds that differ only in code the bench never
-//! runs; one unit makes such builds identical.
+//! times each, then compares them. With a list, both builds run only the
+//! listed scenarios, and one the baseline doesn't know prints as `new`. A
+//! listed run is a quick check; the run without a list, over every scenario,
+//! is the binding one.
 //!
-//! Results and saved binaries are written to `target/bench/chunk_lifecycle/`.
+//! Scenarios behind a cargo feature run only in a build with it, so pick the
+//! features of an A/B by what the change touches. A change touching sub-grids
+//! or fragment detection runs its A/B with
+//! `--features sub_grids,dislodged_fragments`, adding `light_propagation`
+//! when it touches light.
+//!
+//! Results and saved binaries are written to `target/bench/chunk_lifecycle/`
+//! of the checkout the binary was built in, which it finds through
+//! `CARGO_MANIFEST_DIR`. A saved baseline binary keeps writing there when `ab`
+//! runs it from another checkout or worktree, so make that checkout's
+//! `target/bench/chunk_lifecycle` a link to the baseline's folder before
+//! running `ab` from it.
+//!
+//! `[profile.bench]` in Cargo.toml builds both sides with one codegen unit. The
+//! voxel world's generic code is compiled inside this crate, and how the
+//! default sixteen units group it has moved flat terrain's generation
+//! throughput by more than the gates between builds that differ only in code
+//! the bench never runs; one unit makes such builds identical. A baseline from
+//! a commit older than that setting needs it from the environment:
+//!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- save-binary baseline
 //!
 //! To see what a scenario's slow frames are doing, run it once under Tracy. Start
 //! the Tracy profiler (or `tracy-capture -o <file>.tracy`) first, then:
@@ -29,8 +51,8 @@
 //! The Tracy version must match the protocol of the `tracy-client` crate Bevy uses;
 //! see the version table in the `tracy-client` README.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,12 +64,16 @@ use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
 #[path = "common/light_scene.rs"]
 mod light_scene;
 
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
 use light_scene::{SceneTable, SCENE_TOP};
+
+#[cfg(feature = "dislodged_fragments")]
+#[path = "common/fragment_sites.rs"]
+mod fragment_sites;
 
 #[cfg(feature = "light_propagation")]
 #[path = "common/fill_worlds.rs"]
@@ -55,6 +81,14 @@ mod fill_worlds;
 
 #[cfg(feature = "light_propagation")]
 use fill_worlds::FILL_SCENES;
+
+#[cfg(feature = "sub_grids")]
+#[path = "common/vehicle_hull.rs"]
+mod vehicle_hull;
+
+#[cfg(feature = "sub_grids")]
+#[path = "common/lift_pieces.rs"]
+mod lift_pieces;
 
 /// Pool sizes are pinned so the machine's core count can't skew comparisons, and
 /// kept, with the main thread, below the M1 Max's 8 performance cores so
@@ -216,12 +250,17 @@ impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
 /// The world of `stream_in`, or of `stream_in_flat` with `FLAT`, lit with the
 /// default light settings. Its scenarios report what light costs on the gated
 /// worlds, against `light-baseline`'s runs of them, and gate nothing yet.
+///
+/// With `LAMPS`, the material `LAMP` glows at level 15. The terrain holds
+/// none of it, so only voxels a scenario sets with it are lamps.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
-struct LitBenchWorld<const TERRAIN: u8>;
+struct LitBenchWorld<const TERRAIN: u8, const LAMPS: bool = false>;
 
 #[cfg(feature = "light_propagation")]
-impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
+impl<const TERRAIN: u8, const LAMPS: bool> VoxelWorldConfig
+    for LitBenchWorld<TERRAIN, LAMPS>
+{
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
@@ -243,6 +282,14 @@ impl<const TERRAIN: u8> VoxelWorldConfig for LitBenchWorld<TERRAIN> {
 
     fn light_propagation(&self) -> Option<LightPropagation> {
         Some(LightPropagation::default())
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        if LAMPS {
+            vec![(LAMP, Emission::level(15.0))]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -575,6 +622,110 @@ impl VoxelWorldConfig for CaveWorld {
     }
 }
 
+/// The light reference scene around `FRAGMENT_CAMERA`, unlit, with every
+/// solid voxel of one material. With `detect`, it detects dislodged
+/// fragments with the default settings and only reports them, or with
+/// `auto_lift` lifts each of them too. Its voxels are read from
+/// [`fragment_table`].
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Resource, Clone, Default)]
+struct FragmentWorld {
+    detect: bool,
+    #[cfg(feature = "sub_grids")]
+    auto_lift: bool,
+}
+
+/// Where `fragments` starts its camera: beside the reference scene's slab,
+/// which sticks out of its mesa, looking up at the slab's edge.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_CAMERA: CameraStart = CameraStart {
+    at: Vec3::new(0.5, 50.0, 420.0),
+    target: Vec3::new(0.5, 78.0, 370.0),
+};
+
+/// The reference scene sampled around `FRAGMENT_CAMERA`, as [`cave_table`]
+/// samples it around `CAVE_CAMERA`. Sampled once per process, before the
+/// first `fragments` run.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_table() -> Arc<SceneTable> {
+    static TABLE: std::sync::OnceLock<Arc<SceneTable>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let started = Instant::now();
+            let camera = (FRAGMENT_CAMERA.at / 32.0).floor().as_ivec3();
+            let reach = IVec3::splat(SPAWNING_DISTANCE + 1);
+            let min = (camera - reach) * 32;
+            let max = ((camera + reach + IVec3::ONE) * 32).with_y(SCENE_TOP);
+            let table = SceneTable::new(min, max, 8);
+            eprintln!(
+                "sampled the reference scene from {min} to {max} in {:.1?}",
+                started.elapsed()
+            );
+            Arc::new(table)
+        })
+        .clone()
+}
+
+/// Where `fragments` digs and cuts, found in [`fragment_table`] once per
+/// process.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_sites() -> &'static fragment_sites::Sites {
+    static SITES: std::sync::OnceLock<fragment_sites::Sites> = std::sync::OnceLock::new();
+    SITES.get_or_init(|| {
+        let started = Instant::now();
+        let sites = fragment_sites::find(&fragment_table(), FRAGMENT_CAMERA.at);
+        let pieces: Vec<u32> = sites.cuts.iter().map(|cut| cut.piece).collect();
+        eprintln!(
+            "found {} digs, cuts around pieces of {pieces:?} voxels and a limit cut \
+             at {} in {:.1?}",
+            sites.digs.len(),
+            sites.limit_cut.min,
+            started.elapsed()
+        );
+        sites
+    })
+}
+
+#[cfg(feature = "dislodged_fragments")]
+impl VoxelWorldConfig for FragmentWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        SPAWNING_DISTANCE as u32
+    }
+
+    fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
+        ChunkSpawnStrategy::Close
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        let table = fragment_table();
+        Box::new(move |_, _, _| {
+            let table = table.clone();
+            Box::new(move |pos: IVec3, _| {
+                if table.open(pos) {
+                    WorldVoxel::Air
+                } else {
+                    WorldVoxel::Solid(1)
+                }
+            })
+        })
+    }
+
+    fn detect_dislodged_fragments(&self) -> Option<FragmentDetection<u8>> {
+        self.detect.then(|| FragmentDetection {
+            #[cfg(feature = "sub_grids")]
+            auto_lift: self.auto_lift,
+            ..default()
+        })
+    }
+}
+
 /// The world of the `noise_terrain_lod` example: a noise terrain streamed
 /// out to 500 chunks in six levels of detail, with fill hints for the rock
 /// below it and the air above it, lit with the default light settings when
@@ -825,6 +976,11 @@ fn pool(threads: usize) -> TaskPoolThreadAssignmentPolicy {
 
 fn build_app<C: VoxelWorldConfig<MaterialIndex = u8>>(config: C) -> App {
     let mut app = App::new();
+    // Bevy gives each system its span as the system is added, so the
+    // profiler's subscriber must be in place before any plugin adds one.
+    if PROFILING.load(Ordering::Relaxed) {
+        add_profiling(&mut app);
+    }
     let threads = IO_THREADS + ASYNC_COMPUTE_THREADS + COMPUTE_THREADS;
     let task_pool_options = TaskPoolOptions {
         min_total_threads: threads,
@@ -851,9 +1007,6 @@ fn build_app<C: VoxelWorldConfig<MaterialIndex = u8>>(config: C) -> App {
         .add_systems(First, move_camera::<C>)
         .add_systems(Update, edit_storm::<C>)
         .add_systems(Last, track::<C>);
-    if PROFILING.load(Ordering::Relaxed) {
-        add_profiling(&mut app);
-    }
     app.finish();
     app.cleanup();
     app
@@ -1671,7 +1824,7 @@ const EDIT_MAIN_THREAD_GATE_US: f64 = 1000.0;
 
 /// The height of the sine terrain's surface at `x`, `z`: the first voxel of
 /// air above it.
-#[cfg(feature = "light_propagation")]
+#[cfg(any(feature = "light_propagation", feature = "sub_grids"))]
 fn sine_height(x: i32, z: i32) -> i32 {
     (8.0 * (x as f32 / 23.0).sin() + 8.0 * (z as f32 / 17.0).cos()) as i32
 }
@@ -2030,6 +2183,2129 @@ fn scenario_edit_storm() -> Metrics {
     metrics
 }
 
+/// Runs of `fragments`, each of which streams the reference scene twice.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_RUNS: usize = 3;
+
+/// The most frames `fragments` waits for a cut's check to land.
+#[cfg(feature = "dislodged_fragments")]
+const CUT_FRAME_CAP: u32 = 600;
+
+/// Frames in a row with no change to a world's fragment counters, once a
+/// check has finished, after which `fragments` takes its checks to have
+/// landed.
+#[cfg(feature = "dislodged_fragments")]
+const QUIET_CHECK_FRAMES: u32 = 10;
+
+/// The threshold of `fragments`: the most voxels a check of a dig that cuts
+/// nothing may visit on average, about 20% above its first run. The digs
+/// and the order a check floods in are fixed, so machine load doesn't move
+/// it.
+#[cfg(feature = "dislodged_fragments")]
+const FRAGMENT_DIG_VISITED_PER_CHECK: f64 = 22.0;
+
+/// Every dislodged fragment received so far, as its box's lowest corner,
+/// its box's highest corner, exclusive, and its voxel count.
+#[cfg(feature = "dislodged_fragments")]
+#[derive(Resource, Default)]
+struct Dislodged(Vec<(IVec3, IVec3, u32)>);
+
+#[cfg(feature = "dislodged_fragments")]
+fn record_dislodged<C: VoxelWorldConfig>(
+    mut dislodged: ResMut<Dislodged>,
+    mut messages: MessageReader<FragmentDislodged<C>>,
+) {
+    dislodged.0.extend(
+        messages
+            .read()
+            .map(|fragment| (fragment.min, fragment.max, fragment.voxel_count)),
+    );
+}
+
+/// An app of `world`, recording the fragments it reports, streamed in
+/// around `FRAGMENT_CAMERA`.
+#[cfg(feature = "dislodged_fragments")]
+fn fragments_app(world: FragmentWorld) -> App {
+    let mut app = build_app(world);
+    app.insert_resource(FRAGMENT_CAMERA)
+        .init_resource::<Dislodged>()
+        .add_systems(Update, record_dislodged::<FragmentWorld>);
+    #[cfg(feature = "sub_grids")]
+    app.init_resource::<FragmentLifts>()
+        .add_systems(Update, record_fragment_lifts::<FragmentWorld>);
+    stream_in::<FragmentWorld>(&mut app);
+    app
+}
+
+/// The fragment counters of `app`'s world, all zero in a world that
+/// doesn't detect dislodged fragments.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_counters(app: &App) -> bevy_voxel_world::grid_bench::FragmentStats {
+    bevy_voxel_world::grid_bench::fragment_stats::<FragmentWorld>(app.world())
+        .unwrap_or_default()
+}
+
+/// What the counters counted from `before` to `after`.
+#[cfg(feature = "dislodged_fragments")]
+fn counted_since(
+    after: bevy_voxel_world::grid_bench::FragmentStats,
+    before: bevy_voxel_world::grid_bench::FragmentStats,
+) -> bevy_voxel_world::grid_bench::FragmentStats {
+    bevy_voxel_world::grid_bench::FragmentStats {
+        checks: after.checks - before.checks,
+        voxels_visited: after.voxels_visited - before.voxels_visited,
+        reruns: after.reruns - before.reruns,
+        task_micros: after.task_micros - before.task_micros,
+    }
+}
+
+/// Sets the voxels at `positions` to air, to commit in the next frame.
+#[cfg(feature = "dislodged_fragments")]
+fn dig_voxels(app: &mut App, positions: &[IVec3]) {
+    let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+    let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+    for position in positions {
+        voxel_world.set_voxel(*position, WorldVoxel::Air);
+    }
+}
+
+/// Runs frames until the fragment counters have not changed for
+/// `QUIET_CHECK_FRAMES` in a row, or for at most `CUT_FRAME_CAP` frames.
+#[cfg(feature = "dislodged_fragments")]
+fn settle_fragment_checks(app: &mut App) {
+    let mut last = fragment_counters(app);
+    let mut quiet = 0;
+    for _ in 0..CUT_FRAME_CAP {
+        app.update();
+        let now = fragment_counters(app);
+        quiet = if now == last { quiet + 1 } else { 0 };
+        last = now;
+        if quiet >= QUIET_CHECK_FRAMES {
+            return;
+        }
+    }
+}
+
+/// Part 1 of `fragments`: digs at `digs`, one a frame, then waits for the
+/// checks to land. Reports, as `name`, the frames' metrics, the checks run,
+/// the voxels visited and task µs per check, the reruns, and how many digs
+/// wrote a `FragmentDislodged` within a voxel of the fragment's box.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_digs(app: &mut App, name: &str, digs: &[IVec3], metrics: &mut Metrics) {
+    let before = fragment_counters(app);
+    let seen = app.world().resource::<Dislodged>().0.len();
+    dig_voxels(app, &digs[..1]);
+    let mut next = 1;
+    let times = timed_frames(app, digs.len(), |app| {
+        if let Some(position) = digs.get(next) {
+            dig_voxels(app, &[*position]);
+            next += 1;
+        }
+    });
+    settle_fragment_checks(app);
+    let counted = counted_since(fragment_counters(app), before);
+    let written = &app.world().resource::<Dislodged>().0[seen..];
+    let dislodging = digs
+        .iter()
+        .filter(|dig| {
+            written.iter().any(|(min, max, _)| {
+                dig.cmpge(*min - 1).all() && dig.cmplt(*max + 1).all()
+            })
+        })
+        .count();
+
+    frame_metrics(name, &times, metrics);
+    let checks = counted.checks.max(1) as f64;
+    let mut put = |metric: &str, value: f64| {
+        metrics.insert(format!("{name}.{metric}"), value);
+    };
+    put("checks", counted.checks as f64);
+    put("reruns", counted.reruns as f64);
+    put(
+        "voxels_visited_per_check",
+        counted.voxels_visited as f64 / checks,
+    );
+    put("task_us_per_check", counted.task_micros as f64 / checks);
+    put("dislodging_digs", dislodging as f64);
+}
+
+/// What one cut of `fragments` did.
+#[cfg(feature = "dislodged_fragments")]
+struct CutReport {
+    /// Frames from the cut's frame to the one its check landed in.
+    frames: u32,
+    counted: bevy_voxel_world::grid_bench::FragmentStats,
+    /// The voxel count of each fragment it reported.
+    dislodged: Vec<u32>,
+    /// Whether its check hadn't landed after `CUT_FRAME_CAP` frames.
+    capped: bool,
+}
+
+/// Makes `cut` and runs frames until its check lands.
+///
+/// A check that reports a fragment has landed in the frame the report
+/// arrives. One that reports none is taken to have landed in the frame
+/// after the counters last changed, once they show it finished and stay
+/// unchanged for `QUIET_CHECK_FRAMES`.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cut(app: &mut App, cut: &fragment_sites::Cut) -> CutReport {
+    fragment_cut_by(app, |app| dig_voxels(app, &cut.dug))
+}
+
+/// Cuts with `dig`, which sets voxels to commit in the next frame, and runs
+/// frames until the cut's check lands, as [`fragment_cut`] does.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cut_by(app: &mut App, dig: impl FnOnce(&mut App)) -> CutReport {
+    let before = fragment_counters(app);
+    let seen = app.world().resource::<Dislodged>().0.len();
+    dig(app);
+    let mut last = before;
+    let mut changed_at = 0;
+    for frame in 1..=CUT_FRAME_CAP {
+        app.update();
+        let now = fragment_counters(app);
+        let written = &app.world().resource::<Dislodged>().0[seen..];
+        if !written.is_empty() {
+            return CutReport {
+                frames: frame,
+                counted: counted_since(now, before),
+                dislodged: written.iter().map(|(_, _, count)| *count).collect(),
+                capped: false,
+            };
+        }
+        if now != last {
+            last = now;
+            changed_at = frame;
+        }
+        let finished = now.voxels_visited > before.voxels_visited;
+        if finished && frame - changed_at >= QUIET_CHECK_FRAMES {
+            return CutReport {
+                frames: changed_at + 1,
+                counted: counted_since(now, before),
+                dislodged: Vec::new(),
+                capped: false,
+            };
+        }
+    }
+    CutReport {
+        frames: CUT_FRAME_CAP,
+        counted: counted_since(fragment_counters(app), before),
+        dislodged: Vec::new(),
+        capped: true,
+    }
+}
+
+/// Part 2 of `fragments`: makes each cut of `sites` in turn, waiting for its
+/// check to land, then the limit cut. Reports each cut as `cut_NN` and their
+/// sum as `cuts`: frames to land, the check's task µs, voxels visited and
+/// reruns, and the voxels dislodged. `cuts_without_report` counts the cuts
+/// that wrote no `FragmentDislodged`, and `limit_cut` reports the same as a
+/// cut. Returns how many cuts were capped.
+#[cfg(feature = "dislodged_fragments")]
+fn fragment_cuts(
+    app: &mut App,
+    prefix: &str,
+    sites: &fragment_sites::Sites,
+    metrics: &mut Metrics,
+) -> usize {
+    let mut put = |name: &str, report: &CutReport| {
+        let mut put = |metric: &str, value: f64| {
+            metrics.insert(format!("{prefix}.{name}.{metric}"), value);
+        };
+        put("frames", report.frames as f64);
+        put("task_us", report.counted.task_micros as f64);
+        put("voxels_visited", report.counted.voxels_visited as f64);
+        put("reruns", report.counted.reruns as f64);
+        put(
+            "dislodged_voxels",
+            report.dislodged.iter().sum::<u32>() as f64,
+        );
+    };
+    let mut total = CutReport {
+        frames: 0,
+        counted: default(),
+        dislodged: Vec::new(),
+        capped: false,
+    };
+    let mut without_report = 0;
+    let mut capped = 0;
+    for (i, cut) in sites.cuts.iter().enumerate() {
+        let report = fragment_cut(app, cut);
+        if report.dislodged != [cut.piece] {
+            eprintln!(
+                "{prefix}: the cut at {} dislodged {:?} voxels, not its piece of {}",
+                cut.min, report.dislodged, cut.piece
+            );
+        }
+        put(&format!("cut_{:02}", i + 1), &report);
+        without_report += report.dislodged.is_empty() as usize;
+        capped += report.capped as usize;
+        total.frames += report.frames;
+        total.counted.task_micros += report.counted.task_micros;
+        total.counted.voxels_visited += report.counted.voxels_visited;
+        total.counted.reruns += report.counted.reruns;
+        total.dislodged.extend(report.dislodged);
+    }
+    put("cuts", &total);
+    let limit = fragment_cut(app, &sites.limit_cut);
+    if !limit.dislodged.is_empty() {
+        eprintln!(
+            "{prefix}: the limit cut dislodged {:?} voxels",
+            limit.dislodged
+        );
+    }
+    put("limit_cut", &limit);
+    capped += limit.capped as usize;
+    metrics.insert(
+        format!("{prefix}.cuts_without_report"),
+        without_report as f64,
+    );
+    capped
+}
+
+/// The sub-grid each `FragmentDislodged` received so far was lifted into,
+/// in the order they arrived, and the sub-grid of each `Lifted`.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+#[derive(Resource, Default)]
+struct FragmentLifts {
+    lifted: Vec<Option<Entity>>,
+    landed: Vec<Entity>,
+}
+
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn record_fragment_lifts<C: VoxelWorldConfig>(
+    mut lifts: ResMut<FragmentLifts>,
+    mut dislodged: MessageReader<FragmentDislodged<C>>,
+    mut landed: MessageReader<Lifted<C>>,
+) {
+    let lifts = &mut *lifts;
+    lifts
+        .lifted
+        .extend(dislodged.read().map(|fragment| fragment.lifted));
+    lifts
+        .landed
+        .extend(landed.read().map(|lifted| lifted.sub_grid));
+}
+
+/// What one cut of `fragments` made with auto-lift on did.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+struct LiftCutReport {
+    /// Frames from the cut's frame to the one its check landed in.
+    frames_to_report: u32,
+    /// Frames from the cut's frame to the one the handover of the lifts of
+    /// its fragments landed in.
+    frames: u32,
+    /// The voxel count of each fragment it reported.
+    dislodged: Vec<u32>,
+    /// Whether each fragment it reported was lifted and its `Lifted`
+    /// arrived.
+    landed: bool,
+    /// Whether that hadn't happened after `CUT_FRAME_CAP` frames.
+    capped: bool,
+}
+
+/// Makes `cut` in a world that lifts each fragment, and runs frames until
+/// the fragments it reports have all been lifted and their `Lifted` has
+/// arrived.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_lift_cut(app: &mut App, cut: &fragment_sites::Cut) -> LiftCutReport {
+    let seen = app.world().resource::<Dislodged>().0.len();
+    let seen_lifts = app.world().resource::<FragmentLifts>().lifted.len();
+    dig_voxels(app, &cut.dug);
+    let mut report = LiftCutReport {
+        frames_to_report: CUT_FRAME_CAP,
+        frames: CUT_FRAME_CAP,
+        dislodged: Vec::new(),
+        landed: false,
+        capped: true,
+    };
+    for frame in 1..=CUT_FRAME_CAP {
+        app.update();
+        let written = &app.world().resource::<Dislodged>().0[seen..];
+        if written.is_empty() {
+            continue;
+        }
+        if report.dislodged.is_empty() {
+            report.frames_to_report = frame;
+            report.dislodged = written.iter().map(|(_, _, count)| *count).collect();
+        }
+        let lifts = app.world().resource::<FragmentLifts>();
+        let lifted = &lifts.lifted[seen_lifts..];
+        let landed = lifted
+            .iter()
+            .all(|sub_grid| sub_grid.is_some_and(|s| lifts.landed.contains(&s)));
+        if landed || lifted.contains(&None) {
+            report.frames = frame;
+            report.landed = landed;
+            report.capped = false;
+            break;
+        }
+    }
+    report
+}
+
+/// Part 3 of `fragments`, with `sub_grids`: sets the voxels part 2's cuts
+/// dug back to what they were, turns `auto_lift` on, and makes the same
+/// cuts again, one at a time. Reports each as `lift_cut_NN`, and their sum
+/// as `lift_cuts`: frames to the `FragmentDislodged`, frames to its lift's
+/// handover landing and the voxels dislodged, with the handovers that
+/// landed and their chunks per handover. `lifts_without_landing` counts the
+/// cuts whose fragments weren't all lifted, or whose `Lifted` never came.
+/// Turns `auto_lift` off again after. Returns how many cuts were capped.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_lift_cuts(
+    app: &mut App,
+    prefix: &str,
+    sites: &fragment_sites::Sites,
+    metrics: &mut Metrics,
+) -> usize {
+    {
+        let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+        for position in sites.cuts.iter().flat_map(|cut| &cut.dug) {
+            voxel_world.set_voxel(*position, WorldVoxel::Solid(1));
+        }
+    }
+    settle_fragment_checks(app);
+    app.world_mut().resource_mut::<FragmentWorld>().auto_lift = true;
+
+    let handovers = |app: &App| {
+        bevy_voxel_world::grid_bench::handover_stats::<FragmentWorld>(app.world())
+            .unwrap_or_default()
+    };
+    let before = handovers(app);
+    let mut put = |name: &str, metric: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}.{metric}"), value);
+    };
+    let (mut frames_to_report, mut frames, mut dislodged) = (0, 0, 0);
+    let (mut without_landing, mut capped) = (0, 0);
+    for (i, cut) in sites.cuts.iter().enumerate() {
+        let report = fragment_lift_cut(app, cut);
+        if report.dislodged != [cut.piece] {
+            eprintln!(
+                "{prefix}: the lifted cut at {} dislodged {:?} voxels, not its piece of {}",
+                cut.min, report.dislodged, cut.piece
+            );
+        }
+        let name = format!("lift_cut_{:02}", i + 1);
+        let voxels = report.dislodged.iter().sum::<u32>();
+        put(&name, "frames_to_report", report.frames_to_report as f64);
+        put(&name, "frames", report.frames as f64);
+        put(&name, "dislodged_voxels", voxels as f64);
+        frames_to_report += report.frames_to_report;
+        frames += report.frames;
+        dislodged += voxels;
+        without_landing += !report.landed as usize;
+        capped += report.capped as usize;
+    }
+    let landed = handovers(app);
+    let handovers = landed.handovers - before.handovers;
+    let chunks = landed.chunks - before.chunks;
+    put("lift_cuts", "frames_to_report", frames_to_report as f64);
+    put("lift_cuts", "frames", frames as f64);
+    put("lift_cuts", "dislodged_voxels", dislodged as f64);
+    put("lift_cuts", "handovers", handovers as f64);
+    put(
+        "lift_cuts",
+        "chunks_per_handover",
+        chunks as f64 / handovers.max(1) as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.lifts_without_landing"),
+        without_landing as f64,
+    );
+
+    app.world_mut().resource_mut::<FragmentWorld>().auto_lift = false;
+    settle_fragment_checks(app);
+    capped
+}
+
+/// Where part 4 of `fragments` spawns the vehicle hull: in the air above
+/// the reference scene, near `FRAGMENT_CAMERA`.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+const FRAGMENT_HULL_AT: Vec3 = Vec3::new(-48.0, 200.0, 200.0);
+
+/// The plane of air part 4 of `fragments` cuts the hull with, at this z in
+/// the hull's sub-grid: across the envelope, ahead of the gondola.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+const HULL_CUT_Z: i32 = 64;
+
+/// Part 4 of `fragments`, with `sub_grids`: builds the vehicle hull in a
+/// sub-grid of the world, lets its chunks settle, and cuts it in two with a
+/// plane of air across a whole cross-section of the box holding it, at
+/// `HULL_CUT_Z`. A sub-grid is checked with no limit, so the check floods
+/// until the smaller half runs out. Reports `hull_cut` as part 2 reports a
+/// cut, with the hull's solid voxels. Returns whether the cut was capped.
+#[cfg(all(feature = "dislodged_fragments", feature = "sub_grids"))]
+fn fragment_hull_cut(app: &mut App, prefix: &str, metrics: &mut Metrics) -> usize {
+    let (hull, built) = spawn_hull::<FragmentWorld>(
+        app,
+        Transform::from_translation(FRAGMENT_HULL_AT),
+        None,
+    );
+    let ready = settle_hull::<FragmentWorld>(app, hull);
+    if ready != built.chunks.len() {
+        eprintln!(
+            "{prefix}: {ready} hull chunks are Ready, but the hull should have {}",
+            built.chunks.len()
+        );
+    }
+    settle_fragment_checks(app);
+    let (min, max) = (vehicle_hull::MIN, vehicle_hull::MAX);
+    let mut piece = 0;
+    for z in min.z..HULL_CUT_Z {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                piece +=
+                    vehicle_hull::hull_voxel(IVec3::new(x, y, z), None).is_some() as u32;
+            }
+        }
+    }
+
+    let report = fragment_cut_by(app, |app| {
+        let mut state = SystemState::<VoxelWorld<FragmentWorld>>::new(app.world_mut());
+        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+        voxel_world
+            .grid_mut(Grid::SubGrid(hull))
+            .unwrap()
+            .set_voxels_in(min.with_z(HULL_CUT_Z), max.with_z(HULL_CUT_Z + 1), |_| {
+                Some(WorldVoxel::Air)
+            });
+    });
+    if report.dislodged != [piece] {
+        eprintln!(
+            "{prefix}: the hull cut dislodged {:?} voxels, not its smaller half of {piece}",
+            report.dislodged
+        );
+    }
+    let mut put = |metric: &str, value: f64| {
+        metrics.insert(format!("{prefix}.hull_cut.{metric}"), value);
+    };
+    put("solid_voxels", built.solid_voxels as f64);
+    put("frames", report.frames as f64);
+    put("task_us", report.counted.task_micros as f64);
+    put("voxels_visited", report.counted.voxels_visited as f64);
+    put("reruns", report.counted.reruns as f64);
+    put(
+        "dislodged_voxels",
+        report.dislodged.iter().sum::<u32>() as f64,
+    );
+    report.capped as usize
+}
+
+/// What detecting dislodged fragments costs in the light reference scene,
+/// unlit, in a world that detects them with the default settings and only
+/// reports them. `fragment_sites` finds where it digs and cuts.
+///
+/// 1. 200 digs that cut nothing, into slopes and cave walls, one a frame.
+///    `digs` reports their frames, the checks run, voxels visited and task
+///    µs per check, reruns, and the digs that wrote a `FragmentDislodged`.
+///    `digs_not_opted_in` reports the same digs in a fresh app of the same
+///    world not opted in, and `RATIO_LINES` prints the frame time of one
+///    against the other.
+/// 2. A dozen cuts, each around a piece of a few hundred to a few thousand
+///    voxels with air under it, as in a cave ceiling, an overhang or an
+///    arch, then a cut around more voxels than a check floods by default;
+///    see `fragment_cuts`.
+/// 3. With `sub_grids`, the same dozen cuts again with auto-lift on, in the
+///    same app, timed to their lifts' handovers landing; see
+///    `fragment_lift_cuts`.
+/// 4. With `sub_grids`, the `vehicle` hull built in a sub-grid and cut in
+///    two, which a check floods with no limit; see `fragment_hull_cut`.
+///
+/// Threshold, checked here and reported as `gate_failures`: voxels visited
+/// per check in `digs` at most `FRAGMENT_DIG_VISITED_PER_CHECK`. A cut whose
+/// check, or whose lifts' handover, hasn't landed within `CUT_FRAME_CAP`
+/// frames also counts. Timings have no threshold.
+#[cfg(feature = "dislodged_fragments")]
+fn scenario_fragments() -> Metrics {
+    let prefix = "fragments";
+    let sites = fragment_sites();
+    let mut metrics = Metrics::new();
+
+    let mut app = fragments_app(FragmentWorld {
+        detect: true,
+        #[cfg(feature = "sub_grids")]
+        auto_lift: false,
+    });
+    fragment_digs(
+        &mut app,
+        &format!("{prefix}.digs"),
+        &sites.digs,
+        &mut metrics,
+    );
+    #[allow(unused_mut)]
+    let mut capped = fragment_cuts(&mut app, prefix, sites, &mut metrics);
+    #[cfg(feature = "sub_grids")]
+    {
+        capped += fragment_lift_cuts(&mut app, prefix, sites, &mut metrics);
+        capped += fragment_hull_cut(&mut app, prefix, &mut metrics);
+    }
+    drop(app);
+
+    let mut app = fragments_app(FragmentWorld::default());
+    fragment_digs(
+        &mut app,
+        &format!("{prefix}.digs_not_opted_in"),
+        &sites.digs,
+        &mut metrics,
+    );
+    drop(app);
+
+    let visited = metrics[&format!("{prefix}.digs.voxels_visited_per_check")];
+    let mut failures = capped;
+    if visited > FRAGMENT_DIG_VISITED_PER_CHECK {
+        eprintln!(
+            "{prefix}: voxels visited per check {visited} > {FRAGMENT_DIG_VISITED_PER_CHECK}"
+        );
+        failures += 1;
+    }
+    if capped > 0 {
+        eprintln!("{prefix}: {capped} cuts didn't land within {CUT_FRAME_CAP} frames");
+    }
+    metrics.insert(format!("{prefix}.gate_failures"), failures as f64);
+    metrics
+}
+
+/// Frames in each of `vehicle`'s phases: upright flight, tumbling, and
+/// tumbling while edited. The flight is one lap of its circle.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_PHASE_FRAMES: u32 = 600;
+
+/// The centre of the circle the hull's centre flies around, high enough
+/// above the sine terrain that the tumbling hull never reaches it.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_ORBIT_CENTRE: Vec3 = Vec3::new(16.0, 220.0, 16.0);
+
+#[cfg(feature = "sub_grids")]
+const VEHICLE_ORBIT_RADIUS: f32 = 160.0;
+
+/// How far the tumbling hull turns each frame about its x, y and z axes,
+/// in radians.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_TUMBLE_RATES: Vec3 = Vec3::new(0.011, 0.019, 0.027);
+
+/// The first of the materials `vehicle` sets at the hull's edit sites, a
+/// different one at each visit to a site. The hull uses none of them, so a
+/// publish showing one can only come from its edit.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_EDIT: u8 = 10;
+
+/// The most frames `vehicle` runs after its edited phase, still tumbling,
+/// for its last edits to publish.
+#[cfg(feature = "sub_grids")]
+const VEHICLE_DRAIN_FRAMES: u32 = 120;
+
+/// The hull a scenario moves, and the frame of its motion.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct VehicleMotion {
+    hull: Option<Entity>,
+    tumbling: bool,
+    frame: u32,
+}
+
+/// The hull's transform at `frame` of its flight, or of its tumbling when
+/// `tumbling`.
+///
+/// In flight the hull stays upright and circles `VEHICLE_ORBIT_CENTRE`,
+/// facing along its path. Tumbling, it turns about its centre at the point
+/// where the flight starts and ends.
+#[cfg(feature = "sub_grids")]
+fn vehicle_pose(tumbling: bool, frame: u32) -> Transform {
+    let (centre, rotation) = if tumbling {
+        let angles = VEHICLE_TUMBLE_RATES * frame as f32;
+        (
+            VEHICLE_ORBIT_CENTRE + VEHICLE_ORBIT_RADIUS * Vec3::X,
+            Quat::from_euler(EulerRot::XYZ, angles.x, angles.y, angles.z),
+        )
+    } else {
+        let angle = std::f32::consts::TAU * frame as f32 / VEHICLE_PHASE_FRAMES as f32;
+        (
+            VEHICLE_ORBIT_CENTRE
+                + VEHICLE_ORBIT_RADIUS * Vec3::new(angle.cos(), 0.0, angle.sin()),
+            Quat::from_rotation_y(-angle),
+        )
+    };
+    Transform {
+        translation: centre - rotation * vehicle_hull::CENTRE,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// Sets the hull's transform from the frame of its motion, then moves on a
+/// frame. Driven per frame, not by wall-clock time, so every run shows the
+/// same poses.
+#[cfg(feature = "sub_grids")]
+fn move_vehicle(
+    mut motion: ResMut<VehicleMotion>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let Some(hull) = motion.hull else {
+        return;
+    };
+    if let Ok(mut transform) = transforms.get_mut(hull) {
+        *transform = vehicle_pose(motion.tumbling, motion.frame);
+    }
+    motion.frame += 1;
+}
+
+/// The chunk positions of the hull's chunks published since the scenario
+/// last took them.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct HullPublishes {
+    hull: Option<Entity>,
+    chunks: Vec<IVec3>,
+}
+
+#[cfg(feature = "sub_grids")]
+fn record_hull_publishes<C: VoxelWorldConfig>(
+    mut publishes: ResMut<HullPublishes>,
+    mut messages: MessageReader<PublishMessage<C>>,
+) {
+    let Some(hull) = publishes.hull else {
+        messages.read().for_each(drop);
+        return;
+    };
+    let published: Vec<IVec3> = messages
+        .read()
+        .filter(|message| message.grid == Grid::SubGrid(hull))
+        .map(|message| message.chunk_key.position)
+        .collect();
+    publishes.chunks.extend(published);
+}
+
+/// Spawns a sub-grid at `transform` and builds the vehicle hull in it, with
+/// lamp voxels of the material `lamp` when given. Returns the sub-grid's
+/// entity and what the hull holds. The hull commits in the next frame.
+#[cfg(feature = "sub_grids")]
+fn spawn_hull<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    transform: Transform,
+    lamp: Option<u8>,
+) -> (Entity, vehicle_hull::Hull) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+            let hull = voxel_world.spawn_sub_grid(transform);
+            let mut grid = voxel_world.grid_mut(Grid::SubGrid(hull)).unwrap();
+            (hull, vehicle_hull::build(&mut grid, lamp))
+        })
+        .unwrap()
+}
+
+/// How many chunks the sub-grid `hull` has, and how many of them are Ready.
+#[cfg(feature = "sub_grids")]
+fn hull_chunks<C: VoxelWorldConfig>(app: &mut App, hull: Entity) -> (usize, usize) {
+    let world = app.world_mut();
+    let keys: Vec<ChunkKey> = world
+        .query::<(&Chunk<C>, &ChildOf)>()
+        .iter(world)
+        .filter(|(_, parent)| parent.parent() == hull)
+        .map(|(chunk, _)| chunk.key())
+        .collect();
+    let mut state = SystemState::<VoxelWorld<C>>::new(world);
+    let voxel_world = state.get(world).unwrap();
+    let grid = voxel_world.grid(Grid::SubGrid(hull)).unwrap();
+    let ready = keys
+        .iter()
+        .filter(|key| grid.chunk_state(**key) == Some(ChunkStatus::Ready))
+        .count();
+    (keys.len(), ready)
+}
+
+/// Runs frames until every chunk of the sub-grid `hull` has been Ready for
+/// `SETTLE_FRAMES` frames in a row, or for at most `MAX_FRAMES`, and
+/// returns how many of its chunks are Ready.
+#[cfg(feature = "sub_grids")]
+fn settle_hull<C: VoxelWorldConfig>(app: &mut App, hull: Entity) -> usize {
+    let mut settled = 0;
+    for _ in 0..MAX_FRAMES {
+        app.update();
+        let (chunks, ready) = hull_chunks::<C>(app, hull);
+        settled = if chunks > 0 && ready == chunks {
+            settled + 1
+        } else {
+            0
+        };
+        if settled >= SETTLE_FRAMES {
+            break;
+        }
+    }
+    hull_chunks::<C>(app, hull).1
+}
+
+/// A voxel `vehicle` set in the hull that hasn't published yet.
+#[cfg(feature = "sub_grids")]
+struct PendingEdit {
+    position: IVec3,
+    voxel: WorldVoxel<u8>,
+    set_at: Instant,
+    frames: u32,
+}
+
+/// Adds what the vehicle scenarios need to an app of world `C`: the hull's
+/// motion and the record of its chunks' publishes.
+#[cfg(feature = "sub_grids")]
+fn add_vehicle<C: VoxelWorldConfig>(app: &mut App) {
+    app.init_resource::<VehicleMotion>()
+        .init_resource::<HullPublishes>()
+        .add_systems(Update, move_vehicle)
+        .add_systems(Last, record_hull_publishes::<C>);
+}
+
+/// Builds the vehicle hull in a new sub-grid at the start of its flight,
+/// with lamp voxels of the material `lamp` when given, and runs frames until
+/// its chunks are Ready. Reports its solid voxels and Ready chunks under
+/// `prefix`, and returns the sub-grid's entity.
+///
+/// Prints a warning when the Ready chunks differ from `vehicle_hull`'s
+/// prediction.
+#[cfg(feature = "sub_grids")]
+fn build_vehicle<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    prefix: &str,
+    lamp: Option<u8>,
+    metrics: &mut Metrics,
+) -> Entity {
+    let (hull, built) = spawn_hull::<C>(app, vehicle_pose(false, 0), lamp);
+    let ready = settle_hull::<C>(app, hull);
+    if ready != built.chunks.len() {
+        eprintln!(
+            "{prefix}: {ready} hull chunks are Ready, but the hull should have {}",
+            built.chunks.len()
+        );
+    }
+    metrics.insert(format!("{prefix}.solid_voxels"), built.solid_voxels as f64);
+    metrics.insert(format!("{prefix}.ready_chunks"), ready as f64);
+    hull
+}
+
+/// Starts the motion of `hull` from its first frame, in flight or
+/// tumbling. With no hull, the hull stays where it is.
+#[cfg(feature = "sub_grids")]
+fn set_motion(app: &mut App, hull: Option<Entity>, tumbling: bool) {
+    *app.world_mut().resource_mut::<VehicleMotion>() = VehicleMotion {
+        hull,
+        tumbling,
+        frame: 0,
+    };
+}
+
+/// Edits the sub-grid `hull` every frame for `VEHICLE_PHASE_FRAMES` frames
+/// while it keeps its motion, and reports under `name` the frames' metrics
+/// and how long the edits took to publish. Calls `after` after each frame,
+/// outside the frame's time.
+///
+/// The edits visit `vehicle_hull::edit_sites`, one in each hull chunk, in
+/// turn, setting a material from `VEHICLE_EDIT` up on even frames and
+/// digging on odd ones, so each site alternates between the two. An edit
+/// has published on the first frame its chunk's `ChunkPublished` arrives
+/// with data holding it or a later edit at its site: a chunk task that
+/// starts after several edits publishes them all at once. A dug site reads
+/// air whichever dig it shows, so air counts as the earliest dig waiting.
+///
+/// Reports the median and worst frames and time from setting an edit to its
+/// publish. An edit that hasn't published `VEHICLE_DRAIN_FRAMES` after the
+/// phase, which keeps the motion with no edits, counts as unpublished.
+#[cfg(feature = "sub_grids")]
+fn edit_vehicle_every_frame<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    hull: Entity,
+    name: &str,
+    metrics: &mut Metrics,
+    mut after: impl FnMut(&mut App),
+) {
+    let sites = vehicle_hull::edit_sites();
+    let site_in_chunk: HashMap<IVec3, IVec3> = sites
+        .iter()
+        .map(|site| (vehicle_hull::chunk_of(*site), *site))
+        .collect();
+    *app.world_mut().resource_mut::<HullPublishes>() = HullPublishes {
+        hull: Some(hull),
+        chunks: Vec::new(),
+    };
+    let mut state = SystemState::<VoxelWorld<C>>::new(app.world_mut());
+    let mut pending: Vec<PendingEdit> = Vec::new();
+    let mut frames_to_publish = Vec::new();
+    let mut times_to_publish = Vec::new();
+    let mut times = Vec::new();
+    for frame in 0..VEHICLE_PHASE_FRAMES + VEHICLE_DRAIN_FRAMES {
+        if frame < VEHICLE_PHASE_FRAMES {
+            let position = sites[frame as usize % sites.len()];
+            let visit = frame as usize / sites.len();
+            let voxel = if frame % 2 == 0 {
+                WorldVoxel::Solid(VEHICLE_EDIT + (visit % 200) as u8)
+            } else {
+                WorldVoxel::Air
+            };
+            let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+            voxel_world
+                .grid_mut(Grid::SubGrid(hull))
+                .unwrap()
+                .set_voxel(position, voxel);
+            state.apply(app.world_mut());
+            pending.push(PendingEdit {
+                position,
+                voxel,
+                set_at: Instant::now(),
+                frames: 0,
+            });
+        } else if pending.is_empty() {
+            break;
+        }
+
+        let start = Instant::now();
+        app.update();
+        if frame < VEHICLE_PHASE_FRAMES {
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        after(app);
+
+        let mut published =
+            std::mem::take(&mut app.world_mut().resource_mut::<HullPublishes>().chunks);
+        published.sort_by_key(|chunk| chunk.to_array());
+        published.dedup();
+        let voxel_world = state.get(app.world()).unwrap();
+        let grid = voxel_world.grid(Grid::SubGrid(hull)).unwrap();
+        let mut landed = vec![false; pending.len()];
+        for chunk in published {
+            let Some(site) = site_in_chunk.get(&chunk) else {
+                continue;
+            };
+            let Some(shown) = grid
+                .get_chunk_data(ChunkKey::new(chunk, 0))
+                .and_then(|data| data.get_voxel_at_world_position(*site))
+            else {
+                continue;
+            };
+            // The site's waiting edits, oldest first: the data holds the
+            // first one that matches what it shows, and every one before.
+            let waiting: Vec<usize> = (0..pending.len())
+                .filter(|index| pending[*index].position == *site)
+                .collect();
+            if let Some(shown) = waiting
+                .iter()
+                .position(|index| pending[*index].voxel == shown)
+            {
+                for index in &waiting[..=shown] {
+                    landed[*index] = true;
+                }
+            }
+        }
+        let mut landed = landed.into_iter();
+        pending.retain_mut(|edit| {
+            edit.frames += 1;
+            let landed = landed.next().unwrap();
+            if landed {
+                frames_to_publish.push(edit.frames as f64);
+                times_to_publish.push(edit.set_at.elapsed().as_secs_f64() * 1000.0);
+            }
+            !landed
+        });
+    }
+    let unpublished = pending.len();
+
+    frame_metrics(name, &times, metrics);
+    metrics.insert(format!("{name}.edits"), VEHICLE_PHASE_FRAMES as f64);
+    metrics.insert(format!("{name}.sites"), sites.len() as f64);
+    metrics.insert(format!("{name}.unpublished_edits"), unpublished as f64);
+    if frames_to_publish.is_empty() {
+        eprintln!("{name}: no edit published");
+        frames_to_publish.push(f64::INFINITY);
+        times_to_publish.push(f64::INFINITY);
+    }
+    metrics.insert(
+        format!("{name}.frames_to_publish"),
+        percentile(&frames_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{name}.max_frames_to_publish"),
+        percentile(&frames_to_publish, 1.0),
+    );
+    metrics.insert(
+        format!("{name}.time_to_publish_ms"),
+        percentile(&times_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{name}.max_time_to_publish_ms"),
+        percentile(&times_to_publish, 1.0),
+    );
+}
+
+/// A large, editable sub-grid that moves: the vehicle hull, built by voxel
+/// edits before timing starts, flies upright for `VEHICLE_PHASE_FRAMES`
+/// over the streamed sine world, tumbles on all three axes for as many, and
+/// tumbles for as many again while one voxel of it is set or dug every
+/// frame, as `edit_vehicle_every_frame` says. The camera stays still, so
+/// the world's chunks stay put.
+///
+/// Reports the hull's solid voxels and its Ready level-0 chunks, frame
+/// metrics for each phase, and the median and worst frames and time from
+/// setting an edit to its publish. Timings have no threshold.
+#[cfg(feature = "sub_grids")]
+fn scenario_vehicle() -> Metrics {
+    let prefix = "vehicle";
+    let mut app = build_app(SineWorld::default());
+    add_vehicle::<SineWorld>(&mut app);
+    stream_in::<SineWorld>(&mut app);
+
+    let mut metrics = Metrics::new();
+    let hull = build_vehicle::<SineWorld>(&mut app, prefix, None, &mut metrics);
+
+    set_motion(&mut app, Some(hull), false);
+    let times = timed_frames(&mut app, VEHICLE_PHASE_FRAMES as usize, |_| {});
+    frame_metrics(&format!("{prefix}.flight"), &times, &mut metrics);
+
+    set_motion(&mut app, Some(hull), true);
+    let times = timed_frames(&mut app, VEHICLE_PHASE_FRAMES as usize, |_| {});
+    frame_metrics(&format!("{prefix}.tumble"), &times, &mut metrics);
+
+    edit_vehicle_every_frame::<SineWorld>(
+        &mut app,
+        hull,
+        &format!("{prefix}.edited"),
+        &mut metrics,
+        |_| {},
+    );
+    metrics
+}
+
+/// Frames `vehicle_lit` hovers before it flies.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+const VEHICLE_HOVER_FRAMES: u32 = 60;
+
+/// The thresholds of `vehicle_lit`'s tag map counts, as (metric, the most it
+/// may reach), each about 20% above its first run. The hull's path is the
+/// same every run, so machine load moves them little.
+///
+/// The world air around the hull's path is open sky at one level, so it
+/// needs no slot, and any slot it takes is over.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+const VEHICLE_TAG_MAP_GATES: [(&str, f64); 2] = [
+    ("tumble.tag_entries_written_per_frame", 21.0),
+    ("tumble.air_slots", 0.0),
+];
+
+/// Runs frames until light is settled and the tag map has written no entry
+/// for `SETTLE_FRAMES` frames in a row, or for at most `MAX_FRAMES`.
+///
+/// `light_is_settled` doesn't wait for the tag map: the column answers of
+/// hinted air it holds land from tasks of their own, and an answer that
+/// changes its position's entry writes it.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn settle_tag_map<C: VoxelWorldConfig>(app: &mut App) {
+    let written = |app: &App| {
+        bevy_voxel_world::grid_bench::tag_map_stats::<C>(app.world())
+            .map_or(0, |stats| stats.entries_written)
+    };
+    let mut quiet = 0;
+    let mut last = written(app);
+    for _ in 0..MAX_FRAMES {
+        if quiet >= SETTLE_FRAMES && light_is_settled::<C>(app) {
+            return;
+        }
+        app.update();
+        let now = written(app);
+        quiet = if now == last { quiet + 1 } else { 0 };
+        last = now;
+    }
+    eprintln!("the tag map didn't settle in {MAX_FRAMES} frames");
+}
+
+/// Light work in a lit world over one frame or a span of frames, as
+/// `LightWatch` records it.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+#[derive(Clone, Copy, Default)]
+struct LightFrame {
+    /// Whether `light_is_settled` held after the frame.
+    settled: bool,
+    /// Solves of every grid, in chunk tasks and relights.
+    solves: u64,
+    /// Relights of every grid started.
+    relights: u64,
+    /// Of those, the relights of sub-grid chunks.
+    sub_grid_relights: u64,
+    /// Sub-grid chunks solved in their chunk tasks.
+    sub_grid_chunk_solves: u64,
+    /// Main thread spent landing light and starting relights, in
+    /// microseconds: in a frame, or the most in any frame of a span.
+    main_thread_us: f64,
+    /// The positions the tag map held after the frame, or the most after any
+    /// frame of a span. 0 before the world's first sub-grid.
+    tag_entries: u64,
+    /// Entries written into the tag map's texture, each entry of a full
+    /// rewrite counting.
+    tag_entries_written: u64,
+    /// Times the tag map's whole texture was written.
+    tag_full_rewrites: u64,
+    /// Main thread spent on the tag map's upkeep, in microseconds.
+    tag_upkeep_us: f64,
+    /// Slots held by world chunks of air the tag map holds, after the frame,
+    /// or the most after any frame of a span.
+    air_slots: u64,
+}
+
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+impl LightFrame {
+    /// The relights started for the world's own chunks.
+    fn world_relights(&self) -> u64 {
+        self.relights - self.sub_grid_relights
+    }
+
+    /// The sub-grid solves and relights started, each a light solve of a
+    /// sub-grid chunk.
+    fn sub_grid_work(&self) -> u64 {
+        self.sub_grid_relights + self.sub_grid_chunk_solves
+    }
+}
+
+/// The light work of a lit world `C`, frame by frame, in named phases.
+///
+/// A scenario starts each phase with `start` and calls `frame` after each
+/// frame it runs, outside the frame's time. A phase runs from its start to
+/// the next phase's. The counts come from `light_stats`, so work a chunk
+/// task or relight task does off the main thread shows in the frame it
+/// finished by.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+struct LightWatch<C> {
+    frames: Vec<LightFrame>,
+    /// Each phase's name and its first frame's index in `frames`.
+    phases: Vec<(&'static str, usize)>,
+    last: bevy_voxel_world::light_bench::LightStats,
+    last_tag_map: bevy_voxel_world::grid_bench::TagMapStats,
+    world: std::marker::PhantomData<C>,
+}
+
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+impl<C: VoxelWorldConfig> LightWatch<C> {
+    fn new(app: &App) -> Self {
+        Self {
+            frames: Vec::new(),
+            phases: Vec::new(),
+            last: Self::stats(app),
+            last_tag_map: Self::tag_map_stats(app),
+            world: std::marker::PhantomData,
+        }
+    }
+
+    fn stats(app: &App) -> bevy_voxel_world::light_bench::LightStats {
+        bevy_voxel_world::light_bench::light_stats::<C>(app.world()).unwrap()
+    }
+
+    /// The tag map's stats, all 0 while the world has no tag map.
+    fn tag_map_stats(app: &App) -> bevy_voxel_world::grid_bench::TagMapStats {
+        bevy_voxel_world::grid_bench::tag_map_stats::<C>(app.world()).unwrap_or_default()
+    }
+
+    /// Starts the phase `name`, ending the one before.
+    fn start(&mut self, name: &'static str) {
+        self.phases.push((name, self.frames.len()));
+    }
+
+    /// Records the frame just run.
+    fn frame(&mut self, app: &mut App) {
+        let now = Self::stats(app);
+        let last = self.last;
+        let tag_map = Self::tag_map_stats(app);
+        let last_tag_map = self.last_tag_map;
+        self.frames.push(LightFrame {
+            settled: light_is_settled::<C>(app),
+            solves: now.solves - last.solves,
+            relights: now.relights - last.relights,
+            sub_grid_relights: now.sub_grid_relights - last.sub_grid_relights,
+            sub_grid_chunk_solves: now.sub_grid_chunk_solves - last.sub_grid_chunk_solves,
+            main_thread_us: (now.main_thread_ms - last.main_thread_ms) * 1000.0,
+            tag_entries: tag_map.entries,
+            tag_entries_written: tag_map.entries_written - last_tag_map.entries_written,
+            tag_full_rewrites: tag_map.full_rewrites - last_tag_map.full_rewrites,
+            tag_upkeep_us: (tag_map.upkeep_micros - last_tag_map.upkeep_micros) as f64,
+            air_slots: tag_map.air_slots,
+        });
+        self.last = now;
+        self.last_tag_map = tag_map;
+    }
+
+    /// Runs and records frames until light is settled, or for at most
+    /// `MAX_FRAMES`.
+    fn settle(&mut self, app: &mut App) {
+        for _ in 0..MAX_FRAMES {
+            if light_is_settled::<C>(app) {
+                return;
+            }
+            app.update();
+            self.frame(app);
+        }
+        eprintln!("light didn't settle in {MAX_FRAMES} frames");
+    }
+
+    /// The index in `frames` of the phase `name`'s first frame, and of the
+    /// next phase's.
+    fn phase(&self, name: &str) -> (usize, usize) {
+        let index = self
+            .phases
+            .iter()
+            .position(|(phase, _)| *phase == name)
+            .unwrap();
+        let end = self
+            .phases
+            .get(index + 1)
+            .map_or(self.frames.len(), |(_, first)| *first);
+        (self.phases[index].1, end)
+    }
+
+    /// The light work of the frames from `first` up to `end`, exclusive.
+    fn sum(&self, first: usize, end: usize) -> LightFrame {
+        let frames = &self.frames[first..end];
+        LightFrame {
+            settled: frames.last().is_some_and(|frame| frame.settled),
+            solves: frames.iter().map(|frame| frame.solves).sum(),
+            relights: frames.iter().map(|frame| frame.relights).sum(),
+            sub_grid_relights: frames.iter().map(|frame| frame.sub_grid_relights).sum(),
+            sub_grid_chunk_solves: frames
+                .iter()
+                .map(|frame| frame.sub_grid_chunk_solves)
+                .sum(),
+            main_thread_us: frames
+                .iter()
+                .map(|frame| frame.main_thread_us)
+                .fold(0.0, f64::max),
+            tag_entries: frames
+                .iter()
+                .map(|frame| frame.tag_entries)
+                .max()
+                .unwrap_or(0),
+            tag_entries_written: frames
+                .iter()
+                .map(|frame| frame.tag_entries_written)
+                .sum(),
+            tag_full_rewrites: frames.iter().map(|frame| frame.tag_full_rewrites).sum(),
+            tag_upkeep_us: frames.iter().map(|frame| frame.tag_upkeep_us).sum(),
+            air_slots: frames
+                .iter()
+                .map(|frame| frame.air_slots)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// The light work of the phase `name`.
+    fn in_phase(&self, name: &str) -> LightFrame {
+        let (first, end) = self.phase(name);
+        self.sum(first, end)
+    }
+
+    /// The frames from the start of the phase `name` until light was
+    /// settled, counting the frame it settled on, which may come in a later
+    /// phase, and the light work of those frames. Light that never settled
+    /// counts every frame recorded, with a warning.
+    fn until_settled(&self, name: &str) -> (usize, LightFrame) {
+        let (first, _) = self.phase(name);
+        let end = match self.frames[first..].iter().position(|frame| frame.settled) {
+            Some(settled) => first + settled + 1,
+            None => {
+                eprintln!("{name}: light didn't settle");
+                self.frames.len()
+            }
+        };
+        (end - first, self.sum(first, end))
+    }
+
+    /// Reports the phase `name`'s frames until light settled and their light
+    /// work under `{prefix}.{name}`. Returns that light work.
+    fn report_until_settled(
+        &self,
+        prefix: &str,
+        name: &str,
+        metrics: &mut Metrics,
+    ) -> LightFrame {
+        let (frames, work) = self.until_settled(name);
+        let name = format!("{prefix}.{name}");
+        metrics.insert(format!("{name}.frames_to_settled"), frames as f64);
+        metrics.insert(format!("{name}.solves"), work.solves as f64);
+        metrics.insert(format!("{name}.relights"), work.relights as f64);
+        metrics.insert(
+            format!("{name}.world_relights"),
+            work.world_relights() as f64,
+        );
+        metrics.insert(
+            format!("{name}.sub_grid_relights"),
+            work.sub_grid_relights as f64,
+        );
+        metrics.insert(
+            format!("{name}.sub_grid_chunk_solves"),
+            work.sub_grid_chunk_solves as f64,
+        );
+        metrics.insert(format!("{name}.max_main_thread_us"), work.main_thread_us);
+        work
+    }
+
+    /// Reports the sub-grid light work of the phase `name`, in which none
+    /// should start, under `{prefix}.{name}`. Returns how much started.
+    fn report_still(&self, prefix: &str, name: &str, metrics: &mut Metrics) -> u64 {
+        let work = self.in_phase(name);
+        let name = format!("{prefix}.{name}");
+        metrics.insert(
+            format!("{name}.sub_grid_relights"),
+            work.sub_grid_relights as f64,
+        );
+        metrics.insert(
+            format!("{name}.sub_grid_chunk_solves"),
+            work.sub_grid_chunk_solves as f64,
+        );
+        metrics.insert(format!("{name}.max_main_thread_us"), work.main_thread_us);
+        work.sub_grid_work()
+    }
+
+    /// The tag map's entries written per frame in the phase `name`, on
+    /// average.
+    fn tag_entries_written_per_frame(&self, name: &str) -> f64 {
+        let (first, end) = self.phase(name);
+        self.sum(first, end).tag_entries_written as f64 / (end - first).max(1) as f64
+    }
+
+    /// Reports what the tag map did in the phase `name` under
+    /// `{prefix}.{name}`: the most entries it held after a frame, entries
+    /// written per frame and full rewrites, upkeep per frame, and the most
+    /// slots world chunks of air in it held after a frame. Returns the work
+    /// of the phase.
+    fn report_tag_map(
+        &self,
+        prefix: &str,
+        name: &str,
+        metrics: &mut Metrics,
+    ) -> LightFrame {
+        let (first, end) = self.phase(name);
+        let work = self.sum(first, end);
+        let frames = (end - first).max(1) as f64;
+        let name = format!("{prefix}.{name}");
+        metrics.insert(format!("{name}.tag_entries"), work.tag_entries as f64);
+        metrics.insert(
+            format!("{name}.tag_entries_written_per_frame"),
+            work.tag_entries_written as f64 / frames,
+        );
+        metrics.insert(
+            format!("{name}.tag_full_rewrites"),
+            work.tag_full_rewrites as f64,
+        );
+        metrics.insert(
+            format!("{name}.tag_upkeep_us_per_frame"),
+            work.tag_upkeep_us / frames,
+        );
+        metrics.insert(format!("{name}.air_slots"), work.air_slots as f64);
+        work
+    }
+}
+
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+impl<C: VoxelWorldConfig> BurstWatch for LightWatch<C> {
+    /// Lets light settle before every phase but `moving`, so each phase's
+    /// light work is its own, and starts the phase. The pieces start moving
+    /// right after the lift lands, as a game's would.
+    fn phase(&mut self, app: &mut App, name: &'static str) {
+        if name != "moving" {
+            self.settle(app);
+        }
+        self.start(name);
+    }
+
+    fn frame(&mut self, app: &mut App) {
+        LightWatch::frame(self, app);
+    }
+}
+
+/// The edits `vehicle_lit` makes to the hull one at a time, in order, with
+/// frames paced at 60 a second: `edits_lit`'s edits, on the hull. At each
+/// site, a block set on the surface and its undo, then the surface voxel
+/// dug and its undo.
+///
+/// The sites are on the envelope's top and the cabin's floor, in the middle
+/// of a chunk and against chunk faces. Each dig leaves the wall under it
+/// closed, so the hull stays enclosed.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn paced_hull_edits() -> Vec<(IVec3, WorldVoxel<u8>)> {
+    let lamp = Some(LAMP);
+    let first_solid_down = |from: IVec3| {
+        (0..=from.y)
+            .map(|down| from - IVec3::Y * down)
+            .find(|position| vehicle_hull::hull_voxel(*position, lamp).is_some())
+            .unwrap()
+    };
+    let top = vehicle_hull::MAX.y - 1;
+    // The cabin's inside reaches up to y 34; x 44 misses the lamps.
+    let cabin = 33;
+    let surfaces = [
+        first_solid_down(IVec3::new(48, top, 112)),
+        first_solid_down(IVec3::new(31, top, 112)),
+        first_solid_down(IVec3::new(48, top, 128)),
+        first_solid_down(IVec3::new(44, cabin, 116)),
+        first_solid_down(IVec3::new(44, cabin, 127)),
+        first_solid_down(IVec3::new(44, cabin, 128)),
+    ];
+    let mut edits = Vec::new();
+    for surface in surfaces {
+        let material = vehicle_hull::hull_voxel(surface, lamp).unwrap();
+        let above = surface + IVec3::Y;
+        edits.push((above, WorldVoxel::Solid(material)));
+        edits.push((above, WorldVoxel::Air));
+        edits.push((surface, WorldVoxel::Air));
+        edits.push((surface, WorldVoxel::Solid(material)));
+    }
+    edits
+}
+
+/// The vehicle hull with lamps in its cabin, in the lit sine world: built
+/// by voxel edits with its light and tag map settled before timing starts
+/// (see `settle_tag_map`), it hovers
+/// for `VEHICLE_HOVER_FRAMES`, then flies and tumbles as in `vehicle`. Still
+/// tumbling, it takes `paced_hull_edits` one at a time with frames paced
+/// at 60 a second, as `edits_lit` does, and then an edit every frame as in
+/// `vehicle`.
+///
+/// Reports frame metrics for each phase, and for each phase with no edits
+/// the sub-grid solves and relights it started and the most main thread
+/// light took in a frame. For the paced edits, each one's frames to land,
+/// counted from the edit's frame until light is settled, its frames and
+/// time to publish, counting the edit's frame, and the most main thread
+/// light took in any of its frames. For the edits every frame, what
+/// `edit_vehicle_every_frame` reports, and the relights and most main
+/// thread in a frame from the phase's start until light settled. For every
+/// phase, what `LightWatch::report_tag_map` reports: the tag map's entries,
+/// entries written per frame, full rewrites, upkeep per frame, and the slots
+/// world chunks of air around the hull hold.
+///
+/// Gate, checked here and reported as `gate_failures`: no sub-grid solve or
+/// relight starts while the hull hovers, flies or tumbles with no edit, no
+/// tag map entry is written while it hovers, and each paced edit lands
+/// within 2 frames with at most 1 ms of main thread relighting in any
+/// frame. Each solve, relight and entry written, and each edit missing its
+/// gate, counts once. While the hull tumbles, its entries written per frame
+/// and the air chunks' slots stay within `VEHICLE_TAG_MAP_GATES`, each one
+/// over counting once. The edits every frame have no gate, and no timing
+/// has a threshold.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn scenario_vehicle_lit() -> Metrics {
+    type Lit = LitBenchWorld<SINE, true>;
+    let prefix = "vehicle_lit";
+    let mut app = build_app(Lit::default());
+    add_vehicle::<Lit>(&mut app);
+    stream_in::<Lit>(&mut app);
+    settle_light::<Lit>(&mut app);
+
+    let mut metrics = Metrics::new();
+    let hull = build_vehicle::<Lit>(&mut app, prefix, Some(LAMP), &mut metrics);
+    settle_light::<Lit>(&mut app);
+    settle_tag_map::<Lit>(&mut app);
+    let mut watch = LightWatch::<Lit>::new(&app);
+
+    let mut still = 0;
+    for (name, motion, frames) in [
+        ("hover", None, VEHICLE_HOVER_FRAMES),
+        ("flight", Some(false), VEHICLE_PHASE_FRAMES),
+        ("tumble", Some(true), VEHICLE_PHASE_FRAMES),
+    ] {
+        set_motion(&mut app, motion.map(|_| hull), motion == Some(true));
+        watch.start(name);
+        let times = timed_frames(&mut app, frames as usize, |app| watch.frame(app));
+        frame_metrics(&format!("{prefix}.{name}"), &times, &mut metrics);
+        still += watch.report_still(prefix, name, &mut metrics);
+        watch.report_tag_map(prefix, name, &mut metrics);
+    }
+    if still > 0 {
+        eprintln!("{prefix}: {still} sub-grid solves and relights while the hull moved");
+    }
+    let hovered = watch.in_phase("hover").tag_entries_written;
+    if hovered > 0 {
+        eprintln!("{prefix}: {hovered} tag map entries written while the hull hovered");
+    }
+    let over: Vec<String> = VEHICLE_TAG_MAP_GATES
+        .iter()
+        .filter(|(name, most)| metrics[&format!("{prefix}.{name}")] > *most)
+        .map(|(name, most)| format!("{name} > {most}"))
+        .collect();
+    if !over.is_empty() {
+        eprintln!("{prefix}: missed its thresholds: {over:?}");
+    }
+
+    // Still tumbling.
+    watch.start("paced");
+    *app.world_mut().resource_mut::<HullPublishes>() = HullPublishes {
+        hull: Some(hull),
+        chunks: Vec::new(),
+    };
+    let mut state = SystemState::<VoxelWorld<Lit>>::new(app.world_mut());
+    let edits = paced_hull_edits();
+    let mut times = Vec::new();
+    let mut frames_to_land = Vec::new();
+    let mut frames_to_publish = Vec::new();
+    let mut times_to_publish = Vec::new();
+    let mut worst_us = Vec::new();
+    let mut unpublished = 0;
+    for (position, voxel) in &edits {
+        let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
+        voxel_world
+            .grid_mut(Grid::SubGrid(hull))
+            .unwrap()
+            .set_voxel(*position, *voxel);
+        state.apply(app.world_mut());
+        let set_at = Instant::now();
+        let first = watch.frames.len();
+        let chunk = vehicle_hull::chunk_of(*position);
+        let mut landed = None;
+        let mut published = None;
+        for frame in 1..=MAX_FRAMES {
+            let start = Instant::now();
+            app.update();
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+            watch.frame(&mut app);
+            let chunks = std::mem::take(
+                &mut app.world_mut().resource_mut::<HullPublishes>().chunks,
+            );
+            if published.is_none() && chunks.contains(&chunk) {
+                let voxel_world = state.get(app.world()).unwrap();
+                let shown = voxel_world
+                    .grid(Grid::SubGrid(hull))
+                    .unwrap()
+                    .get_chunk_data(ChunkKey::new(chunk, 0))
+                    .and_then(|data| data.get_voxel_at_world_position(*position));
+                if shown == Some(*voxel) {
+                    published = Some((frame, set_at.elapsed().as_secs_f64() * 1000.0));
+                }
+            }
+            if landed.is_none() && watch.frames.last().unwrap().settled {
+                landed = Some(frame - 1);
+            }
+            if landed.is_some() && published.is_some() {
+                break;
+            }
+            std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
+        }
+        // A frame's rest, as a game's frame would give the edit's frame.
+        std::thread::sleep(PACED_FRAME);
+        frames_to_land.push(landed.map_or(f64::INFINITY, |frames| frames as f64));
+        match published {
+            Some((frames, ms)) => {
+                frames_to_publish.push(frames as f64);
+                times_to_publish.push(ms);
+            }
+            None => unpublished += 1,
+        }
+        worst_us.push(watch.sum(first, watch.frames.len()).main_thread_us);
+    }
+    let missed = frames_to_land
+        .iter()
+        .zip(&worst_us)
+        .filter(|(frames, worst)| {
+            **frames > EDIT_FRAMES_GATE as f64 || **worst > EDIT_MAIN_THREAD_GATE_US
+        })
+        .count();
+    if missed > 0 {
+        eprintln!(
+            "{prefix}: {missed} of {} paced edits missed the gate \
+             (frames {frames_to_land:?}, main thread µs {worst_us:?})",
+            edits.len()
+        );
+    }
+    let paced = format!("{prefix}.paced");
+    frame_metrics(&paced, &times, &mut metrics);
+    let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
+    metrics.insert(format!("{paced}.edits"), edits.len() as f64);
+    metrics.insert(format!("{paced}.max_frames_to_land"), max(&frames_to_land));
+    metrics.insert(
+        format!("{paced}.p50_frames_to_land"),
+        percentile(&frames_to_land, 0.5),
+    );
+    metrics.insert(format!("{paced}.max_main_thread_us"), max(&worst_us));
+    metrics.insert(
+        format!("{paced}.p50_main_thread_us"),
+        percentile(&worst_us, 0.5),
+    );
+    metrics.insert(format!("{paced}.unpublished_edits"), unpublished as f64);
+    if frames_to_publish.is_empty() {
+        frames_to_publish.push(f64::INFINITY);
+        times_to_publish.push(f64::INFINITY);
+    }
+    metrics.insert(
+        format!("{paced}.frames_to_publish"),
+        percentile(&frames_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{paced}.max_frames_to_publish"),
+        max(&frames_to_publish),
+    );
+    metrics.insert(
+        format!("{paced}.time_to_publish_ms"),
+        percentile(&times_to_publish, 0.5),
+    );
+    metrics.insert(
+        format!("{paced}.max_time_to_publish_ms"),
+        max(&times_to_publish),
+    );
+    watch.report_tag_map(prefix, "paced", &mut metrics);
+
+    watch.start("edited");
+    edit_vehicle_every_frame::<Lit>(
+        &mut app,
+        hull,
+        &format!("{prefix}.edited"),
+        &mut metrics,
+        |app| watch.frame(app),
+    );
+    watch.settle(&mut app);
+    watch.report_until_settled(prefix, "edited", &mut metrics);
+    watch.report_tag_map(prefix, "edited", &mut metrics);
+
+    metrics.insert(
+        format!("{prefix}.gate_failures"),
+        (still as usize + missed + hovered as usize + over.len()) as f64,
+    );
+    metrics
+}
+
+/// Frames `lift_burst`'s pieces move between their lift and their stamp.
+#[cfg(feature = "sub_grids")]
+const BURST_MOVE_FRAMES: u32 = 300;
+
+/// How far a moving piece rises, in voxels, at the middle of its path.
+#[cfg(feature = "sub_grids")]
+const BURST_RISE: f32 = 24.0;
+
+/// How far a moving piece turns, in radians, at the middle of its path.
+#[cfg(feature = "sub_grids")]
+const BURST_TURN: f32 = 0.6;
+
+/// How far a piece ends its path from its start pose: turned by
+/// `BURST_END_TURN` radians, about 3 degrees, and moved by
+/// `BURST_END_DRIFT` voxels. The stamp snaps both away, so the piece lands
+/// where it was lifted from.
+#[cfg(feature = "sub_grids")]
+const BURST_END_TURN: f32 = 0.05;
+#[cfg(feature = "sub_grids")]
+const BURST_END_DRIFT: Vec3 = Vec3::new(0.3, 0.2, -0.25);
+
+/// The sub-grids whose `Lifted` and `Stamped` have arrived since a burst
+/// phase started.
+#[cfg(feature = "sub_grids")]
+#[derive(Resource, Default)]
+struct BurstLanded {
+    lifted: Vec<Entity>,
+    stamped: Vec<Entity>,
+}
+
+#[cfg(feature = "sub_grids")]
+fn record_burst_landed<C: VoxelWorldConfig>(
+    mut landed: ResMut<BurstLanded>,
+    mut lifted: MessageReader<Lifted<C>>,
+    mut stamped: MessageReader<Stamped<C>>,
+) {
+    landed
+        .lifted
+        .extend(lifted.read().map(|message| message.sub_grid));
+    landed
+        .stamped
+        .extend(stamped.read().map(|message| message.sub_grid));
+}
+
+/// A piece lifted out of the world, as it was when its lift landed.
+#[cfg(feature = "sub_grids")]
+#[derive(Clone, Copy)]
+struct LiftedPiece {
+    sub_grid: Entity,
+    /// The sub-grid's translation under the world's root when lifted.
+    start: Vec3,
+    /// The centre of the box holding the sub-grid's solid voxels, on its
+    /// own grid, which the piece turns about.
+    pivot: Vec3,
+    /// The sub-grid's level-0 chunks.
+    chunks: usize,
+}
+
+/// How a burst of lifts or stamps landed, from the frame of the calls to
+/// the frame the last `Lifted` or `Stamped` arrived.
+#[cfg(feature = "sub_grids")]
+struct BurstLanding {
+    frames: u32,
+    time_ms: f64,
+    worst_frame_ms: f64,
+    /// Handovers that landed in the span, and the chunks they held.
+    handovers: u64,
+    chunks: u64,
+    errors: usize,
+}
+
+#[cfg(feature = "sub_grids")]
+impl BurstLanding {
+    fn report(&self, prefix: &str, metrics: &mut Metrics) {
+        metrics.insert(format!("{prefix}.frames"), self.frames as f64);
+        metrics.insert(format!("{prefix}.time_ms"), self.time_ms);
+        metrics.insert(format!("{prefix}.worst_frame_ms"), self.worst_frame_ms);
+        metrics.insert(format!("{prefix}.handovers"), self.handovers as f64);
+        metrics.insert(
+            format!("{prefix}.chunks_per_handover"),
+            if self.handovers == 0 {
+                0.0
+            } else {
+                self.chunks as f64 / self.handovers as f64
+            },
+        );
+        metrics.insert(format!("{prefix}.errors"), self.errors as f64);
+    }
+}
+
+/// What a burst scenario watches beside what `lift_burst_metrics` times:
+/// told as each phase starts, before its calls, and after each frame it
+/// runs, outside the frame's time and the phase's.
+///
+/// The phases are `lift`, `moving`, `stamp`, `relift` and `despawn`.
+#[cfg(feature = "sub_grids")]
+trait BurstWatch {
+    fn phase(&mut self, _app: &mut App, _name: &'static str) {}
+
+    fn frame(&mut self, _app: &mut App) {}
+}
+
+/// Watches nothing.
+#[cfg(feature = "sub_grids")]
+impl BurstWatch for () {}
+
+/// Runs `calls`, which returns how many sub-grids should land and how many
+/// calls failed, then runs frames until `landed` counts that many, or for
+/// at most `MAX_FRAMES`. The first frame's time includes the calls'.
+#[cfg(feature = "sub_grids")]
+fn land_burst<C: VoxelWorldConfig>(
+    app: &mut App,
+    calls: impl FnOnce(&mut App) -> (usize, usize),
+    landed: impl Fn(&BurstLanded) -> usize,
+    watch: &mut dyn BurstWatch,
+) -> BurstLanding {
+    let stats = |app: &App| {
+        bevy_voxel_world::grid_bench::handover_stats::<C>(app.world()).unwrap()
+    };
+    *app.world_mut().resource_mut::<BurstLanded>() = BurstLanded::default();
+    let before = stats(app);
+    let start = Instant::now();
+    let (expected, errors) = calls(app);
+    let mut frame_start = start;
+    let mut frames = 0;
+    let mut worst_frame_ms: f64 = 0.0;
+    let mut watched = std::time::Duration::ZERO;
+    while frames < MAX_FRAMES {
+        app.update();
+        frames += 1;
+        worst_frame_ms = worst_frame_ms.max(frame_start.elapsed().as_secs_f64() * 1000.0);
+        let watch_start = Instant::now();
+        watch.frame(app);
+        watched += watch_start.elapsed();
+        frame_start = Instant::now();
+        if landed(app.world().resource::<BurstLanded>()) >= expected {
+            break;
+        }
+    }
+    let time_ms = (start.elapsed() - watched).as_secs_f64() * 1000.0;
+    let landed = landed(app.world().resource::<BurstLanded>());
+    if landed < expected {
+        eprintln!("{landed} of {expected} sub-grids landed in {MAX_FRAMES} frames");
+    }
+    let after = stats(app);
+    BurstLanding {
+        frames,
+        time_ms,
+        worst_frame_ms,
+        handovers: after.handovers - before.handovers,
+        chunks: after.chunks - before.chunks,
+        errors,
+    }
+}
+
+/// Lifts every piece out of the world in one frame, each with every solid
+/// voxel in its box, and runs frames until every lift has landed. Returns
+/// the pieces that lifted, in the order of `pieces`, and how the burst
+/// landed.
+#[cfg(feature = "sub_grids")]
+fn lift_burst<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    pieces: &[lift_pieces::Piece],
+    watch: &mut dyn BurstWatch,
+) -> (Vec<LiftedPiece>, BurstLanding) {
+    use bevy::ecs::system::RunSystemOnce;
+    let boxes: Vec<(IVec3, IVec3)> =
+        pieces.iter().map(|piece| (piece.min, piece.max)).collect();
+    let mut sub_grids = Vec::new();
+    let landing = land_burst::<C>(
+        app,
+        |app| {
+            let results = app
+                .world_mut()
+                .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+                    boxes
+                        .iter()
+                        .map(|(min, max)| {
+                            voxel_world.lift(Grid::World, *min, *max, |_, voxel| {
+                                matches!(voxel, WorldVoxel::Solid(_))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap();
+            sub_grids = results.iter().filter_map(|result| result.ok()).collect();
+            (sub_grids.len(), results.len() - sub_grids.len())
+        },
+        |landed| landed.lifted.len(),
+        watch,
+    );
+
+    let world = app.world_mut();
+    let mut chunks: HashMap<Entity, usize> = HashMap::new();
+    for (_, parent) in world.query::<(&Chunk<C>, &ChildOf)>().iter(world) {
+        *chunks.entry(parent.parent()).or_default() += 1;
+    }
+    let mut state = SystemState::<VoxelWorld<C>>::new(world);
+    let voxel_world = state.get(world).unwrap();
+    let pivots: Vec<Vec3> = sub_grids
+        .iter()
+        .map(|sub_grid| {
+            let (min, max) = voxel_world
+                .grid(Grid::SubGrid(*sub_grid))
+                .and_then(|grid| grid.bounds())
+                .unwrap_or_default();
+            (min + max).as_vec3() / 2.0
+        })
+        .collect();
+    let lifted = sub_grids
+        .iter()
+        .zip(pivots)
+        .map(|(sub_grid, pivot)| LiftedPiece {
+            sub_grid: *sub_grid,
+            start: world.get::<Transform>(*sub_grid).unwrap().translation,
+            pivot,
+            chunks: chunks.get(sub_grid).copied().unwrap_or(0),
+        })
+        .collect();
+    (lifted, landing)
+}
+
+/// The transform of the `index`th lifted piece at `frame` of its path,
+/// from 1 to `BURST_MOVE_FRAMES`, under the world's root.
+///
+/// The piece rises by up to `BURST_RISE` and turns by up to `BURST_TURN`
+/// about its pivot, on an axis of its own, and comes back down, ending
+/// `BURST_END_TURN` and `BURST_END_DRIFT` from its start pose.
+#[cfg(feature = "sub_grids")]
+fn burst_pose(index: usize, piece: &LiftedPiece, frame: u32) -> Transform {
+    let t = frame as f32 / BURST_MOVE_FRAMES as f32;
+    let arc = (std::f32::consts::PI * t).sin();
+    let axis = Vec3::new((index as f32).sin(), 2.0, (index as f32).cos()).normalize();
+    let rotation = Quat::from_axis_angle(axis, BURST_TURN * arc + BURST_END_TURN * t);
+    let pivot =
+        piece.start + piece.pivot + BURST_RISE * arc * Vec3::Y + BURST_END_DRIFT * t;
+    Transform {
+        translation: pivot - rotation * piece.pivot,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// Moves every lifted piece along its path for `BURST_MOVE_FRAMES` frames,
+/// setting its transform before each frame, and returns the frames' times.
+#[cfg(feature = "sub_grids")]
+fn move_burst(
+    app: &mut App,
+    pieces: &[LiftedPiece],
+    watch: &mut dyn BurstWatch,
+) -> Vec<f64> {
+    let mut times = Vec::with_capacity(BURST_MOVE_FRAMES as usize);
+    for frame in 1..=BURST_MOVE_FRAMES {
+        let start = Instant::now();
+        for (index, piece) in pieces.iter().enumerate() {
+            if let Some(mut transform) =
+                app.world_mut().get_mut::<Transform>(piece.sub_grid)
+            {
+                *transform = burst_pose(index, piece, frame);
+            }
+        }
+        app.update();
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        watch.frame(app);
+    }
+    times
+}
+
+/// Stamps every lifted piece back into the world in one frame, writing
+/// every voxel it holds, and runs frames until every stamp has landed.
+#[cfg(feature = "sub_grids")]
+fn stamp_burst<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    pieces: &[LiftedPiece],
+    watch: &mut dyn BurstWatch,
+) -> BurstLanding {
+    use bevy::ecs::system::RunSystemOnce;
+    let sub_grids: Vec<Entity> = pieces.iter().map(|piece| piece.sub_grid).collect();
+    land_burst::<C>(
+        app,
+        |app| {
+            let errors = app
+                .world_mut()
+                .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+                    sub_grids
+                        .iter()
+                        .filter(|sub_grid| {
+                            voxel_world
+                                .stamp(**sub_grid, Grid::World, incoming_replaces)
+                                .is_err()
+                        })
+                        .count()
+                })
+                .unwrap();
+            (pieces.len() - errors, errors)
+        },
+        |landed| landed.stamped.len(),
+        watch,
+    )
+}
+
+/// Despawns every lifted piece in one frame and returns that frame's time,
+/// the calls included.
+#[cfg(feature = "sub_grids")]
+fn despawn_burst<C: VoxelWorldConfig>(
+    app: &mut App,
+    pieces: &[LiftedPiece],
+    watch: &mut dyn BurstWatch,
+) -> f64 {
+    use bevy::ecs::system::RunSystemOnce;
+    let sub_grids: Vec<Entity> = pieces.iter().map(|piece| piece.sub_grid).collect();
+    let start = Instant::now();
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<C>| {
+            for sub_grid in &sub_grids {
+                voxel_world.despawn_sub_grid(*sub_grid);
+            }
+        })
+        .unwrap();
+    app.update();
+    let time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    watch.frame(app);
+    time_ms
+}
+
+/// A burst of lifts and stamps in a streamed world with its camera still:
+/// every piece of `lift_pieces` lifted in one frame, moved every frame for
+/// `BURST_MOVE_FRAMES`, stamped back in one frame, lifted again, and
+/// despawned in one frame. The app must hold `BurstLanded` and run
+/// `record_burst_landed` for the world `C`.
+///
+/// Reports how many pieces lifted into sub-grids of one chunk, of 2 to 4,
+/// and of more, and how many cross a chunk corner of the world. For the
+/// first lift, the stamp and the second lift (`relift`), it reports frames
+/// and time from the calls to the last sub-grid landing, the worst frame
+/// in that span, the handovers that landed and their chunks per handover,
+/// and the calls that returned an error. Pieces lifted in one frame share
+/// world chunks and fold into fewer handovers, which the handover count
+/// shows. Then frame metrics while the pieces move, and the time of the
+/// frame that despawns the second lift's pieces.
+///
+/// Each piece's path ends near its start pose, so the stamp snaps it back
+/// to where it was lifted from and the second lift takes the same voxels.
+/// A sub-grid whose chunk count differs from its piece's, or a second lift
+/// that starts somewhere else, prints a warning.
+///
+/// `watch` is told of each phase and frame. The time it takes counts in no
+/// timing reported here.
+#[cfg(feature = "sub_grids")]
+fn lift_burst_metrics<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    prefix: &str,
+    watch: &mut dyn BurstWatch,
+) -> Metrics {
+    let pieces = lift_pieces::pieces(sine_height);
+    let mut metrics = Metrics::new();
+
+    watch.phase(app, "lift");
+    let (lifted, landing) = lift_burst::<C>(app, &pieces, watch);
+    landing.report(&format!("{prefix}.lift"), &mut metrics);
+    let mut counts = [0; 3];
+    for (index, (piece, sub_grid)) in pieces.iter().zip(&lifted).enumerate() {
+        if sub_grid.chunks != piece.chunks {
+            eprintln!(
+                "{prefix}: piece {index} has {} chunks, but should have {}",
+                sub_grid.chunks, piece.chunks
+            );
+        }
+        counts[match sub_grid.chunks {
+            0 | 1 => 0,
+            2..=4 => 1,
+            _ => 2,
+        }] += 1;
+    }
+    metrics.insert(format!("{prefix}.pieces"), lifted.len() as f64);
+    for (name, count) in [
+        "pieces_1_chunk",
+        "pieces_2_to_4_chunks",
+        "pieces_over_4_chunks",
+    ]
+    .into_iter()
+    .zip(counts)
+    {
+        metrics.insert(format!("{prefix}.{name}"), count as f64);
+    }
+    metrics.insert(
+        format!("{prefix}.pieces_on_chunk_corners"),
+        pieces
+            .iter()
+            .filter(|piece| piece.crosses_chunk_corner())
+            .count() as f64,
+    );
+    metrics.insert(
+        format!("{prefix}.sub_grid_chunks"),
+        lifted.iter().map(|piece| piece.chunks).sum::<usize>() as f64,
+    );
+
+    watch.phase(app, "moving");
+    let times = move_burst(app, &lifted, watch);
+    frame_metrics(&format!("{prefix}.moving"), &times, &mut metrics);
+
+    watch.phase(app, "stamp");
+    let landing = stamp_burst::<C>(app, &lifted, watch);
+    landing.report(&format!("{prefix}.stamp"), &mut metrics);
+
+    watch.phase(app, "relift");
+    let (relifted, landing) = lift_burst::<C>(app, &pieces, watch);
+    landing.report(&format!("{prefix}.relift"), &mut metrics);
+    let moved = lifted
+        .iter()
+        .zip(&relifted)
+        .filter(|(first, second)| {
+            first.start != second.start || first.chunks != second.chunks
+        })
+        .count();
+    if moved > 0 || relifted.len() != lifted.len() {
+        eprintln!(
+            "{prefix}: {} pieces lifted again, {moved} of them not as first lifted",
+            relifted.len()
+        );
+    }
+
+    watch.phase(app, "despawn");
+    metrics.insert(
+        format!("{prefix}.despawn_frame_ms"),
+        despawn_burst::<C>(app, &relifted, watch),
+    );
+    metrics
+}
+
+/// `lift_burst_metrics` in the unlit sine world.
+#[cfg(feature = "sub_grids")]
+fn scenario_lift_burst() -> Metrics {
+    let mut app = build_app(SineWorld::default());
+    app.init_resource::<BurstLanded>()
+        .add_systems(Last, record_burst_landed::<SineWorld>);
+    stream_in::<SineWorld>(&mut app);
+    lift_burst_metrics::<SineWorld>(&mut app, "lift_burst", &mut ())
+}
+
+/// `lift_burst_metrics` in the lit sine world, once its light is at rest,
+/// with the light work of each phase, then the same voxels dug in a fresh
+/// app of the world, for comparing a lift with the digs it stands for.
+///
+/// Light settles before every phase but `moving`, which starts right after
+/// the lift lands. For `lift`, `stamp`, `relift` and `despawn`, it reports
+/// the frames from the calls until light is settled, counting the frame it
+/// settles on, and in those frames the solves, the relights of the world's
+/// chunks and of sub-grid chunks, sub-grid chunks solved in their chunk
+/// tasks, and the most main thread light took in a frame. For `moving`, the
+/// sub-grid solves and relights, the most main thread in a frame, and the
+/// tag map's entries written per frame while the pieces move. For `digs`,
+/// the same as for `lift`. Ratio lines compare the lift with the digs.
+///
+/// Gate, checked here and reported as `gate_failures`, each solve or relight
+/// against it counting once: no sub-grid solve or relight starts while the
+/// pieces move, counted from the frame after every lift has landed; each
+/// lift solves each new sub-grid chunk once, its first solve being a
+/// relight; and the first lift starts no more relights of the world's
+/// chunks than the digs.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn scenario_lift_burst_lit() -> Metrics {
+    use bevy::ecs::system::RunSystemOnce;
+
+    type Lit = LitBenchWorld<SINE>;
+    let prefix = "lift_burst_lit";
+    let mut app = build_app(Lit::default());
+    app.init_resource::<BurstLanded>()
+        .add_systems(Last, record_burst_landed::<Lit>);
+    stream_in::<Lit>(&mut app);
+    settle_light::<Lit>(&mut app);
+    let mut watch = LightWatch::<Lit>::new(&app);
+    let mut metrics = lift_burst_metrics::<Lit>(&mut app, prefix, &mut watch);
+    watch.settle(&mut app);
+    drop(app);
+
+    let new_chunks = metrics[&format!("{prefix}.sub_grid_chunks")] as u64;
+    let mut failures = watch.report_still(prefix, "moving", &mut metrics);
+    metrics.insert(
+        format!("{prefix}.moving.tag_entries_written_per_frame"),
+        watch.tag_entries_written_per_frame("moving"),
+    );
+    let mut lift = LightFrame::default();
+    for name in ["lift", "stamp", "relift", "despawn"] {
+        let work = watch.report_until_settled(prefix, name, &mut metrics);
+        if name == "lift" || name == "relift" {
+            let again = work.sub_grid_work().saturating_sub(new_chunks);
+            if again > 0 {
+                eprintln!("{prefix}: {name} solved sub-grid chunks {again} more times than it has");
+            }
+            failures += again;
+        }
+        if name == "lift" {
+            lift = work;
+        }
+    }
+
+    let mut app = build_app(Lit::default());
+    stream_in::<Lit>(&mut app);
+    settle_light::<Lit>(&mut app);
+    let mut digs = LightWatch::<Lit>::new(&app);
+    digs.start("digs");
+    let solids: Vec<IVec3> = lift_pieces::pieces(sine_height)
+        .iter()
+        .flat_map(|piece| {
+            let (min, max) = (piece.min, piece.max);
+            (min.z..max.z).flat_map(move |z| {
+                (min.y..max.y)
+                    .flat_map(move |y| (min.x..max.x).map(move |x| IVec3::new(x, y, z)))
+            })
+        })
+        .filter(|position| position.y < sine_height(position.x, position.z))
+        .collect();
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<Lit>| {
+            for position in &solids {
+                voxel_world.set_voxel(*position, WorldVoxel::Air);
+            }
+        })
+        .unwrap();
+    app.update();
+    digs.frame(&mut app);
+    digs.settle(&mut app);
+    let dug = digs.report_until_settled(prefix, "digs", &mut metrics);
+
+    let beyond = lift.world_relights().saturating_sub(dug.world_relights());
+    if beyond > 0 {
+        eprintln!(
+            "{prefix}: the lift started {} world relights, {beyond} more than the digs",
+            lift.world_relights()
+        );
+    }
+    if failures > 0 {
+        eprintln!("{prefix}: {failures} sub-grid solves and relights missed the gate");
+    }
+    metrics.insert(
+        format!("{prefix}.gate_failures"),
+        (failures + beyond) as f64,
+    );
+    metrics
+}
+
 /// Combines repeated samples of the same metrics into one, key by key.
 fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
     samples[0]
@@ -2044,6 +4320,10 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
 /// Repeated runs within one process. Interference only ever slows a run down, so
 /// whole-run totals take their best run; everything else, already summarised over
 /// many frames, takes the median.
+///
+/// `gate_failures` and `errors` take the worst run: a scenario's promise must
+/// hold in every run, and the median would read 0 for a promise broken in
+/// fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
@@ -2051,7 +4331,7 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
             "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
                 percentile(values, 0.0)
             }
-            "chunks_per_s" => percentile(values, 1.0),
+            "chunks_per_s" | "gate_failures" | "errors" => percentile(values, 1.0),
             _ => percentile(values, 0.5),
         }
     })
@@ -2224,6 +4504,16 @@ fn run_all(only: Option<&str>) -> Metrics {
     step("edits_lit", RUNS, &scenario_edits_lit);
     #[cfg(feature = "light_propagation")]
     step("settings_lit", RUNS, &scenario_settings_lit);
+    #[cfg(feature = "dislodged_fragments")]
+    step("fragments", FRAGMENT_RUNS, &scenario_fragments);
+    #[cfg(feature = "sub_grids")]
+    step("vehicle", RUNS, &scenario_vehicle);
+    #[cfg(feature = "sub_grids")]
+    step("lift_burst", RUNS, &scenario_lift_burst);
+    #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+    step("vehicle_lit", RUNS, &scenario_vehicle_lit);
+    #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+    step("lift_burst_lit", RUNS, &scenario_lift_burst_lit);
     metrics
 }
 
@@ -2253,6 +4543,11 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("settings_lit")
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
+        || key.starts_with("fragments")
+        || key.starts_with("vehicle")
+        || key.starts_with("lift_burst")
+        || key.starts_with("vehicle_lit")
+        || key.starts_with("lift_burst_lit")
     {
         return Gate::ReportOnly;
     }
@@ -2271,19 +4566,41 @@ fn gate(key: &str) -> Gate {
     }
 }
 
+/// The relative change from `b` to `a`, with no change between two zeros.
+fn relative_change(b: f64, a: f64) -> f64 {
+    match (b, a) {
+        (0.0, 0.0) => 0.0,
+        (0.0, _) => f64::INFINITY,
+        _ => (a - b) / b,
+    }
+}
+
+/// Prints every metric of either side, the on gate and the ratio lines, and
+/// returns whether no gated metric regressed.
+///
+/// A metric on one side only prints as `new` (after only) or `gone` (before
+/// only) and gates nothing, so a scenario one build lacks still shows.
 fn compare(before: &Metrics, after: &Metrics) -> bool {
     let mut ok = true;
     println!(
         "{:<38} {:>12} {:>12} {:>9}  gate",
         "metric", "before", "after", "change"
     );
-    for (key, b) in before {
-        let Some(a) = after.get(key) else { continue };
-        let change = match (*b, *a) {
-            (0.0, 0.0) => 0.0,
-            (0.0, _) => f64::INFINITY,
-            _ => (a - b) / b,
+    let keys: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for key in keys {
+        let (b, a) = match (before.get(key), after.get(key)) {
+            (Some(b), Some(a)) => (b, a),
+            (None, Some(a)) => {
+                println!("{key:<38} {:>12} {a:>12.3} {:>9}  report", "-", "new");
+                continue;
+            }
+            (Some(b), None) => {
+                println!("{key:<38} {b:>12.3} {:>12} {:>9}  report", "-", "gone");
+                continue;
+            }
+            (None, None) => unreachable!(),
         };
+        let change = relative_change(*b, *a);
         let verdict = match gate(key) {
             Gate::Lower(limit) if change > limit => "REGRESSED",
             Gate::LowerCount { limit, min } if change > limit && a - b > min => {
@@ -2318,8 +4635,50 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
             change * 100.0
         );
     }
+    for (top, bottom) in RATIO_LINES {
+        let ratio = |metrics: &Metrics| Some(metrics.get(top)? / metrics.get(bottom)?);
+        let (b, a) = (ratio(before), ratio(after));
+        let cell =
+            |ratio: Option<f64>| ratio.map_or("-".to_string(), |r| format!("{r:.3}"));
+        let change = match (b, a) {
+            (None, None) => continue,
+            (Some(b), Some(a)) => format!("{:+.1}%", relative_change(b, a) * 100.0),
+            _ => String::new(),
+        };
+        println!(
+            "{:<38} {:>12} {:>12} {change:>9}  ratio report",
+            format!("{top} / {bottom}"),
+            cell(b),
+            cell(a),
+        );
+    }
     ok
 }
+
+/// Ratio lines: two metrics of one build, as (numerator, denominator).
+/// `compare` prints the ratio within the before build and within the after
+/// build, and the change between them, and gates nothing.
+///
+/// A side lacking either metric prints `-`, so a ratio between scenarios only
+/// the after build runs still shows. A pair neither side has prints nothing.
+const RATIO_LINES: [(&str, &str); 4] = [
+    (
+        "fragments.digs.p50_ms",
+        "fragments.digs_not_opted_in.p50_ms",
+    ),
+    (
+        "lift_burst_lit.lift.frames_to_settled",
+        "lift_burst_lit.digs.frames_to_settled",
+    ),
+    (
+        "lift_burst_lit.lift.world_relights",
+        "lift_burst_lit.digs.world_relights",
+    ),
+    (
+        "lift_burst_lit.lift.max_main_thread_us",
+        "lift_burst_lit.digs.max_main_thread_us",
+    ),
+];
 
 /// The on gate: a lit stream against the same stream unlit in the before
 /// build, `light-baseline` for the gate, as (unlit, lit, gated). The gate
@@ -2403,16 +4762,25 @@ fn save_binary(name: &str) {
     eprintln!("wrote {}", path.display());
 }
 
-fn run_binary(binary: &PathBuf, label: &str) {
+/// Runs `binary` as `run <label>`, passing `only` on as its scenario list.
+fn run_binary(binary: &Path, label: &str, only: Option<&str>) {
     eprintln!("== {} run {label}", binary.display());
-    let status = Command::new(binary).args(["run", label]).status().unwrap();
+    let status = Command::new(binary)
+        .args(["run", label])
+        .args(only)
+        .status()
+        .unwrap();
     assert!(status.success(), "{} failed: {status}", binary.display());
 }
 
 /// Runs the saved `baseline` binary and this build alternately, then compares them.
 /// The order flips every round (ABBAAB…) so drift over the session hits both sides
 /// alike.
-fn ab(baseline: &str) -> bool {
+///
+/// With `only`, a comma-separated list, both builds run only the listed
+/// scenarios. A scenario the baseline doesn't know records nothing there and
+/// prints as `new`.
+fn ab(baseline: &str, only: Option<&str>) -> bool {
     let baseline = binary_path(baseline);
     let this = std::env::current_exe().unwrap();
     let mut before = Vec::new();
@@ -2421,11 +4789,11 @@ fn ab(baseline: &str) -> bool {
         let before_label = format!("ab-before-{round}");
         let after_label = format!("ab-after-{round}");
         if round % 2 == 1 {
-            run_binary(&baseline, &before_label);
-            run_binary(&this, &after_label);
+            run_binary(&baseline, &before_label, only);
+            run_binary(&this, &after_label, only);
         } else {
-            run_binary(&this, &after_label);
-            run_binary(&baseline, &before_label);
+            run_binary(&this, &after_label, only);
+            run_binary(&baseline, &before_label, only);
         }
         before.push(before_label);
         after.push(after_label);
@@ -2469,8 +4837,8 @@ fn main() {
             }
         }
         ["save-binary", name] => save_binary(name),
-        ["ab", baseline] => {
-            if !ab(baseline) {
+        ["ab", baseline, rest @ ..] if rest.len() <= 1 => {
+            if !ab(baseline, rest.first().copied()) {
                 std::process::exit(1);
             }
         }
@@ -2478,7 +4846,12 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: chunk_lifecycle run <label> [<scenario>,…] | compare <before> <after> \
-                 | save-binary <name> | ab <baseline> | profile <scenario>"
+                 | save-binary <name> | ab <baseline> [<scenario>,…] | profile <scenario>\n\
+                 \n\
+                 `ab` with a scenario list runs only those scenarios in both builds, as a quick \
+                 check; the run without a list is the binding one. `compare` and `ab` print a \
+                 metric found in one build only as `new` (after only) or `gone` (before only), \
+                 and print the ratio lines in `RATIO_LINES`; neither kind gates anything."
             );
             std::process::exit(2);
         }

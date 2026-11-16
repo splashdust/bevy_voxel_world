@@ -54,16 +54,16 @@ use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
-use super::sky::{Columns, Hinted, SkyRule, WALK_BUDGET};
+use super::sky::{Columns, SkyRule, WALK_BUDGET};
 use super::slot::{
     cell_index, put_lamp, put_texel, shell_cell, texel_at, texel_bytes, SLOT_TEXELS,
 };
 use super::solver::{empty_planes, LightTaskSettings};
 use crate::chunk::{
-    chunk_containing, ChunkData, ChunkKey, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U,
-    PADDED_CHUNK_SIZE,
+    ChunkData, ChunkKey, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK_SIZE,
 };
-use crate::configuration::{VoxelLookupDelegate, VoxelLookupFn, VoxelWorldConfig};
+use crate::configuration::{VoxelLookupDelegate, VoxelWorldConfig};
+use crate::level_0_reader::{ChunkLookups, Hinted};
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::{VoxelEditReader, VoxelEdits};
 
@@ -709,7 +709,7 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
             block *= 2;
         }
 
-        let mut lookups: HashMap<IVec3, VoxelLookupFn<I>> = HashMap::new();
+        let mut lookups = ChunkLookups::new(self.delegate);
         let mut made = 0u64;
         let mut answer = [0; CHUNK];
         let blocks = CHUNK / block;
@@ -734,13 +734,7 @@ impl<I: Copy + PartialEq> CoarseWalk<I> {
                     let at = IVec3::new(middle.x, y, middle.z);
                     made += 1;
                     let edit = self.edits.as_ref().and_then(|edits| edits.get(at));
-                    let voxel = edit.unwrap_or_else(|| {
-                        let chunk = chunk_containing(at);
-                        let lookup = lookups
-                            .entry(chunk)
-                            .or_insert_with(|| (self.delegate)(chunk, 0, None));
-                        lookup(at, None)
-                    });
+                    let voxel = edit.unwrap_or_else(|| lookups.lookup(at));
                     !voxel.is_solid()
                 });
                 if clear {
