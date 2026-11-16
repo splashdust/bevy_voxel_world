@@ -52,7 +52,7 @@ No Rust signature changed. Only the cases below break.
 
 This applies only to a custom vertex shader that feeds the crate's fragment shader. The outputs at locations 9 and 10 used to exist only in a lit world, and now exist in every world. A shader that declares them but never writes them still compiles, and shows the side texture on every face.
 
-```wgsl
+```wesl
 // 0.19.3, unlit world: nothing to write
 
 // now, in every world
@@ -64,7 +64,7 @@ out.local_normal = vertex.normal;
 
 A lit world's vertex shaders now also output `world_grid_position`, the centroid-sampled world position, at location 12 under the `SUB_GRIDS` shader def. The crate's fragment shaders read sub-grids' faces from it. A shader that declares the crate's output but never writes location 12 still compiles, and lights sub-grids' faces as if they were at the world's origin.
 
-```wgsl
+```wesl
 // now, after out.world_position is set
 @if(SUB_GRIDS)
 out.world_grid_position = out.world_position.xyz;
