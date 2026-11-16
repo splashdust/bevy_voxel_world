@@ -142,9 +142,8 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     /// Sub-grids `despawn_landed` ended this frame, for `apply_despawns` to
     /// despawn.
     despawning: Vec<Entity>,
-    /// Sub-grids stamped and still live, which fragment checks landing from
-    /// the stamp on count as gone.
-    #[cfg(feature = "dislodged_fragments")]
+    /// Sub-grids stamped and still live. A later stamp refuses them, and
+    /// fragment checks landing from the stamp on count them as gone.
     stamped_away: Mutex<bevy::platform::collections::HashSet<Entity>>,
     stats: HandoverStats,
     /// In a lit world, the chunks whose light each handover holds, by its
@@ -173,7 +172,6 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             next_id: 0,
             despawns: Mutex::default(),
             despawning: Vec::new(),
-            #[cfg(feature = "dislodged_fragments")]
             stamped_away: Mutex::default(),
             stats: HandoverStats::default(),
             #[cfg(feature = "light_propagation")]
@@ -529,15 +527,14 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Notes a stamp, whose edits commit in the next `commit_voxel_edits`,
     /// to announce with `stamped` once that commit's handover lands.
     pub fn stamped(&self, stamped: Stamped<C>) {
-        #[cfg(feature = "dislodged_fragments")]
         self.stamped_away.lock().unwrap().insert(stamped.sub_grid);
         self.queued.lock().unwrap().push(Operation::Stamp(stamped));
     }
 
-    /// Whether the sub-grid `entity` was stamped: from the call on, a
-    /// fragment check of it finds nothing to report, since its voxels are
-    /// the target's.
-    #[cfg(feature = "dislodged_fragments")]
+    /// Whether the sub-grid `entity` was stamped and is still live: from
+    /// the call on, its voxels are the target's. A later stamp refuses it as
+    /// the sub-grid or the target, and a fragment check of it finds nothing
+    /// to report.
     pub fn is_stamped_away(&self, entity: Entity) -> bool {
         self.stamped_away.lock().unwrap().contains(&entity)
     }
@@ -545,7 +542,6 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Whether [`write_landed`](Self::write_landed) has anything to do: a
     /// landed lift or stamp to announce, or a stamped sub-grid to forget.
     pub fn has_landed(handovers: Res<Self>) -> bool {
-        #[cfg(feature = "dislodged_fragments")]
         if !handovers.stamped_away.lock().unwrap().is_empty() {
             return true;
         }
@@ -568,12 +564,9 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         mut lifted: MessageWriter<Lifted<C>>,
         mut stamped: MessageWriter<Stamped<C>>,
     ) {
-        #[cfg(feature = "dislodged_fragments")]
-        {
-            let stamped_away = handovers.stamped_away.get_mut().unwrap();
-            if !stamped_away.is_empty() {
-                stamped_away.retain(|&entity| sub_grids.live(entity).is_some());
-            }
+        let stamped_away = handovers.stamped_away.get_mut().unwrap();
+        if !stamped_away.is_empty() {
+            stamped_away.retain(|&entity| sub_grids.live(entity).is_some());
         }
         if handovers.landed.is_empty() {
             return;

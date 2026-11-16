@@ -409,6 +409,46 @@ fn stamp_refuses_a_dead_sub_grid_a_dead_target_and_a_target_inside_it() {
 }
 
 #[test]
+fn a_stamped_sub_grid_is_refused_on_either_side_of_a_stamp_until_it_lands() {
+    let mut app = stamp_app();
+    let down = Transform::from_translation(Vec3::new(0.0, -5.0, 0.0));
+    let sub_grid = sub_grid_holding(&mut app, down, row());
+    let other = sub_grid_holding(&mut app, Transform::default(), row());
+
+    let (results, previews) = run(&mut app, move |voxel_world| {
+        voxel_world
+            .stamp(sub_grid, Grid::World, incoming_replaces)
+            .unwrap();
+        let attempts = [
+            (sub_grid, Grid::World),
+            (sub_grid, Grid::SubGrid(other)),
+            (other, Grid::SubGrid(sub_grid)),
+        ];
+        let previews: Vec<bool> = attempts
+            .iter()
+            .map(|(s, t)| voxel_world.stamp_preview(*s, *t).is_some())
+            .collect();
+        let results: Vec<Result<(), StampError>> = attempts
+            .iter()
+            .map(|(s, t)| voxel_world.stamp(*s, *t, incoming_replaces))
+            .collect();
+        (results, previews)
+    });
+
+    assert_eq!(results, [Err(StampError::AlreadyStamped); 3]);
+    assert_eq!(previews, [false; 3]);
+    until_stamped(&mut app, sub_grid);
+    for _ in 0..3 {
+        app.update();
+    }
+    let messages: Vec<Stamped<LiftWorld>> =
+        stamped(&app).iter().map(|(_, message, _)| *message).collect();
+    assert_eq!(messages, [Stamped::new(sub_grid, Grid::World)]);
+    let left = read(&mut app, Grid::SubGrid(other), row());
+    assert!(left.iter().all(|v| *v == WorldVoxel::Solid(5)), "{left:?}");
+}
+
+#[test]
 fn right_after_the_call_each_voxel_reads_from_one_grid() {
     let mut app = stamp_app();
     let above = Transform::from_translation(Vec3::new(0.0, 10.0, 0.0));

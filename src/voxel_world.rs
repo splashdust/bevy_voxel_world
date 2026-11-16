@@ -455,8 +455,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// `stamp`'s does.
     ///
     /// Returns `None` where `stamp` would refuse: `sub_grid` isn't a live
-    /// sub-grid, `target` names an entity that isn't one, or `target` is
-    /// the sub-grid or one of its descendants.
+    /// sub-grid, `target` names an entity that isn't one, `target` is the
+    /// sub-grid or one of its descendants, or either was stamped already and
+    /// that stamp hasn't landed.
     pub fn stamp_preview(&self, sub_grid: Entity, target: Grid) -> Option<StampPreview> {
         crate::sub_grid::preview(self.stamp_parts(), sub_grid, target)
     }
@@ -507,11 +508,13 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// [`StampError::NoSuchSubGrid`] when `sub_grid` isn't a live sub-grid
     /// of this world, [`StampError::NoSuchTarget`] when `target` names an
-    /// entity that isn't one, and [`StampError::IntoItself`] when `target`
-    /// is the sub-grid or one of its descendants. Nothing is changed. A
-    /// sub-grid counts as a descendant of the sub-grids above it in the
-    /// hierarchy as it was when last frame's transforms propagated, or from
-    /// the call for one lifted this frame.
+    /// entity that isn't one, [`StampError::IntoItself`] when `target` is
+    /// the sub-grid or one of its descendants, and
+    /// [`StampError::AlreadyStamped`] when `sub_grid`, or a sub-grid
+    /// `target`, was stamped already and that stamp hasn't landed. Nothing is
+    /// changed. A sub-grid counts as a descendant of the sub-grids above it
+    /// in the hierarchy as it was when last frame's transforms propagated,
+    /// or from the call for one lifted this frame.
     pub fn stamp(
         &mut self,
         sub_grid: Entity,
