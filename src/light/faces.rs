@@ -198,7 +198,8 @@ fn emissive_reaches_sooner(
 ) -> bool {
     let back = face.opposite();
     from.inputs.emissive.iter().any(|voxel| {
-        let Some((u, v)) = face.uv(voxel.x as usize, voxel.y as usize, voxel.z as usize)
+        let Some((u, v)) =
+            face.uv(voxel.x() as usize, voxel.y() as usize, voxel.z() as usize)
         else {
             return false;
         };
@@ -206,7 +207,7 @@ fn emissive_reaches_sooner(
         if to.inputs.occupancy.is_solid(tx, ty, tz) {
             return false;
         }
-        let Some(start) = scale.start(scale.precision().of_whole(voxel.level)) else {
+        let Some(start) = scale.start(scale.precision().of_whole(voxel.level())) else {
             return false;
         };
         start as u32 + 1 < scale.last_distance(to.voxel.at(tx, ty, tz))

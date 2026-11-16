@@ -919,8 +919,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     // A light entry's first solve changes no inputs a
                     // neighbour reads, so it ripples nowhere.
                     let fresh = self.fresh.remove(&key);
-                    if solved.rescanned.is_none()
-                        && chunk.light.same_levels(&solved.light)
+                    if solved.rescanned.is_none() && chunk.light.same_light(&solved.light)
                     {
                         // The light already there is the light these seeds
                         // give.
@@ -1129,7 +1128,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             }
             chunk.faces = landing.solved.faces;
             landing.solved.rescanned.is_none()
-                && chunk.light.same_levels(&landing.solved.light)
+                && chunk.light.same_light(&landing.solved.light)
         };
         let (urgent, cause) = (landing.urgent, landing.cause);
         if same {
@@ -1757,6 +1756,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             inputs: Arc::new(light.inputs.with_columns(answer)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
+                            color: light.color,
                             precision: light.precision,
                         });
                     }
@@ -2083,6 +2083,7 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         inputs: chunk.light.inputs.clone(),
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
+        color: light.color,
         precision: light.precision,
     });
 }

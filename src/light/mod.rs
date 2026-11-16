@@ -22,6 +22,7 @@
 
 mod census;
 mod coarse;
+pub(crate) mod color;
 pub(crate) mod config;
 mod edit;
 mod faces;
@@ -270,6 +271,9 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// `work`. A solid cell reads the brightest of its six neighbours. A
     /// coarse chunk with no voxels to mesh, and hinted air holding no light
     /// entry, walk the column above the voxel on request: see [`request`].
+    ///
+    /// A level-0 chunk and a light entry read the light colour they hold, and
+    /// an emissive voxel its own. Everything else reads white.
     #[allow(clippy::too_many_arguments)]
     pub fn light_at(
         &self,
@@ -387,16 +391,13 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             }
         };
         if !open {
-            let level = match own {
-                Some(crate::voxel::WorldVoxel::Solid(material)) => self
-                    .task
-                    .emission
-                    .iter()
-                    .find(|(emissive, _)| *emissive == material)
-                    .map_or(0, |(_, level)| *level),
-                _ => 0,
+            let emitter = match own {
+                Some(crate::voxel::WorldVoxel::Solid(material)) => {
+                    self.task.emission.get(material)
+                }
+                _ => None,
             };
-            return Some(LightLevels::new(0, level));
+            return Some(solver::emitted(&self.task.emission, emitter));
         }
         let chunk = crate::chunk::chunk_containing(position);
         let top = (chunk.y + 1) * crate::chunk::CHUNK_SIZE_I;
@@ -469,21 +470,18 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         let local = (position - chunk * crate::chunk::CHUNK_SIZE_I).as_uvec3();
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         if light.inputs.occupancy.is_solid(x, y, z) {
-            let level = light
+            let emitter = light
                 .inputs
                 .emissive
                 .iter()
-                .find(|emitter| {
-                    (emitter.x, emitter.y, emitter.z) == (x as u8, y as u8, z as u8)
-                })
-                .map_or(0, |emitter| emitter.level);
-            return Some(LightLevels::new(0, level));
+                .find(|emitter| emitter.at() == (x as u8, y as u8, z as u8))
+                .map(|emitter| color::Emitter {
+                    level: emitter.level(),
+                    material: emitter.material(),
+                });
+            return Some(solver::emitted(&self.task.emission, emitter));
         }
-        Some(LightLevels::of_steps(
-            light.sky.at(x, y, z),
-            light.voxel.at(x, y, z),
-            light.precision,
-        ))
+        Some(light.open_levels_at(x, y, z))
     }
 }
 
@@ -495,11 +493,17 @@ pub(crate) struct LightReads<'a, C: VoxelWorldConfig> {
     pub route: Option<&'a route::LightRoute<C>>,
 }
 
-/// The brighter of `a` and `b` in sky light and in voxel light.
+/// The brighter of `a` and `b` in sky light and in voxel light, with the
+/// light colour of the brighter voxel light, `a`'s on a tie.
 fn brighter(a: LightLevels, b: LightLevels) -> LightLevels {
     LightLevels {
         sky: a.sky.max(b.sky),
         voxel: a.voxel.max(b.voxel),
+        voxel_color: if b.voxel > a.voxel {
+            b.voxel_color
+        } else {
+            a.voxel_color
+        },
     }
 }
 
@@ -1036,10 +1040,7 @@ fn task_settings<C: VoxelWorldConfig>(
             .then(|| LevelScale::new(config.sky_reach as u32, precision)),
         shape: config.shape,
         routed,
-        emission: emissive_materials
-            .iter()
-            .map(|(material, emission)| (*material, emission.whole_level()))
-            .collect(),
+        emission: color::EmissionTable::new(emissive_materials),
         counters: Arc::new(LightCounters::default()),
         generation: 0,
         sky_generation: 0,

@@ -364,6 +364,11 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// pool, and its neighbours relight again where its emissive voxels
     /// changed.
     ///
+    /// Each [`Emission`] can give its light a colour. Materials whose colours
+    /// are the same once scaled give the same light. A world declaring more
+    /// than 8,192 emissive materials warns once, and gives each one past that
+    /// the colour of the earlier one nearest it.
+    ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.
     #[cfg(feature = "light_propagation")]

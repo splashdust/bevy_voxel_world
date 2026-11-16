@@ -1747,6 +1747,7 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
         inputs: light.inputs.clone(),
         sky: ChunkLevels::Planes(planes.into_boxed_slice()),
         voxel: light.voxel.clone(),
+        color: light.color,
         precision,
     })
 }
@@ -1964,12 +1965,13 @@ mod tests {
         let light = ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy,
-                emissive: Vec::new(),
+                emissive: Default::default(),
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
             sky: ChunkLevels::Planes(vec![above; precision.bits()].into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
+            color: Default::default(),
             precision,
         };
         let own = own_faces_see(&light);
@@ -2086,12 +2088,13 @@ mod tests {
         Arc::new(ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy: Occupancy::Open,
-                emissive: Vec::new(),
+                emissive: Default::default(),
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
             sky: ChunkLevels::Planes(sky.into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
+            color: Default::default(),
             precision: LightPrecision::Steps16,
         })
     }
@@ -2209,7 +2212,7 @@ mod tests {
         let light = Arc::new(ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy,
-                emissive: Vec::new(),
+                emissive: Default::default(),
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
@@ -2218,6 +2221,7 @@ mod tests {
                 ChunkLevels::Uniform(level) => ChunkLevels::Uniform(*level),
             },
             voxel: ChunkLevels::Uniform(0),
+            color: Default::default(),
             precision: LightPrecision::Steps16,
         });
         let own = own_faces_see(&light);

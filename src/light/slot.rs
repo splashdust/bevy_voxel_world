@@ -247,7 +247,7 @@ fn touching_open(solid: &Plane) -> Box<Plane> {
 
 /// Whether the emissive voxel `lamp` touches an open voxel of its own chunk.
 fn touches_open(solid: &Plane, lamp: &EmissiveVoxel) -> bool {
-    let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+    let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
     let around = ((0b111u64 << z) >> 1) as u32;
     (y.saturating_sub(1)..(y + 2).min(CHUNK)).any(|ny| {
         (x.saturating_sub(1)..(x + 2).min(CHUNK))
@@ -325,9 +325,9 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
         }
     }
     for lamp in &light.inputs.emissive {
-        let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+        let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
         let texel = (z + 1) + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
-        put_lamp(&mut bytes, texel, lamp.level, precision);
+        put_lamp(&mut bytes, texel, lamp.level(), precision);
     }
     bytes
 }
@@ -422,7 +422,7 @@ pub(crate) fn border_plane(
         }
     }
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
-        put_lamp(&mut plane, u + v * CHUNK, lamp.level, precision);
+        put_lamp(&mut plane, u + v * CHUNK, lamp.level(), precision);
     });
     plane
 }
@@ -609,7 +609,7 @@ fn for_lamps_on(
 ) {
     let side = if face as usize & 1 == 1 { CHUNK - 1 } else { 0 };
     for lamp in emissive {
-        let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+        let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
         let (on, u, v) = match face {
             Face::NegX | Face::PosX => (x, y, z),
             Face::NegY | Face::PosY => (y, x, z),
@@ -648,12 +648,13 @@ mod tests {
         ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy,
-                emissive: Vec::new(),
+                emissive: Default::default(),
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
             sky,
             voxel: ChunkLevels::Uniform(voxel),
+            color: Default::default(),
             precision: LightPrecision::Steps16,
         }
     }

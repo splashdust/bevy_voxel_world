@@ -88,6 +88,7 @@ pub(crate) mod handover;
 pub(crate) mod line_record;
 pub(crate) mod tag_map;
 
+use super::color::{ChunkColor, EmissionTable};
 use super::config::SubGridSky;
 use super::edit::{reach_of, within_reach, within_reach_of_box};
 use super::faces::FaceHashes;
@@ -245,6 +246,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs,
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
+                    color: chunk.light.color,
                     precision: chunk.light.precision,
                 });
                 chunk.edits = stamp;
@@ -262,6 +264,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs,
                     sky: ChunkLevels::Uniform(sky),
                     voxel: ChunkLevels::Uniform(0),
+                    color: ChunkColor::White,
                     precision: task.precision,
                 }),
                 faces: FaceHashes::default(),
@@ -362,7 +365,7 @@ pub(crate) fn name_new_chunks<C: VoxelWorldConfig>(
 fn inputs_of<I: Copy + PartialEq>(
     bucket: Option<EditBucket<I>>,
     position: IVec3,
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
 ) -> LightInputs {
     let mut occupancy = Occupancy::Open;
     let mut emissive = Vec::new();
@@ -374,19 +377,14 @@ fn inputs_of<I: Copy + PartialEq>(
         let local = (at - min).as_uvec3();
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         occupancy.set(x, y, z, true);
-        if let Some(level) = emission_of(emission, material) {
-            emissive.push(EmissiveVoxel {
-                x: x as u8,
-                y: y as u8,
-                z: z as u8,
-                level,
-            });
+        if let Some(emitter) = emission.get(material) {
+            emissive.push(EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter));
         }
     }
     occupancy.normalize();
     LightInputs {
         occupancy,
-        emissive,
+        emissive: emissive.into(),
         columns: ColumnAnswer::none(),
         ring: false,
     }
@@ -409,7 +407,7 @@ fn inputs_updated<I: Copy + PartialEq>(
     old: &LightInputs,
     position: IVec3,
     voxels: &[VoxelChange<I>],
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
 ) -> LightInputs {
     let mut occupancy = old.occupancy.clone();
     let min = position * CHUNK_SIZE_I;
@@ -430,30 +428,20 @@ fn inputs_updated<I: Copy + PartialEq>(
     let mut emissive: Vec<EmissiveVoxel> = old
         .emissive
         .iter()
-        .filter(|emitter| !placed.contains_key(&(emitter.x, emitter.y, emitter.z)))
+        .filter(|emitter| !placed.contains_key(&emitter.at()))
         .copied()
         .collect();
     for ((x, y, z), material) in placed {
-        if let Some(level) = material.and_then(|material| emission_of(emission, material))
-        {
-            emissive.push(EmissiveVoxel { x, y, z, level });
+        if let Some(emitter) = material.and_then(|material| emission.get(material)) {
+            emissive.push(EmissiveVoxel::new(x, y, z, emitter));
         }
     }
     LightInputs {
         occupancy,
-        emissive,
+        emissive: emissive.into(),
         columns: ColumnAnswer::none(),
         ring: false,
     }
-}
-
-/// The level `material` emits at under the emissive list `emission`, if it
-/// is emissive.
-fn emission_of<I: PartialEq>(emission: &[(I, u8)], material: I) -> Option<u8> {
-    emission
-        .iter()
-        .find(|(emissive, _)| *emissive == material)
-        .map(|(_, level)| *level)
 }
 
 impl<C: VoxelWorldConfig> LightSettings<C> {
@@ -477,10 +465,8 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
             let level = inputs
                 .emissive
                 .iter()
-                .find(|emitter| {
-                    (emitter.x, emitter.y, emitter.z) == (x as u8, y as u8, z as u8)
-                })
-                .map_or(0, |emitter| emitter.level);
+                .find(|emitter| emitter.at() == (x as u8, y as u8, z as u8))
+                .map_or(0, |emitter| emitter.level());
             return Some(LightLevels::new(0, level));
         }
         Some(LightLevels::of_steps(

@@ -16,7 +16,7 @@ use super::faces::{Face, FaceHashes};
 use super::fill::seed::{CellsAround, Seeding};
 use super::fill::{PositionCells, SkyFillField};
 use super::inputs::LightInputs;
-use super::inputs::{EmissiveVoxel, Occupancy};
+use super::inputs::Occupancy;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::relight::LightWork;
@@ -343,12 +343,13 @@ impl SlotBox {
             ChunkLight {
                 inputs: Arc::new(LightInputs {
                     occupancy: Occupancy::Mixed(solid),
-                    emissive: Vec::<EmissiveVoxel>::new(),
+                    emissive: Default::default(),
                     columns: ColumnAnswer::none(),
                     ring: true,
                 }),
                 sky: ChunkLevels::Uniform(precision.top()),
                 voxel: ChunkLevels::Planes(kernel_box.planes.clone()),
+                color: Default::default(),
                 precision,
             }
         };
@@ -387,7 +388,8 @@ pub fn emissive_scan<I: Copy + PartialEq + std::hash::Hash>(
     let mut chunk = ChunkData::new();
     chunk.fill_type = FillType::Mixed;
     chunk.voxels = Some(voxels.clone());
-    LightInputs::of(&chunk, emission, ColumnAnswer::none())
+    let emission = super::color::EmissionTable::white(emission);
+    LightInputs::of(&chunk, &emission, ColumnAnswer::none())
         .0
         .emissive
         .len()
