@@ -267,11 +267,21 @@ A sub-grid is a set of voxels on a grid of its own, with its own transform, that
 $ cargo add bevy_voxel_world --features sub_grids
 ```
 
-`VoxelWorld::spawn_sub_grid` makes an empty one, and `VoxelWorld::grid` and `VoxelWorld::grid_mut` read and edit any grid with the same calls the world's own methods use. A sub-grid has no generator, so every voxel it holds is a voxel edit. It shows through chunks of its own, built by the world's chunk tasks, mesher and material, and its chunks are children of its entity, so they move with it.
+Sub-grids can be created either from scratch, by creating an empty sub-grid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
 
-`VoxelWorld::lift` moves the voxels a game picks out of any grid into a new sub-grid, and `VoxelWorld::stamp` writes a sub-grid's voxels back into any other grid at the nearest pose that lines up with it. Either way the voxels never show twice or not at all: every chunk the move touches changes in the same frame. `VoxelWorld::raycast_grids` casts a ray through every grid. In a lit world, a sub-grid's lamps light it, its own voxels keep sky out of its insides, and its faces show the world's light where it is, so it darkens as it flies into a cave.
+In a lit world, sug-grids are lit by their own lights, the sky, and lights from the regular world. However, lights in sub-grids does not light the regular world or other sub-grids. Regular Bevy lights can be added to achive that instead.
 
-The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) walks through the feature on a few pillars and rods: cut them apart, build on them, drop new rods and stamp them back into the world.
+Main ways to interact with sub-grids are:
+
+- `VoxelWorld::spawn_sub_grid` creaes an empty sub-grid.
+- `VoxelWorld::grid` and `VoxelWorld::grid_mut` returns an access object with `set_voxel` methods, so the grid can be edited the same way as the regular world.
+- `VoxelWorld::lift` grabs a range of voxels from the world and make a sub-grid from them, leaving air behind in the parent world.
+- `VoxelWorld::stamp` writes a sub-grid's voxels back into any other grid at the nearest pose that lines up with it.
+- `VoxelWorld::raycast_grids` casts a ray through every grid, including the regular world.
+
+A sub-grid has no generator, so every voxel it holds is a voxel edit. It has chunks of its own, built by the world's chunk tasks, mesher and material, and its chunks are children of its entity, so they move with it.
+
+The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) walks through and demos the feature.
 
 ```bash
 $ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,light_propagation
@@ -279,7 +289,11 @@ $ cargo run -r --example sub_grids --features sub_grids,dislodged_fragments,ligh
 
 ## Dislodged fragments
 
-With the opt-in `dislodged_fragments` feature, a world can ask the crate to find the voxels an edit cuts off from the rest of their grid, by returning settings from `VoxelWorldConfig::detect_dislodged_fragments`. Each piece arrives as a `FragmentDislodged` message. With `sub_grids` too, the crate can lift each piece into a sub-grid for the game to drop.
+Another off-by-default feature called `dislodged_fragments` finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`.
+
+When a dislodged fragment is detected, a `FragmentDislodged<C>` message is sent, with its bounding box, its voxel count and `contains`. The largest piece of a cut keeps its place (typically that's the world itself).
+
+When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to automatically turn dislodged fragments into sub-grids.
 
 The [`sub_grids` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/sub_grids.rs) lifts each piece you cut off a pillar or a rod, and the [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) fells a tree when you cut through its trunk.
 
