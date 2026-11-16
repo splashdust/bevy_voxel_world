@@ -393,6 +393,28 @@ fn a_grids_chunk_reads_through_its_grid_where_the_world_has_a_chunk_at_its_key()
     );
 }
 
+#[test]
+fn a_chunk_component_names_its_grid_where_the_world_has_a_chunk_at_its_key() {
+    let mut app = floor_app();
+    let origin = level_0([0, 0, 0]);
+    let entity = spawn_filled::<FloorWorld>(
+        &mut app,
+        Transform::default(),
+        &[IVec3::new(5, 6, 7)],
+        WorldVoxel::Solid(3),
+    );
+    until_ready::<FloorWorld>(&mut app, entity, &[origin]);
+
+    let mut chunks = app.world_mut().query::<&Chunk<FloorWorld>>();
+    let mut at_origin: Vec<Grid> = chunks
+        .iter(app.world())
+        .filter(|chunk| chunk.key() == origin)
+        .map(Chunk::grid)
+        .collect();
+    at_origin.sort_by_key(|grid| *grid != Grid::World);
+    assert_eq!(at_origin, [Grid::World, Grid::SubGrid(entity)]);
+}
+
 /// The voxels of the sub-grid chunks a collider system rebuilt on
 /// `ChunkPublished`, read at [`COLLIDER_VOXEL`].
 #[derive(Resource, Default)]
