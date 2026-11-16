@@ -124,8 +124,15 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     handovers: HashMap<u32, Vec<Entity>>,
     /// The operations of each handover holding any, by its id.
     operations: HashMap<u32, Vec<Operation<C>>>,
-    /// Operations whose commit is still to come.
+    /// Operations whose edits are still pending: the next commit takes them.
     queued: Mutex<Vec<Operation<C>>>,
+    /// Operations whose edits the last commit took, for the `join` of that
+    /// commit's requests.
+    ///
+    /// An operation made after a commit and before its `join`, as by a
+    /// system running between the two, waits in `queued` for the next
+    /// commit, which is the one that takes its edits.
+    committed: Vec<Operation<C>>,
     /// Operations whose handover has landed, to announce.
     landed: Vec<Operation<C>>,
     next_id: u32,
@@ -161,6 +168,7 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             handovers: HashMap::new(),
             operations: HashMap::new(),
             queued: Mutex::default(),
+            committed: Vec::new(),
             landed: Vec::new(),
             next_id: 0,
             despawns: Mutex::default(),
@@ -247,7 +255,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// and the lift is dropped. A forming handover with no chunks lands at
     /// once. A stamp marks its commit, so it always forms one.
     pub fn join(&mut self, joining: Joining) {
-        let operations = std::mem::take(self.queued.get_mut().unwrap());
+        let operations = std::mem::take(&mut self.committed);
         if joining.chunks.is_empty() {
             if joining.forming {
                 self.landed.extend(operations);
@@ -502,6 +510,14 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             }
             false
         });
+    }
+
+    /// Hands the lifts and stamps queued so far to the commit that has just
+    /// taken their edits, so that commit's `join` holds them. Called by
+    /// `commit_voxel_edits`.
+    pub fn note_commit(&mut self) {
+        let queued = self.queued.get_mut().unwrap();
+        self.committed.append(queued);
     }
 
     /// Notes a lift, whose edits commit in the next `commit_voxel_edits`,

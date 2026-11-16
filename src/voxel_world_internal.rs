@@ -227,13 +227,19 @@ where
         #[cfg(feature = "sub_grids")] mut sub_grid_committed: MessageWriter<
             crate::edits::SubGridEditsCommitted<C>,
         >,
+        #[cfg(feature = "sub_grids")] mut handovers: ResMut<
+            crate::sub_grid::handover::Handovers<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("commit_voxel_edits").entered();
         let mut flipped = Vec::new();
         let sets = voxel_edits.commit_all(&mut flipped);
         #[cfg(feature = "sub_grids")]
-        requests.note_commit(!flipped.is_empty());
+        {
+            requests.note_commit(!flipped.is_empty());
+            handovers.note_commit();
+        }
         #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
         if !flipped.is_empty() || !requests.emptied().is_empty() {
             let committed = voxel_edits.committed();
