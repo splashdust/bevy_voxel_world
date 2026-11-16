@@ -600,8 +600,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
     /// renders, which is plausible rather than exact: the cell holding the
     /// voxel while the chunk holds a slot in the world's light texture, and
-    /// otherwise the one level per channel its tag shows. A solid cell reads
-    /// the brightest of its six neighbours, or 0 if all six are solid.
+    /// otherwise the one sky light level and voxel light level its tag shows. A
+    /// solid cell reads the brightest of its six neighbours, or 0 if all six
+    /// are solid.
     ///
     /// Where nothing renders, in such a chunk with no voxels to mesh or in air
     /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,

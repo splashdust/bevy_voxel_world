@@ -181,10 +181,10 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
             counts
         })
         .unwrap();
-    let most_common = |channel: fn(&(u32, u32)) -> u32| {
+    let most_common = |kind: fn(&(u32, u32)) -> u32| {
         let mut by_level: HashMap<u32, usize> = HashMap::new();
         for (levels, count) in &read {
-            *by_level.entry(channel(levels)).or_default() += count;
+            *by_level.entry(kind(levels)).or_default() += count;
         }
         by_level
             .into_iter()

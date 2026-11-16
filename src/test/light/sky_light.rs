@@ -176,7 +176,7 @@ fn a_1x1_shaft_lights_its_column_and_a_pool_at_its_foot_that_fades_to_black() {
 }
 
 #[test]
-fn a_sealed_pocket_and_a_cavern_beyond_its_pool_read_0_in_both_channels() {
+fn a_sealed_pocket_and_a_cavern_beyond_its_pool_read_0_in_sky_light_and_voxel_light() {
     let mut app = settled(shaft_world(sky_light(Sky::default(), 30)));
 
     for z in 20..26 {

@@ -95,7 +95,7 @@ use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::levels::LightLevels;
 use super::relight::LightWork;
 use super::sky::ColumnAnswer;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::ViewChunk;
 use super::LightSettings;
 use crate::chunk::{chunk_containing, CHUNK_SIZE_I};
@@ -260,8 +260,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 entity: Entity::PLACEHOLDER,
                 light: Arc::new(ChunkLight {
                     inputs,
-                    sky: ChannelLight::Uniform(sky),
-                    voxel: ChannelLight::Uniform(0),
+                    sky: ChunkLevels::Uniform(sky),
+                    voxel: ChunkLevels::Uniform(0),
                     precision: task.precision,
                 }),
                 faces: FaceHashes::default(),

@@ -494,7 +494,7 @@ pub(crate) struct LightReads<'a, C: VoxelWorldConfig> {
     pub route: Option<&'a route::LightRoute<C>>,
 }
 
-/// The brighter of `a` and `b` in each channel.
+/// The brighter of `a` and `b` in sky light and in voxel light.
 fn brighter(a: LightLevels, b: LightLevels) -> LightLevels {
     LightLevels {
         sky: a.sky.max(b.sky),

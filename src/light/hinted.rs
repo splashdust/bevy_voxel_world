@@ -43,7 +43,7 @@ use super::record::SkyRecord;
 use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::{ColumnAnswer, SkyRule};
-use super::solver::{neighbour_index, ChannelLight, ChunkLight, Neighbourhood};
+use super::solver::{neighbour_index, ChunkLevels, ChunkLight, Neighbourhood};
 use super::view::{in_world, AirInputs, ViewChunk, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -170,16 +170,16 @@ pub(crate) fn known_light(
     precision: LightPrecision,
 ) -> ChunkLight {
     let sky = match inputs.direct_sky() {
-        None => ChannelLight::Uniform(0),
-        Some(_) if inputs.all_open_direct() => ChannelLight::Uniform(precision.top()),
+        None => ChunkLevels::Uniform(0),
+        Some(_) if inputs.all_open_direct() => ChunkLevels::Uniform(precision.top()),
         Some(direct) => {
-            ChannelLight::Planes(vec![*direct; precision.bits()].into_boxed_slice())
+            ChunkLevels::Planes(vec![*direct; precision.bits()].into_boxed_slice())
         }
     };
     ChunkLight {
         inputs: inputs.clone(),
         sky,
-        voxel: ChannelLight::Uniform(0),
+        voxel: ChunkLevels::Uniform(0),
         precision,
     }
 }

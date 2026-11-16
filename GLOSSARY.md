@@ -185,7 +185,7 @@ How many voxels light spreads from a source before its light level reaches zero.
 _Avoid_: radius, range
 
 **Light precision**:
-How finely a channel divides the scale of light levels, which a world chooses. 16 steps holds whole levels and 256 steps holds fractions of one. A format is named by what it holds: 4+4 is 16 steps each for sky light and voxel light, and 8+8 is 256 each.
+How finely sky light and voxel light divide the scale of light levels, which a world chooses. 16 steps holds whole levels and 256 steps holds fractions of one. A format is named by what it holds: 4+4 is 16 steps each for sky light and voxel light, and 8+8 is 256 each.
 _Avoid_: bit depth, light quality
 
 **Provisional light**:
@@ -237,7 +237,7 @@ The one way a world works out a chunk's light: from the occupancy, direct sky, e
 _Avoid_: propagator, light engine
 
 **Kernel**:
-The part of the solver that spreads light from its sources through open voxels, for one channel at a time. Sky light and voxel light, first solves and relights all use the same one.
+The part of the solver that spreads light from its sources through open voxels, for sky light or voxel light, one at a time. Sky light and voxel light, first solves and relights all use the same one.
 _Avoid_: solver (which also gathers the kernel's inputs), flood fill
 
 **Voxel light**:
@@ -249,11 +249,11 @@ A voxel whose material a world declares to be a source of voxel light.
 _Avoid_: light block, torch
 
 **Slot**:
-Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces, or the faces of a sub-grid passing through it, see more than one light level in a channel.
+Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces, or the faces of a sub-grid passing through it, see more than one sky light level or more than one voxel light level.
 _Avoid_: page, atlas entry
 
 **Tag**:
-The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
+The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one sky light level and voxel light level that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
 _Avoid_: mesh tag (the Bevy component that carries it), light index
 
 **Tag map**:

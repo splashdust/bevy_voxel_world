@@ -12,9 +12,9 @@
 //! direct sky changed, and goes on to neighbours only across faces whose
 //! hashes change (see [`relight`](super::relight)). Where an edit touches no
 //! light, nothing relights: a placed solid relights only if its voxel held
-//! light, a dug one only if a voxel beside it did, in either channel. Placing
-//! or removing an emissive voxel always relights. Every edit committed in one
-//! frame is worked out together, as one change.
+//! light, a dug one only if a voxel beside it did, sky light or voxel light.
+//! Placing or removing an emissive voxel always relights. Every edit committed
+//! in one frame is worked out together, as one change.
 //!
 //! The ripple compares a solve's face hashes with those the world view holds.
 //! While an earlier ripple is still out, those hashes are about to be
@@ -627,7 +627,7 @@ fn touches_light(view: &View, p: IVec3, solid: bool) -> bool {
         })
 }
 
-/// Whether the open voxel at `p` holds light in either channel, or `None` if
+/// Whether the open voxel at `p` holds sky light or voxel light, or `None` if
 /// it is solid or its chunk isn't in the view. An open voxel of hinted air
 /// holding no light entry may hold light, which nothing keeps.
 fn open_light(view: &View, p: IVec3) -> Option<bool> {
@@ -693,7 +693,7 @@ fn column_looked_up<I: Copy + PartialEq>(
 }
 
 /// How far, in voxels, a change can move light under `settings`: the longer
-/// of the two channels' reaches.
+/// of sky light's and voxel light's reaches.
 pub(super) fn reach_of<I>(settings: &LightTaskSettings<I>) -> i32 {
     settings
         .sky_scale

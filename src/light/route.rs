@@ -72,8 +72,8 @@
 //!
 //! A change of precision or slot capacity replaces the texture: see
 //! [`LightRoute::replace_texture`]. Every chunk with a slot drops to its one
-//! level per channel, and takes a slot in the new texture as its light lands
-//! again.
+//! sky light level and voxel light level, and takes a slot in the new texture
+//! as its light lands again.
 //!
 //! With `sub_grids`, a world with a sub-grid also keeps a tag map beside the
 //! light texture, from a world chunk position to the tag shown there. Every
@@ -126,7 +126,7 @@ use super::slot::{
     most_common_open, open_voxels_see, shell_cell, slot_bytes, texel_at, texel_bytes,
     texel_levels, texture_format, write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::{chunk_centre, world_position};
 use crate::chunk::CHUNK_SIZE_U;
 use crate::chunk::{Chunk, ChunkKey};
@@ -558,8 +558,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Replaces the texture with one of `precision`'s format holding
     /// `capacity` slots, after either changed.
     ///
-    /// Every chunk with a slot drops it and shows its most common level per
-    /// channel, and changed tags wait in
+    /// Every chunk with a slot drops it and shows its most common sky light
+    /// level and voxel light level, and changed tags wait in
     /// [`take_changed_tags`](Self::take_changed_tags). The old texture waits
     /// in [`take_released`](Self::take_released) for the world's materials to
     /// stop binding it, and the new one is made only when a chunk next takes
@@ -776,9 +776,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     ///
     /// A kept chunk takes a slot unless every one of its open voxels, and
     /// every open voxel its slot's shell copies from its face neighbours,
-    /// holds one level per channel. Without a slot it shows the most common
-    /// level among its open voxels. A chunk showing its mesh that is no
-    /// longer kept goes back to the rule in [`slot`](super::slot).
+    /// holds one sky light level and one voxel light level. Without a slot it
+    /// shows the most common level among its open voxels. A chunk showing its
+    /// mesh that is no longer kept goes back to the rule in
+    /// [`slot`](super::slot).
     #[cfg_attr(
         not(any(test, feature = "sub_grids")),
         expect(dead_code, reason = "called by the tag map")
@@ -1166,9 +1167,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     }
 
     /// What the level-0 chunk `id` shows with no slot while its light needs
-    /// one: the most common level per channel among the voxels its slot rule
-    /// reads, or the levels of a chunk with no light if its light hasn't
-    /// landed.
+    /// one: the most common sky light level and voxel light level among the
+    /// voxels its slot rule reads, or the levels of a chunk with no light if
+    /// its light hasn't landed.
     fn most_common_shows(&self, id: RouteId) -> Shows {
         let chunk = &self.chunks[&id];
         let Some(light) = &chunk.light else {
@@ -1768,12 +1769,12 @@ impl RouteChunk {
 }
 
 /// The levels of a chunk with no slot whose faces see `sees`, as sky and
-/// voxel light. A channel no face reads takes the chunk's own level, if it
-/// has one.
+/// voxel light. A kind of light no face reads takes the chunk's own level, if
+/// it has one.
 fn flat_tag(sees: &FacesSee, light: &ChunkLight) -> (u8, u8) {
-    let level = |seen: Seen, channel: &ChannelLight| match (seen, channel) {
+    let level = |seen: Seen, levels: &ChunkLevels| match (seen, levels) {
         (Seen::One(level), _) => level,
-        (_, ChannelLight::Uniform(level)) => *level,
+        (_, ChunkLevels::Uniform(level)) => *level,
         _ => 0,
     };
     (level(sees.sky, &light.sky), level(sees.voxel, &light.voxel))
@@ -1815,7 +1816,7 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
     }
     Arc::new(ChunkLight {
         inputs: light.inputs.clone(),
-        sky: ChannelLight::Planes(planes.into_boxed_slice()),
+        sky: ChunkLevels::Planes(planes.into_boxed_slice()),
         voxel: light.voxel.clone(),
         precision,
     })
@@ -2037,8 +2038,8 @@ mod tests {
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
-            sky: ChannelLight::Planes(vec![above; precision.bits()].into_boxed_slice()),
-            voxel: ChannelLight::Uniform(0),
+            sky: ChunkLevels::Planes(vec![above; precision.bits()].into_boxed_slice()),
+            voxel: ChunkLevels::Uniform(0),
             precision,
         };
         let own = own_faces_see(&light);
@@ -2159,8 +2160,8 @@ mod tests {
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
-            sky: ChannelLight::Planes(sky.into_boxed_slice()),
-            voxel: ChannelLight::Uniform(0),
+            sky: ChunkLevels::Planes(sky.into_boxed_slice()),
+            voxel: ChunkLevels::Uniform(0),
             precision: LightPrecision::Steps16,
         })
     }
@@ -2283,10 +2284,10 @@ mod tests {
                 ring: false,
             }),
             sky: match &air.sky {
-                ChannelLight::Planes(planes) => ChannelLight::Planes(planes.clone()),
-                ChannelLight::Uniform(level) => ChannelLight::Uniform(*level),
+                ChunkLevels::Planes(planes) => ChunkLevels::Planes(planes.clone()),
+                ChunkLevels::Uniform(level) => ChunkLevels::Uniform(*level),
             },
-            voxel: ChannelLight::Uniform(0),
+            voxel: ChunkLevels::Uniform(0),
             precision: LightPrecision::Steps16,
         });
         let own = own_faces_see(&light);

@@ -291,10 +291,10 @@ pub struct LightPropagation {
     /// the GPU memory per slot: see [`slot_capacity`](Self::slot_capacity).
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, every loaded chunk
-    /// relights, coarse chunks included, and the new texture is made when a
-    /// chunk next needs a slot. Chunks look flat until their light lands
-    /// again, which takes longer than other relights.
+    /// sky light level and one voxel light level, the old texture is released,
+    /// every loaded chunk relights, coarse chunks included, and the new texture
+    /// is made when a chunk next needs a slot. Chunks look flat until their
+    /// light lands again, which takes longer than other relights.
     ///
     /// Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
@@ -319,9 +319,9 @@ pub struct LightPropagation {
     /// glow. Raise the count if that warning appears.
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, the settings relight
-    /// runs, and the new texture is made when a chunk next needs a slot. Chunks
-    /// look flat until they take slots again.
+    /// sky light level and one voxel light level, the old texture is released,
+    /// the settings relight runs, and the new texture is made when a chunk next
+    /// needs a slot. Chunks look flat until they take slots again.
     ///
     /// Defaults to 1,024.
     pub slot_capacity: u32,

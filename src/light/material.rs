@@ -37,7 +37,7 @@
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
 //! extension alone, so the extension passes on the wrapped material's. It
 //! takes the opaque render method from the wrapped material, so the extension
-//! can't force forward rendering. Light adds to the emissive channel only in
+//! can't force forward rendering. Light adds to the emissive output only in
 //! the forward pass, so a lit chunk material must render forward.
 //!
 //! # Reading light on any mesh
@@ -152,7 +152,7 @@
 //!   light.
 //! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
 //!   sky light dims Bevy's ambient light and sun, and voxel light adds through
-//!   the emissive channel.
+//!   the emissive output.
 
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -336,7 +336,7 @@ pub(crate) struct LookUniform {
     /// 0 for [`LightAo::IndirectLight`], 1 for the base colour, 2 for off.
     pub ao: u32,
     /// 1 at [`LightPrecision::Steps256`], whose texels and tags hold 8 bits
-    /// per channel, 0 at 16 levels.
+    /// each for sky light and voxel light, 0 at 16 levels.
     pub steps_256: u32,
     /// 1 when a sub-grid's enclosure caps the world's voxel light its faces
     /// show, as it caps the world's sky. 0 without the `sub_grids` feature.

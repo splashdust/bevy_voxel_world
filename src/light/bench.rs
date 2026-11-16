@@ -24,7 +24,7 @@ use super::route::LightRoute;
 use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
 use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel, DirectSky};
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::{in_world, Missing, Snapshot};
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
@@ -347,8 +347,8 @@ impl SlotBox {
                     columns: ColumnAnswer::none(),
                     ring: true,
                 }),
-                sky: ChannelLight::Uniform(precision.top()),
-                voxel: ChannelLight::Planes(kernel_box.planes.clone()),
+                sky: ChunkLevels::Uniform(precision.top()),
+                voxel: ChunkLevels::Planes(kernel_box.planes.clone()),
                 precision,
             }
         };
@@ -495,8 +495,8 @@ pub struct LightStats {
     /// Light entries in the world view now.
     pub entries: u64,
     /// What the light entries in the world view now keep: their face hashes,
-    /// each channel's bit planes where it isn't one level, and occupancy
-    /// where an edit gave them a solid.
+    /// sky light's and voxel light's bit planes where each isn't one level, and
+    /// occupancy where an edit gave them a solid.
     pub entry_bytes: u64,
     /// Hinted air holding no light entry that the world view keeps now.
     pub air_positions: u64,
@@ -504,8 +504,8 @@ pub struct LightStats {
     pub peak_slots: u64,
     /// Chunks needing a slot that have none now.
     pub starved: u64,
-    /// What level-0 chunks' light keeps on the CPU now: each channel's bit
-    /// planes where it isn't one level.
+    /// What level-0 chunks' light keeps on the CPU now: sky light's and voxel
+    /// light's bit planes where each isn't one level.
     pub light_bytes: u64,
     /// Level-0 chunks in the world view now with both open and solid voxels.
     pub mixed_chunks: u64,
@@ -541,8 +541,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
             entries += 1;
             bytes += size_of::<FaceHashes>();
             let light = &chunk.light;
-            for channel in [&light.sky, &light.voxel] {
-                if let ChannelLight::Planes(planes) = channel {
+            for levels in [&light.sky, &light.voxel] {
+                if let ChunkLevels::Planes(planes) = levels {
                     bytes += size_of_val(&**planes);
                 }
             }
@@ -558,8 +558,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         let mut mixed = 0;
         for chunk in view.chunks.values().filter(|chunk| !chunk.is_entry()) {
             let light = &chunk.light;
-            for channel in [&light.sky, &light.voxel] {
-                if let ChannelLight::Planes(planes) = channel {
+            for levels in [&light.sky, &light.voxel] {
+                if let ChunkLevels::Planes(planes) = levels {
                     bytes += size_of_val(&**planes);
                 }
             }

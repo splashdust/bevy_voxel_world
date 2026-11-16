@@ -2,14 +2,14 @@
 //! it.
 //!
 //! A chunk's light is a pure function of the occupancy, direct sky and emissive
-//! voxels of the 3×3×3 chunks around it, read into a box per channel that
-//! reaches that channel's reach past each of the chunk's faces. It never reads
-//! a neighbour's light, so the order chunks arrive in can't change a chunk's
-//! light, and no light outlives what made it.
+//! voxels of the 3×3×3 chunks around it, read into a box for sky light and one
+//! for voxel light, each reaching that light's reach past each of the chunk's
+//! faces. It never reads a neighbour's light, so the order chunks arrive in
+//! can't change a chunk's light, and no light outlives what made it.
 //!
 //! Sky light spreads from voxels with direct sky, each from its own chunk's
 //! column answer (see [`sky`](super::sky)). Voxel light spreads from emissive
-//! voxels. A channel with no source in its box does no work. A solve can
+//! voxels. A kind of light with no source in its box does no work. A solve can
 //! instead be given its box's voxels with direct sky as [`DirectSky::Cells`],
 //! so sky can enter a voxel from any side, and can be told to take no sky fill.
 //!
@@ -67,21 +67,21 @@ use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// One channel of a chunk's light, in steps of its precision: one level for
-/// every open voxel, or a level per voxel as one bit plane per bit of the
-/// level, 16 KiB at 16 levels and 32 KiB at 256.
+/// One kind of a chunk's light, sky or voxel, in steps of its precision: one
+/// level for every open voxel, or a level per voxel as one bit plane per bit of
+/// the level, 16 KiB at 16 levels and 32 KiB at 256.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ChannelLight {
+pub(crate) enum ChunkLevels {
     Uniform(u8),
     Planes(Box<[Plane]>),
 }
 
-impl ChannelLight {
+impl ChunkLevels {
     /// The level at the chunk's voxel `x`, `y`, `z`, which must be open.
     pub fn at(&self, x: usize, y: usize, z: usize) -> u8 {
         match self {
-            ChannelLight::Uniform(level) => *level,
-            ChannelLight::Planes(planes) => planes
+            ChunkLevels::Uniform(level) => *level,
+            ChunkLevels::Planes(planes) => planes
                 .iter()
                 .enumerate()
                 .map(|(bit, plane)| ((plane[x + y * CHUNK] >> z & 1) as u8) << bit)
@@ -94,8 +94,8 @@ impl ChannelLight {
 #[derive(Debug)]
 pub(crate) struct ChunkLight {
     pub inputs: Arc<LightInputs>,
-    pub sky: ChannelLight,
-    pub voxel: ChannelLight,
+    pub sky: ChunkLevels,
+    pub voxel: ChunkLevels,
     /// The precision its levels are steps of: the world's when it was
     /// solved, which a change of precision leaves behind until it relights.
     pub precision: LightPrecision,
@@ -584,7 +584,7 @@ fn solve<I>(
             seeding.as_ref(),
             &settings.counters,
         ),
-        None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
+        None => (ChunkLevels::Uniform(0), FaceHashes::uniform(0)),
     };
     let (voxel, voxel_faces) = solve_voxel(
         &snapshot.neighbours,
@@ -661,9 +661,9 @@ pub(crate) fn solve_voxel(
     missing: Missing,
     scale: &LevelScale,
     shape: LightShape,
-) -> (ChannelLight, [u64; 6]) {
+) -> (ChunkLevels, [u64; 6]) {
     let centre = centre(neighbours);
-    let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
+    let unlit = (ChunkLevels::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
@@ -672,7 +672,7 @@ pub(crate) fn solve_voxel(
         return unlit;
     }
     let (planes, faces) = spread(neighbours, missing, scale, shape, &seeds, None, None);
-    (channel_light(planes, &centre.occupancy), faces)
+    (chunk_levels(planes, &centre.occupancy), faces)
 }
 
 /// The sky fill cells of the 27 positions around `position`.
@@ -702,9 +702,9 @@ pub(crate) fn solve_sky(
     shape: LightShape,
     fill: Option<&Seeding>,
     counters: &LightCounters,
-) -> (ChannelLight, [u64; 6]) {
+) -> (ChunkLevels, [u64; 6]) {
     let centre = centre(neighbours);
-    let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
+    let unlit = (ChunkLevels::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
@@ -729,7 +729,7 @@ pub(crate) fn solve_sky(
         });
         if all_direct {
             let top = scale.precision().top();
-            return (ChannelLight::Uniform(top), FaceHashes::uniform(top));
+            return (ChunkLevels::Uniform(top), FaceHashes::uniform(top));
         }
     }
     let seeds = fill.and_then(|seeding| Some((seeding.seeds.as_ref()?, seeding.took)));
@@ -752,7 +752,7 @@ pub(crate) fn solve_sky(
             }
         }
     }
-    (channel_light(planes, &centre.occupancy), faces)
+    (chunk_levels(planes, &centre.occupancy), faces)
 }
 
 /// Adds to `direct` the voxels of the cells `sunlit` holds for each position
@@ -784,9 +784,9 @@ fn centre(neighbours: &Neighbourhood) -> &LightInputs {
         .expect("the chunk's own inputs")
 }
 
-fn channel_light(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChannelLight {
+fn chunk_levels(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChunkLevels {
     one_level(&planes, occupancy)
-        .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
+        .map_or(ChunkLevels::Planes(planes), ChunkLevels::Uniform)
 }
 
 /// Sky fill's seeds for a solve, the time finding them took, and where to
@@ -1080,7 +1080,7 @@ mod tests {
         assert_eq!(air, open);
 
         let (solid, _) = solve_voxel(&alone, Missing::Solid, &scale(), shape);
-        assert_eq!(solid, ChannelLight::Uniform(0));
+        assert_eq!(solid, ChunkLevels::Uniform(0));
     }
 
     #[test]
@@ -1197,7 +1197,7 @@ mod tests {
             None,
             &counters,
         );
-        assert_eq!(columns, ChannelLight::Uniform(0));
+        assert_eq!(columns, ChunkLevels::Uniform(0));
     }
 
     fn settings_with_fill(fill: FillCells) -> LightTaskSettings<u8> {

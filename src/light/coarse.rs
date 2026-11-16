@@ -82,7 +82,7 @@ pub(crate) fn takes_coarse_path(key: ChunkKey, data_shape: UVec3) -> bool {
 /// A coarse chunk's light, as its task worked it out.
 pub(crate) struct CoarseSolved {
     /// The sky light and voxel light its tag holds without a slot: the one
-    /// level per channel its faces see, or else the brightest level a tenth
+    /// level of each that its faces see, or else the brightest level a tenth
     /// of them see.
     pub levels: (u8, u8),
     /// The precision of its levels and of its slot's format.
@@ -494,9 +494,9 @@ thread_local! {
     static TWO_WORD_BOXES: RefCell<Vec<LightBox<TwoWords>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Spreads one channel through the `open` cells, from the `lit` cells and
-/// the emissive cells `lamps`. Returns each cell's level in slot order,
-/// padding included.
+/// Spreads sky light or voxel light through the `open` cells, from the `lit`
+/// cells and the emissive cells `lamps`. Returns each cell's level in slot
+/// order, padding included.
 fn spread(
     open: &[u64],
     lit: Option<&[u64]>,

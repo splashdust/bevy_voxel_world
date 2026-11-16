@@ -25,8 +25,8 @@ impl LightPrecision {
         }
     }
 
-    /// How many bits a level has, which is how many bit planes a channel
-    /// stores for a chunk.
+    /// How many bits a level has, which is how many bit planes sky light
+    /// or voxel light stores for a chunk.
     #[inline]
     pub(crate) fn bits(self) -> usize {
         match self {

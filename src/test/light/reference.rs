@@ -5,9 +5,9 @@
 //! with the crate's solver, so a test can hold the solver's light against it.
 //! It is slow on purpose: every round of spreading visits every voxel.
 //!
-//! A channel is worked out from its sources, each a voxel and the distance it
-//! starts at, so another kind of source, such as direct sky, adds sources
-//! without changing the flood.
+//! Sky light and voxel light are each worked out from their sources, each a
+//! voxel and the distance it starts at, so another kind of source, such as
+//! direct sky, adds sources without changing the flood.
 //!
 //! Levels are held in steps: 0 to 15 at 16 levels, 0 to 255 at 256, where
 //! direct sky holds `top`, 255.

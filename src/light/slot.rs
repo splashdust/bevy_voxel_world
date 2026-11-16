@@ -3,9 +3,10 @@
 //! A chunk's faces read light from the open voxels in front of them: its own
 //! voxels, and through the slot's shell its six face neighbours' border voxels.
 //! A chunk needs a slot unless every open voxel touching one of its solid
-//! voxels by a face, an edge or a corner holds one level per channel. Edges
-//! and corners count because a face off the voxel grid, from a mesher other
-//! than cubes, reads the voxels around it and not only the one in front.
+//! voxels by a face, an edge or a corner holds one sky light level and one
+//! voxel light level. Edges and corners count because a face off the voxel
+//! grid, from a mesher other than cubes, reads the voxels around it and not
+//! only the one in front.
 //!
 //! An emissive voxel touching an open voxel always needs a slot, since only a
 //! slot holds the lamp's own cell, which makes its faces glow.
@@ -28,7 +29,7 @@ use super::faces::Face;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::kernel::Plane;
 use super::levels::LightLevels;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -162,8 +163,8 @@ const SPREAD: [u64; 256] = {
     table
 };
 
-/// What some open voxels hold of one channel: no voxel at all, one level, or
-/// more than one.
+/// What some open voxels hold of one kind of light: no voxel at all, one level,
+/// or more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Seen {
     #[default]
@@ -254,16 +255,16 @@ fn touches_open(solid: &Plane, lamp: &EmissiveVoxel) -> bool {
     })
 }
 
-/// What one channel holds in the voxels set in `voxels`.
-fn seen_over(channel: &ChannelLight, voxels: &Plane) -> Seen {
+/// What `levels` hold in the voxels set in `voxels`.
+fn seen_over(levels: &ChunkLevels, voxels: &Plane) -> Seen {
     let mut seen = Seen::Nothing;
-    match channel {
-        ChannelLight::Uniform(level) => {
+    match levels {
+        ChunkLevels::Uniform(level) => {
             if voxels.iter().any(|column| *column != 0) {
                 seen = Seen::One(*level);
             }
         }
-        ChannelLight::Planes(planes) => {
+        ChunkLevels::Planes(planes) => {
             for (column, &these) in voxels.iter().enumerate() {
                 if these == 0 {
                     continue;
@@ -340,13 +341,13 @@ fn every_other_byte(bytes: u64) -> u128 {
     (wide | wide << 8) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF
 }
 
-/// The levels of one channel at 8 voxels of a column from `shift` up, one in
+/// The levels in `light` at 8 voxels of a column from `shift` up, one in
 /// each byte. Only the voxels set in `open` get a level.
 #[inline]
-fn levels(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
-    match channel {
-        ChannelLight::Uniform(level) => SPREAD[open] * *level as u64,
-        ChannelLight::Planes(planes) => {
+fn levels(light: &ChunkLevels, column: usize, shift: usize, open: usize) -> u64 {
+    match light {
+        ChunkLevels::Uniform(level) => SPREAD[open] * *level as u64,
+        ChunkLevels::Planes(planes) => {
             let mut texels = 0;
             for (bit, plane) in planes.iter().enumerate() {
                 let levels = (plane[column] >> shift) as usize & open;
@@ -461,8 +462,8 @@ pub(crate) fn across(
             let u = cells.trailing_zeros() as usize;
             cells &= cells - 1;
             let (x, y, z) = back.voxel(u, v);
-            let level = |channel: &ChannelLight| {
-                Seen::One(precision.convert(channel.at(x, y, z), neighbour.precision))
+            let level = |levels: &ChunkLevels| {
+                Seen::One(precision.convert(levels.at(x, y, z), neighbour.precision))
             };
             seen.sky = seen.sky.join(level(&neighbour.sky));
             seen.voxel = seen.voxel.join(level(&neighbour.voxel));
@@ -476,15 +477,15 @@ pub(crate) fn across(
     seen
 }
 
-/// The most common level per channel among the open voxels touching a solid
-/// voxel of the chunk lit by `light`, as sky and voxel light in steps of the
-/// light's precision.
+/// The most common sky light level and voxel light level among the open
+/// voxels touching a solid voxel of the chunk lit by `light`, as sky and voxel
+/// light in steps of the light's precision.
 pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
     let touching = match &light.inputs.occupancy {
         Occupancy::Mixed(solid) => Some(touching_open(solid)),
         _ => None,
     };
-    let level = |channel| most_common_over(channel, touching.as_deref(), light.precision);
+    let level = |levels| most_common_over(levels, touching.as_deref(), light.precision);
     (level(&light.sky), level(&light.voxel))
 }
 
@@ -523,8 +524,8 @@ pub(crate) fn border_sees(
     if let Occupancy::Solid = occupancy {
         return (sky, voxel);
     }
-    let level = |channel: &ChannelLight, (x, y, z)| {
-        Seen::One(precision.convert(channel.at(x, y, z), light.precision))
+    let level = |levels: &ChunkLevels, (x, y, z)| {
+        Seen::One(precision.convert(levels.at(x, y, z), light.precision))
     };
     for v in 0..CHUNK {
         for u in 0..CHUNK {
@@ -543,35 +544,36 @@ pub(crate) fn border_sees(
     (sky, voxel)
 }
 
-/// The most common level per channel among every open voxel of the chunk lit
-/// by `light`, as sky and voxel light in steps of the light's precision.
+/// The most common sky light level and voxel light level among every open
+/// voxel of the chunk lit by `light`, as sky and voxel light in steps of the
+/// light's precision.
 ///
 /// Unlike [`most_common`], it counts open voxels far from any solid too, so
 /// an open chunk lit voxel by voxel gets its own most common level and not 0.
 /// Its cost grows with the chunk's open voxels.
 pub(crate) fn most_common_open(light: &ChunkLight) -> (u8, u8) {
     let open = open_voxels(&light.inputs.occupancy);
-    let level = |channel| most_common_over(channel, open.as_deref(), light.precision);
+    let level = |levels| most_common_over(levels, open.as_deref(), light.precision);
     (level(&light.sky), level(&light.voxel))
 }
 
-/// The most common level of `channel`, steps of `precision`, among the voxels
-/// set in `voxels`. With no voxels, a channel held as planes gives 0.
+/// The most common level of `levels`, steps of `precision`, among the voxels
+/// set in `voxels`. With no voxels, levels held as planes give 0.
 fn most_common_over(
-    channel: &ChannelLight,
+    levels: &ChunkLevels,
     voxels: Option<&Plane>,
     precision: LightPrecision,
 ) -> u8 {
-    match (channel, voxels) {
-        (ChannelLight::Uniform(level), _) => *level,
-        (ChannelLight::Planes(_), Some(voxels)) => {
+    match (levels, voxels) {
+        (ChunkLevels::Uniform(level), _) => *level,
+        (ChunkLevels::Planes(_), Some(voxels)) => {
             let mut counts = [0u32; 256];
             for (column, &these) in voxels.iter().enumerate() {
                 let mut voxels = these;
                 while voxels != 0 {
                     let z = voxels.trailing_zeros() as usize;
                     voxels &= voxels - 1;
-                    let level = channel.at(column % CHUNK, column / CHUNK, z);
+                    let level = levels.at(column % CHUNK, column / CHUNK, z);
                     counts[level as usize] += 1;
                 }
             }
@@ -579,7 +581,7 @@ fn most_common_over(
                 .max_by_key(|level| counts[*level])
                 .unwrap_or(0) as u8
         }
-        (ChannelLight::Planes(_), None) => 0,
+        (ChunkLevels::Planes(_), None) => 0,
     }
 }
 
@@ -640,9 +642,9 @@ mod tests {
 
     use crate::light::sky::ColumnAnswer;
 
-    /// The light of a chunk of `occupancy` at 16 levels whose sky channel is
+    /// The light of a chunk of `occupancy` at 16 levels whose sky light is
     /// `sky` and whose voxel light is `voxel` everywhere.
-    fn light(occupancy: Occupancy, sky: ChannelLight, voxel: u8) -> ChunkLight {
+    fn light(occupancy: Occupancy, sky: ChunkLevels, voxel: u8) -> ChunkLight {
         ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy,
@@ -651,12 +653,12 @@ mod tests {
                 ring: false,
             }),
             sky,
-            voxel: ChannelLight::Uniform(voxel),
+            voxel: ChunkLevels::Uniform(voxel),
             precision: LightPrecision::Steps16,
         }
     }
 
-    /// A channel at 16 levels holding `level` at every voxel, as planes.
+    /// Levels at 16 steps holding `level` at every voxel, as planes.
     fn planes_of(level: u8) -> Box<[Plane]> {
         (0..4)
             .map(|bit| [if level >> bit & 1 == 1 { !0 } else { 0 }; CHUNK * CHUNK])
@@ -681,12 +683,12 @@ mod tests {
 
     #[test]
     fn a_chunk_whose_open_voxels_hold_one_level_reports_it() {
-        let held_whole = light(Occupancy::Open, ChannelLight::Uniform(9), 4);
+        let held_whole = light(Occupancy::Open, ChunkLevels::Uniform(9), 4);
         assert_eq!(open_voxels_see(&held_whole), (Seen::One(9), Seen::One(4)));
         assert_eq!(most_common_open(&held_whole), (9, 4));
 
         for occupancy in [Occupancy::Open, one_solid()] {
-            let planes = light(occupancy, ChannelLight::Planes(planes_of(9)), 4);
+            let planes = light(occupancy, ChunkLevels::Planes(planes_of(9)), 4);
             assert_eq!(open_voxels_see(&planes), (Seen::One(9), Seen::One(4)));
             assert_eq!(most_common_open(&planes), (9, 4));
         }
@@ -696,7 +698,7 @@ mod tests {
     fn one_open_voxel_at_another_level_makes_the_chunk_mixed() {
         let mut planes = planes_of(9);
         set_level(&mut planes, (3, 30, 7), 8);
-        let light = light(one_solid(), ChannelLight::Planes(planes), 4);
+        let light = light(one_solid(), ChunkLevels::Planes(planes), 4);
 
         assert_eq!(open_voxels_see(&light), (Seen::Mixed, Seen::One(4)));
         assert_eq!(most_common_open(&light).0, 9);
@@ -714,7 +716,7 @@ mod tests {
                 }
             }
         }
-        let light = light(one_solid(), ChannelLight::Planes(planes), 0);
+        let light = light(one_solid(), ChunkLevels::Planes(planes), 0);
 
         assert_eq!(most_common(&light).0, 5);
         assert_eq!(most_common_open(&light).0, 9);
@@ -722,7 +724,7 @@ mod tests {
 
     #[test]
     fn a_solid_chunk_has_no_open_voxel_to_report() {
-        let light = light(Occupancy::Solid, ChannelLight::Planes(planes_of(9)), 0);
+        let light = light(Occupancy::Solid, ChunkLevels::Planes(planes_of(9)), 0);
         assert_eq!(open_voxels_see(&light), (Seen::Nothing, Seen::Nothing));
     }
 

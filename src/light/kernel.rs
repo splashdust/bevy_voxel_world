@@ -1,5 +1,5 @@
-//! The kernel: spreads one channel of light from its sources through the open
-//! voxels of a box around a chunk, by bit dilation.
+//! The kernel: spreads one kind of light, sky or voxel, from its sources
+//! through the open voxels of a box around a chunk, by bit dilation.
 //!
 //! The box is `32 + 2 × reach` voxels on a side, centred on the chunk, so it
 //! holds every voxel light can come from. Each row of the box runs along z, bit
@@ -19,8 +19,8 @@
 //! voxel along each axis, so each round works on a box one voxel smaller on
 //! every side than the last.
 //!
-//! The kernel knows nothing about which channel it spreads. More channels, such
-//! as coloured voxel light, are more runs of it.
+//! The kernel knows nothing about which kind of light it spreads. More kinds,
+//! such as coloured voxel light, are more runs of it.
 //!
 //! A run also hashes, for each of the chunk's six faces, when light reached
 //! each voxel on that face: see [`FaceHashes`](super::faces::FaceHashes).
