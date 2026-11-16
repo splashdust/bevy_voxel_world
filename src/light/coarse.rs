@@ -50,6 +50,7 @@ use bevy::platform::collections::HashMap;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+use super::color::EmissionTable;
 use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
@@ -158,7 +159,10 @@ struct Cells {
 }
 
 impl Cells {
-    fn of<I: Copy + PartialEq>(chunk: &ChunkData<I>, emission: &[(I, u8)]) -> Self {
+    fn of<I: Copy + PartialEq>(
+        chunk: &ChunkData<I>,
+        emission: &EmissionTable<I>,
+    ) -> Self {
         let uniform = |open: bool| Self {
             open: vec![if open { ALL_CELLS } else { 0 }; SIDE * SIDE],
             lamps: Vec::new(),
@@ -202,11 +206,11 @@ impl Cells {
                     if is_open {
                         open[x + y * SIDE] |= 1 << z;
                     } else if let WorldVoxel::Solid(material) = middle {
-                        if let Some((_, level)) =
-                            emission.iter().find(|(emissive, _)| *emissive == material)
-                        {
-                            lamps
-                                .push((UVec3::new(x as u32, y as u32, z as u32), *level));
+                        if let Some(emitter) = emission.get(material) {
+                            lamps.push((
+                                UVec3::new(x as u32, y as u32, z as u32),
+                                emitter.level,
+                            ));
                         }
                     }
                 }

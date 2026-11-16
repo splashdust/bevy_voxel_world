@@ -129,7 +129,7 @@ impl ChangeCensus {
                 }
             }
             Some(old) => {
-                if old.same_levels(new) {
+                if old.same_light(new) {
                     return;
                 }
                 self.counts.changed_relights += 1;

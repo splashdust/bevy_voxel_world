@@ -324,7 +324,7 @@ fn sky_reach_with_sky_light_off_starts_no_relight() {
 }
 
 /// The warnings logged anywhere in the test process since it started.
-fn warnings() -> &'static Mutex<Vec<String>> {
+pub(super) fn warnings() -> &'static Mutex<Vec<String>> {
     static WARNINGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     WARNINGS.get_or_init(|| {
         struct Warnings;
@@ -350,14 +350,14 @@ fn warnings() -> &'static Mutex<Vec<String>> {
                 warnings().lock().unwrap().push(message.0);
             }
         }
-        // Only this test sets the global subscriber.
+        // Nothing else in the tests sets the global subscriber.
         bevy::log::tracing::subscriber::set_global_default(registry().with(Warnings))
             .expect("no other global subscriber");
         Mutex::new(Vec::new())
     })
 }
 
-fn warned(about: &str) -> usize {
+pub(super) fn warned(about: &str) -> usize {
     warnings()
         .lock()
         .unwrap()

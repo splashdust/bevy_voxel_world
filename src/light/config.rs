@@ -21,6 +21,7 @@ use std::fmt::Display;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use bevy::color::{Color, LinearRgba};
 use bevy::log::{warn, warn_once};
 use bevy::reflect::Reflect;
 
@@ -1007,24 +1008,57 @@ pub enum LightAo {
     Off,
 }
 
-/// The light an emissive material gives off.
+/// The light an emissive material gives off: a level, and a light colour.
 ///
-/// Built with [`Emission::level`].
+/// Built with [`Emission::level`], which gives white light, and coloured
+/// with [`with_color`](Self::with_color).
 #[derive(Reflect, Clone, Copy, PartialEq, Debug)]
 pub struct Emission {
     level: f32,
+    /// The light colour, scaled so its brightest component is 1, or black.
+    color: LinearRgba,
 }
 
 impl Emission {
-    /// Light at `level`, from 0 to 15. A voxel at level 8 lights about half as
-    /// far as one at 15.
+    /// White light at `level`, from 0 to 15. A voxel at level 8 lights about
+    /// half as far as one at 15.
     pub fn level(level: f32) -> Self {
-        Self { level }
+        Self {
+            level,
+            color: LinearRgba::WHITE,
+        }
     }
 
-    /// The level as a whole level from 0 to 15.
+    /// This emission with its light in `color`.
+    ///
+    /// Only the colour's hue and saturation count. It's scaled so its brightest
+    /// component is 1, so `Color::srgb(0.5, 0.0, 0.0)` gives the same light as
+    /// `Color::srgb(1.0, 0.0, 0.0)`, and grey gives white. The level alone sets
+    /// how bright the light is and how far it reaches. Black gives no light, as
+    /// level 0 does. Alpha is ignored, and a negative component is read as 0,
+    /// with a warning logged once.
+    pub fn with_color(self, color: impl Into<Color>) -> Self {
+        let (color, negative) = super::color::scaled(color.into().to_linear());
+        if negative {
+            warn_once!(
+                "light propagation: an emission colour has a negative component, \
+                 which is read as 0"
+            );
+        }
+        Self { color, ..self }
+    }
+
+    /// The level as a whole level from 0 to 15, and 0 for black light.
     pub(crate) fn whole_level(&self) -> u8 {
+        if self.color == LinearRgba::BLACK {
+            return 0;
+        }
         self.level.round().clamp(0.0, 15.0) as u8
+    }
+
+    /// The light colour, with its brightest component 1, or black.
+    pub(crate) fn color(&self) -> LinearRgba {
+        self.color
     }
 
     /// This emission with its level clamped to 0 to 15, logging a warning once
@@ -1032,6 +1066,7 @@ impl Emission {
     pub(crate) fn clamped(self) -> Self {
         Self {
             level: clamp_setting(self.level, 0.0, 15.0, "emission level"),
+            ..self
         }
     }
 }

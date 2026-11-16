@@ -76,7 +76,7 @@ use bevy::prelude::*;
 
 use super::fill::{cell_bit, open_cells, CELL};
 use super::hinted::air_inputs;
-use super::inputs::LightInputs;
+use super::inputs::{uniform_emission, EmissiveVoxel, LightInputs};
 use super::probe::SkyProbes;
 use super::relight::LightWork;
 use super::sky::{walkable, Columns, SkyRule};
@@ -207,13 +207,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         _ => generated.get(&p).copied().unwrap_or(WorldVoxel::Unset),
     };
     let emission = &settings.task.emission;
-    let level_of = |voxel: WorldVoxel<C::MaterialIndex>| match voxel {
-        WorldVoxel::Solid(material) => emission
-            .iter()
-            .find(|(emissive, _)| *emissive == material)
-            .map(|(_, level)| *level),
-        _ => None,
-    };
+    let emitter_of =
+        |voxel: WorldVoxel<C::MaterialIndex>| uniform_emission(voxel, emission);
     let reach = reach_of(&settings.task);
 
     let mut relight: HashSet<IVec3> = HashSet::new();
@@ -284,6 +279,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs: std::sync::Arc::new(inputs),
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
+                    color: chunk.light.color,
                     precision: chunk.light.precision,
                 });
                 relight.insert(position);
@@ -336,7 +332,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
         };
         let old = &chunk.light.inputs;
         let mut occupancy = old.occupancy.clone();
-        let mut emissive = old.emissive.clone();
+        let mut emissive = old.emissive.to_vec();
         for p in voxels {
             let local = local(*p);
             let new = voxel(*p);
@@ -344,32 +340,39 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 occupancy.set(local.x, local.y, local.z, new.is_solid());
                 columns.push((*position, local.x, local.z));
             }
-            let at = |emitter: &super::inputs::EmissiveVoxel| {
-                (emitter.x, emitter.y, emitter.z)
-                    == (local.x as u8, local.y as u8, local.z as u8)
+            let (x, y, z) = (local.x as u8, local.y as u8, local.z as u8);
+            let was = emissive
+                .iter()
+                .position(|emitter| emitter.at() == (x, y, z));
+            let now = emitter_of(new).map(|emitter| EmissiveVoxel::new(x, y, z, emitter));
+            // In a world whose light is all white, a swap between emissive
+            // materials of one level changes no light.
+            let changed = if emission.is_colored() {
+                was.map(|index| emissive[index]) != now
+            } else {
+                was.map(|index| emissive[index].level()) != now.map(EmissiveVoxel::level)
             };
-            let was = emissive.iter().position(at);
-            let now = level_of(new);
-            if was.map(|index| emissive[index].level) != now {
+            if changed {
                 if let Some(index) = was {
                     emissive.swap_remove(index);
                 }
-                if let Some(level) = now {
-                    emissive.push(super::inputs::EmissiveVoxel {
-                        x: local.x as u8,
-                        y: local.y as u8,
-                        z: local.z as u8,
-                        level,
-                    });
+                if let Some(emitter) = now {
+                    emissive.push(emitter);
                 }
                 relight.insert(*position);
+                // A change of light colour alone changes no level at a face,
+                // so it ripples nowhere: the chunks its light reaches relight
+                // too.
+                if emission.is_colored() {
+                    relight.extend(within_reach(*p, reach));
+                }
             }
         }
         occupancy.normalize();
         old_occupancy.insert(*position, old.occupancy.solid_columns());
         let inputs = LightInputs {
             occupancy,
-            emissive,
+            emissive: emissive.into(),
             columns: old.columns.clone(),
             ring: old.ring,
         };
@@ -377,6 +380,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             inputs: std::sync::Arc::new(inputs),
             sky: chunk.light.sky.clone(),
             voxel: chunk.light.voxel.clone(),
+            color: chunk.light.color,
             precision: chunk.light.precision,
         });
         chunk.edits = count;
@@ -558,6 +562,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                             inputs: std::sync::Arc::new(light.inputs.with_columns(new)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
+                            color: light.color,
                             precision: light.precision,
                         });
                     }
@@ -653,10 +658,10 @@ fn emits(view: &View, p: IVec3) -> bool {
         return false;
     };
     let local = local(p);
-    inputs.emissive.iter().any(|emitter| {
-        (emitter.x as usize, emitter.y as usize, emitter.z as usize)
-            == (local.x, local.y, local.z)
-    })
+    inputs
+        .emissive
+        .iter()
+        .any(|emitter| emitter.at() == (local.x as u8, local.y as u8, local.z as u8))
 }
 
 /// Whether the column at `x`, `z` of the chunk with `inputs` holds a solid.
