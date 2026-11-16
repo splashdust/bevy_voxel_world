@@ -46,12 +46,14 @@
 //! faces come to see one level gives its slot back.
 //!
 //! The texture is made when the first chunk takes a slot, so a world whose
-//! chunks all see one level holds none. Its slot count is clamped to the
-//! largest 3D texture the device makes. When every slot is taken, the slot
-//! holder farthest from the cameras gives way to a nearer chunk, and the
-//! world warns once. A sub-grid's chunk is measured at its grid's last pose. A chunk with no slot shows the most common level of the
-//! voxels touching its solids, so it loses its shadows and its lamps' glow;
-//! it takes a slot again when one comes free.
+//! chunks all see one level holds none. Which slots are free, and which
+//! holder gives way to a nearer chunk when every slot is taken, is kept by a
+//! [`SlotPool`], which also clamps the slot count to the device and warns.
+//! The route tells the pool how far a holder is from the cameras, with a
+//! sub-grid's chunk measured at its grid's last pose. A level-0 chunk that
+//! gives way, or finds no slot, shows the most common level of the voxels
+//! touching its solids, so it loses its shadows and its lamps' glow; it
+//! takes a slot again when one comes free.
 //!
 //! A coarse chunk (see [`coarse`](super::coarse)) takes a slot on the same
 //! rule from its own cells, and its shell holds its own padding cells. Its
@@ -97,7 +99,6 @@ use std::time::Duration;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::system::EntityCommands;
-use bevy::log::warn_once;
 use bevy::mesh::MeshTag;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::platform::hash::FixedHasher;
@@ -126,6 +127,7 @@ use super::slot::{
     most_common_open, open_voxels_see, shell_cell, slot_bytes, texel_at, texel_bytes,
     texel_levels, texture_format, write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
+use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
 use super::view::{chunk_centre, world_position};
 use crate::chunk::CHUNK_SIZE_U;
@@ -166,29 +168,6 @@ pub(crate) fn tag_levels(sky: u8, voxel: u8, precision: LightPrecision) -> u32 {
 
 /// How long refilling slots may take in a frame.
 const REFILL_BUDGET: Duration = Duration::from_millis(1);
-
-/// How many slots the texture holds along each of its axes, for `capacity`
-/// slots on a device whose 3D textures are at most `max_side` texels on a
-/// side: the smallest axis doubles, x first, until they hold them all.
-///
-/// Returns the slot count the texture holds, which is less than `capacity`
-/// only if the device can't make a texture that large. Then each axis holds
-/// as many slots as fit.
-fn texture_shape(capacity: u32, max_side: Option<u32>) -> (u32, UVec3) {
-    let limit = max_side.map_or(u32::MAX, |side| (side / SLOT_SIDE).max(1));
-    let mut axes = UVec3::ONE;
-    while axes.element_product() < capacity {
-        let Some(axis) = (0..3)
-            .filter(|&axis| axes[axis] * 2 <= limit)
-            .min_by_key(|&axis| axes[axis])
-        else {
-            let axes = UVec3::splat(limit);
-            return (axes.element_product().min(capacity), axes);
-        };
-        axes[axis] *= 2;
-    }
-    (capacity, axes)
-}
 
 /// Counts of what the route has done with slots, for benchmarks.
 #[derive(Clone, Copy, Debug, Default)]
@@ -308,15 +287,7 @@ pub(crate) struct LightRoute<C> {
     texture_wanted: bool,
     /// The precision of the texture's format, and of the levels in tags.
     precision: LightPrecision,
-    /// The slot count, clamped to the device once the texture's shape is set.
-    capacity: u32,
-    slots_per_axis: Option<UVec3>,
-    /// The device's largest 3D texture side, if there's a device.
-    max_side: Option<u32>,
-    next_slot: u32,
-    /// Slots given back, the last one first.
-    free: Vec<u32>,
-    holders: HashMap<u32, Tagged>,
+    slots: SlotPool<Tagged>,
     chunks: HashMap<RouteId, RouteChunk>,
     coarse: EntityHashMap<CoarseChunk>,
     /// The level-0 chunk at each grid key whose light has landed.
@@ -339,7 +310,6 @@ pub(crate) struct LightRoute<C> {
     /// such as a chunk above LOD level 0, or one whose light hasn't landed
     /// yet.
     unlit_sky: u8,
-    warned_full: bool,
     pub counters: SlotCounters,
     /// The cells of the world's sky fill field, which a kept chunk of air
     /// with no solid in its padding shows where they're brighter than its
@@ -420,12 +390,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             released: Vec::new(),
             texture_wanted: false,
             precision: config.precision,
-            capacity: config.slot_capacity,
-            slots_per_axis: None,
-            max_side: None,
-            next_slot: 0,
-            free: Vec::new(),
-            holders: HashMap::default(),
+            slots: SlotPool::new(config.slot_capacity),
             chunks: HashMap::default(),
             coarse: EntityHashMap::default(),
             at: HashMap::default(),
@@ -437,7 +402,6 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             #[cfg(feature = "sub_grids")]
             poses: HashMap::default(),
             unlit_sky: sky,
-            warned_full: false,
             counters: SlotCounters::default(),
             fill_cells: FillCells::default(),
             #[cfg(feature = "sub_grids")]
@@ -449,9 +413,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Notes the largest 3D texture side of the device, if there is one,
     /// which the texture's shape is clamped to when it's made.
     pub fn set_device(&mut self, device: Option<&RenderDevice>) {
-        if self.slots_per_axis.is_none() {
-            self.max_side = device.map(|device| device.limits().max_texture_dimension_3d);
-        }
+        self.slots
+            .set_device(device.map(|device| device.limits().max_texture_dimension_3d));
     }
 
     /// Makes chunks with no light of their own show sky light at the whole
@@ -570,16 +533,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     pub fn replace_texture(&mut self, precision: LightPrecision, capacity: u32) {
         let old = self.precision;
         self.precision = precision;
-        self.capacity = capacity;
+        self.slots.reset(capacity);
         self.released.extend(self.texture.take());
         self.texture_wanted = false;
-        self.slots_per_axis = None;
-        self.next_slot = 0;
-        self.free.clear();
-        self.holders.clear();
         self.uploads.clear();
         self.starved.clear();
-        self.warned_full = false;
         let unlit = self.unlit();
         let ids: Vec<RouteId> = self.chunks.keys().copied().collect();
         for id in ids {
@@ -668,7 +626,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// The texture of the shape the slots need, made once.
     pub fn texture_image(&self) -> Image {
-        let size = self.slots_per_axis.unwrap_or(UVec3::ONE) * SLOT_SIDE;
+        let size = self.slots.shape().unwrap_or(UVec3::ONE) * SLOT_SIDE;
         let mut image = Image::new_uninit(
             Extent3d {
                 width: size.x,
@@ -700,7 +658,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Whether the world has warned that its slots ran out.
     #[cfg_attr(not(test), expect(dead_code, reason = "read by tests"))]
     pub fn warned_full(&self) -> bool {
-        self.warned_full
+        self.slots.warned_full()
     }
 
     /// Takes the light that landed for the level-0 chunk `entity` at `key`:
@@ -1035,7 +993,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// Whether a chunk needing a slot waits for one that is free.
     pub fn wants_refill(&self) -> bool {
-        !self.starved.is_empty() && self.has_free_slot()
+        !self.starved.is_empty() && self.slots.has_free()
     }
 
     /// Gives free slots to the chunks waiting for one, nearest the cameras
@@ -1312,82 +1270,25 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// A slot for `chunk`, `near` from the cameras: a free one, or one taken
     /// from the holder farthest from the cameras if it's farther than this
-    /// chunk.
+    /// chunk. The texture waits to be made once the first slot is taken.
     fn take_slot(&mut self, chunk: Tagged, near: f32) -> Option<u32> {
-        if self.slots_per_axis.is_none() {
-            let (capacity, axes) = texture_shape(self.capacity, self.max_side);
-            if capacity < self.capacity {
-                warn_once!(
-                    "light propagation: slot_capacity {} is more than this device's 3D \
-                     textures hold, using {capacity}",
-                    self.capacity
-                );
-            }
-            self.capacity = capacity;
-            self.slots_per_axis = Some(axes);
+        let shaped = self.slots.shape().is_some();
+        // The pool asks the route about holders while it hands out a slot,
+        // so it's moved out of the route meanwhile.
+        let mut slots = std::mem::replace(&mut self.slots, SlotPool::new(0));
+        let slot = slots.take(chunk, near, self);
+        self.slots = slots;
+        if !shaped && self.slots.shape().is_some() {
             self.texture_wanted = true;
         }
-        let slot = match self.free.pop() {
-            Some(slot) => slot,
-            None if self.next_slot < self.capacity => {
-                self.next_slot += 1;
-                self.next_slot - 1
-            }
-            None => self.evict_for(near)?,
-        };
-        self.holders.insert(slot, chunk);
+        let slot = slot?;
         self.counters.allocations += 1;
-        self.counters.peak_held = self.counters.peak_held.max(self.holders.len() as u64);
-        Some(slot)
-    }
-
-    /// Takes the slot of the holder farthest from the cameras, if it's
-    /// farther than `near`, falling it back to flat light.
-    fn evict_for(&mut self, near: f32) -> Option<u32> {
-        if !self.warned_full {
-            self.warned_full = true;
-            warn!(
-                "light propagation: every one of the {} light slots is taken, so the \
-                 chunks farthest from the camera show flat light; raise slot_capacity \
-                 to give them slots",
-                self.capacity
-            );
-        }
-        let (slot, holder, far) = self
-            .holders
-            .iter()
-            .map(|(slot, holder)| (*slot, *holder, self.holder_distance(*holder)))
-            .max_by(|a, b| a.2.total_cmp(&b.2))?;
-        if far <= near {
-            return None;
-        }
-        self.holders.remove(&slot);
-        self.counters.evictions += 1;
-        match holder {
-            Tagged::Coarse(entity) => {
-                let chunk = self.coarse.get_mut(&entity).unwrap();
-                chunk.slot = None;
-                chunk.bytes = None;
-                let (sky, voxel) = chunk.levels;
-                self.retag(holder, Shows::Levels(sky, voxel));
-            }
-            Tagged::Chunk(id) => {
-                let shows = self.most_common_shows(id);
-                self.chunks.get_mut(&id).unwrap().slot = None;
-                self.retag(holder, shows);
-                self.starved.insert(id);
-            }
-        }
+        self.counters.peak_held = self.counters.peak_held.max(self.slots.held() as u64);
         Some(slot)
     }
 
     fn free_slot(&mut self, slot: u32) {
-        self.holders.remove(&slot);
-        self.free.push(slot);
-    }
-
-    fn has_free_slot(&self) -> bool {
-        !self.free.is_empty() || self.next_slot < self.capacity
+        self.slots.give_back(slot);
     }
 
     /// The light of the chunk across `face` from the level-0 chunk at `key`,
@@ -1410,14 +1311,6 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return self.distance_to(chunk_centre(key, pose));
         }
         self.distance_to(chunk_centre(key, &GlobalTransform::IDENTITY))
-    }
-
-    /// How far the slot holder `holder` is from the nearest camera.
-    fn holder_distance(&self, holder: Tagged) -> f32 {
-        match holder {
-            Tagged::Coarse(entity) => self.distance_to(self.coarse[&entity].key.centre()),
-            Tagged::Chunk(id) => self.distance(self.chunks[&id].key),
-        }
     }
 
     /// How far `point` is from the nearest camera.
@@ -1723,7 +1616,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// How many slots chunks hold.
     #[cfg(all(test, feature = "sub_grids"))]
     pub fn slots_held(&self) -> usize {
-        self.holders.len()
+        self.slots.held()
     }
 
     /// The bytes queued whole for `slot` and not yet taken by the render
@@ -1733,6 +1626,42 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         match self.uploads.get(&slot)? {
             Upload::Full(bytes) => Some(bytes),
             Upload::Planes(_) => None,
+        }
+    }
+}
+
+/// The light slots' side of the route's slot pool.
+impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
+    const SLOTS: &'static str = "light slots";
+    const WITHOUT_SLOT: &'static str = "show flat light";
+
+    fn distance(&self, holder: Tagged) -> f32 {
+        match holder {
+            Tagged::Coarse(entity) => self.distance_to(self.coarse[&entity].key.centre()),
+            Tagged::Chunk(id) => self.distance(self.chunks[&id].key),
+        }
+    }
+
+    /// A level-0 chunk shows its most common levels and waits for a slot to
+    /// come free. A coarse chunk drops its copy of its slot's bytes and shows
+    /// the brightest level a tenth of its faces see, and takes no slot again
+    /// until its chunk task runs again.
+    fn gave_way(&mut self, holder: Tagged) {
+        self.counters.evictions += 1;
+        match holder {
+            Tagged::Coarse(entity) => {
+                let chunk = self.coarse.get_mut(&entity).unwrap();
+                chunk.slot = None;
+                chunk.bytes = None;
+                let (sky, voxel) = chunk.levels;
+                self.retag(holder, Shows::Levels(sky, voxel));
+            }
+            Tagged::Chunk(id) => {
+                let shows = self.most_common_shows(id);
+                self.chunks.get_mut(&id).unwrap().slot = None;
+                self.retag(holder, shows);
+                self.starved.insert(id);
+            }
         }
     }
 }
@@ -1901,7 +1830,7 @@ fn extract_uploads<C: VoxelWorldConfig>(
     if route.uploads.is_empty() {
         return;
     }
-    let (Some(texture), Some(axes)) = (&route.texture, route.slots_per_axis) else {
+    let (Some(texture), Some(axes)) = (&route.texture, route.slots.shape()) else {
         return;
     };
     // Writes for a texture since replaced would not fit the new one.
@@ -2015,6 +1944,7 @@ mod tests {
     use crate::light::kernel::Plane;
     use crate::light::sky::ColumnAnswer;
     use crate::light::slot::own_faces_see;
+    use crate::light::slot_pool::texture_shape;
     use crate::light::view::in_world;
 
     fn route() -> LightRoute<DefaultWorld> {
@@ -2065,7 +1995,7 @@ mod tests {
         let far = in_world(IVec3::new(5, 0, 0));
         let id = RouteId::Key(far);
         route.landed(id, far, light.clone(), own, None, true);
-        assert!(route.holders.is_empty());
+        assert_eq!(route.slots.held(), 0);
 
         route.keep(id, far, true);
 
@@ -2077,7 +2007,7 @@ mod tests {
         assert_eq!(route.take_changed_tags().count(), 0);
 
         // The world chunk takes a slot only once its mesh shows.
-        assert_eq!(route.holders.len(), 1);
+        assert_eq!(route.slots.held(), 1);
         let shown = route.show(entity, world, false);
         assert_ne!(shown & HAS_SLOT, 0);
         assert!(route.queued_upload(shown & 0xFF_FFFF).is_some());
@@ -2085,7 +2015,7 @@ mod tests {
         route.keep(id, far, false);
 
         assert!(!route.chunks.contains_key(&id));
-        assert_eq!(route.holders.len(), 1);
+        assert_eq!(route.slots.held(), 1);
     }
 
     #[cfg(feature = "sub_grids")]
@@ -2311,7 +2241,7 @@ mod tests {
             &mut images,
         );
         assert_eq!(route.chunks[&RouteId::Entity(entity)].tag, flat);
-        assert!(route.holders.is_empty());
+        assert_eq!(route.slots.held(), 0);
         assert_eq!(route.tag_map().unwrap().answer(IVec3::X), None);
     }
 

@@ -38,6 +38,7 @@ mod request;
 pub(crate) mod route;
 pub(crate) mod sky;
 pub(crate) mod slot;
+mod slot_pool;
 pub(crate) mod solver;
 #[cfg(feature = "sub_grids")]
 pub(crate) mod sub_grid;
