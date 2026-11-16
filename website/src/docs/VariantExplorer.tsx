@@ -11,7 +11,7 @@ import {
   ItemDoc,
   itemOfKey,
   KIND_LABEL,
-  TopicIntro,
+  TopicGuide,
   topicOfKey,
   useApiLinks,
   useFeatureFilter,
@@ -134,7 +134,7 @@ export function Explorer({ api }: { api: ApiView }) {
         ) : (
           <>
             <h1 className="docs-c-title">{topic.title}</h1>
-            <TopicIntro topic={topic} />
+            <TopicGuide api={api} topic={topic} filter={filter} />
             <Elsewhere api={api} topic={topic} filter={filter} />
           </>
         )}

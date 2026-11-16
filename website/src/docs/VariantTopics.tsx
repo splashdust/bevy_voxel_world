@@ -1,6 +1,6 @@
 // PROTOTYPE, variant A: one page per topic, like a book. Topics down the left,
-// the README section that introduces the topic, then each item in full, and a
-// menu of the items on the right that follows the reader.
+// the topic's guide from website/guide/, then each item of its reference in
+// full, and a menu on the right that follows the reader.
 
 import { useMemo } from 'react';
 import { DocMenu } from '../DocMenu';
@@ -12,7 +12,7 @@ import {
   FeaturesOverview,
   FeatureToggles,
   ItemDoc,
-  TopicIntro,
+  TopicGuide,
   topicOfKey,
   useApiLinks,
   useFeatureFilter,
@@ -49,7 +49,9 @@ export function TopicPages({ api }: { api: ApiView }) {
     () =>
       topic
         ? [
-            ...items.map((item) => ({ id: item.path, text: item.name, depth: 2 })),
+            ...topic.headings,
+            { id: 'reference', text: 'Reference', depth: 2 },
+            ...items.map((item) => ({ id: item.path, text: item.name, depth: 3 })),
             ...(topic.elsewhere.length > 0 ? [{ id: 'elsewhere', text: 'Elsewhere', depth: 2 }] : []),
           ]
         : [
@@ -87,7 +89,10 @@ export function TopicPages({ api }: { api: ApiView }) {
           <div className="docs-a-content">
             {topic ? (
               <>
-                <TopicIntro topic={topic} />
+                <TopicGuide api={api} topic={topic} filter={filter} />
+                <h2 id="reference" className="api-reference-heading">
+                  Reference
+                </h2>
                 {items.map((item) => (
                   <ItemDoc key={item.path} item={item} filter={filter} />
                 ))}

@@ -1,12 +1,28 @@
-// PROTOTYPE: lets the site import `virtual:api`, the crate's API sorted into the
-// topics of api-topics.ts, with its docs rendered to HTML. It reads api.json,
-// which `npm run build:api` writes.
+// PROTOTYPE: lets the site import `virtual:api`, the guide in website/guide/
+// with the crate's API sorted into its topics and the docs rendered to HTML. It
+// reads api.json, which `npm run build:api` writes.
+//
+// Each guide file is one topic. Its front matter names the topic and lists the
+// API items whose reference it holds:
+//
+//   ---
+//   title: Light
+//   feature: light_propagation   # the page also lists what the feature adds elsewhere
+//   module: rendering            # optional: a module whose docs belong here
+//   api:
+//     - LightPropagation
+//     - Sky
+//   ---
+//
+// The body is Markdown. [`LightPropagation`] and [`VoxelWorld::raycast`] link to
+// the API, as in rustdoc, and a code block with the language `api` shows the
+// items or members it lists, one per line, where it stands.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { Marked } from 'marked';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { Marked, type Token as MarkdownToken, type TokensList } from 'marked';
 import type { Plugin } from 'vite';
-import { CODE_COLORS, CODE_THEME, highlighter } from './markdown.ts';
-import { TOPICS } from './api-topics.ts';
+import { CODE_COLORS, CODE_THEME, type Heading, highlighter, slugify } from './markdown.ts';
 
 /** One piece of a signature: text, a link (`h`) or a keyword or name (`k`). */
 export type Token = { t: string; h?: string; k?: 'kw' | 'name' };
@@ -73,12 +89,18 @@ export type ItemView = {
   topic: string;
 };
 
+/** A run of a guide's HTML, or the API items and members an `api` block shows. */
+export type GuideBlock = { html: string } | { embed: string[] };
+
 export type TopicView = {
   id: string;
   title: string;
+  /** The guide file, relative to the repository. */
+  file: string;
   feature?: string;
-  /** The README section or blurb that introduces the topic, as HTML. */
-  intro: string;
+  blocks: GuideBlock[];
+  /** The guide's `##` and `###` headings. */
+  headings: Heading[];
   /** The module docs that belong with the topic, as HTML. */
   moduleDocs?: { path: string; html: string };
   items: string[];
@@ -110,7 +132,7 @@ const MODULE_ID = 'virtual:api';
 const RESOLVED_MODULE_ID = `\0${MODULE_ID}`;
 
 const apiFile = new URL('../api.json', import.meta.url);
-const readmeFile = new URL('../../README.md', import.meta.url);
+const guideDir = new URL('../guide/', import.meta.url);
 const manifestFile = new URL('../../Cargo.toml', import.meta.url);
 
 /** Code block attributes that rustdoc reads, and that still mean the code is Rust. */
@@ -138,7 +160,7 @@ function visibleRust(code: string): string {
 
 const DOCS_RS = /^https:\/\/docs\.rs\/bevy_voxel_world\/[^/]+\/bevy_voxel_world\/(.+)$/;
 
-/** The key a docs.rs link to this crate points at, so the README's links stay on the site. */
+/** The key a docs.rs link to this crate points at, so links copied from the README stay on the site. */
 function docsRsKey(href: string): string | undefined {
   const match = DOCS_RS.exec(href);
   if (!match) {
@@ -164,18 +186,39 @@ function anchor(href: string, inner: string): string {
   return `<a href="${escape(href)}">${inner}</a>`;
 }
 
-async function docRenderer() {
+/**
+ * rustdoc's intra-doc links, like [`Sky`], are reference links without a
+ * definition. Appending a definition for each one resolves them.
+ */
+function withDefinitions(source: string, links: Record<string, string>): string {
+  const definitions = Object.entries(links)
+    .filter(([text]) => !/[[\]\n]/.test(text))
+    .map(([text, href]) => `[${text}]: <${href}>`)
+    .join('\n');
+  return `${source}\n\n${definitions}\n`;
+}
+
+async function markdownTools() {
   const code = await highlighter;
-  /** Renders rustdoc Markdown, moving its headings `shift` levels down. */
-  return (source: string, links: Record<string, string>, shift: number): string => {
-    if (!source.trim()) {
-      return '';
-    }
-    const marked = new Marked({
+
+  /** A renderer that moves headings `shift` levels down, and records the ids it gives `##` and `###` headings. */
+  const make = (links: Record<string, string>, shift: number, headings?: Heading[]) => {
+    const usedIds = new Map<string, number>();
+    return new Marked({
       renderer: {
         heading({ tokens, depth }) {
           const level = Math.min(6, depth + shift);
-          return `<h${level}>${this.parser.parseInline(tokens)}</h${level}>\n`;
+          const inner = this.parser.parseInline(tokens);
+          if (!headings || level > 3) {
+            return `<h${level}>${inner}</h${level}>\n`;
+          }
+          const text = this.parser.parseInline(tokens, this.parser.textRenderer);
+          const slug = slugify(text);
+          const uses = usedIds.get(slug) ?? 0;
+          usedIds.set(slug, uses + 1);
+          const id = uses === 0 ? slug : `${slug}-${uses}`;
+          headings.push({ id, text, depth: level });
+          return `<h${level} id="${id}">${inner}</h${level}>\n`;
         },
         code({ text, lang }) {
           const language = codeLanguage(lang);
@@ -191,14 +234,38 @@ async function docRenderer() {
         },
       },
     });
-    // rustdoc's intra-doc links, like [`Sky`], are reference links without a
-    // definition. Defining each one resolves them.
-    const definitions = Object.entries(links)
-      .filter(([text]) => !/[[\]\n]/.test(text))
-      .map(([text, href]) => `[${text}]: <${href}>`)
-      .join('\n');
-    return marked.parse(`${source}\n\n${definitions}\n`, { async: false });
   };
+
+  /** Renders the Markdown of a doc comment. */
+  const docs = (source: string, links: Record<string, string>, shift: number): string =>
+    source.trim() ? make(links, shift).parse(withDefinitions(source, links), { async: false }) : '';
+
+  /** Renders a guide, split at its `api` blocks. */
+  const guide = (source: string, links: Record<string, string>) => {
+    const headings: Heading[] = [];
+    const marked = make(links, 0, headings);
+    const tokens = marked.lexer(withDefinitions(source, links));
+    const blocks: GuideBlock[] = [];
+    let start = 0;
+    const flush = (end: number) => {
+      const run = Object.assign(tokens.slice(start, end), { links: tokens.links }) as TokensList;
+      const html = marked.parser(run);
+      if (html.trim()) {
+        blocks.push({ html });
+      }
+    };
+    tokens.forEach((token: MarkdownToken, i: number) => {
+      if (token.type === 'code' && token.lang === 'api') {
+        flush(i);
+        blocks.push({ embed: token.text.split('\n').map((line: string) => line.trim()).filter(Boolean) });
+        start = i + 1;
+      }
+    });
+    flush(tokens.length);
+    return { blocks, headings };
+  };
+
+  return { docs, guide };
 }
 
 /** The first paragraph of rustdoc Markdown, as plain text. */
@@ -212,15 +279,84 @@ function summary(docs: string): string {
     .trim();
 }
 
-/** Returns the body of the README section under `## title`, without its heading. */
-function readmeSection(readme: string, title: string): string {
-  const lines = readme.split('\n');
-  const start = lines.findIndex((line) => line === `## ${title}`);
-  if (start < 0) {
-    throw new Error(`README.md has no "## ${title}" section, which api-topics.ts names`);
+/** Reads a guide's front matter: `key: value` lines, and `key:` followed by `  - item` lines. */
+function frontMatter(source: string, file: string) {
+  const match = /^---\n([\s\S]*?)\n---\n/.exec(source);
+  if (!match) {
+    throw new Error(`${file} must start with front matter that gives its title`);
   }
-  const end = lines.findIndex((line, i) => i > start && line.startsWith('## '));
-  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
+  const data: Record<string, string | string[]> = {};
+  let list: string[] | undefined;
+  for (const line of match[1].split('\n')) {
+    const content = line.replace(/\s+#.*$/, '');
+    if (!content.trim()) {
+      continue;
+    }
+    const entry = /^\s+-\s+(.+)$/.exec(content);
+    if (entry && list) {
+      list.push(entry[1].trim());
+      continue;
+    }
+    const field = /^(\w+):\s*(.*)$/.exec(content);
+    if (!field) {
+      throw new Error(`${file}: can't read the front matter line "${line}"`);
+    }
+    if (field[2]) {
+      data[field[1]] = field[2].trim();
+      list = undefined;
+    } else {
+      list = [];
+      data[field[1]] = list;
+    }
+  }
+  return { data, body: source.slice(match[0].length) };
+}
+
+/**
+ * Finds what a Rust path names, the way a guide writes it: `LightPropagation`,
+ * `rendering::VoxelWorldBindings` or `VoxelWorld::raycast`. Returns its key.
+ */
+function resolver(items: RawItem[]) {
+  const byPath = new Map<string, RawItem>();
+  const byName = new Map<string, RawItem[]>();
+  for (const item of items) {
+    for (const path of [item.path, ...item.aliases]) {
+      byPath.set(path, item);
+    }
+    byName.set(item.name, [...(byName.get(item.name) ?? []), item]);
+  }
+  const item = (path: string): RawItem | undefined => {
+    const found = byPath.get(path) ?? byPath.get(`prelude::${path}`);
+    if (found) {
+      return found;
+    }
+    const named = byName.get(path) ?? [];
+    if (named.length > 1) {
+      throw new Error(`${path} could mean ${named.map((i) => i.path).join(' or ')}`);
+    }
+    return named[0];
+  };
+  return (reference: string): string | undefined => {
+    const path = reference
+      .replace(/^(crate|bevy_voxel_world)::/, '')
+      .replace(/\(\)$/, '')
+      .replace(/!$/, '');
+    const found = item(path);
+    if (found) {
+      return found.path;
+    }
+    const split = path.lastIndexOf('::');
+    const owner = split > 0 ? item(path.slice(0, split)) : undefined;
+    if (!owner) {
+      return undefined;
+    }
+    const name = path.slice(split + 2);
+    const members = owner.members.filter((m) => m.name === name || m.key === name);
+    if (members.length > 1) {
+      throw new Error(`${path} could mean ${members.map((m) => m.key).join(' or ')}; write ${owner.name}::${members[0].key}`);
+    }
+    return members[0] && `${owner.path}::${members[0].key}`;
+  };
 }
 
 /** Each feature in Cargo.toml, with the comment above it. */
@@ -244,30 +380,73 @@ function cargoFeatures(): { name: string; doc: string; enables: string[] }[] {
   return features;
 }
 
-async function buildView(): Promise<ApiView> {
+async function buildView(): Promise<{ view: ApiView; files: string[] }> {
   if (!existsSync(apiFile)) {
     throw new Error('website/api.json is missing. Run `npm run build:api` first.');
   }
   const api: RawApi = JSON.parse(readFileSync(apiFile, 'utf8'));
-  const readme = readFileSync(readmeFile, 'utf8');
-  const render = await docRenderer();
-  const byPath = new Map(api.items.map((item) => [item.path, item]));
+  const render = await markdownTools();
+  const resolve = resolver(api.items);
+  const errors: string[] = [];
+
+  // Each guide file is a topic, in the order of their names.
+  const guideFiles = readdirSync(guideDir).filter((f) => f.endsWith('.md')).sort();
+  const guides = guideFiles.map((file) => {
+    const { data, body } = frontMatter(readFileSync(new URL(file, guideDir), 'utf8'), file);
+    if (typeof data.title !== 'string') {
+      throw new Error(`${file} needs a title in its front matter`);
+    }
+    const items = ((data.api ?? []) as string[]).flatMap((reference) => {
+      const key = resolve(reference);
+      if (!key || !api.items.some((item) => item.path === key)) {
+        errors.push(`${file}: api lists ${reference}, which isn't a public item`);
+        return [];
+      }
+      return [key];
+    });
+    // [`Name`] links to the API, as in a doc comment.
+    const links: Record<string, string> = {};
+    for (const match of body.matchAll(/\[`([^`\]\n]+)`\](?!\()/g)) {
+      const reference = match[1];
+      const atLineStart = match.index === 0 || body[match.index - 1] === '\n';
+      if (atLineStart && body[match.index + match[0].length] === ':') {
+        continue; // A link definition, not a link.
+      }
+      const key = resolve(reference);
+      if (key) {
+        links[`\`${reference}\``] = `api:${key}`;
+      } else {
+        errors.push(`${file}: [\`${reference}\`] names nothing in the API`);
+      }
+    }
+    return {
+      file,
+      id: file.replace(/^\d+-/, '').replace(/\.md$/, ''),
+      title: data.title,
+      feature: typeof data.feature === 'string' ? data.feature : undefined,
+      module: typeof data.module === 'string' ? data.module : undefined,
+      items,
+      body,
+      links,
+    };
+  });
 
   const topicOf = new Map<string, string>();
-  for (const topic of TOPICS) {
-    for (const path of topic.items) {
-      if (!byPath.has(path)) {
-        throw new Error(`api-topics.ts lists ${path}, which isn't a public item`);
-      }
+  for (const guide of guides) {
+    for (const path of guide.items) {
       if (topicOf.has(path)) {
-        throw new Error(`api-topics.ts lists ${path} in both ${topicOf.get(path)} and ${topic.id}`);
+        errors.push(`${guide.file}: ${path} is already in ${topicOf.get(path)}`);
       }
-      topicOf.set(path, topic.id);
+      topicOf.set(path, guide.file);
     }
   }
-  const missing = api.items.filter((item) => !topicOf.has(item.path)).map((item) => item.path);
-  if (missing.length > 0) {
-    throw new Error(`These public items are in no topic. Add each to api-topics.ts:\n  ${missing.join('\n  ')}`);
+  for (const item of api.items) {
+    if (!topicOf.has(item.path)) {
+      errors.push(`${item.path} is in no guide. Add it to the api list of the guide that explains it.`);
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(`The guide doesn't match the API:\n  ${errors.join('\n  ')}`);
   }
 
   const items: Record<string, ItemView> = {};
@@ -279,7 +458,7 @@ async function buildView(): Promise<ApiView> {
       kind: item.kind,
       features: item.features,
       signature: item.signature,
-      html: render(item.docs, item.links, 2),
+      html: render.docs(item.docs, item.links, 2),
       summary: summary(item.docs),
       source: item.source,
       deprecated: item.deprecated,
@@ -289,33 +468,47 @@ async function buildView(): Promise<ApiView> {
         section: member.section,
         features: member.features.filter((f) => !item.features.includes(f)),
         signature: member.signature,
-        html: render(member.docs, member.links, 4),
+        html: render.docs(member.docs, member.links, 4),
       })),
       traits: item.traits.map((t) => ({ ...t, features: t.features.filter((f) => !item.features.includes(f)) })),
-      topic: topicOf.get(item.path)!,
+      topic: guides.find((g) => g.file === topicOf.get(item.path))!.id,
     };
   }
 
-  const topics: TopicView[] = TOPICS.map((topic) => {
-    const module = topic.module ? api.modules.find((m) => m.path === topic.module) : undefined;
-    const intro = [topic.blurb ?? '', topic.readme ? readmeSection(readme, topic.readme) : ''].join('\n\n');
-    const elsewhere = topic.feature
+  const topics: TopicView[] = guides.map((guide) => {
+    const module = guide.module ? api.modules.find((m) => m.path === guide.module) : undefined;
+    const { blocks, headings } = render.guide(guide.body, guide.links);
+    for (const block of blocks) {
+      if ('embed' in block) {
+        block.embed = block.embed.map((reference) => {
+          const key = resolve(reference);
+          if (!key) {
+            throw new Error(`${guide.file}: an api block lists ${reference}, which names nothing in the API`);
+          }
+          return key;
+        });
+      }
+    }
+    const feature = guide.feature;
+    const elsewhere = feature
       ? Object.values(items)
-          .filter((item) => item.topic !== topic.id && !item.features.includes(topic.feature!))
+          .filter((item) => item.topic !== guide.id && !item.features.includes(feature))
           .map((item) => ({
             item: item.path,
-            members: item.members.filter((m) => m.features.includes(topic.feature!)).map((m) => m.anchor),
-            traits: item.traits.filter((t) => t.features.includes(topic.feature!)).map((t) => t.name),
+            members: item.members.filter((m) => m.features.includes(feature)).map((m) => m.anchor),
+            traits: item.traits.filter((t) => t.features.includes(feature)).map((t) => t.name),
           }))
           .filter((e) => e.members.length > 0 || e.traits.length > 0)
       : [];
     return {
-      id: topic.id,
-      title: topic.title,
-      feature: topic.feature,
-      intro: render(intro, {}, 0),
-      moduleDocs: module && { path: module.path, html: render(module.docs, module.links, 2) },
-      items: topic.items,
+      id: guide.id,
+      title: guide.title,
+      file: `website/guide/${guide.file}`,
+      feature,
+      blocks,
+      headings,
+      moduleDocs: module && { path: module.path, html: render.docs(module.docs, module.links, 2) },
+      items: guide.items,
       elsewhere,
     };
   });
@@ -329,14 +522,19 @@ async function buildView(): Promise<ApiView> {
         item.members.filter((m) => m.features.includes(feature.name) && !item.features.includes(feature.name)).length,
       0,
     ),
-    topic: TOPICS.find((topic) => topic.feature === feature.name)?.id,
+    topic: topics.find((topic) => topic.feature === feature.name)?.id,
   }));
 
-  return { version: api.version, features, apiFeatures: api.features, topics, items };
+  return {
+    view: { version: api.version, features, apiFeatures: api.features, topics, items },
+    files: guideFiles.map((file) => fileURLToPath(new URL(file, guideDir))),
+  };
 }
 
-/** Lets the site import `virtual:api`, the crate's API as the docs section shows it. */
+/** Lets the site import `virtual:api`, the guide and the crate's API. */
 export function api(): Plugin {
+  const guidePath = fileURLToPath(guideDir);
+  const apiPath = fileURLToPath(apiFile);
   return {
     name: 'api',
     resolveId(id) {
@@ -346,9 +544,29 @@ export function api(): Plugin {
       if (id !== RESOLVED_MODULE_ID) {
         return null;
       }
-      this.addWatchFile(apiFile.pathname);
-      this.addWatchFile(readmeFile.pathname);
-      return `export default ${JSON.stringify(await buildView())};`;
+      const { view, files } = await buildView();
+      for (const file of [apiPath, ...files]) {
+        this.addWatchFile(file);
+      }
+      return `export default ${JSON.stringify(view)};`;
+    },
+    // Editing, adding or removing a guide, or rebuilding api.json, reloads the
+    // page, since nothing imports those files directly.
+    configureServer(server) {
+      server.watcher.add([guidePath, apiPath]);
+      const reload = (file: string) => {
+        if (!file.startsWith(guidePath) && file !== apiPath) {
+          return;
+        }
+        const module = server.moduleGraph.getModuleById(RESOLVED_MODULE_ID);
+        if (module) {
+          server.moduleGraph.invalidateModule(module);
+        }
+        server.ws.send({ type: 'full-reload' });
+      };
+      server.watcher.on('change', reload);
+      server.watcher.on('add', reload);
+      server.watcher.on('unlink', reload);
     },
   };
 }

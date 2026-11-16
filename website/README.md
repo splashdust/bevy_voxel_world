@@ -27,7 +27,21 @@ npm run dev
 
 ## Docs section (prototype)
 
-`docs/index.html` shows the crate's API by topic, from the rustdoc JSON of a nightly toolchain. `npm run build:api` runs `api_extract/`, which builds that JSON once with every feature that adds API and once without each of them, and writes `api.json`: each public item's signature, docs, members and the features it needs. `scripts/api-topics.ts` sorts the items into topics, and the build stops if an item is in none.
+`docs/index.html` shows the guide in `guide/` with the crate's API, from the rustdoc JSON of a nightly toolchain. `npm run build:api` runs `api_extract/`, which builds that JSON once with every feature that adds API and once without each of them, and writes `api.json`: each public item's signature, docs, members and the features it needs.
+
+Each file in `guide/` is one topic, in the order of the file names. The number at the start of a name only sets that order, so `08-light.md` is the topic `light`. Its front matter gives the title and lists the API items whose reference follows the guide:
+
+```markdown
+---
+title: Light
+feature: light_propagation
+api:
+  - LightPropagation
+  - Sky
+---
+```
+
+`feature` adds a section listing what the feature adds to other topics' items, and `module` adds a module's docs. In the body, [`LightPropagation`] and [`VoxelWorld::raycast`] link to the API, as in a doc comment. A code block with the language `api` shows the items or members it lists, one per line, at that point in the guide. The build stops if a link or `api` entry names nothing, or if a public item is in no guide's `api` list or in two.
 
 ```bash
 rustup toolchain install nightly

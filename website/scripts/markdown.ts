@@ -14,7 +14,7 @@ export const highlighter = createHighlighter({
 });
 
 /** Makes the same anchors as GitHub, so links to a section work on both sites. */
-function slugify(text: string): string {
+export function slugify(text: string): string {
   return text
     .toLowerCase()
     .replace(/[^\w\s-]/g, '')

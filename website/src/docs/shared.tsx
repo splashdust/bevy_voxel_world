@@ -155,9 +155,13 @@ export function scrollToId(id: string) {
   requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ block: 'start' }));
 }
 
-export function MemberDoc({ member, owner }: { member: MemberView; owner?: ItemView }) {
+/**
+ * One member's docs. `owner` names the item it belongs to, for a member shown
+ * away from its item; `anchored: false` leaves off the id that links land on.
+ */
+export function MemberDoc({ member, owner, anchored = true }: { member: MemberView; owner?: ItemView; anchored?: boolean }) {
   return (
-    <div className="api-member" id={member.anchor}>
+    <div className="api-member" id={anchored ? member.anchor : undefined}>
       <div className="api-member-head">
         <Signature tokens={member.signature} small />
         <FeatureChips features={member.features} />
@@ -233,11 +237,54 @@ export function ItemDoc({ item, filter, headless }: { item: ItemView; filter: Fe
   );
 }
 
-/** The README section and module docs that open a topic. */
-export function TopicIntro({ topic }: { topic: TopicView }) {
+/**
+ * What an `api` block in a guide shows: an item's signature and summary, with
+ * a link to its full reference, or a member's full docs.
+ */
+export function ApiEmbed({ api, keys, filter }: { api: ApiView; keys: string[]; filter: FeatureFilter }) {
+  return (
+    <div className="api-embed">
+      {keys.map((key) => {
+        const item = itemOfKey(api, key)!;
+        if (!filter.shows(item.features)) {
+          return null;
+        }
+        if (key === item.path) {
+          return (
+            <div key={key} className="api-embed-item">
+              <p className="api-embed-head">
+                <span className="api-kind">{KIND_LABEL[item.kind] ?? item.kind}</span>
+                <ApiLink to={item.path}>{item.name}</ApiLink>
+                <FeatureChips features={item.features} />
+              </p>
+              <Signature tokens={item.signature} small />
+              <p className="api-embed-summary">{item.summary}</p>
+            </div>
+          );
+        }
+        const member = item.members.find((m) => m.anchor === key)!;
+        return filter.shows(member.features) ? (
+          <MemberDoc key={key} member={member} owner={item} anchored={false} />
+        ) : null;
+      })}
+    </div>
+  );
+}
+
+/** A topic's guide, with its `api` blocks, and the module docs that belong with it. */
+export function TopicGuide({ api, topic, filter }: { api: ApiView; topic: TopicView; filter: FeatureFilter }) {
   return (
     <>
-      {topic.intro && <div className="prose topic-intro" dangerouslySetInnerHTML={{ __html: topic.intro }} />}
+      {topic.blocks.map((block, i) =>
+        'html' in block ? (
+          <div key={i} className="prose topic-intro" dangerouslySetInnerHTML={{ __html: block.html }} />
+        ) : (
+          <ApiEmbed key={i} api={api} keys={block.embed} filter={filter} />
+        ),
+      )}
+      <p className="guide-edit">
+        <a href={`${REPOSITORY}/blob/main/${topic.file}`}>Edit this page</a>
+      </p>
       {topic.moduleDocs && (
         <details className="module-docs" id={topic.moduleDocs.path}>
           <summary>
