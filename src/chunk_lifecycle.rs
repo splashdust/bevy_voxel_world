@@ -38,9 +38,6 @@ use crate::{
     voxel_world_internal::{NeedsMaterial, SpawnMeshes},
 };
 
-#[cfg(feature = "sub_grids")]
-pub(crate) mod handover;
-
 /// Where a chunk is in the chunk lifecycle, as seen from outside the crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChunkStatus {
@@ -276,7 +273,7 @@ pub(crate) type ChunkStateOf<C> = ChunkState<ChunkTaskHandle<C>>;
 pub struct ChunkIndex<C> {
     entities: GridTable<ChunkKey, Entity>,
     /// The grid key of every live chunk.
-    keys: HashMap<Entity, GridKey>,
+    pub(crate) keys: HashMap<Entity, GridKey>,
     /// How many chunks each grid has at each LOD level.
     levels: PerGrid<LevelCounts>,
     /// The entity of each sub-grid with live chunks, which its chunks'
@@ -296,7 +293,7 @@ pub struct ChunkIndex<C> {
     /// The other Pending chunks, with their chunk keys.
     pending: HashMap<Entity, ChunkKey>,
     generating: HashSet<Entity>,
-    retiring: HashSet<Entity>,
+    pub(crate) retiring: HashSet<Entity>,
     /// How many generated chunks disagreed with their fill hint. Counted in
     /// debug builds; the first one is reported.
     pub(crate) hint_mismatches: usize,
@@ -428,7 +425,7 @@ impl<C> ChunkIndex<C> {
 
     /// Removes the chunk from the index, so its key can spawn again. Returns its
     /// grid key, or `None` if the index no longer holds it.
-    fn despawned(&mut self, entity: Entity) -> Option<GridKey> {
+    pub(crate) fn despawned(&mut self, entity: Entity) -> Option<GridKey> {
         let key = self.keys.remove(&entity)?;
         self.entities.remove(&key);
         self.levels
@@ -760,7 +757,9 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             MessageWriter<ChunkWillUpdate<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
-        #[cfg(feature = "sub_grids")] mut handovers: ResMut<handover::Handovers<C>>,
+        #[cfg(feature = "sub_grids")] mut handovers: ResMut<
+            crate::sub_grid::handover::Handovers<C>,
+        >,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("apply_requests").entered();
@@ -952,7 +951,7 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
             ResMut<crate::light::relight::LightWork<C>>,
         >,
         #[cfg(feature = "sub_grids")] landing: (
-            ResMut<handover::Handovers<C>>,
+            ResMut<crate::sub_grid::handover::Handovers<C>>,
             ResMut<ChunkMapRemoveBuffer<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),

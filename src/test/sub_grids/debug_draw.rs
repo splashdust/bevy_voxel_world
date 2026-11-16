@@ -5,7 +5,6 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::gizmos::{config::DefaultGizmoConfigGroup, AppGizmoBuilder, GizmoAsset};
 use bevy::prelude::*;
 
-use super::{test_plugins, update_until, FloorWorld};
 use crate::chunk::{Chunk, ChunkData};
 use crate::chunk_map::ChunkMap;
 use crate::debug::{VoxelGizmo, VoxelWorldDebugDraw, VoxelWorldDebugDrawPlugin};
@@ -14,6 +13,7 @@ use crate::debug_draw::{
 };
 use crate::grid::GridKey;
 use crate::prelude::*;
+use crate::test::{test_plugins, update_until, FloorWorld};
 
 /// A world with no camera, so it streams no chunks of its own, whose
 /// transforms propagate and whose voxel gizmos draw.

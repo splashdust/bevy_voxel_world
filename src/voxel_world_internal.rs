@@ -129,7 +129,7 @@ where
         #[cfg(feature = "sub_grids")]
         {
             commands.insert_resource(crate::sub_grid::SubGrids::<C>::new(world_root));
-            commands.init_resource::<crate::chunk_lifecycle::handover::Handovers<C>>();
+            commands.init_resource::<crate::sub_grid::handover::Handovers<C>>();
         }
         configuration.init_root(commands, world_root)
     }

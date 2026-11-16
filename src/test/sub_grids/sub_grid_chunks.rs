@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::{
-    chunk_status, meshing_app, move_cameras, record_chunk_messages, recorded,
-    spawn_camera, test_plugins, update_until, FloorWorld,
-};
 use crate::chunk::{Chunk, ChunkData, VoxelArray};
 use crate::chunk_lifecycle::ChunkStateOf;
 use crate::mesh_cache::MeshRef;
 use crate::prelude::*;
+use crate::test::{
+    chunk_status, meshing_app, move_cameras, record_chunk_messages, recorded,
+    spawn_camera, test_plugins, update_until, FloorWorld,
+};
 use crate::voxel_world::{
     ChunkEvent, ChunkEventType, Published, WillDespawn, WillRemesh, WillSpawn, WillUpdate,
 };

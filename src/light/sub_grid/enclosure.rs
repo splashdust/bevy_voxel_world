@@ -12,7 +12,7 @@
 //! where a chunk position the sub-grid has no chunk at is air, and then the
 //! sub-grid's [line record](super::line_record) for the chunks further along
 //! each row. Each sub-grid has one record in the
-//! [world view](super::view), which solves read a snapshot of. The commit
+//! [world view](crate::light::view), which solves read a snapshot of. The commit
 //! keeps it current from the sub-grid's voxel edits, and relights the chunks
 //! whose solve box holds a voxel whose line test the edit flipped. Under
 //! [`SubGridSky::World`] there are no records, and every open voxel of a
@@ -26,16 +26,16 @@ use std::sync::Arc;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
-use super::config::SubGridSky;
-use super::inputs::LightInputs;
-use super::kernel::Plane;
 use super::line_record::{Axis, ChunkLines, Flip, LineRecord};
-use super::solver::{DirectCells, Neighbourhood};
-use super::view::{LightView, ViewMaps};
-use super::LightSettings;
 use crate::chunk::{chunk_containing, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::{GridId, GridKey};
+use crate::light::config::SubGridSky;
+use crate::light::inputs::LightInputs;
+use crate::light::kernel::Plane;
+use crate::light::solver::{DirectCells, Neighbourhood};
+use crate::light::view::{LightView, ViewMaps};
+use crate::light::LightSettings;
 use crate::sub_grid::SubGrids;
 use crate::voxel_edits::{ChangeSet, CommittedEdits, VoxelEdits};
 
@@ -421,9 +421,9 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::line_record::OpenLines;
     use super::*;
     use crate::light::inputs::Occupancy;
-    use crate::light::line_record::OpenLines;
     use crate::light::sky::ColumnAnswer;
     use crate::light::solver::neighbour_index;
 

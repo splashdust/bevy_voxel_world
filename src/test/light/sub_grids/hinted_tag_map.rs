@@ -8,12 +8,12 @@ use std::sync::Arc;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::edits::settle;
-use super::sky_light::sky_light;
-use super::voxel_light::{app, light_at, LampWorld, STONE};
 use crate::light::route::LightRoute;
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::test::light::edits::settle;
+use crate::test::light::sky_light::sky_light;
+use crate::test::light::voxel_light::{app, light_at, LampWorld, STONE};
 use crate::test::update_until;
 
 /// The chunk position of an island 16 voxels thick, two chunk positions
@@ -172,7 +172,7 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
         .world_mut()
         .run_system_once(|voxel_world: VoxelWorld<LampWorld>| {
             let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
-            for local in super::voxel_light::origin_voxels() {
+            for local in crate::test::light::voxel_light::origin_voxels() {
                 let levels = voxel_world.light_at(BELOW_ISLAND * 32 + local).unwrap();
                 *counts
                     .entry((levels.sky as u32, levels.voxel as u32))

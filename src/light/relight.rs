@@ -283,7 +283,7 @@ pub(crate) struct LightWork<C> {
     /// The relights handovers wait for, and the chunks whose light they
     /// hold.
     #[cfg(feature = "sub_grids")]
-    handovers: super::handover::HandoverWaits,
+    handovers: super::sub_grid::handover::HandoverWaits,
     _world: PhantomData<C>,
 }
 

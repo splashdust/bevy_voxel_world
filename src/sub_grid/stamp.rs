@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use bevy::{math::I64Vec3, prelude::*};
 
+use super::handover::Handovers;
 use super::{solid_at, world, Grid, SubGrid, SubGrids};
-use crate::chunk_lifecycle::{handover::Handovers, ChunkRequests};
+use crate::chunk_lifecycle::ChunkRequests;
 use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridId;
 use crate::level_0_reader::Level0Reader;
-use crate::snap::{snap, GridRotation, Snap};
+use crate::sub_grid::snap::{snap, GridRotation, Snap};
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::VoxelEdits;
 

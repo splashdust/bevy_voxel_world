@@ -9,15 +9,15 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
-use super::super::{record_chunk_messages, recorded, update_until};
-use super::edits::{paced_update, settle};
-use super::sky_light::sky_light;
-use super::voxel_light::{app, Hold, LampWorld, LAMP, STONE};
 use crate::chunk::Chunk;
 use crate::light::route::{LightRoute, HAS_SLOT};
 use crate::light::LightSettings;
 use crate::mesh_cache::MeshRef;
 use crate::prelude::*;
+use crate::test::light::edits::{paced_update, settle};
+use crate::test::light::sky_light::sky_light;
+use crate::test::light::voxel_light::{app, Hold, LampWorld, LAMP, STONE};
+use crate::test::{record_chunk_messages, recorded, update_until};
 use crate::voxel_world_internal::WorldRoot;
 
 /// The lamp in the underside of the slab of [`overhang`].

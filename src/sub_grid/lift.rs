@@ -6,10 +6,10 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use super::{world, Grid, SubGrids};
-use crate::chunk_lifecycle::handover::Handovers;
 use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
 use crate::level_0_reader::Level0Reader;
+use crate::sub_grid::handover::Handovers;
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::VoxelEdits;
 

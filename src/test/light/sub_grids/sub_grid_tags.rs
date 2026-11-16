@@ -9,11 +9,11 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
-use super::edits::settle;
-use super::reference::Reference;
-use super::voxel_light::{app, lit, LampWorld, LAMP, STONE};
 use crate::light::route::{LightRoute, HAS_SLOT};
 use crate::prelude::*;
+use crate::test::light::edits::settle;
+use crate::test::light::reference::Reference;
+use crate::test::light::voxel_light::{app, lit, LampWorld, LAMP, STONE};
 
 /// The tag bit of a sub-grid's chunk.
 const SUB_GRID: u32 = 1 << 30;

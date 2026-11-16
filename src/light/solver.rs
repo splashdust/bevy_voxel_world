@@ -291,7 +291,7 @@ fn direct_sky(key: GridKey, snapshot: &Snapshot, inputs: &LightInputs) -> Direct
     }
     #[cfg(feature = "sub_grids")]
     if let Some(lines) = &snapshot.lines {
-        return DirectSky::Cells(super::enclosure::direct_cells(
+        return DirectSky::Cells(super::sub_grid::enclosure::direct_cells(
             &snapshot.neighbours,
             inputs,
             key.position(),

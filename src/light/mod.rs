@@ -24,18 +24,12 @@ mod census;
 mod coarse;
 pub(crate) mod config;
 mod edit;
-#[cfg(feature = "sub_grids")]
-mod enclosure;
 mod faces;
 pub(crate) mod fill;
-#[cfg(feature = "sub_grids")]
-mod handover;
 pub(crate) mod hinted;
 mod inputs;
 mod kernel;
 mod levels;
-#[cfg(feature = "sub_grids")]
-mod line_record;
 pub(crate) mod material;
 pub(crate) mod probe;
 pub(crate) mod record;
@@ -46,9 +40,7 @@ pub(crate) mod sky;
 pub(crate) mod slot;
 pub(crate) mod solver;
 #[cfg(feature = "sub_grids")]
-mod sub_grid;
-#[cfg(feature = "sub_grids")]
-pub(crate) mod tag_map;
+pub(crate) mod sub_grid;
 pub(crate) mod view;
 
 #[doc(hidden)]
@@ -683,7 +675,7 @@ fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
 /// read the new fill. A change of `sub_grid_sky` builds or drops the
 /// sub-grids' line records at once and relights every sub-grid chunk with
 /// an open voxel, nearest a camera first, and no world chunk: see
-/// [`enclosure::switch`]. Values equal to those last applied start nothing.
+/// [`enclosure::switch`](sub_grid::enclosure::switch). Values equal to those last applied start nothing.
 ///
 /// `shown`, and returning `None` after `Some`, are read once at plugin
 /// build: changing them logs a warning once and changes nothing.
@@ -756,7 +748,7 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     #[cfg(feature = "sub_grids")]
     if config.sub_grid_sky != settings.config.sub_grid_sky {
         settings.config.sub_grid_sky = config.sub_grid_sky;
-        let keys = enclosure::switch(
+        let keys = sub_grid::enclosure::switch(
             &settings.view,
             config.sub_grid_sky,
             &edits,

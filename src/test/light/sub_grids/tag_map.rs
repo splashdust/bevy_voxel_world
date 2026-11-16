@@ -9,11 +9,11 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
-use super::super::{meshing_app, spawn_camera, update_until};
 use crate::grid_bench::{tag_map_stats, TagMapStats};
 use crate::light::route::{LightRoute, HAS_SLOT};
 use crate::prelude::*;
 use crate::rendering::VoxelWorldMaterial;
+use crate::test::{meshing_app, spawn_camera, update_until};
 use crate::voxel_material::DefaultVoxelMaterial;
 
 const STONE: u8 = 1;

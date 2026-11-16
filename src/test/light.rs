@@ -9,20 +9,12 @@ use bevy::prelude::*;
 use super::{meshing_app, spawn_camera, update_until, DefaultVoxelMaterial, FloorWorld};
 use crate::prelude::*;
 
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod air_slots;
 #[cfg(feature = "light_propagation")]
 mod coarse;
 #[cfg(feature = "light_propagation")]
 mod edits;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod enclosure;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod handover_light;
 #[cfg(feature = "light_propagation")]
 mod hinted_air;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod hinted_tag_map;
 #[cfg(feature = "light_propagation")]
 mod look;
 #[cfg(feature = "light_propagation")]
@@ -44,13 +36,7 @@ mod sky_record;
 #[cfg(feature = "light_propagation")]
 mod slots;
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod sub_grid_edits;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod sub_grid_light;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod sub_grid_tags;
-#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-mod tag_map;
+mod sub_grids;
 #[cfg(feature = "light_propagation")]
 mod voxel_light;
 #[cfg(feature = "light_propagation")]

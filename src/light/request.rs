@@ -15,7 +15,7 @@
 //! [`WalkCache`], so a game reading the same voxel every frame walks it
 //! once. With `sub_grids`, the tag map walks the same way in tasks of its
 //! own, for hinted air around sub-grids: see
-//! [`tag_map`](super::tag_map#hinted-air).
+//! [`tag_map`](super::sub_grid::tag_map#hinted-air).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

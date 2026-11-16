@@ -8,13 +8,13 @@ use std::sync::Arc;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::edits::settle;
-use super::sky_light::chunk_light;
-use super::voxel_light::{app, LampWorld, LAMP, STONE};
 use crate::light::route::{tag_levels, LightRoute, HAS_SLOT};
 use crate::light::slot::{cell_index, texel_at, texel_levels};
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::test::light::edits::settle;
+use crate::test::light::sky_light::chunk_light;
+use crate::test::light::voxel_light::{app, LampWorld, LAMP, STONE};
 
 /// The hall's air, from its minimum corner inclusive to its maximum corner
 /// exclusive. It holds the chunks of air at (0, 0, 0) and (1, 0, 0), whose
@@ -132,7 +132,7 @@ fn answer(app: &App, position: IVec3) -> Option<u32> {
 fn light_of_chunk(app: &mut App, chunk: IVec3) -> Vec<LightLevels> {
     app.world_mut()
         .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
-            super::voxel_light::origin_voxels()
+            crate::test::light::voxel_light::origin_voxels()
                 .map(|local| {
                     voxel_world
                         .light_at(chunk * 32 + local)
@@ -153,7 +153,7 @@ fn slot_light(app: &App, chunk: IVec3) -> Vec<LightLevels> {
         .queued_upload(tag & 0xFF_FFFF)
         .expect("the slot's bytes are queued");
     let precision = LightPropagation::default().precision;
-    super::voxel_light::origin_voxels()
+    crate::test::light::voxel_light::origin_voxels()
         .map(|local| {
             let index = cell_index(local.as_uvec3() + UVec3::ONE);
             let (sky, voxel) = texel_at(bytes, index, precision);
@@ -167,7 +167,7 @@ fn slot_light(app: &App, chunk: IVec3) -> Vec<LightLevels> {
 fn assert_slot_matches_light_at(app: &mut App, chunk: IVec3, when: &str) {
     let shown = slot_light(app, chunk);
     let read = light_of_chunk(app, chunk);
-    for (index, local) in super::voxel_light::origin_voxels().enumerate() {
+    for (index, local) in crate::test::light::voxel_light::origin_voxels().enumerate() {
         assert_eq!(
             shown[index],
             read[index],

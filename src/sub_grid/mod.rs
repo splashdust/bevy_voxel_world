@@ -195,7 +195,10 @@ use crate::{
     voxel_world_internal::WorldRoot,
 };
 
+pub(crate) mod handover;
 mod lift;
+pub(crate) mod raycast;
+pub(crate) mod snap;
 mod stamp;
 
 pub(crate) use lift::{lift, LiftParts};

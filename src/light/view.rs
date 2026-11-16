@@ -85,9 +85,9 @@ pub(crate) struct ViewMaps {
     pub air: HashMap<GridKey, AirInputs>,
     /// Each sub-grid's line record, by grid, under
     /// [`SubGridSky::Enclosed`](super::config::SubGridSky::Enclosed), and
-    /// `None` under `World`: see [`enclosure`](super::enclosure).
+    /// `None` under `World`: see [`enclosure`](super::sub_grid::enclosure).
     #[cfg(feature = "sub_grids")]
-    pub lines: Option<HashMap<GridId, super::enclosure::GridLines>>,
+    pub lines: Option<HashMap<GridId, super::sub_grid::enclosure::GridLines>>,
 }
 
 impl ViewMaps {
@@ -198,7 +198,7 @@ pub(crate) struct Snapshot {
     /// The line record of a sub-grid chunk's grid, when enclosure caps its
     /// sky. A sub-grid with no record yet reads an empty one.
     #[cfg(feature = "sub_grids")]
-    pub lines: Option<Arc<super::line_record::LineRecord>>,
+    pub lines: Option<Arc<super::sub_grid::line_record::LineRecord>>,
 }
 
 impl Snapshot {

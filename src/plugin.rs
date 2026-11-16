@@ -342,7 +342,7 @@ where
         // frame.
         #[cfg(feature = "sub_grids")]
         {
-            use crate::chunk_lifecycle::handover::Handovers;
+            use crate::sub_grid::handover::Handovers;
             use crate::sub_grid::{Stamped, SubGrids};
             let in_use = |sub_grids: Res<SubGrids<C>>| sub_grids.in_use();
             app.add_message::<crate::sub_grid::Lifted<C>>()

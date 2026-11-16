@@ -4,9 +4,9 @@
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::edits::{settle, world};
-use super::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 use crate::prelude::*;
+use crate::test::light::edits::{settle, world};
+use crate::test::light::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 use crate::test::update_until;
 
 #[test]

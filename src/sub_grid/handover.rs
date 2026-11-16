@@ -2,7 +2,7 @@
 //! twice or not at all.
 //!
 //! A commit that gives a sub-grid its first solid voxel or takes its last,
-//! or one an operation marks with [`ChunkRequests::mark_handover`], lands as
+//! or one an operation marks with [`ChunkRequests::mark_handover`](crate::chunk_lifecycle::ChunkRequests::mark_handover), lands as
 //! one handover. It holds every chunk the commit spawns or makes stale, in
 //! every grid, padding neighbours included. A held chunk keeps showing what
 //! it showed: its old mesh and published voxel data, or nothing for a chunk
@@ -58,8 +58,17 @@
 
 use std::sync::Mutex;
 
-use super::*;
+use bevy::{platform::collections::HashMap, prelude::*};
+
 use crate::sub_grid::{Lifted, Stamped, SubGrids};
+use crate::{
+    chunk_lifecycle::{publish, ChunkIndex, Finished},
+    chunk_map::{ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
+    configuration::VoxelWorldConfig,
+    grid::{GridId, GridKey},
+    voxel_edits::VoxelEdits,
+    voxel_world::ChunkWillDespawn,
+};
 
 /// A lift or stamp whose commit a handover holds, announced once it lands.
 pub(crate) enum Operation<C: VoxelWorldConfig> {
@@ -129,7 +138,7 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     /// Sub-grids stamped and still live, which fragment checks landing from
     /// the stamp on count as gone.
     #[cfg(feature = "dislodged_fragments")]
-    stamped_away: Mutex<HashSet<Entity>>,
+    stamped_away: Mutex<bevy::platform::collections::HashSet<Entity>>,
     stats: HandoverStats,
     /// In a lit world, the chunks whose light each handover holds, by its
     /// id: those whose relights its commits started, and its own.
@@ -334,7 +343,8 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             }
             return;
         };
-        let mut keys: HashSet<GridKey> = relights.into_iter().collect();
+        let mut keys: bevy::platform::collections::HashSet<GridKey> =
+            relights.into_iter().collect();
         for entity in &self.handovers[&id] {
             let Some(held) = self.held.get(entity) else {
                 continue;

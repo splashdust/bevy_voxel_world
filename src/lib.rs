@@ -21,8 +21,6 @@ mod mesh_cache;
 mod meshing;
 mod plugin;
 mod pool_budget;
-#[cfg(feature = "sub_grids")]
-mod snap;
 mod streaming_policy;
 #[cfg(feature = "sub_grids")]
 mod sub_grid;
@@ -57,7 +55,7 @@ pub mod prelude {
     pub use crate::light_off::*;
     pub use crate::plugin::VoxelWorldPlugin;
     #[cfg(feature = "sub_grids")]
-    pub use crate::snap::GridRotation;
+    pub use crate::sub_grid::snap::GridRotation;
     #[cfg(feature = "sub_grids")]
     pub use crate::sub_grid::{
         incoming_replaces, Grid, GridVoxels, GridVoxelsMut, LiftError, Lifted,

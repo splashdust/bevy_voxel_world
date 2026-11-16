@@ -515,17 +515,17 @@ where
     app.add_systems(
         PostUpdate,
         (
-            super::tag_map::upkeep::<C>
-                .run_if(super::tag_map::has_upkeep::<C>)
+            super::sub_grid::tag_map::upkeep::<C>
+                .run_if(super::sub_grid::tag_map::has_upkeep::<C>)
                 .after(crate::sub_grid::SubGrids::<C>::snapshot_poses)
-                .after(crate::chunk_lifecycle::handover::Handovers::<C>::despawn_landed)
+                .after(crate::sub_grid::handover::Handovers::<C>::despawn_landed)
                 .after(super::follow_config::<C>)
                 .before(make_texture::<C, M>),
-            super::tag_map::set_changed_tags::<C>
-                .run_if(super::tag_map::has_upkeep::<C>)
-                .after(super::tag_map::upkeep::<C>),
+            super::sub_grid::tag_map::set_changed_tags::<C>
+                .run_if(super::sub_grid::tag_map::has_upkeep::<C>)
+                .after(super::sub_grid::tag_map::upkeep::<C>),
             bind_tag_map::<C, M>
-                .after(super::tag_map::upkeep::<C>)
+                .after(super::sub_grid::tag_map::upkeep::<C>)
                 .before(AssetEventSystems),
         ),
     );
@@ -719,7 +719,7 @@ struct TagMapBinding<C> {
 #[cfg(feature = "sub_grids")]
 impl<C: VoxelWorldConfig> TagMapBinding<C> {
     fn new(images: &mut Assets<Image>) -> Self {
-        let placeholder = images.add(super::tag_map::placeholder_image());
+        let placeholder = images.add(super::sub_grid::tag_map::placeholder_image());
         Self {
             bound: placeholder.id(),
             placeholder,

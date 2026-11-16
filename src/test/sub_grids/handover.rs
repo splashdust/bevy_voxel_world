@@ -7,14 +7,14 @@ use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::{
-    floor_voxel, meshing_app, record_chunk_messages, recorded, spawn_camera,
-    test_plugins, update_until,
-};
 use crate::chunk::{Chunk, CHUNK_SIZE_I};
 use crate::grid_bench::{handover_stats, HandoverStats};
 use crate::mesh_cache::MeshRef;
 use crate::prelude::*;
+use crate::test::{
+    floor_voxel, meshing_app, record_chunk_messages, recorded, spawn_camera,
+    test_plugins, update_until,
+};
 
 /// A world with solid ground below y = 0, as `FloorWorld`. Once `slow`, it
 /// runs two chunk tasks at a time, so a commit touching many chunks takes

@@ -7,12 +7,10 @@ use std::sync::{Arc, RwLock};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
-#[cfg(feature = "sub_grids")]
-mod grid_raycast;
-mod raycast;
+pub(crate) mod raycast;
 
 #[cfg(feature = "sub_grids")]
-pub use grid_raycast::{GridRaycastFn, GridRaycastHit};
+pub use crate::sub_grid::raycast::{GridRaycastFn, GridRaycastHit};
 
 #[cfg(feature = "sub_grids")]
 use crate::sub_grid::{
@@ -247,9 +245,10 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     chunk_index: Res<'w, ChunkIndex<C>>,
     chunk_states: Query<'w, 's, &'static ChunkStateOf<C>>,
     chunk_requests: Res<'w, ChunkRequests<C>>,
-    chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    voxel_edits: Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
-    configuration: Res<'w, ConfigCopy<C>>,
+    pub(crate) chunk_map: Res<'w, ChunkMap<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    pub(crate) voxel_edits:
+        Res<'w, VoxelEdits<C, <C as VoxelWorldConfig>::MaterialIndex>>,
+    pub(crate) configuration: Res<'w, ConfigCopy<C>>,
     #[cfg(feature = "light_propagation")]
     light: Option<Res<'w, crate::light::LightSettings<C>>>,
     #[cfg(feature = "light_propagation")]
@@ -261,9 +260,9 @@ pub struct VoxelWorld<'w, 's, C: VoxelWorldConfig> {
     #[cfg(feature = "light_propagation")]
     sky_fill: Option<Res<'w, crate::light::fill::driver::SkyFillWork<C>>>,
     #[cfg(feature = "sub_grids")]
-    sub_grids: Res<'w, SubGrids<C>>,
+    pub(crate) sub_grids: Res<'w, SubGrids<C>>,
     #[cfg(feature = "sub_grids")]
-    handovers: Res<'w, crate::chunk_lifecycle::handover::Handovers<C>>,
+    handovers: Res<'w, crate::sub_grid::handover::Handovers<C>>,
     #[cfg(feature = "sub_grids")]
     commands: Commands<'w, 's>,
 }

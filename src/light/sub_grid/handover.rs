@@ -27,8 +27,8 @@
 
 use bevy::platform::collections::HashMap;
 
-use super::census::Cause;
 use crate::grid::GridKey;
+use crate::light::census::Cause;
 
 /// A relight a held chunk's light calls for: the chunk to relight, whether
 /// its relight is urgent, and why.

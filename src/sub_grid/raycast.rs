@@ -14,7 +14,7 @@ use std::{
 
 use bevy::{math::Affine3A, prelude::*};
 
-use super::{raycast::trace, voxel_at, VoxelWorld};
+use crate::voxel_world::{raycast::trace, voxel_at, VoxelWorld};
 use crate::{
     chunk_map::{ChunkMap, ChunkMapData},
     configuration::VoxelWorldConfig,

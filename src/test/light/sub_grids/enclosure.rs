@@ -7,11 +7,11 @@ use std::sync::Arc;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::edits::settle;
-use super::reference::Reference;
-use super::sky_light::{light_is_settled, sky_light};
-use super::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 use crate::prelude::*;
+use crate::test::light::edits::settle;
+use crate::test::light::reference::Reference;
+use crate::test::light::sky_light::{light_is_settled, sky_light};
+use crate::test::light::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 
 /// Runs `f` on the voxel world in a system of its own, whose commands apply
 /// when it returns.

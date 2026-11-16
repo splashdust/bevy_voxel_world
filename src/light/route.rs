@@ -82,7 +82,7 @@
 //! same extract as the slots'. A chunk at a position the tag map holds is
 //! kept, which places its light whether or not its mesh shows, under a
 //! wider slot rule that reads all of its open voxels: see
-//! [`tag_map`](super::tag_map).
+//! [`tag_map`](super::sub_grid::tag_map).
 //!
 //! # References
 //!
@@ -134,8 +134,8 @@ use crate::configuration::VoxelWorldConfig;
 use crate::grid::GridKey;
 #[cfg(feature = "sub_grids")]
 use {
-    super::tag_map::columns::{HintedColumns, Hinting},
-    super::tag_map::{PendingWrites, Placed, TagMap, TagMapWrites},
+    super::sub_grid::tag_map::columns::{HintedColumns, Hinting},
+    super::sub_grid::tag_map::{PendingWrites, Placed, TagMap, TagMapWrites},
     super::view::in_world,
     crate::chunk::MAX_LOD_LEVEL,
     crate::configuration::LodLevel,
@@ -353,7 +353,7 @@ pub(crate) struct LightRoute<C> {
 }
 
 /// A tag map, and what the route keeps to give the tag at each of its
-/// positions: see [`tag_map`](super::tag_map).
+/// positions: see [`tag_map`](super::sub_grid::tag_map).
 #[cfg(feature = "sub_grids")]
 struct TagMapping {
     map: TagMap,

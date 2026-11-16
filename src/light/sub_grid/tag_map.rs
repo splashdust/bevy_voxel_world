@@ -8,7 +8,7 @@
 //! this frame and padded by one voxel. A sub-grid with no solid voxel adds
 //! none. Positions are on the world's grid, so a sub-grid's own chunks are
 //! never held. Each position holds the tag of the chunk the screen shows there, in
-//! the encoding [`route`](super::route) describes: a level-0 chunk's tag, or
+//! the encoding [`route`](crate::light::route) describes: a level-0 chunk's tag, or
 //! else the tag of the coarse chunk covering the position, whose LOD bits
 //! say how wide its cells are. Hinted air holds levels: see [Hinted
 //! air](#hinted-air). Any other position with no chunk showing a tag, such
@@ -27,7 +27,7 @@
 //! while a chunk has none its entry holds the most common level among its
 //! open voxels. When the map stops holding the position, the chunk's slot
 //! is freed in the frame its entry leaves, and a chunk showing its mesh
-//! goes back to the slot rule in [`slot`](super::slot).
+//! goes back to the slot rule in [`slot`](crate::light::slot).
 //!
 //! **When entries are written.** Upkeep runs in `PostUpdate`, after
 //! transform propagation and after the last change to a chunk's tag, and an
@@ -49,7 +49,7 @@
 //!
 //! **The shader.** The world's materials bind the map's texture at binding
 //! 202, and the shader looks up the world chunk in front of a sub-grid's
-//! face in it: see [`material`](super::material). Until the world makes its
+//! face in it: see [`material`](crate::light::material). Until the world makes its
 //! tag map they bind a placeholder of one empty entry, where every lookup
 //! misses, which has no upkeep. Each time the table grows into a new
 //! texture, the materials bind it in the same frame.
@@ -107,8 +107,8 @@ use crate::sub_grid::SubGrids;
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world::{ConfigCopy, VoxelWorldCamera};
 
-use super::route::LightRoute;
-use super::LightSettings;
+use crate::light::route::LightRoute;
+use crate::light::LightSettings;
 use columns::{walked_voxel, Hinting};
 
 pub(crate) mod columns;
@@ -768,7 +768,8 @@ pub(crate) fn upkeep<C: VoxelWorldConfig>(
         return;
     }
     let world = configuration.0.clone();
-    let is_hinted_air = |position| super::hinted::is_hinted_air(world.as_ref(), position);
+    let is_hinted_air =
+        |position| crate::light::hinted::is_hinted_air(world.as_ref(), position);
     let hinting = Hinting {
         is_hinted_air: &is_hinted_air,
         cameras: cameras
@@ -800,7 +801,7 @@ pub(crate) fn upkeep<C: VoxelWorldConfig>(
             let reader = edits.reader();
             let top = (position.y + 1) * crate::chunk::CHUNK_SIZE_I;
             pool.spawn(async move {
-                super::request::column_is_open(
+                crate::light::request::column_is_open(
                     walked_voxel(position),
                     1,
                     top,

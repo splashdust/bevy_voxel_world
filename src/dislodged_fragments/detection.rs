@@ -14,14 +14,14 @@ use futures_lite::future;
 
 use super::check::{check_fragments, FragmentCheck, FragmentRules};
 use super::{FragmentDetection, FragmentDislodged};
-#[cfg(feature = "sub_grids")]
-use crate::chunk_lifecycle::handover::Handovers;
 use crate::chunk_lifecycle::{ChunkLifecycle, ChunkRequests};
 use crate::chunk_map::ChunkMap;
 use crate::configuration::VoxelWorldConfig;
 use crate::grid::{GridId, GridKey};
 use crate::level_0_reader::Level0Reader;
 use crate::pool_budget::{JobKind, PoolBudget};
+#[cfg(feature = "sub_grids")]
+use crate::sub_grid::handover::Handovers;
 #[cfg(feature = "sub_grids")]
 use crate::sub_grid::{Grid, LiftParts, SubGrids};
 use crate::voxel::WorldVoxel;

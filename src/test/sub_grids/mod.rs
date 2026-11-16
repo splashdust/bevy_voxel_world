@@ -14,7 +14,12 @@ use crate::prelude::*;
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world_internal::WorldRoot;
 
+mod debug_draw;
+mod handover;
+mod lift;
 mod raycasts;
+mod stamp;
+mod sub_grid_chunks;
 
 const OTHER: GridId = GridId::new(1);
 

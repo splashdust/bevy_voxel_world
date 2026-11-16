@@ -28,7 +28,7 @@
 //! [`SubGridSky::Enclosed`] its own sky is its enclosure: sky spreads, with
 //! the world's sky reach, precision and shape, from each open voxel with a
 //! line along one of the sub-grid's axes that leaves the sub-grid without
-//! meeting a solid: see [`enclosure`](super::enclosure). Under
+//! meeting a solid: see [`enclosure`]. Under
 //! [`SubGridSky::World`], every open
 //! voxel has direct sky, so its own sky is the top level everywhere.
 //!
@@ -83,9 +83,13 @@ use bevy::platform::collections::{HashMap, HashSet};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+pub(crate) mod enclosure;
+pub(crate) mod handover;
+pub(crate) mod line_record;
+pub(crate) mod tag_map;
+
 use super::config::SubGridSky;
 use super::edit::{reach_of, within_reach, within_reach_of_box};
-use super::enclosure;
 use super::faces::FaceHashes;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::levels::LightLevels;

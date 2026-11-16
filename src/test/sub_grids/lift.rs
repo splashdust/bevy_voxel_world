@@ -8,12 +8,12 @@ use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::{
+use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I};
+use crate::prelude::*;
+use crate::test::{
     chunk_status_of, record_chunk_messages, recorded, spawn_camera, test_plugins,
     update_until,
 };
-use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I};
-use crate::prelude::*;
 use crate::voxel_edits::VoxelEdits;
 use crate::voxel_world_internal::WorldRoot;
 

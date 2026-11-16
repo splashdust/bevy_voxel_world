@@ -14,8 +14,8 @@ use super::lift::{
     padded_chunks, positions, published_since, row, run, sub_grid_holding, until_lifted,
     LiftWorld,
 };
-use super::{record_chunk_messages, recorded, update_until};
 use crate::prelude::*;
+use crate::test::{record_chunk_messages, recorded, update_until};
 
 /// Each `Stamped` an app read, with the frame it arrived in and whether its
 /// sub-grid's entity still existed as it was read.

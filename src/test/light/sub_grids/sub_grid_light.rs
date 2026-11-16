@@ -4,10 +4,10 @@
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
-use super::edits::settle;
-use super::reference::Reference;
-use super::voxel_light::{app, LampWorld, LAMP, STONE};
 use crate::prelude::*;
+use crate::test::light::edits::settle;
+use crate::test::light::reference::Reference;
+use crate::test::light::voxel_light::{app, LampWorld, LAMP, STONE};
 
 /// Runs `f` on the voxel world in a system of its own, whose commands apply
 /// when it returns.
@@ -159,7 +159,7 @@ fn own_light(reference: &Reference, p: IVec3) -> f32 {
 
 #[test]
 fn a_turned_sub_grid_reads_the_worlds_light_where_it_is_with_its_lamps_on_top() {
-    use super::edits::{cavern, world};
+    use crate::test::light::edits::{cavern, world};
 
     let mut app = app(world());
     settle(&mut app, "the world to settle");
@@ -261,7 +261,7 @@ fn moving_and_turning_a_lit_sub_grid_solves_nothing() {
         );
         app.update();
         assert!(
-            super::sky_light::light_is_settled(&mut app),
+            crate::test::light::sky_light::light_is_settled(&mut app),
             "settled on frame {frame}"
         );
     }
@@ -307,7 +307,7 @@ fn an_edit_at_one_end_of_a_long_sub_grid_relights_only_the_chunks_within_reach()
 
 #[test]
 fn light_is_settled_waits_for_a_sub_grids_light() {
-    use super::sky_light::light_is_settled;
+    use crate::test::light::sky_light::light_is_settled;
 
     let mut app = app(LampWorld::default());
     settle(&mut app, "the world to settle");
