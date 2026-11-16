@@ -131,7 +131,7 @@ Voxels of one grid that an edit cut off from the rest of that grid, small enough
 _Avoid_: loose piece, island (a floating island the generator makes), debris, chunk
 
 **Enclosure**:
-How much sky a sub-grid's own voxels let through to a place on it, with the sky coming from every side. A place is fully open where a line along one of the sub-grid's axes leaves it without meeting one of its voxels, and enclosure fades inward from there as sky light does. In a lit world it caps the sky light a sub-grid's faces show, so the inside of a cabin goes dark under an open sky. It doesn't depend on which way up the sub-grid is.
+How much sky a sub-grid's own voxels let through to a place on it, with the sky coming from every side. A place is fully open where a line along one of the sub-grid's axes leaves it without meeting one of its voxels, and enclosure fades inward from there as sky light does. In a lit world it caps the sky light and the world's voxel light a sub-grid's faces show, so the inside of a cabin goes dark under an open sky and beside the world's lamps. It doesn't depend on which way up the sub-grid is.
 _Avoid_: openness (sky openness is a way of working out sky fill), interior light, own sky
 
 ### Light
