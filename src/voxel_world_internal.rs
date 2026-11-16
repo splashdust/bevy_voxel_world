@@ -242,11 +242,10 @@ where
         }
         #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
         if !flipped.is_empty() || !requests.emptied().is_empty() {
-            let committed = voxel_edits.committed();
             let emptied = flipped
                 .iter()
                 .copied()
-                .filter(|grid| !committed.holds_solid(*grid))
+                .filter(|grid| !voxel_edits.holds_solid_in(*grid))
                 .collect();
             requests.note_emptied(emptied);
         }

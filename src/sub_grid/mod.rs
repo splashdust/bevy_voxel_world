@@ -781,8 +781,10 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
     /// this frame, and is `None` for a sub-grid with no solid voxel and for
     /// the world.
     ///
-    /// Its cost grows with the sub-grid's chunks holding voxels, and with
-    /// the voxels of the chunks edited since the last commit.
+    /// A sub-grid with no edits since the last commit reads the box that
+    /// commit kept. Otherwise its cost grows with the sub-grid's chunks
+    /// holding voxels, and with the voxels of the chunks edited since the
+    /// last commit.
     pub fn bounds(&self) -> Option<(IVec3, IVec3)> {
         match self.target {
             Target::World => None,
