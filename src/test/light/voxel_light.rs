@@ -467,6 +467,92 @@ fn an_empty_emissive_list_scans_nothing() {
     assert!(emissive_scans(&listed) > 0);
 }
 
+fn voxel_boxes_culled(app: &App) -> u64 {
+    app.world()
+        .resource::<LightSettings<LampWorld>>()
+        .counters()
+        .voxel_boxes_culled
+        .load(Ordering::Relaxed)
+}
+
+#[test]
+fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
+    // Five voxels outside the chunk at the origin along every axis: 15 face
+    // steps from it, past the 14 a lamp at level 15 lights. It's the only
+    // lamp in the origin's light box, and no other chunk's box holding it is
+    // that far.
+    let lamp = IVec3::splat(-5);
+    // The lamp's chunk only touches the origin's corner, and light relights
+    // across faces, so the origin solves with the lamp in its box only if its
+    // own task starts after the lamp's chunk has landed.
+    let _holding = Hold::exclusive();
+    let hold = Hold::new(IVec3::ZERO);
+    let mut app = app(LampWorld {
+        hold: Some(hold.clone()),
+        ..lamps_in_air(vec![(lamp, LAMP)], LightShape::Diamond)
+    });
+    app.init_resource::<OriginPublishes>()
+        .add_systems(Update, count_origin_publishes);
+    let neighbours: Vec<IVec3> = (-1..=1)
+        .flat_map(|z| {
+            (-1..=1).flat_map(move |y| (-1..=1).map(move |x| IVec3::new(x, y, z)))
+        })
+        .filter(|offset| *offset != IVec3::ZERO)
+        .collect();
+    update_until(&mut app, "the origin's neighbours' light to land", |app| {
+        neighbours.iter().all(|chunk| {
+            chunk_status::<LampWorld>(app, *chunk) == Some(ChunkStatus::Ready)
+                && landed_stamp(app, *chunk).is_some()
+        })
+    });
+    // An edit that changes nothing starts a new task for the origin once the
+    // held one lands.
+    let edited = IVec3::new(5, 5, 5);
+    app.world_mut()
+        .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
+            voxel_world.set_voxel(edited, WorldVoxel::Air)
+        })
+        .unwrap();
+    app.update();
+    let stamp = app
+        .world()
+        .resource::<VoxelEdits<LampWorld, u8>>()
+        .edit_stamp(IVec3::ZERO);
+    hold.release();
+    update_until(&mut app, "the follow-up task's light to land", |app| {
+        app.world().resource::<OriginPublishes>().0 >= 2
+            && landed_stamp(app, IVec3::ZERO) == Some(stamp)
+    });
+
+    assert!(voxel_boxes_culled(&app) > 0);
+    let reference = Reference::voxel_light(
+        IVec3::splat(-32),
+        IVec3::splat(64),
+        14,
+        LightShape::Diamond,
+        |p| {
+            if p == lamp {
+                WorldVoxel::Solid(LAMP)
+            } else {
+                WorldVoxel::Air
+            }
+        },
+        |material| (material == LAMP).then_some(15.0),
+    );
+    for p in origin_voxels() {
+        assert_eq!(
+            voxel_light(&mut app, p),
+            reference.voxel_at(p) as f32,
+            "at {p}"
+        );
+    }
+    assert!(voxel_light(&mut app, IVec3::new(-1, -1, 0)) > 0.0);
+
+    // Round light gets there, moving along every axis at once.
+    let round = origin_ready(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
+    assert_eq!(voxel_boxes_culled(&round), 0);
+}
+
 fn hash3(p: IVec3) -> u32 {
     let mut h = (p.x as u32).wrapping_mul(0x8da6_b343)
         ^ (p.y as u32).wrapping_mul(0xd816_3841)
