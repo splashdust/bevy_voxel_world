@@ -130,6 +130,9 @@ export function ApiSearchBox({ placeholder = 'Search the API' }: { placeholder?:
 
 export type FeatureFilter = ReturnType<typeof useFeatureFilter>;
 
+/** Says whether to show something that needs these features. */
+export type Shows = { shows: (features: string[]) => boolean };
+
 export function FeatureToggles({ filter }: { filter: FeatureFilter }) {
   return (
     <div className="feature-toggles" role="group" aria-label="Features in your build">
@@ -211,8 +214,8 @@ export function MemberDoc({ member, owner, anchored = true }: { member: MemberVi
 }
 
 /** One item's full docs: signature, docs, traits and members. */
-export function ItemDoc({ item, filter, headless }: { item: ItemView; filter: FeatureFilter; headless?: boolean }) {
-  const members = item.members.filter((m) => filter.shows(m.features));
+export function ItemDoc({ item, filter, headless }: { item: ItemView; filter: Shows; headless?: boolean }) {
+  const members = item.members.filter((m) => filter.shows([...item.features, ...m.features]));
   const sections: [string, MemberView[]][] = [];
   for (const member of members) {
     const last = sections.at(-1);
@@ -222,7 +225,7 @@ export function ItemDoc({ item, filter, headless }: { item: ItemView; filter: Fe
       sections.push([member.section, [member]]);
     }
   }
-  const traits = item.traits.filter((t) => filter.shows(t.features));
+  const traits = item.traits.filter((t) => filter.shows([...item.features, ...t.features]));
 
   return (
     <article className="api-item" id={headless ? undefined : item.path}>
@@ -275,7 +278,7 @@ export function ItemDoc({ item, filter, headless }: { item: ItemView; filter: Fe
  * What an `api` block in a guide shows: an item's signature and summary, with
  * a link to its full reference, or a member's full docs.
  */
-export function ApiEmbed({ api, keys, filter }: { api: ApiView; keys: string[]; filter: FeatureFilter }) {
+export function ApiEmbed({ api, keys, filter }: { api: ApiView; keys: string[]; filter: Shows }) {
   return (
     <div className="api-embed">
       {keys.map((key) => {
@@ -297,7 +300,7 @@ export function ApiEmbed({ api, keys, filter }: { api: ApiView; keys: string[]; 
           );
         }
         const member = item.members.find((m) => m.anchor === key)!;
-        return filter.shows(member.features) ? (
+        return filter.shows([...item.features, ...member.features]) ? (
           <MemberDoc key={key} member={member} owner={item} anchored={false} />
         ) : null;
       })}
@@ -306,7 +309,7 @@ export function ApiEmbed({ api, keys, filter }: { api: ApiView; keys: string[]; 
 }
 
 /** A topic's guide, with its `api` blocks, and the module docs that belong with it. */
-export function TopicGuide({ api, topic, filter }: { api: ApiView; topic: TopicView; filter: FeatureFilter }) {
+export function TopicGuide({ api, topic, filter }: { api: ApiView; topic: TopicView; filter: Shows }) {
   return (
     <>
       {topic.blocks.map((block, i) =>
@@ -332,7 +335,7 @@ export function TopicGuide({ api, topic, filter }: { api: ApiView; topic: TopicV
 }
 
 /** What a topic's feature adds to items that belong to other topics. */
-export function Elsewhere({ api, topic, filter }: { api: ApiView; topic: TopicView; filter: FeatureFilter }) {
+export function Elsewhere({ api, topic, filter }: { api: ApiView; topic: TopicView; filter: Shows }) {
   const entries = topic.elsewhere.filter((e) => filter.shows(api.items[e.item].features));
   if (!topic.feature || entries.length === 0) {
     return null;

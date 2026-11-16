@@ -86,7 +86,8 @@ export type ItemView = {
   deprecated?: string;
   members: MemberView[];
   traits: { name: string; href?: string; features: string[] }[];
-  topic: string;
+  /** The guide whose reference holds the item. Not every item is in a guide. */
+  topic?: string;
 };
 
 /** A run of a guide's HTML, or the API items and members an `api` block shows. */
@@ -125,7 +126,10 @@ export type ApiView = {
   /** The features that add API, which the site can filter by. */
   apiFeatures: string[];
   topics: TopicView[];
+  /** Every public item, in the order the crate exports them. */
   items: Record<string, ItemView>;
+  /** The items that no guide's reference holds, which only the API page shows. */
+  unguided: string[];
 };
 
 const MODULE_ID = 'virtual:api';
@@ -440,11 +444,8 @@ async function buildView(): Promise<{ view: ApiView; files: string[] }> {
       topicOf.set(path, guide.file);
     }
   }
-  for (const item of api.items) {
-    if (!topicOf.has(item.path)) {
-      errors.push(`${item.path} is in no guide. Add it to the api list of the guide that explains it.`);
-    }
-  }
+  // An item no guide explains is still in the API page, under Other.
+  const unguided = api.items.filter((item) => !topicOf.has(item.path)).map((item) => item.path);
   if (errors.length > 0) {
     throw new Error(`The guide doesn't match the API:\n  ${errors.join('\n  ')}`);
   }
@@ -471,7 +472,7 @@ async function buildView(): Promise<{ view: ApiView; files: string[] }> {
         html: render.docs(member.docs, member.links, 4),
       })),
       traits: item.traits.map((t) => ({ ...t, features: t.features.filter((f) => !item.features.includes(f)) })),
-      topic: guides.find((g) => g.file === topicOf.get(item.path))!.id,
+      topic: guides.find((g) => g.file === topicOf.get(item.path))?.id,
     };
   }
 
@@ -526,7 +527,7 @@ async function buildView(): Promise<{ view: ApiView; files: string[] }> {
   }));
 
   return {
-    view: { version: api.version, features, apiFeatures: api.features, topics, items },
+    view: { version: api.version, features, apiFeatures: api.features, topics, items, unguided },
     files: guideFiles.map((file) => fileURLToPath(new URL(file, guideDir))),
   };
 }
@@ -547,6 +548,9 @@ export function api(): Plugin {
       const { view, files } = await buildView();
       for (const file of [apiPath, ...files]) {
         this.addWatchFile(file);
+      }
+      if (view.unguided.length > 0) {
+        this.warn(`No guide explains these items, so only the API page shows them:\n  ${view.unguided.join('\n  ')}`);
       }
       return `export default ${JSON.stringify(view)};`;
     },

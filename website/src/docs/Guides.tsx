@@ -1,10 +1,11 @@
 // PROTOTYPE: Docs › Guides, one page per topic, like a book. Topics down the
-// left, the topic's guide from website/guide/, then each item of its reference
-// in full, and a menu on the right that follows the reader.
+// left, the topic's guide from website/guide/, then its reference as the same
+// list the API page shows, and a menu on the right that follows the reader.
 
 import { useEffect, useMemo } from 'react';
 import { DocMenu } from '../DocMenu';
-import { DocsHeader } from '../Page';
+import { DocsHeader, pageUrl } from '../Page';
+import { ItemList, useOpenItems } from './ItemList';
 import {
   ApiSearchBox,
   type ApiView,
@@ -12,7 +13,6 @@ import {
   FeatureChips,
   FeatureToggles,
   guideHref,
-  ItemDoc,
   TopicGuide,
   topicOfKey,
   useApiLinks,
@@ -23,22 +23,25 @@ export function Guides({ api }: { api: ApiView }) {
   const requested = new URLSearchParams(location.search).get('topic');
   const topic = api.topics.find((t) => t.id === requested) ?? api.topics[0];
   const filter = useFeatureFilter(api.apiFeatures);
+  const reference = useOpenItems(api);
 
   useEffect(() => {
     document.title = `${topic.title} · Guides · bevy_voxel_world`;
   }, [topic]);
 
-  // A link into another topic loads that topic's page.
+  // A link into this topic opens its row; one into another topic loads that
+  // topic's page, and one to an item no guide explains opens the API page.
   useApiLinks((key) => {
     const target = topicOfKey(api, key);
-    if (!target) {
-      return;
-    }
     if (target === topic.id) {
       history.replaceState(null, '', `#${key}`);
-      document.getElementById(key)?.scrollIntoView();
-    } else {
+      if (!reference.reveal(key)) {
+        document.getElementById(key)?.scrollIntoView();
+      }
+    } else if (target) {
       location.assign(guideHref(target, key));
+    } else {
+      location.assign(`${pageUrl('api')}#${key}`);
     }
   });
 
@@ -79,9 +82,14 @@ export function Guides({ api }: { api: ApiView }) {
             <h2 id="reference" className="api-reference-heading">
               Reference
             </h2>
-            {items.map((item) => (
-              <ItemDoc key={item.path} item={item} filter={filter} />
-            ))}
+            <ItemList
+              api={api}
+              rows={items.map((item) => ({ item }))}
+              open={reference.open}
+              onToggle={reference.toggle}
+              filter={filter}
+              hideFeature={topic.feature}
+            />
             <Elsewhere api={api} topic={topic} filter={filter} />
           </div>
           <DocMenu headings={headings} />

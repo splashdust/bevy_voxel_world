@@ -46,7 +46,7 @@ api:
 ---
 ```
 
-`feature` adds a section listing what the feature adds to other topics' items, and `module` adds a module's docs. In the body, [`LightPropagation`] and [`VoxelWorld::raycast`] link to the API, as in a doc comment. A code block with the language `api` shows the items or members it lists, one per line, at that point in the guide. The build stops if a link or `api` entry names nothing, or if a public item is in no guide's `api` list or in two.
+`feature` adds a section listing what the feature adds to other topics' items, and `module` adds a module's docs. In the body, [`LightPropagation`] and [`VoxelWorld::raycast`] link to the API, as in a doc comment. A code block with the language `api` shows the items or members it lists, one per line, at that point in the guide. The build stops if a link or `api` entry names nothing, or if an item is in two guides' `api` lists. An item in none is fine: the API page lists every public item, and puts those under Other. The build names them in a warning.
 
 ```bash
 rustup toolchain install nightly

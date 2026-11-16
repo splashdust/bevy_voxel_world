@@ -10,6 +10,10 @@
   --font-display: 'Martian Mono Variable', ui-monospace, Menlo, Consolas, monospace;
   --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --gutter: clamp(16px, 4vw, 48px);
+  /* Every page's content, header and menu share one centered column. */
+  --column: 1184px;
+  /* The padding that lines a full-width bar's contents up with the column. */
+  --column-inset: max(var(--gutter), calc((100% - var(--column)) / 2));
 
   color-scheme: light;
 }
@@ -70,7 +74,7 @@ code {
   align-items: stretch;
   gap: clamp(4px, 1.5vw, 16px);
   min-height: 52px;
-  padding-inline: var(--gutter);
+  padding-inline: var(--column-inset);
   background: var(--cream);
   border-bottom: 2px solid var(--ink);
   color: var(--ink);
@@ -105,7 +109,7 @@ code {
 }
 
 .hero-content {
-  max-width: 1280px;
+  max-width: calc(var(--column) + 2 * var(--gutter));
   margin: 0 auto;
   padding: clamp(32px, 6vw, 72px) var(--gutter) 0;
 }
@@ -233,12 +237,7 @@ h1 {
 
 /* Pages under a short header */
 
-.narrow-page {
-  --page-width: 46rem;
-}
-
 .page-header .hero-content {
-  max-width: calc(var(--page-width) + 2 * var(--gutter));
   padding-block: clamp(24px, 4vw, 40px) 8px;
 }
 
@@ -258,11 +257,12 @@ h1 {
   justify-content: space-between;
   align-items: start;
   gap: clamp(24px, 5vw, 72px);
-  max-width: 1184px;
+  max-width: var(--column);
   margin-inline: auto;
 }
 
-.doc-with-menu .prose {
+.doc-with-menu > .prose,
+.doc-with-menu > .example-list {
   grid-column: 1;
   grid-row: 1;
 }
@@ -271,11 +271,6 @@ h1 {
    mark it as the current one. */
 .doc-with-menu .last-section {
   min-height: calc(100svh - 76px);
-}
-
-.narrow-page .prose {
-  max-width: var(--page-width);
-  margin-inline: auto;
 }
 
 .prose {
@@ -391,11 +386,6 @@ h1 {
 
 /* Examples */
 
-.example-list {
-  max-width: var(--page-width);
-  margin-inline: auto;
-}
-
 .example-list a {
   color: var(--sky);
 }
@@ -505,8 +495,13 @@ h1 {
 
 .demo-frame,
 .demo-text {
-  max-width: 60rem;
+  max-width: var(--column);
   margin-inline: auto;
+}
+
+/* Lines of text stay readable in the wide column. */
+.demo-text > * {
+  max-width: 46rem;
 }
 
 .demo-section {
@@ -599,7 +594,7 @@ footer {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 24px;
-  padding: 8px var(--gutter) 32px;
+  padding: 8px var(--column-inset) 32px;
   background: var(--rock);
   color: #fff;
   font: 500 0.8rem/1.6 var(--font-display);

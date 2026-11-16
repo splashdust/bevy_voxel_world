@@ -36,22 +36,36 @@
   background: #c9b6ee;
 }
 
-.feature-toggles {
+.feature-toggles,
+.feature-picks {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
 
-.feature-toggles p {
+.feature-toggles p,
+.feature-picks p {
   width: 100%;
   font: 600 0.7rem/1.4 var(--font-display);
   font-stretch: 85%;
   opacity: 0.7;
 }
 
-.chip.toggle {
+.chip.toggle,
+.chip.pick {
   cursor: pointer;
+}
+
+/* A feature the API page isn't narrowed to: an outline, filled once picked. */
+.chip.pick[aria-pressed='false'] {
+  background: transparent;
+  color: var(--cream);
+  box-shadow: inset 0 0 0 2px rgb(244 236 217 / 0.35);
+}
+
+.chip.pick[aria-pressed='false']:hover {
+  box-shadow: inset 0 0 0 2px rgb(244 236 217 / 0.7);
 }
 
 .chip.toggle[aria-pressed='false'] {
@@ -320,11 +334,11 @@
 
 .guides {
   display: grid;
-  grid-template-columns: 14rem minmax(0, 46rem) 13rem;
+  grid-template-columns: 12.5rem minmax(0, 1fr) 12rem;
   justify-content: space-between;
   align-items: start;
   gap: clamp(24px, 3vw, 48px);
-  max-width: 1400px;
+  max-width: var(--column);
   margin-inline: auto;
 }
 
@@ -409,7 +423,7 @@
 }
 
 .api-page-inner {
-  max-width: 58rem;
+  max-width: var(--column);
   margin-inline: auto;
 }
 
@@ -460,17 +474,25 @@
   opacity: 0.85;
 }
 
-.api-page-group ul {
+/* Under the API page's sticky search, a row or member must stop lower to be seen. */
+.api-page .item-list li,
+.api-page .api-member {
+  scroll-margin-top: 230px;
+}
+
+/* The item list the API page and the guides' references share */
+
+.item-list {
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.api-page-group li {
-  scroll-margin-top: 230px;
+.item-list li {
+  scroll-margin-top: 80px;
 }
 
-.api-page-row {
+.item-row {
   display: grid;
   grid-template-columns: 6.5rem minmax(0, 1fr);
   gap: 2px 12px;
@@ -486,32 +508,32 @@
   cursor: pointer;
 }
 
-.api-page-row:hover,
-.open > .api-page-row {
+.item-row:hover,
+.open > .item-row {
   background: rgb(0 0 0 / 0.2);
 }
 
-.api-page-title {
+.item-row-title {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px 8px;
   align-items: center;
 }
 
-.api-page-name {
+.item-row-name {
   font-size: 0.95rem;
   font-weight: 700;
 }
 
-.api-page-summary,
-.api-page-hits {
+.item-row-summary,
+.item-row-hits {
   grid-column: 2;
   font-size: 0.88rem;
   line-height: 1.4;
   opacity: 0.75;
 }
 
-.api-page-hits {
+.item-row-hits {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
@@ -519,15 +541,25 @@
   opacity: 1;
 }
 
-.api-page-detail {
+.item-detail {
   padding: 4px 12px 28px 12px;
   background: rgb(0 0 0 / 0.14);
 }
 
-.api-page-detail .api-item {
+.item-detail .api-item {
   margin-top: 0;
   padding-top: 8px;
   border-top: 0;
+}
+
+.item-detail-guide {
+  margin: 4px 0 -4px;
+  font: 500 0.72rem/1.4 var(--font-display);
+  opacity: 0.8;
+}
+
+.item-detail-guide a {
+  color: var(--sky);
 }
 
 .api-page-empty {
@@ -540,16 +572,6 @@
   font-size: 0.72rem;
   letter-spacing: 0;
   text-transform: none;
-}
-
-.api-page-explained {
-  margin: 4px 0 -4px;
-  font: 500 0.72rem/1.4 var(--font-display);
-  opacity: 0.8;
-}
-
-.api-page-explained a {
-  color: var(--sky);
 }
 
 /* The search field on other docs pages */
@@ -593,7 +615,7 @@
 /* The docs overview */
 
 .docs-home {
-  max-width: 1184px;
+  max-width: var(--column);
   margin-inline: auto;
 }
 
