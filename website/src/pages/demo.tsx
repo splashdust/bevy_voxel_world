@@ -20,8 +20,9 @@ mountPage(
         </p>
         <p>
           <strong>Click the scene to look around.</strong> Walk with WASD and jump with Space. A
-          left click places a voxel and a right click removes one, and the light follows. 1 to 4
-          choose what to place, [ and ] lower and raise the sun, and Esc frees the mouse.
+          left click places a voxel and a right click removes one, and the light follows. Remove a
+          voxel of a trunk to fell a tree. 1 to 4 choose what to place, [ and ] lower and raise the
+          sun, and Esc frees the mouse.
         </p>
         <p className="demo-note">
           A browser gives the demo one thread and WebGL2, so a plain sky stands in for Bevy’s

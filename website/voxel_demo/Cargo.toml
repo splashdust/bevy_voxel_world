@@ -28,7 +28,16 @@ bevy = { version = "0.20", default-features = false, features = [
   "webgl2",
   "zstd_rust",
 ] }
-bevy_voxel_world = { path = "../..", features = ["light_propagation"] }
+bevy_voxel_world = { path = "../..", features = [
+  "light_propagation",
+  "sub_grids",
+  "dislodged_fragments",
+] }
+# Physics for felled trees, as in the example's own build.
+avian3d = { version = "0.8.0", default-features = false, features = [
+  "3d",
+  "parry-f32",
+] }
 noise = "0.9.0"
 wasm-bindgen = "0.2"
 
