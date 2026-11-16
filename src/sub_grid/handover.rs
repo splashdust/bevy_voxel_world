@@ -424,7 +424,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// taken before anything lands, and never waited for: while another
     /// thread holds it, each handover that publishes chunks waits for a
     /// later frame.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn land_ready(
         &mut self,
         index: &mut ChunkIndex<C>,

@@ -9,9 +9,9 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I};
-use crate::prelude::*;
 use crate::chunk_lifecycle::ChunkLifecycle;
 use crate::chunk_map::ChunkMap;
+use crate::prelude::*;
 use crate::test::{
     chunk_status_of, record_chunk_messages, recorded, spawn_camera, test_plugins,
     update_until,
@@ -882,10 +882,7 @@ fn a_lift_waits_to_land_while_another_thread_reads_the_chunk_map() {
 
     // A reader such as a task reading voxels, holding the chunk map while
     // every chunk of the lift finishes its task.
-    let map = app
-        .world()
-        .resource::<ChunkMap<LiftWorld, u8>>()
-        .get_map();
+    let map = app.world().resource::<ChunkMap<LiftWorld, u8>>().get_map();
     let reading = map.read().unwrap();
     update_until(&mut app, "every chunk of the lift to finish", |app| {
         let (world_keys, sub_grid_keys) = (world_keys.clone(), sub_grid_keys.clone());

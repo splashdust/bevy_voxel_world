@@ -11,9 +11,8 @@ use bevy::prelude::*;
 
 use super::lift::{
     all_published_since, assert_poses_match, between_commit_and_handovers, ground,
-    lift_app, lifted, next_frame,
-    padded_chunks, positions, published_since, row, run, sub_grid_holding, until_lifted,
-    LiftWorld,
+    lift_app, lifted, next_frame, padded_chunks, positions, published_since, row, run,
+    sub_grid_holding, until_lifted, LiftWorld,
 };
 use crate::prelude::*;
 use crate::test::{record_chunk_messages, recorded, update_until};
@@ -441,8 +440,10 @@ fn a_stamped_sub_grid_is_refused_on_either_side_of_a_stamp_until_it_lands() {
     for _ in 0..3 {
         app.update();
     }
-    let messages: Vec<Stamped<LiftWorld>> =
-        stamped(&app).iter().map(|(_, message, _)| *message).collect();
+    let messages: Vec<Stamped<LiftWorld>> = stamped(&app)
+        .iter()
+        .map(|(_, message, _)| *message)
+        .collect();
     assert_eq!(messages, [Stamped::new(sub_grid, Grid::World)]);
     let left = read(&mut app, Grid::SubGrid(other), row());
     assert!(left.iter().all(|v| *v == WorldVoxel::Solid(5)), "{left:?}");
