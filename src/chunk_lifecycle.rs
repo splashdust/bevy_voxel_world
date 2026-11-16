@@ -828,12 +828,19 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 request.transform,
             ));
             let entity = chunk_entity.id();
-            chunk_entity.insert(Chunk::<C>::new(
+            let chunk = Chunk::<C>::new(
                 key,
                 entity,
                 configuration.chunk_data_shape(key.lod_level()),
                 configuration.chunk_meshing_shape(key.lod_level()),
-            ));
+            );
+            // A sub-grid's chunk spawns as a child of the sub-grid.
+            #[cfg(feature = "sub_grids")]
+            let chunk = match request.parent.filter(|_| !key.is_world()) {
+                Some(sub_grid) => chunk.of_sub_grid(sub_grid),
+                None => chunk,
+            };
+            chunk_entity.insert(chunk);
             // A parent despawned before the commands apply, as a sub-grid
             // can be, leaves the chunk with no parent.
             if let Some(parent) = request.parent {
