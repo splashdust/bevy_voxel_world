@@ -416,7 +416,8 @@ fn a_world_whose_emissions_are_white_or_grey_has_a_white_worlds_tags_and_no_colo
         ]))
     };
     let mut grey = lamps(GREY_LAMP);
-    grey.emissive.retain(|(material, _)| *material != ORANGE_LAMP);
+    grey.emissive
+        .retain(|(material, _)| *material != ORANGE_LAMP);
     let mut white = lamps(LAMP);
     white.emissive = ground(Vec::new()).emissive;
     assert_eq!(tags(grey.clone(), &AROUND), tags(white, &AROUND));
@@ -503,7 +504,11 @@ fn a_one_colour_chunk_with_no_slot_carries_its_colour_in_bits_16_to_29() {
 
     let orange = packed_at(&mut app, far + IVec3::X);
     let tag = tag_of(&mut app, far_chunk).unwrap();
-    assert_eq!(tag & 0xFFFF, 13 << 4, "the levels a white lamp's chunk shows");
+    assert_eq!(
+        tag & 0xFFFF,
+        13 << 4,
+        "the levels a white lamp's chunk shows"
+    );
     assert_eq!(tag >> 16, tag_cut(orange), "tag {tag:#x}");
     assert_ne!(tag >> 16, 0);
     assert_eq!(tag & 1 << 28, 0);
@@ -515,8 +520,11 @@ fn a_change_of_precision_replaces_the_colour_texture() {
     let mut world = with_colors(ground(vec![(lamp, ORANGE_LAMP)]));
     let mut app = app(world.clone());
     run_until_shown(&mut app, &[IVec3::ZERO]);
-    let color_texture =
-        |app: &App| app.world().resource::<LightRoute<LampWorld>>().color_texture();
+    let color_texture = |app: &App| {
+        app.world()
+            .resource::<LightRoute<LampWorld>>()
+            .color_texture()
+    };
     let before = color_texture(&app).id();
     assert_eq!(color_textures(&app).len(), 1);
 
@@ -528,13 +536,20 @@ fn a_change_of_precision_replaces_the_colour_texture() {
     run_until(&mut app, "the colour texture to be replaced", |app| {
         let now = color_texture(app);
         now.id() != before
-            && now != app.world().resource::<LightRoute<LampWorld>>().color_placeholder
+            && now
+                != app
+                    .world()
+                    .resource::<LightRoute<LampWorld>>()
+                    .color_placeholder
     });
     run_until_shown(&mut app, &[IVec3::ZERO]);
     let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
     assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
     update_until(&mut app, "the old colour texture to be dropped", |app| {
-        app.world().resource::<Assets<Image>>().get(before).is_none()
+        app.world()
+            .resource::<Assets<Image>>()
+            .get(before)
+            .is_none()
     });
     assert_eq!(color_textures(&app).len(), 1);
 }
@@ -545,7 +560,8 @@ fn a_chunk_whose_faces_see_several_colours_shows_the_most_common() {
     // from the orange lamp, whose pool is orange everywhere else.
     let orange = IVec3::new(8, 1, 16);
     let blue = IVec3::new(24, 1, 16);
-    let mut world = with_colors(ground(vec![(orange, ORANGE_LAMP), (blue, DIM_BLUE_LAMP)]));
+    let mut world =
+        with_colors(ground(vec![(orange, ORANGE_LAMP), (blue, DIM_BLUE_LAMP)]));
     world.emissive.push((
         DIM_BLUE_LAMP,
         Emission::level(4.0).with_color(bevy::color::palettes::css::BLUE),

@@ -20,6 +20,11 @@
 //! rebuilt on `ChunkPublished` and removed on `ChunkWillDespawn` swap in one
 //! frame.
 //!
+//! A handover lands only in a frame where no other thread holds the chunk
+//! map, such as a task reading voxels, so its chunks' data is readable in
+//! the frame their meshes show. The frame never waits for that thread: the
+//! handover waits for a later frame instead.
+//!
 //! In a lit world, a handover also waits until the relights its commit
 //! started have solved, in every grid: the first solves of the sub-grid
 //! chunks it spawns, and the relights of the chunks within reach of the
@@ -63,11 +68,11 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use crate::sub_grid::{Lifted, Stamped, SubGrids};
 use crate::{
     chunk_lifecycle::{publish, ChunkIndex, Finished},
-    chunk_map::{ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
+    chunk_map::{ChunkMap, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
     configuration::VoxelWorldConfig,
     grid::{GridId, GridKey},
     voxel_edits::VoxelEdits,
-    voxel_world::ChunkWillDespawn,
+    voxel_world::{ChunkPublished, ChunkWillDespawn, ChunkWillSpawn},
 };
 
 /// A lift or stamp whose commit a handover holds, announced once it lands.
@@ -124,8 +129,15 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     handovers: HashMap<u32, Vec<Entity>>,
     /// The operations of each handover holding any, by its id.
     operations: HashMap<u32, Vec<Operation<C>>>,
-    /// Operations whose commit is still to come.
+    /// Operations whose edits are still pending: the next commit takes them.
     queued: Mutex<Vec<Operation<C>>>,
+    /// Operations whose edits the last commit took, for the `join` of that
+    /// commit's requests.
+    ///
+    /// An operation made after a commit and before its `join`, as by a
+    /// system running between the two, waits in `queued` for the next
+    /// commit, which is the one that takes its edits.
+    committed: Vec<Operation<C>>,
     /// Operations whose handover has landed, to announce.
     landed: Vec<Operation<C>>,
     next_id: u32,
@@ -135,9 +147,8 @@ pub(crate) struct Handovers<C: VoxelWorldConfig> {
     /// Sub-grids `despawn_landed` ended this frame, for `apply_despawns` to
     /// despawn.
     despawning: Vec<Entity>,
-    /// Sub-grids stamped and still live, which fragment checks landing from
-    /// the stamp on count as gone.
-    #[cfg(feature = "dislodged_fragments")]
+    /// Sub-grids stamped and still live. A later stamp refuses them, and
+    /// fragment checks landing from the stamp on count them as gone.
     stamped_away: Mutex<bevy::platform::collections::HashSet<Entity>>,
     stats: HandoverStats,
     /// In a lit world, the chunks whose light each handover holds, by its
@@ -161,11 +172,11 @@ impl<C: VoxelWorldConfig> Default for Handovers<C> {
             handovers: HashMap::new(),
             operations: HashMap::new(),
             queued: Mutex::default(),
+            committed: Vec::new(),
             landed: Vec::new(),
             next_id: 0,
             despawns: Mutex::default(),
             despawning: Vec::new(),
-            #[cfg(feature = "dislodged_fragments")]
             stamped_away: Mutex::default(),
             stats: HandoverStats::default(),
             #[cfg(feature = "light_propagation")]
@@ -247,7 +258,7 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// and the lift is dropped. A forming handover with no chunks lands at
     /// once. A stamp marks its commit, so it always forms one.
     pub fn join(&mut self, joining: Joining) {
-        let operations = std::mem::take(self.queued.get_mut().unwrap());
+        let operations = std::mem::take(&mut self.committed);
         if joining.chunks.is_empty() {
             if joining.forming {
                 self.landed.extend(operations);
@@ -406,20 +417,34 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Drops the chunks that left their handover, and lands each handover
     /// whose chunks are all ready: publishes their kept tasks, despawns the
     /// chunks it retires and queues the messages of its lifts and stamps.
-    /// The data they publish is readable once the next
-    /// `flush_chunk_map_buffers` has run, in this frame.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The data a landing handover publishes, and that of every other chunk
+    /// waiting in the buffers, goes into the chunk map here, so it is
+    /// readable in the frame the meshes show. The chunk map's write lock is
+    /// taken before anything lands, and never waited for: while another
+    /// thread holds it, each handover that publishes chunks waits for a
+    /// later frame.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn land_ready(
         &mut self,
         index: &mut ChunkIndex<C>,
         commands: &mut Commands,
-        chunk_map_update_buffer: &mut ChunkMapUpdateBuffer<C, C::MaterialIndex>,
-        chunk_map_remove_buffer: &mut ChunkMapRemoveBuffer<C>,
-        ev_chunk_will_despawn: &mut MessageWriter<ChunkWillDespawn<C>>,
+        chunk_map: &ChunkMap<C, C::MaterialIndex>,
+        buffers: (
+            &mut ChunkMapUpdateBuffer<C, C::MaterialIndex>,
+            &mut ChunkMapRemoveBuffer<C>,
+        ),
+        messages: (
+            &mut MessageWriter<ChunkPublished<C>>,
+            &mut MessageWriter<ChunkWillSpawn<C>>,
+            &mut MessageWriter<ChunkWillDespawn<C>>,
+        ),
         #[cfg(feature = "light_propagation")] mut light_work: Option<
             &mut crate::light::relight::LightWork<C>,
         >,
     ) {
+        let (chunk_map_update_buffer, chunk_map_remove_buffer) = buffers;
+        let (ev_chunk_published, ev_chunk_will_spawn, ev_chunk_will_despawn) = messages;
         #[cfg(feature = "light_propagation")]
         if let Some(light_work) = light_work.as_deref_mut() {
             self.wait_for_light(light_work);
@@ -450,33 +475,54 @@ impl<C: VoxelWorldConfig> Handovers<C> {
             }
             stays
         });
-        handovers.retain(|id, chunks| {
+        let mut landing: Vec<u32> = Vec::new();
+        for (id, chunks) in handovers.iter_mut() {
             chunks.retain(|entity| held.contains_key(entity));
             let ready =
                 |entity: &Entity| held.get(entity).is_some_and(|c| c.wait.is_ready());
             if !chunks.iter().all(ready) {
-                return true;
+                continue;
             }
             // In a lit world, the relights its commits started must have
-            // solved too. The light held for its chunks lands in this frame.
+            // solved too.
             #[cfg(feature = "light_propagation")]
-            if let Some(light_work) = light_work.as_deref_mut() {
+            if let Some(light_work) = light_work.as_deref() {
                 let keys = light.get(id).map_or(&[][..], Vec::as_slice);
                 if !light_work.handover_solved(keys) {
-                    return true;
+                    continue;
                 }
-                for key in light.remove(id).into_iter().flatten() {
+            }
+            landing.push(*id);
+        }
+        if landing.is_empty() {
+            return;
+        }
+        // Taken before anything lands, so the handovers that publish chunks
+        // either all land with their data readable or wait together.
+        let mut write_lock = None;
+        if landing.iter().any(|id| !handovers[id].is_empty()) {
+            write_lock = chunk_map.try_write();
+            if write_lock.is_none() {
+                landing.retain(|id| handovers[id].is_empty());
+            }
+        }
+        for id in landing {
+            let chunks = handovers.remove(&id).unwrap_or_default();
+            // The light held for its chunks lands in this frame.
+            #[cfg(feature = "light_propagation")]
+            if let Some(light_work) = light_work.as_deref_mut() {
+                for key in light.remove(&id).into_iter().flatten() {
                     light_work.release_for_handover(key);
                     lit_by.remove(&key);
                 }
             }
-            landed.extend(operations.remove(id).into_iter().flatten());
+            landed.extend(operations.remove(&id).into_iter().flatten());
             if chunks.is_empty() {
-                return false;
+                continue;
             }
             stats.handovers += 1;
             stats.chunks += chunks.len() as u64;
-            for entity in chunks.drain(..) {
+            for entity in chunks {
                 let Some(chunk) = held.remove(&entity) else {
                     continue;
                 };
@@ -497,11 +543,27 @@ impl<C: VoxelWorldConfig> Handovers<C> {
                         #[cfg(feature = "light_propagation")]
                         light_work.as_deref_mut(),
                     );
-                    chunk_map_update_buffer.must_land = true;
                 }
             }
-            false
-        });
+        }
+        if let Some(mut write_lock) = write_lock {
+            ChunkMap::write_buffers(
+                &mut write_lock,
+                chunk_map_update_buffer,
+                chunk_map_remove_buffer,
+                ev_chunk_published,
+                ev_chunk_will_spawn,
+                index,
+            );
+        }
+    }
+
+    /// Hands the lifts and stamps queued so far to the commit that has just
+    /// taken their edits, so that commit's `join` holds them. Called by
+    /// `commit_voxel_edits`.
+    pub fn note_commit(&mut self) {
+        let queued = self.queued.get_mut().unwrap();
+        self.committed.append(queued);
     }
 
     /// Notes a lift, whose edits commit in the next `commit_voxel_edits`,
@@ -513,15 +575,14 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Notes a stamp, whose edits commit in the next `commit_voxel_edits`,
     /// to announce with `stamped` once that commit's handover lands.
     pub fn stamped(&self, stamped: Stamped<C>) {
-        #[cfg(feature = "dislodged_fragments")]
         self.stamped_away.lock().unwrap().insert(stamped.sub_grid);
         self.queued.lock().unwrap().push(Operation::Stamp(stamped));
     }
 
-    /// Whether the sub-grid `entity` was stamped: from the call on, a
-    /// fragment check of it finds nothing to report, since its voxels are
-    /// the target's.
-    #[cfg(feature = "dislodged_fragments")]
+    /// Whether the sub-grid `entity` was stamped and is still live: from
+    /// the call on, its voxels are the target's. A later stamp refuses it as
+    /// the sub-grid or the target, and a fragment check of it finds nothing
+    /// to report.
     pub fn is_stamped_away(&self, entity: Entity) -> bool {
         self.stamped_away.lock().unwrap().contains(&entity)
     }
@@ -529,7 +590,6 @@ impl<C: VoxelWorldConfig> Handovers<C> {
     /// Whether [`write_landed`](Self::write_landed) has anything to do: a
     /// landed lift or stamp to announce, or a stamped sub-grid to forget.
     pub fn has_landed(handovers: Res<Self>) -> bool {
-        #[cfg(feature = "dislodged_fragments")]
         if !handovers.stamped_away.lock().unwrap().is_empty() {
             return true;
         }
@@ -552,12 +612,9 @@ impl<C: VoxelWorldConfig> Handovers<C> {
         mut lifted: MessageWriter<Lifted<C>>,
         mut stamped: MessageWriter<Stamped<C>>,
     ) {
-        #[cfg(feature = "dislodged_fragments")]
-        {
-            let stamped_away = handovers.stamped_away.get_mut().unwrap();
-            if !stamped_away.is_empty() {
-                stamped_away.retain(|&entity| sub_grids.live(entity).is_some());
-            }
+        let stamped_away = handovers.stamped_away.get_mut().unwrap();
+        if !stamped_away.is_empty() {
+            stamped_away.retain(|&entity| sub_grids.live(entity).is_some());
         }
         if handovers.landed.is_empty() {
             return;

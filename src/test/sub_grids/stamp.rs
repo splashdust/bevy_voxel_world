@@ -10,9 +10,9 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use super::lift::{
-    all_published_since, assert_poses_match, ground, lift_app, lifted, next_frame,
-    padded_chunks, positions, published_since, row, run, sub_grid_holding, until_lifted,
-    LiftWorld,
+    all_published_since, assert_poses_match, between_commit_and_handovers, ground,
+    lift_app, lifted, next_frame, padded_chunks, positions, published_since, row, run,
+    sub_grid_holding, until_lifted, LiftWorld,
 };
 use crate::prelude::*;
 use crate::test::{record_chunk_messages, recorded, update_until};
@@ -408,6 +408,48 @@ fn stamp_refuses_a_dead_sub_grid_a_dead_target_and_a_target_inside_it() {
 }
 
 #[test]
+fn a_stamped_sub_grid_is_refused_on_either_side_of_a_stamp_until_it_lands() {
+    let mut app = stamp_app();
+    let down = Transform::from_translation(Vec3::new(0.0, -5.0, 0.0));
+    let sub_grid = sub_grid_holding(&mut app, down, row());
+    let other = sub_grid_holding(&mut app, Transform::default(), row());
+
+    let (results, previews) = run(&mut app, move |voxel_world| {
+        voxel_world
+            .stamp(sub_grid, Grid::World, incoming_replaces)
+            .unwrap();
+        let attempts = [
+            (sub_grid, Grid::World),
+            (sub_grid, Grid::SubGrid(other)),
+            (other, Grid::SubGrid(sub_grid)),
+        ];
+        let previews: Vec<bool> = attempts
+            .iter()
+            .map(|(s, t)| voxel_world.stamp_preview(*s, *t).is_some())
+            .collect();
+        let results: Vec<Result<(), StampError>> = attempts
+            .iter()
+            .map(|(s, t)| voxel_world.stamp(*s, *t, incoming_replaces))
+            .collect();
+        (results, previews)
+    });
+
+    assert_eq!(results, [Err(StampError::AlreadyStamped); 3]);
+    assert_eq!(previews, [false; 3]);
+    until_stamped(&mut app, sub_grid);
+    for _ in 0..3 {
+        app.update();
+    }
+    let messages: Vec<Stamped<LiftWorld>> = stamped(&app)
+        .iter()
+        .map(|(_, message, _)| *message)
+        .collect();
+    assert_eq!(messages, [Stamped::new(sub_grid, Grid::World)]);
+    let left = read(&mut app, Grid::SubGrid(other), row());
+    assert!(left.iter().all(|v| *v == WorldVoxel::Solid(5)), "{left:?}");
+}
+
+#[test]
 fn right_after_the_call_each_voxel_reads_from_one_grid() {
     let mut app = stamp_app();
     let above = Transform::from_translation(Vec3::new(0.0, 10.0, 0.0));
@@ -457,6 +499,48 @@ fn a_stamp_into_the_world_lands_in_one_frame_and_then_despawns_the_sub_grid() {
     frames.extend(despawned);
     let landing = one_frame(&frames);
     assert!(landing > commit, "the slow world takes frames to land");
+    assert_eq!(
+        stamped(&app),
+        [(landing, Stamped::new(sub_grid, Grid::World), true)].as_slice()
+    );
+    assert!(app.world().get_entity(sub_grid).is_err());
+    let reads = read(&mut app, Grid::World, landed);
+    assert!(
+        reads.iter().all(|v| *v == WorldVoxel::Solid(5)),
+        "{reads:?}"
+    );
+}
+
+#[test]
+fn a_stamp_made_between_a_commit_and_its_requests_lands_with_its_own_commit() {
+    let mut app = stamp_app();
+    let since = next_frame(&app);
+    let down = Transform::from_translation(Vec3::new(0.0, -5.0, 0.0));
+    let sub_grid = sub_grid_holding(&mut app, down, row());
+    let sub_grid_chunks = BTreeSet::from([[0, 0, 0]]);
+    until_published(&mut app, since, Grid::SubGrid(sub_grid), &sub_grid_chunks);
+
+    // The frame of the call commits nothing, so it forms no handover. The
+    // stamp's edits commit in the next frame.
+    let call = next_frame(&app);
+    between_commit_and_handovers(&mut app, move |voxel_world| {
+        voxel_world
+            .stamp(sub_grid, Grid::World, incoming_replaces)
+            .unwrap();
+        sub_grid
+    });
+    let landed: Vec<IVec3> = row().iter().map(|p| *p - IVec3::new(0, 5, 0)).collect();
+    let world_chunks = padded_chunks(landed[0], landed[3] + 1);
+    until_published(&mut app, call, Grid::World, &world_chunks);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let mut frames = published_since(&app, call, Grid::World, &world_chunks);
+    let despawned = despawned_since(&app, call, Grid::SubGrid(sub_grid));
+    assert_eq!(despawned.len(), 1, "{despawned:?}");
+    frames.extend(despawned);
+    let landing = one_frame(&frames);
     assert_eq!(
         stamped(&app),
         [(landing, Stamped::new(sub_grid, Grid::World), true)].as_slice()

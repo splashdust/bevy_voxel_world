@@ -491,6 +491,10 @@ pub struct Chunk<C> {
     pub(crate) key: ChunkKey,
     /// The grid the chunk belongs to: the world's, or a sub-grid's.
     grid: GridId,
+    /// The entity of the sub-grid the chunk belongs to, or `None` for one of
+    /// the world's chunks.
+    #[cfg(feature = "sub_grids")]
+    sub_grid: Option<Entity>,
     pub(crate) entity: Entity,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
@@ -507,6 +511,8 @@ impl<C> Chunk<C> {
         Self {
             key: key.key(),
             grid: key.grid(),
+            #[cfg(feature = "sub_grids")]
+            sub_grid: None,
             entity,
             data_shape,
             mesh_shape,
@@ -514,9 +520,33 @@ impl<C> Chunk<C> {
         }
     }
 
+    /// This chunk, as a chunk of the sub-grid whose entity is `sub_grid`.
+    #[cfg(feature = "sub_grids")]
+    pub(crate) fn of_sub_grid(self, sub_grid: Entity) -> Self {
+        Self {
+            sub_grid: Some(sub_grid),
+            ..self
+        }
+    }
+
     /// The chunk's key: its position and LOD level, on its own grid.
     pub fn key(&self) -> ChunkKey {
         self.key
+    }
+
+    /// The grid the chunk belongs to: [`Grid::World`] for the world's
+    /// chunks, or the sub-grid whose voxels it shows.
+    ///
+    /// [`key`](Self::key), [`position`](Self::position) and
+    /// [`aabb`](Self::aabb) are on this grid, so a sub-grid's chunk can have
+    /// the same key as a world chunk somewhere else entirely. Read the
+    /// chunk's data through `VoxelWorld::grid(chunk.grid())`.
+    ///
+    /// [`Grid::World`]: crate::prelude::Grid::World
+    #[cfg(feature = "sub_grids")]
+    pub fn grid(&self) -> crate::sub_grid::Grid {
+        self.sub_grid
+            .map_or(crate::sub_grid::Grid::World, crate::sub_grid::Grid::SubGrid)
     }
 
     /// The chunk's grid key: its grid and its chunk key.
@@ -685,7 +715,7 @@ where
     pub light: Option<crate::light::TaskLight<I>>,
     /// The chunk's solved light, once `post_voxel` has run.
     #[cfg(feature = "light_propagation")]
-    pub solved_light: Option<crate::light::SolvedLight>,
+    pub solved_light: Option<crate::light::SolvedLight<I>>,
     _marker: PhantomData<C>,
 }
 

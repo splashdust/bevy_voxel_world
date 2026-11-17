@@ -156,9 +156,9 @@ use super::levels::LightLevels;
 use super::slot::{
     across, across_voxels, border_plane, border_sees, border_voxels, cell_index,
     colors_seen, convert_texels, count_colors, most_common, most_common_open,
-    open_colors_seen, open_voxels, open_voxels_see, own_colors_seen, shell_cell, slot_bytes,
-    texel_at, texel_bytes, texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen,
-    ShellPlane, PLANE_TEXELS,
+    open_colors_seen, open_voxels, open_voxels_see, own_colors_seen, shell_cell,
+    slot_bytes, texel_at, texel_bytes, texel_levels, texture_format, touching_open,
+    write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -817,7 +817,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// The colour texture a material made now binds: the colour texture once
     /// it's made, or else its placeholder.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by tests until materials bind it"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by tests until materials bind it")
+    )]
     pub fn color_texture(&self) -> Handle<Image> {
         self.color_texture
             .clone()
@@ -1403,7 +1406,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     ///
     /// Its cost grows with the chunk's voxels and its face neighbours' border
     /// voxels.
-    fn most_common_color(&self, id: RouteId, light: &ChunkLight, level: Option<u8>) -> u16 {
+    fn most_common_color(
+        &self,
+        id: RouteId,
+        light: &ChunkLight,
+        level: Option<u8>,
+    ) -> u16 {
         let chunk = &self.chunks[&id];
         let mut counts = Vec::new();
         let own = match &light.inputs.occupancy {
@@ -1423,7 +1431,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             } else {
                 across_voxels(&light.inputs, face, &neighbour.inputs)
             };
-            let level = level.map(|level| neighbour.precision.convert(level, light.precision));
+            let level =
+                level.map(|level| neighbour.precision.convert(level, light.precision));
             count_colors(&neighbour, &voxels, level, &mut counts);
         }
         counts
@@ -2235,7 +2244,9 @@ fn write_entries<C>(
     if uploads.entries.is_empty() {
         return;
     }
-    let Some(image) = uploads.color_texture.and_then(|texture| images.get(texture))
+    let Some(image) = uploads
+        .color_texture
+        .and_then(|texture| images.get(texture))
     else {
         return;
     };

@@ -828,12 +828,19 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
                 request.transform,
             ));
             let entity = chunk_entity.id();
-            chunk_entity.insert(Chunk::<C>::new(
+            let chunk = Chunk::<C>::new(
                 key,
                 entity,
                 configuration.chunk_data_shape(key.lod_level()),
                 configuration.chunk_meshing_shape(key.lod_level()),
-            ));
+            );
+            // A sub-grid's chunk spawns as a child of the sub-grid.
+            #[cfg(feature = "sub_grids")]
+            let chunk = match request.parent.filter(|_| !key.is_world()) {
+                Some(sub_grid) => chunk.of_sub_grid(sub_grid),
+                None => chunk,
+            };
+            chunk_entity.insert(chunk);
             // A parent despawned before the commands apply, as a sub-grid
             // can be, leaves the chunk with no parent.
             if let Some(parent) = request.parent {
@@ -952,15 +959,24 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         >,
         #[cfg(feature = "sub_grids")] landing: (
             ResMut<crate::sub_grid::handover::Handovers<C>>,
+            Res<ChunkMap<C, C::MaterialIndex>>,
             ResMut<ChunkMapRemoveBuffer<C>>,
+            MessageWriter<ChunkPublished<C>>,
+            MessageWriter<ChunkWillSpawn<C>>,
             MessageWriter<ChunkWillDespawn<C>>,
         ),
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("collect_chunk_tasks").entered();
         #[cfg(feature = "sub_grids")]
-        let (mut handovers, mut chunk_map_remove_buffer, mut ev_chunk_will_despawn) =
-            landing;
+        let (
+            mut handovers,
+            chunk_map,
+            mut chunk_map_remove_buffer,
+            mut ev_chunk_published,
+            mut ev_chunk_will_spawn,
+            mut ev_chunk_will_despawn,
+        ) = landing;
         let (mut chunk_map_update_buffer, mut mesh_cache_insert_buffer) = buffers;
         let mut mesh_assets = mesh_assets.filter(|_| spawn_meshes.0);
 
@@ -1079,9 +1095,13 @@ impl<C: VoxelWorldConfig> ChunkLifecycle<C> {
         handovers.land_ready(
             &mut index,
             &mut commands,
-            &mut chunk_map_update_buffer,
-            &mut chunk_map_remove_buffer,
-            &mut ev_chunk_will_despawn,
+            &chunk_map,
+            (&mut chunk_map_update_buffer, &mut chunk_map_remove_buffer),
+            (
+                &mut ev_chunk_published,
+                &mut ev_chunk_will_spawn,
+                &mut ev_chunk_will_despawn,
+            ),
             #[cfg(feature = "light_propagation")]
             light_work.as_deref_mut(),
         );
@@ -1287,7 +1307,7 @@ pub(crate) struct Finished<C: VoxelWorldConfig> {
     pub user_bundle: Option<C::ChunkUserBundle>,
     /// The light the task solved, in a world with light propagation.
     #[cfg(feature = "light_propagation")]
-    pub solved_light: Option<crate::light::SolvedLight>,
+    pub solved_light: Option<crate::light::SolvedLight<C::MaterialIndex>>,
 }
 
 /// Publishes a finished chunk task: gives the chunk its mesh, lands its solved
