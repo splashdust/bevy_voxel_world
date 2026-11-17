@@ -114,6 +114,16 @@ pub(crate) fn pack(color: LinearRgba) -> u16 {
     (top as u16) << 14 | first << 7 | second
 }
 
+/// The packed light colour `packed` cut to the 14 bits a tag with no slot
+/// holds: the 2 bits naming the brightest component, then each of the other
+/// two components in 6 bits, in steps of 1/63. White cuts to 0, so a white
+/// chunk's tag is the tag it would have in a world with no light colour.
+pub(crate) fn tag_cut(packed: u16) -> u32 {
+    let cut = |short: u16| short.div_ceil(2).min(63) as u32;
+    let top = (packed >> 14) as u32;
+    top << 12 | cut(packed >> 7 & 0x7f) << 6 | cut(packed & 0x7f)
+}
+
 /// The light colour `packed` holds, which must name one.
 pub(crate) fn unpack(packed: u16) -> LinearRgba {
     let top = (packed >> 14) as usize;
@@ -219,6 +229,16 @@ impl ChunkColor {
             ChunkColor::White
         } else {
             ChunkColor::One(packed)
+        }
+    }
+
+    /// The packed light colour of the chunk's open voxel `x`, `y`, `z`, which
+    /// has voxel light.
+    pub fn packed_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        match self {
+            ChunkColor::White => WHITE,
+            ChunkColor::One(packed) => *packed,
+            ChunkColor::Mixed(packed) => packed[voxel_index(x, y, z)],
         }
     }
 
@@ -361,6 +381,11 @@ impl<I> EmissionTable<I> {
         self.colored
     }
 
+    /// The packed light colour of each material index, in order.
+    pub fn colors(&self) -> &[u16] {
+        &self.colors
+    }
+
     /// The packed light colour of the material index `material`.
     #[inline]
     pub fn color(&self, material: u16) -> u16 {
@@ -404,6 +429,19 @@ mod tests {
             LinearRgba::BLUE,
         ] {
             assert_eq!(unpack(pack(color)), color);
+        }
+    }
+
+    #[test]
+    fn the_14_bit_tag_cut_keeps_white_at_0_and_the_primaries_exact() {
+        assert_eq!(tag_cut(pack(LinearRgba::WHITE)), 0);
+        assert_eq!(tag_cut(pack(LinearRgba::RED)), 63 << 6 | 63);
+        assert_eq!(tag_cut(pack(LinearRgba::GREEN)), 1 << 12 | 63 << 6 | 63);
+        assert_eq!(tag_cut(pack(LinearRgba::BLUE)), 2 << 12 | 63 << 6 | 63);
+        // Half is 64 of 127 steps short of 1, so 32 of 63.
+        assert_eq!(tag_cut(pack(LinearRgba::rgb(1.0, 0.5, 0.5))), 32 << 6 | 32);
+        for packed in [pack(LinearRgba::rgb(0.2, 0.7, 1.0)), u16::MAX >> 2] {
+            assert!(tag_cut(packed) < 1 << 14);
         }
     }
 

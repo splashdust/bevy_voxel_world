@@ -36,9 +36,11 @@
 // Its slot's cells are `1 << L` voxels wide, so its local position is divided
 // by that width, keeping the corner of its first cell at (1, 1, 1).
 //
-// Bit 30 marks a sub-grid's chunk, with or without a slot, and bits 28 and 29
-// are clear. Every read of a field masks it to its width, so a sub-grid's tag
-// reads the same slot, LOD level and levels it would without bit 30.
+// Bit 30 marks a sub-grid's chunk, with or without a slot. A tag with a slot
+// sets bit 29 when the chunk shows a light colour other than white, and a tag
+// with no slot holds its light colour in bits 16-29; this shader doesn't read
+// them yet. Every read of a field masks it to its width, so a tag reads the
+// same slot, LOD level and levels whatever its colour and sub-grid bits hold.
 //
 // With the crate's `sub_grids` feature, a lit world sets the `SUB_GRIDS`
 // shader def, and its material holds the world's tag map at binding 202: a

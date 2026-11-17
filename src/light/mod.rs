@@ -545,9 +545,6 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
     let emissive_materials = clamped_emission(world);
     let routed = app.world().contains_resource::<route::LightRoute<C>>();
     let fill_cells = FillCells::default();
-    if let Some(mut route) = app.world_mut().get_resource_mut::<route::LightRoute<C>>() {
-        route.set_fill_cells(fill_cells.clone());
-    }
     let field = fill::driver::field_of(&config);
     let task = Arc::new(task_settings::<C>(
         &config,
@@ -555,6 +552,10 @@ pub(crate) fn build<C: VoxelWorldConfig>(app: &mut App, world: &C) {
         routed,
         field.as_ref().map(|_| fill_cells.clone()),
     ));
+    if let Some(mut route) = app.world_mut().get_resource_mut::<route::LightRoute<C>>() {
+        route.set_fill_cells(fill_cells.clone());
+        route.set_light_colors(light_colors(&task.emission));
+    }
     let sky_rule = SkyRule::of(&config.sky);
     if let Some(rule) = sky_rule {
         let mut probes = SkyProbes::<C>::new(rule);
@@ -819,6 +820,9 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         )
     });
 
+    if let (true, Some(route)) = (emission_changed, route.as_mut()) {
+        route.set_light_colors(light_colors(&settings.task.emission));
+    }
     if let (true, Some(route)) = (texture_changed, route.as_mut()) {
         route.replace_texture(config.precision, config.slot_capacity);
         for (entity, tag) in route.take_changed_tags() {
@@ -1110,6 +1114,12 @@ fn relight_settings<C: VoxelWorldConfig>(
     for position in air {
         work.trigger(in_world(position));
     }
+}
+
+/// The packed light colour of each material index of `emission`, for a
+/// world's route, or `None` where every one is white.
+fn light_colors<I>(emission: &color::EmissionTable<I>) -> Option<&[u16]> {
+    emission.is_colored().then(|| emission.colors())
 }
 
 /// World `C`'s emissive list, with each level clamped.
