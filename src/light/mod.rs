@@ -754,6 +754,14 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
             .set_cap(config.sky_record_cap);
     }
     settings.config.wasm_relight_budget = config.wasm_relight_budget;
+    // It changes no light, so the next solves take it and nothing relights.
+    if config.skip_unreached_colors != settings.config.skip_unreached_colors {
+        settings.config.skip_unreached_colors = config.skip_unreached_colors;
+        settings.task = Arc::new(LightTaskSettings {
+            skip_unreached_colors: config.skip_unreached_colors,
+            ..(*settings.task).clone()
+        });
+    }
     if config.sky_reach != settings.config.sky_reach && !sky_reach_changed {
         settings.config.sky_reach = config.sky_reach;
     }
@@ -1003,6 +1011,7 @@ fn recolor<C: VoxelWorldConfig>(
         color_generation,
         recolored: recolored.into(),
         fill: old.fill.clone(),
+        skip_unreached_colors: old.skip_unreached_colors,
     });
     for key in holding_materials(&settings.view, changed) {
         work.trigger_recolor(key);
@@ -1164,5 +1173,6 @@ fn task_settings<C: VoxelWorldConfig>(
         color_generation: 0,
         recolored: vec![0; emissive_materials.len()].into(),
         fill,
+        skip_unreached_colors: config.skip_unreached_colors,
     }
 }
