@@ -178,7 +178,7 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
     let mut app = settled(floor_with_lamp(LightLook::default()));
     assert_eq!(chunk_look(&mut app).voxel_brightness, 1000.0);
 
-    let changes: [fn(&mut LightLook); 9] = [
+    let changes: [fn(&mut LightLook); 10] = [
         |look| look.smoothing = LightSmoothing::Stepped,
         |look| look.sky_falloff = LevelCurve::linear(),
         |look| look.voxel_falloff = LevelCurve::gamma(2.2),
@@ -188,6 +188,7 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
         |look| look.ao = LightAo::BaseColor,
         |look| look.ao = LightAo::Off,
         |look| look.minimum_brightness = 0.05,
+        |look| look.tinted_glow = true,
     ];
     let mut look = LightLook::default();
     for (index, change) in changes.iter().enumerate() {
@@ -213,6 +214,7 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
     assert_eq!(uniform.emissive_glow, 2.0);
     assert_eq!(uniform.ao, 2);
     assert_eq!(uniform.minimum_brightness, 0.05);
+    assert_eq!(uniform.tinted_glow, 1);
     assert!((uniform.sky_falloff[1].y - 5.0 / 15.0).abs() < 1e-6);
 
     // Frames after the change find nothing more to do.
