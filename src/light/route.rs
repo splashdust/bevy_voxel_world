@@ -91,7 +91,10 @@
 //! A slot's shell holds copies of the six face neighbours' border planes, so
 //! a face on a chunk boundary reads the light in front of it. The shell is
 //! only for display: it never feeds back into light. Its edges and corners
-//! stay 0, and so does a plane whose neighbour isn't loaded. A sub-grid's
+//! stay 0, and so does a plane whose neighbour isn't loaded. A colour slot's
+//! edges and corners stay 0 too, which would read as white, but the shader
+//! reads a cell's colour only where it reads voxel light above 0, and a
+//! slot's edge and corner cells hold none. A sub-grid's
 //! chunk copies only the neighbours on its own grid, never a world chunk or
 //! another sub-grid's chunk at the same position, and a plane toward a
 //! position where its grid has no chunk stays 0. When a
