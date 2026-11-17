@@ -170,6 +170,7 @@ pub(crate) fn known_light(
         sky,
         voxel: ChunkLevels::Uniform(0),
         color: ChunkColor::White,
+        borders: Default::default(),
         precision,
     }
 }

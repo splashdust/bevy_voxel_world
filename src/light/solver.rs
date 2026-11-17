@@ -66,7 +66,7 @@ use super::color::{
 };
 use super::config::LightPrecision;
 use super::config::LightShape;
-use super::faces::{could_reach_sooner, mix as mix_hash, Face, FaceHashes};
+use super::faces::{could_reach_sooner, run_hashes, BorderLevels, Face, FaceHashes};
 use super::fill::seed::{CellsAround, FillSeeds, Seeding};
 use super::fill::{FillCells, CELL};
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy, Rescan};
@@ -112,6 +112,9 @@ pub(crate) struct ChunkLight {
     pub voxel: ChunkLevels,
     /// The light colour of its voxel light.
     pub color: ChunkColor,
+    /// Each light colour's levels on the faces where light of two or more
+    /// light colours lights its voxels, for its neighbours' arrivals.
+    pub borders: BorderLevels,
     /// The precision its levels are steps of: the world's when it was
     /// solved, which a change of precision leaves behind until it relights.
     pub precision: LightPrecision,
@@ -119,12 +122,23 @@ pub(crate) struct ChunkLight {
 
 impl ChunkLight {
     /// Whether `other` holds the same levels and light colours as this light
-    /// in every voxel.
+    /// in every voxel. Their border levels may differ.
     pub fn same_light(&self, other: &ChunkLight) -> bool {
         self.precision == other.precision
             && self.sky == other.sky
             && self.voxel == other.voxel
             && self.color == other.color
+    }
+
+    /// Whether `other` is the [same light](Self::same_light) with the same
+    /// border levels, so landing it would change nothing its neighbours read.
+    pub fn same_light_and_borders(&self, other: &ChunkLight) -> bool {
+        self.same_light(other) && self.borders == other.borders
+    }
+
+    /// Whether only white light lights the chunk, if any light does.
+    pub fn is_white(&self) -> bool {
+        self.color == ChunkColor::White && self.borders.is_empty()
     }
 
     /// The light at the chunk's voxel `local`, which holds `voxel`. A solid
@@ -637,8 +651,9 @@ fn solve<I>(
         None => (ChunkLevels::Uniform(0), FaceHashes::uniform(0)),
     };
     // A sub-grid's own voxel light stays white.
-    let (voxel, voxel_faces, color) = if settings.emission.is_colored() && key.is_world()
-    {
+    let colors =
+        (settings.emission.is_colored() && key.is_world()).then_some(&settings.emission);
+    let (voxel, voxel_faces, color, borders) = if colors.is_some() {
         solve_voxel_colors(
             &snapshot.neighbours,
             snapshot.missing,
@@ -655,7 +670,7 @@ fn solve<I>(
             settings.shape,
             &settings.counters,
         );
-        (voxel, faces, ChunkColor::White)
+        (voxel, faces, ChunkColor::White, BorderLevels::default())
     };
     let counters = &settings.counters;
     counters.solves.fetch_add(1, Ordering::Relaxed);
@@ -668,6 +683,7 @@ fn solve<I>(
         sky,
         voxel,
         color,
+        borders,
         precision: settings.precision,
     });
     let faces = FaceHashes {
@@ -685,6 +701,7 @@ fn solve<I>(
                 face,
                 &settings.voxel_scale,
                 settings.sky_scale.as_ref(),
+                colors,
             );
         }
     }
@@ -752,8 +769,8 @@ pub(crate) fn solve_voxel(
 
 /// Solves voxel light for the chunk at the centre of `neighbours`, as
 /// [`solve_voxel`] does, in a world whose emissive list `emission` holds a
-/// light colour other than white. Returns its levels, face hashes and light
-/// colour.
+/// light colour other than white. Returns its levels, face hashes, light
+/// colour and border levels.
 ///
 /// The light colours come from the notes of the emissive materials each
 /// chunk around it holds. With one, light is solved in one run, as in a
@@ -762,6 +779,9 @@ pub(crate) fn solve_voxel(
 /// dropped. A voxel's level is then the highest of the runs', which is the
 /// level one run of all of them gives, and its light colour the runs' colours
 /// at their levels, mixed by [`mix_weighted`].
+///
+/// The face hashes mix each run's, keyed by its light colour, with
+/// [`run_hashes`].
 pub(crate) fn solve_voxel_colors<I>(
     neighbours: &Neighbourhood,
     missing: Missing,
@@ -769,20 +789,23 @@ pub(crate) fn solve_voxel_colors<I>(
     shape: LightShape,
     emission: &EmissionTable<I>,
     counters: &LightCounters,
-) -> (ChunkLevels, [u64; 6], ChunkColor) {
+) -> (ChunkLevels, [u64; 6], ChunkColor, BorderLevels) {
     let colors = light_colors(neighbours, emission);
     if colors.len() <= 1 {
         let (voxel, faces) = solve_voxel(neighbours, missing, scale, shape, counters);
-        let color = match colors.first() {
-            Some(color) if voxel != ChunkLevels::Uniform(0) => ChunkColor::of(*color),
-            _ => ChunkColor::White,
+        let color = colors.first().copied().unwrap_or(WHITE);
+        let faces = run_hashes([(color, faces)]);
+        let color = match voxel {
+            ChunkLevels::Uniform(0) => ChunkColor::White,
+            _ => ChunkColor::of(color),
         };
-        return (voxel, faces, color);
+        return (voxel, faces, color, BorderLevels::default());
     }
     let unlit = (
         ChunkLevels::Uniform(0),
         FaceHashes::uniform(0),
         ChunkColor::White,
+        BorderLevels::default(),
     );
     let centre = centre(neighbours);
     if !centre.occupancy.has_open_voxel() {
@@ -818,8 +841,9 @@ pub(crate) fn solve_voxel_colors<I>(
             let run = runs.pop().expect("one run");
             (
                 chunk_levels(run.planes, &centre.occupancy),
-                run.faces,
+                run_hashes([(run.color, run.faces)]),
                 ChunkColor::of(run.color),
+                BorderLevels::default(),
             )
         }
         _ => mixed(&runs, &centre.occupancy, scale.precision()),
@@ -861,17 +885,20 @@ fn lights_any(planes: &[Plane], occupancy: &Occupancy) -> bool {
     })
 }
 
-/// The levels, face hashes and light colour of a chunk two or more of whose
-/// `runs` light its voxels, with levels in steps of `precision`.
+/// The levels, face hashes, light colour and border levels of a chunk two or
+/// more of whose `runs` light its voxels, with levels in steps of
+/// `precision`.
 ///
 /// A voxel only one run lights takes that run's light colour as it is. The
 /// face hashes mix each run's with its light colour, so they change wherever
-/// a run's light crosses a face at another time.
+/// a run's light crosses a face at another time. Its border levels hold each
+/// run's levels on the faces two or more runs light, whatever form its light
+/// colour takes.
 fn mixed(
     runs: &[Run],
     occupancy: &Occupancy,
     precision: LightPrecision,
-) -> (ChunkLevels, [u64; 6], ChunkColor) {
+) -> (ChunkLevels, [u64; 6], ChunkColor, BorderLevels) {
     let weights: Vec<f32> = (0..=precision.top())
         .map(|steps| mixing_weight(precision.level_of(steps)))
         .collect();
@@ -915,19 +942,19 @@ fn mixed(
             }
         }
     }
-    let mut faces = [0; 6];
-    for run in runs {
-        for (face, hash) in faces.iter_mut().zip(run.faces) {
-            if hash != 0 {
-                *face = mix_hash(mix_hash(*face, run.color as u64), hash);
-            }
-        }
-    }
+    let faces = run_hashes(runs.iter().map(|run| (run.color, run.faces)));
+    let borders = BorderLevels::of(
+        runs.iter()
+            .zip(&levels)
+            .map(|(run, levels)| (run.color, &levels[..])),
+        occupancy,
+        precision,
+    );
     let color = match one {
         Some(one) if uniform => ChunkColor::of(one),
         _ => ChunkColor::Mixed(packed.into()),
     };
-    (chunk_levels(planes, occupancy), faces, color)
+    (chunk_levels(planes, occupancy), faces, color, borders)
 }
 
 /// The level in `planes` of each voxel of the chunk, at

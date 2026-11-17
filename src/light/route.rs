@@ -2378,6 +2378,7 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
         sky: ChunkLevels::Planes(planes.into_boxed_slice()),
         voxel: light.voxel.clone(),
         color: light.color.clone(),
+        borders: light.borders.clone(),
         precision,
     })
 }
@@ -2813,6 +2814,7 @@ mod tests {
             sky: ChunkLevels::Planes(vec![above; precision.bits()].into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision,
         };
         let own = own_faces_see(&light);
@@ -2936,6 +2938,7 @@ mod tests {
             sky: ChunkLevels::Planes(sky.into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         })
     }
@@ -3063,6 +3066,7 @@ mod tests {
             },
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         });
         let own = own_faces_see(&light);
@@ -3149,6 +3153,7 @@ mod tests {
             sky: ChunkLevels::Uniform(0),
             voxel: ChunkLevels::Uniform(5),
             color: ChunkColor::Mixed(colors),
+            borders: Default::default(),
             precision,
         };
         let own = own_faces_see(&light);

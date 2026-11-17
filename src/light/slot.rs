@@ -962,6 +962,7 @@ mod tests {
             sky,
             voxel: ChunkLevels::Uniform(voxel),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         }
     }

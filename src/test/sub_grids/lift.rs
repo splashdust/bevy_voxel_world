@@ -9,13 +9,15 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use crate::chunk::{CHUNK_SIZE_F, CHUNK_SIZE_I};
+use crate::chunk_lifecycle::ChunkLifecycle;
+use crate::chunk_map::ChunkMap;
 use crate::prelude::*;
 use crate::test::{
     chunk_status_of, record_chunk_messages, recorded, spawn_camera, test_plugins,
     update_until,
 };
 use crate::voxel_edits::VoxelEdits;
-use crate::voxel_world_internal::WorldRoot;
+use crate::voxel_world_internal::{Internals, WorldRoot};
 
 /// A position below ground the world generates as air.
 const HOLE: IVec3 = IVec3::new(0, -1, 0);
@@ -200,6 +202,48 @@ pub(super) fn lift_app() -> App {
     });
     app.world_mut().resource_mut::<LiftWorld>().slow = true;
     app
+}
+
+/// What [`between_commit_and_handovers`] runs in the next `PreUpdate`.
+type Act = Box<dyn FnOnce(&mut VoxelWorld<LiftWorld>) -> Entity + Send + Sync>;
+
+/// The work [`between_commit_and_handovers`] queued, and the entity it
+/// returned once it has run.
+#[derive(Resource, Default)]
+struct Between {
+    act: Option<Act>,
+    returned: Option<Entity>,
+}
+
+fn act_between(mut between: ResMut<Between>, mut voxel_world: VoxelWorld<LiftWorld>) {
+    if let Some(act) = between.act.take() {
+        between.returned = Some(act(&mut voxel_world));
+    }
+}
+
+/// Runs `act` in the next update's `PreUpdate`, after that frame's commit
+/// and before `apply_requests` takes in its requests, as a game's system
+/// with no order against the world's systems can. Returns the entity `act`
+/// returns.
+pub(super) fn between_commit_and_handovers(
+    app: &mut App,
+    act: impl FnOnce(&mut VoxelWorld<LiftWorld>) -> Entity + Send + Sync + 'static,
+) -> Entity {
+    if !app.world().contains_resource::<Between>() {
+        app.init_resource::<Between>().add_systems(
+            PreUpdate,
+            act_between
+                .after(Internals::<LiftWorld>::commit_voxel_edits)
+                .before(ChunkLifecycle::<LiftWorld>::apply_requests),
+        );
+    }
+    app.world_mut().resource_mut::<Between>().act = Some(Box::new(act));
+    app.update();
+    app.world_mut()
+        .resource_mut::<Between>()
+        .returned
+        .take()
+        .expect("the act ran")
 }
 
 /// Runs `app` until it has read a `Lifted` naming `sub_grid`.
@@ -775,6 +819,105 @@ fn two_lifts_sharing_a_chunk_each_get_lifted_in_their_landing_frame() {
             (landing, Lifted::new(Grid::World, first)),
             (landing, Lifted::new(Grid::World, second))
         ]
+    );
+}
+
+#[test]
+fn a_lift_made_between_a_commit_and_its_requests_lands_with_its_own_commit() {
+    let mut app = lift_app();
+    let (min, max) = slab();
+    let call = next_frame(&app);
+    // The frame of the call commits nothing, so it forms no handover. The
+    // lift's edits commit in the next frame.
+    let entity = between_commit_and_handovers(&mut app, move |voxel_world| {
+        voxel_world
+            .lift(Grid::World, min, max, |_, _| true)
+            .unwrap()
+    });
+    let world_chunks = padded_chunks(min, max);
+    let sub_grid_chunks = BTreeSet::from([[0, 0, 0]]);
+    update_until(&mut app, "both grids' chunks to publish", |app| {
+        all_published_since(app, call, Grid::World, &world_chunks)
+            && all_published_since(app, call, Grid::SubGrid(entity), &sub_grid_chunks)
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let mut frames = published_since(&app, call, Grid::World, &world_chunks);
+    frames.extend(published_since(
+        &app,
+        call,
+        Grid::SubGrid(entity),
+        &sub_grid_chunks,
+    ));
+    let landing: BTreeSet<u32> = frames.iter().map(|(_, frame)| *frame).collect();
+    assert_eq!(landing.len(), 1, "{frames:?}");
+    let landing = *landing.first().unwrap();
+    assert_eq!(
+        lifted(&app),
+        [(landing, Lifted::new(Grid::World, entity))].as_slice()
+    );
+}
+
+#[test]
+fn a_lift_waits_to_land_while_another_thread_reads_the_chunk_map() {
+    let mut app = lift_app();
+    let (min, max) = slab();
+    let commit = next_frame(&app);
+    let entity = run(&mut app, move |voxel_world| {
+        voxel_world
+            .lift(Grid::World, min, max, |_, _| true)
+            .unwrap()
+    });
+    let world_chunks = padded_chunks(min, max);
+    let sub_grid_chunks = BTreeSet::from([[0, 0, 0]]);
+    let keys = |chunks: &BTreeSet<[i32; 3]>| -> Vec<ChunkKey> {
+        chunks
+            .iter()
+            .map(|chunk| ChunkKey::new(IVec3::from_array(*chunk), 0))
+            .collect()
+    };
+    let (world_keys, sub_grid_keys) = (keys(&world_chunks), keys(&sub_grid_chunks));
+
+    // A reader such as a task reading voxels, holding the chunk map while
+    // every chunk of the lift finishes its task.
+    let map = app.world().resource::<ChunkMap<LiftWorld, u8>>().get_map();
+    let reading = map.read().unwrap();
+    update_until(&mut app, "every chunk of the lift to finish", |app| {
+        let (world_keys, sub_grid_keys) = (world_keys.clone(), sub_grid_keys.clone());
+        run(app, move |voxel_world| {
+            let ready = Some(ChunkStatus::Ready);
+            let sub_grid = voxel_world.grid(Grid::SubGrid(entity)).unwrap();
+            world_keys
+                .iter()
+                .all(|key| voxel_world.chunk_state(*key) == ready)
+                && sub_grid_keys
+                    .iter()
+                    .all(|key| sub_grid.chunk_state(*key) == ready)
+        })
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(published_since(&app, commit, Grid::World, &world_chunks).is_empty());
+    assert!(lifted(&app).is_empty());
+
+    drop(reading);
+    until_lifted(&mut app, entity);
+    let mut frames = published_since(&app, commit, Grid::World, &world_chunks);
+    frames.extend(published_since(
+        &app,
+        commit,
+        Grid::SubGrid(entity),
+        &sub_grid_chunks,
+    ));
+    assert_eq!(frames.len(), world_chunks.len() + 1, "{frames:?}");
+    let landing: BTreeSet<u32> = frames.iter().map(|(_, frame)| *frame).collect();
+    assert_eq!(
+        landing.into_iter().collect::<Vec<_>>(),
+        [lifted(&app)[0].0],
+        "{frames:?}"
     );
 }
 

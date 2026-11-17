@@ -261,6 +261,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 sky: light.sky.clone(),
                 voxel: light.voxel.clone(),
                 color: light.color.clone(),
+                borders: light.borders.clone(),
                 precision: light.precision,
             });
         }
@@ -850,6 +851,7 @@ pub(crate) fn replace_columns(
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
         color: light.color.clone(),
+        borders: light.borders.clone(),
         precision: light.precision,
     });
 }
