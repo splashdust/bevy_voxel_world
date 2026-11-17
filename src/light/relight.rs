@@ -103,7 +103,7 @@ use futures_lite::future;
 
 use super::census::{Cause, ChangeCensus};
 use super::coarse::{emission_changed, CoarseSolved};
-use super::color::EmissionTable;
+use super::color::{unpack, EmissionTable};
 use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
 use super::hinted::{self, changed_across_air, passes_into_air};
@@ -230,7 +230,8 @@ type CoarseRunning<I> = (ChunkKey, Entity, Task<CoarseSolved<I>>);
 /// A coarse chunk whose light has landed.
 struct LandedCoarse<I> {
     key: ChunkKey,
-    /// The levels its tag holds without a slot, as in a texel.
+    /// The levels its tag holds without a slot, as in a texel, with its
+    /// tag's light colour.
     levels: LightLevels,
     /// The solid materials its cells hold, as its solve noted them.
     materials: Box<[I]>,
@@ -455,7 +456,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     /// Queues every coarse chunk whose light has landed and which holds a
     /// material whose entry in the emissive list differs between `old` and
-    /// `new`, to be solved again from its published voxels.
+    /// `new`, in level or in light colour, to be solved again from its
+    /// published voxels.
     ///
     /// Its old light shows until the new light lands. A coarse chunk whose
     /// light is still to land, or which is being solved again, is checked as
@@ -1769,7 +1771,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 continue;
             }
             let (sky, voxel) = solved.levels;
-            let levels = LightLevels::of_steps(sky, voxel, solved.precision);
+            let levels = LightLevels::of_steps(sky, voxel, solved.precision)
+                .with_voxel_color(unpack(solved.color.tag));
             // Solved before a change of precision, or of the emission of a
             // material it holds.
             let stale = solved.precision != settings.task.precision
@@ -1797,6 +1800,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     solved.levels,
                     solved.precision,
                     solved.bytes,
+                    solved.color,
                 );
             }
         }

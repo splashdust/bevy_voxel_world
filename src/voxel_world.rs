@@ -605,7 +605,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// voxel while the chunk holds a slot in the world's light texture, and
     /// otherwise the one sky light level and voxel light level its tag shows. A
     /// solid cell reads the brightest of its six neighbours, or 0 if all six
-    /// are solid.
+    /// are solid. Its light colour is the cell's own where the chunk's faces
+    /// see more than one light colour, and otherwise the one colour the
+    /// chunk shows.
     ///
     /// Where nothing renders, in such a chunk with no voxels to mesh or in air
     /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,
