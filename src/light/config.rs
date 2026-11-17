@@ -120,7 +120,7 @@ use bevy::reflect::Reflect;
 /// - **Solving:** the light colours among the emissive voxels within voxel
 ///   reach of the chunk, since its voxel light is solved once for each
 ///   colour. The colours around each chunk count, not how many the world
-///   declares.
+///   declares. See [`skip_unreached_colors`](Self::skip_unreached_colors).
 /// - **Memory:** the chunks that light of two or more colours reaches, each
 ///   holding a light colour for every voxel, 64 KiB a chunk.
 ///
@@ -403,6 +403,24 @@ pub struct LightPropagation {
     /// Defaults to 4 ms.
     pub wasm_relight_budget: Duration,
 
+    /// Whether a chunk with emissive voxels of four or more light colours within
+    /// voxel reach first works out which of those colours' light can reach it
+    /// through open voxels, and solves only those.
+    ///
+    /// A chunk's voxel light is solved once for each light colour among the
+    /// emissive voxels within voxel reach of it. A colour whose light solids
+    /// keep from the chunk costs a whole solve and lights nothing. Working out
+    /// which colours reach costs about one more solve, so it saves time where
+    /// solids keep colours apart, as in caves and rooms, and costs a little
+    /// where every colour reaches, as on open ground.
+    ///
+    /// It never changes the light, so a change applies to the next solves and
+    /// relights nothing. It does nothing in a world whose emissive voxels are
+    /// all white.
+    ///
+    /// Defaults to `true`.
+    pub skip_unreached_colors: bool,
+
     /// What sky a sub-grid's faces show: the world's sky capped by the
     /// sub-grid's enclosure, or the world's sky alone. The enclosure caps
     /// the world's voxel light too. See [`SubGridSky`].
@@ -428,6 +446,7 @@ impl Default for LightPropagation {
             look: LightLook::default(),
             sky_record_cap: 16 * 1024 * 1024,
             wasm_relight_budget: Duration::from_millis(4),
+            skip_unreached_colors: true,
             #[cfg(feature = "sub_grids")]
             sub_grid_sky: SubGridSky::default(),
         }

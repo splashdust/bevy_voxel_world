@@ -24,6 +24,18 @@
 //! is left. Where no emissive voxel passes, voxel light isn't spread at all.
 //! The check costs a few additions per emissive voxel in the box.
 //!
+//! In a light box of more than one light colour, voxel light runs once per
+//! colour, and a colour whose emissive voxels pass that check can still have
+//! its light kept from the chunk by solids. When four or more colours pass,
+//! and `skip_unreached_colors` is on, the solve first runs the reach run: the
+//! kernel's rounds backwards from the chunk's open voxels, through the light
+//! box's open voxels, which finds exactly the colours one of whose emissive
+//! voxels is reached in time for its level. Only those run. It costs about
+//! one run, whatever the number of colours, so it saves the most where
+//! solids keep many colours from the chunk, as in caves and rooms, and costs
+//! that run where every colour reaches. With fewer colours the runs it could
+//! skip cost less than it does. It never changes light.
+//!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
 //! and it holds no sources. A solve can be told to read it as air instead,
 //! with [`Missing`]. Air a fill hint keeps from spawning reads as what its
@@ -183,6 +195,7 @@ pub(crate) fn emitted<I: Copy + PartialEq>(
 }
 
 /// What a world's chunk tasks need to solve light, shared by all of them.
+#[derive(Clone)]
 pub(crate) struct LightTaskSettings<I> {
     pub precision: LightPrecision,
     pub voxel_scale: LevelScale,
@@ -212,6 +225,10 @@ pub(crate) struct LightTaskSettings<I> {
     /// The cells of the world's sky fill field, with sky light and sky fill
     /// on.
     pub fill: Option<FillCells>,
+    /// Whether a solve whose light box holds four or more light colours runs
+    /// only the colours whose light reaches the chunk: see
+    /// [`colors_reaching`].
+    pub skip_unreached_colors: bool,
 }
 
 /// Counts of light work in a world, for tests and benchmarks.
@@ -224,6 +241,12 @@ pub(crate) struct LightCounters {
     /// two or more light colours. A light box of one colour runs as in a white
     /// world, uncounted.
     pub color_runs: AtomicU64,
+    /// Reach runs, each on a light box holding four or more light colours
+    /// after the cull, with `skip_unreached_colors` on.
+    pub reach_runs: AtomicU64,
+    /// Light colours reach runs found no light of reaching the chunk, whose
+    /// runs were skipped.
+    pub colors_skipped: AtomicU64,
     /// Solves of voxel light that spread none, because no emissive voxel
     /// around the chunk could light it, though some chunk around it held
     /// emissive voxels.
@@ -660,6 +683,7 @@ fn solve<I>(
             &settings.voxel_scale,
             settings.shape,
             &settings.emission,
+            settings.skip_unreached_colors,
             &settings.counters,
         )
     } else {
@@ -780,6 +804,11 @@ pub(crate) fn solve_voxel(
 /// level one run of all of them gives, and its light colour the runs' colours
 /// at their levels, mixed by [`mix_weighted`].
 ///
+/// With `skip_unreached`, a light box still holding [`REACH_RUN_COLORS`] or
+/// more light colours after the cull first runs [`colors_reaching`], and
+/// runs only the colours it finds. The runs it skips would have been
+/// dropped, so it changes nothing the solve returns.
+///
 /// The face hashes mix each run's, keyed by its light colour, with
 /// [`run_hashes`].
 pub(crate) fn solve_voxel_colors<I>(
@@ -788,6 +817,7 @@ pub(crate) fn solve_voxel_colors<I>(
     scale: &LevelScale,
     shape: LightShape,
     emission: &EmissionTable<I>,
+    skip_unreached: bool,
     counters: &LightCounters,
 ) -> (ChunkLevels, [u64; 6], ChunkColor, BorderLevels) {
     let colors = light_colors(neighbours, emission);
@@ -811,16 +841,34 @@ pub(crate) fn solve_voxel_colors<I>(
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
+    let (mut colors, mut seeded): (Vec<u16>, Vec<Vec<Seed>>) = colors
+        .into_iter()
+        .map(|color| {
+            let seeds = seeds(neighbours, scale, shape, |voxel| {
+                emission.color(voxel.material()) == color
+            });
+            (color, seeds)
+        })
+        .filter(|(_, seeds)| !seeds.is_empty())
+        .unzip();
+    if seeded.is_empty() {
+        counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
+        return unlit;
+    }
+    if skip_unreached && seeded.len() >= REACH_RUN_COLORS {
+        counters.reach_runs.fetch_add(1, Ordering::Relaxed);
+        let reaching = colors_reaching(neighbours, missing, scale, shape, &seeded);
+        let skipped = reaching.iter().filter(|reaches| !**reaches).count();
+        counters
+            .colors_skipped
+            .fetch_add(skipped as u64, Ordering::Relaxed);
+        let mut reaches = reaching.iter();
+        colors.retain(|_| *reaches.next().expect("a colour"));
+        let mut reaches = reaching.iter();
+        seeded.retain(|_| *reaches.next().expect("a colour"));
+    }
     let mut runs = Vec::new();
-    let mut spread_any = false;
-    for color in colors {
-        let seeds = seeds(neighbours, scale, shape, |voxel| {
-            emission.color(voxel.material()) == color
-        });
-        if seeds.is_empty() {
-            continue;
-        }
-        spread_any = true;
+    for (color, seeds) in colors.into_iter().zip(seeded) {
         let (planes, faces) =
             spread(neighbours, missing, scale, shape, &seeds, None, None);
         counters.color_runs.fetch_add(1, Ordering::Relaxed);
@@ -831,9 +879,6 @@ pub(crate) fn solve_voxel_colors<I>(
                 faces,
             });
         }
-    }
-    if !spread_any {
-        counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
     }
     match runs.len() {
         0 => unlit,
@@ -849,6 +894,11 @@ pub(crate) fn solve_voxel_colors<I>(
         _ => mixed(&runs, &centre.occupancy, scale.precision()),
     }
 }
+
+/// The fewest light colours a light box must hold after the cull for a solve
+/// to run the reach run first. With fewer, the runs it could skip cost less
+/// than it does.
+const REACH_RUN_COLORS: usize = 4;
 
 /// One light colour's run over a light box.
 struct Run {
@@ -1124,18 +1174,8 @@ fn spread_in<R: Row>(
     fill: Option<Filling<'_>>,
 ) -> (Box<[Plane]>, [u64; 6]) {
     cached.with_borrow_mut(|light_box| {
-        let light_box = match light_box {
-            Some(light_box) if light_box.reach() == scale.reach() as usize => light_box,
-            _ => light_box.insert(LightBox::new(scale.reach())),
-        };
+        let light_box = open_box(light_box, (neighbours, missing), scale);
         let reach = light_box.reach();
-        fill_rows(light_box.open_rows_mut(), reach, |index, x, y| {
-            match (&neighbours[index], missing) {
-                (Some(inputs), _) => Some(!inputs.occupancy.solid_column(x, y)),
-                (None, Missing::Solid) => None,
-                (None, Missing::Air) => Some(!0),
-            }
-        });
         if let Some(lit) = lit {
             fill_rows(light_box.lit_rows_mut(), reach, |index, x, y| {
                 Some(lit[index].as_ref()?[x + y * CHUNK])
@@ -1167,6 +1207,79 @@ fn spread_in<R: Row>(
         );
         (planes, faces)
     })
+}
+
+/// The thread's box `cached` for light of `scale`'s reach, made if it holds
+/// none of that reach, with its open rows filled from `neighbours`, whose
+/// positions holding nothing read as `missing` says.
+fn open_box<'a, R: Row>(
+    cached: &'a mut Option<LightBox<R>>,
+    (neighbours, missing): (&Neighbourhood, Missing),
+    scale: &LevelScale,
+) -> &'a mut LightBox<R> {
+    if cached
+        .as_ref()
+        .is_none_or(|light_box| light_box.reach() != scale.reach() as usize)
+    {
+        *cached = Some(LightBox::new(scale.reach()));
+    }
+    let light_box = cached.as_mut().expect("a box");
+    let reach = light_box.reach();
+    fill_rows(light_box.open_rows_mut(), reach, |index, x, y| {
+        match (&neighbours[index], missing) {
+            (Some(inputs), _) => Some(!inputs.occupancy.solid_column(x, y)),
+            (None, Missing::Solid) => None,
+            (None, Missing::Air) => Some(!0),
+        }
+    });
+    light_box
+}
+
+/// The reach run: for each light colour's seeds in `seeded`, whether a run of
+/// them would light an open voxel of the chunk at the centre of
+/// `neighbours`, spreading in `shape`. The positions of `neighbours` that
+/// hold nothing read as `missing` says. Each colour's seeds must be sorted
+/// by their start, as [`seeds`] gives them.
+///
+/// It runs the kernel's rounds backwards from the chunk once for every
+/// colour: see [`LightBox::colors_reaching`].
+fn colors_reaching(
+    neighbours: &Neighbourhood,
+    missing: Missing,
+    scale: &LevelScale,
+    shape: LightShape,
+    seeded: &[Vec<Seed>],
+) -> Vec<bool> {
+    let mut seeds: Vec<(Seed, usize)> = seeded
+        .iter()
+        .enumerate()
+        .flat_map(|(color, seeds)| seeds.iter().map(move |seed| (*seed, color)))
+        .collect();
+    seeds.sort_by_key(|(seed, _)| seed.start);
+    let (seeds, colors): (Vec<Seed>, Vec<usize>) = seeds.into_iter().unzip();
+    let mut reaching = vec![false; seeded.len()];
+    let last = scale.last_distance(1) as usize;
+    let around = (neighbours, missing);
+    let run = (&seeds[..], &colors[..], shape, last);
+    if scale.reach() <= MAX_ONE_WORD_REACH {
+        reach_in(&ONE_WORD_BOX, around, scale, run, &mut reaching);
+    } else {
+        reach_in(&TWO_WORD_BOX, around, scale, run, &mut reaching);
+    }
+    reaching
+}
+
+fn reach_in<R: Row>(
+    cached: &'static LocalKey<RefCell<Option<LightBox<R>>>>,
+    around: (&Neighbourhood, Missing),
+    scale: &LevelScale,
+    (seeds, colors, shape, last): (&[Seed], &[usize], LightShape, usize),
+    reaching: &mut [bool],
+) {
+    cached.with_borrow_mut(|cached| {
+        open_box(cached, around, scale)
+            .colors_reaching(seeds, colors, shape, last, reaching)
+    });
 }
 
 /// The emissive voxels whose light could reach the chunk, spreading in
@@ -1328,6 +1441,7 @@ mod tests {
     use crate::light::fill::CellFill;
     use crate::light::inputs::EmissiveVoxel;
     use crate::light::view::{in_world, Missing};
+    use crate::prelude::Emission;
 
     /// A chunk whose voxels are all solid except `open`.
     fn solid_except(open: impl IntoIterator<Item = (usize, usize, usize)>) -> Occupancy {
@@ -1561,6 +1675,7 @@ mod tests {
             color_generation: 0,
             recolored: Arc::from([]),
             fill: Some(fill),
+            skip_unreached_colors: true,
         }
     }
 
@@ -1709,5 +1824,275 @@ mod tests {
             1
         );
         assert!(kernel_reaches(&[position], 0, &scale(), LightShape::Round));
+    }
+
+    /// A xorshift generator, so the cases are the same every run.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: i32) -> i32 {
+            (self.next() % n as u64) as i32
+        }
+    }
+
+    /// A light box of `reach` around the chunk at the origin holding two
+    /// lamps of each of `colors` light colours, the light colour as the
+    /// lamp's material, at random places and levels. `walled`, it also has
+    /// a shell around the chunk and five walls across the box, each with
+    /// holes, and scattered solids. Otherwise it's air.
+    fn random_box(
+        random: &mut Random,
+        reach: i32,
+        colors: u16,
+        walled: bool,
+    ) -> Neighbourhood {
+        let side = CHUNK_SIZE_I + 2 * reach;
+        let walls: Vec<(usize, i32, Vec<IVec3>)> = (0..if walled { 5 } else { 0 })
+            .map(|_| {
+                let holes = (0..3)
+                    .map(|_| {
+                        IVec3::new(
+                            random.below(side),
+                            random.below(side),
+                            random.below(side),
+                        )
+                    })
+                    .collect();
+                (random.below(3) as usize, random.below(side), holes)
+            })
+            .collect();
+        // A shell around the chunk, this many voxels outside it, with a hole
+        // of its own.
+        let shell = 1 + random.below(5);
+        let shell_hole =
+            IVec3::new(random.below(side), random.below(side), random.below(side));
+        let solid = |random: &mut Random, position: IVec3| {
+            let outside = (IVec3::splat(reach) - position)
+                .max(position - IVec3::splat(reach + CHUNK_SIZE_I - 1));
+            let in_shell = outside.max_element() == shell
+                && (shell_hole - position).abs().max_element() > 1;
+            walls.iter().any(|(axis, at, holes)| {
+                position[*axis] == *at
+                    && holes
+                        .iter()
+                        .all(|hole| (*hole - position).abs().max_element() > 1)
+            }) || walled && (in_shell || random.next().is_multiple_of(10))
+        };
+        let mut lamps: Vec<(IVec3, Emitter)> = Vec::new();
+        for material in 0..colors {
+            for _ in 0..2 {
+                let position = IVec3::new(
+                    random.below(side),
+                    random.below(side),
+                    random.below(side),
+                );
+                let level = 1 + random.below(15) as u8;
+                lamps.push((position - IVec3::splat(reach), Emitter { level, material }));
+            }
+        }
+        let mut neighbours: Neighbourhood = Default::default();
+        for (index, held) in neighbours.iter_mut().enumerate() {
+            let index = index as i32;
+            let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
+            let corner = offset * CHUNK_SIZE_I;
+            let mut occupancy = Occupancy::Open;
+            for z in 0..CHUNK {
+                for y in 0..CHUNK {
+                    for x in 0..CHUNK {
+                        let voxel = corner + IVec3::new(x as i32, y as i32, z as i32);
+                        if solid(random, voxel + IVec3::splat(reach)) {
+                            occupancy.set(x, y, z, true);
+                        }
+                    }
+                }
+            }
+            let mut emissive = Vec::new();
+            for (position, emitter) in &lamps {
+                let local = *position - corner;
+                if local.cmpge(IVec3::ZERO).all()
+                    && local.cmplt(IVec3::splat(CHUNK_SIZE_I)).all()
+                {
+                    let (x, y, z) =
+                        (local.x as usize, local.y as usize, local.z as usize);
+                    occupancy.set(x, y, z, true);
+                    emissive
+                        .push(EmissiveVoxel::new(x as u8, y as u8, z as u8, *emitter));
+                }
+            }
+            occupancy.normalize();
+            *held = Some(inputs(occupancy, emissive, ColumnAnswer::none()));
+        }
+        neighbours
+    }
+
+    #[test]
+    fn the_reach_run_keeps_exactly_the_colours_whose_light_reaches_the_chunk() {
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        let (mut kept, mut skipped) = (0, 0);
+        for reach in [14, 17] {
+            for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
+                let scale = LevelScale::new(reach, precision);
+                for shape in [LightShape::Round, LightShape::Diamond] {
+                    for walled in [false, true] {
+                        for case in 0..3 {
+                            let neighbours =
+                                random_box(&mut random, reach as i32, 8, walled);
+                            let open = &centre(&neighbours).occupancy;
+                            let seeded: Vec<Vec<Seed>> = (0..8)
+                                .map(|color| {
+                                    seeds(&neighbours, &scale, shape, |voxel| {
+                                        voxel.material() == color
+                                    })
+                                })
+                                .collect();
+                            let flooded: Vec<bool> = seeded
+                                .iter()
+                                .map(|seeds| {
+                                    let missing = Missing::Solid;
+                                    let (planes, _) = spread(
+                                        &neighbours,
+                                        missing,
+                                        &scale,
+                                        shape,
+                                        seeds,
+                                        None,
+                                        None,
+                                    );
+                                    lights_any(&planes, open)
+                                })
+                                .collect();
+                            let reaching = colors_reaching(
+                                &neighbours,
+                                Missing::Solid,
+                                &scale,
+                                shape,
+                                &seeded,
+                            );
+                            assert_eq!(
+                                reaching, flooded,
+                                "reach {reach}, {precision:?}, {shape:?}, walled {walled}, \
+                                 case {case}"
+                            );
+                            kept += flooded.iter().filter(|lights| **lights).count();
+                            skipped += seeded
+                                .iter()
+                                .zip(&flooded)
+                                .filter(|(seeds, lights)| !seeds.is_empty() && !**lights)
+                                .count();
+                        }
+                    }
+                }
+            }
+        }
+        // The cases hold both colours the reach run keeps and colours it
+        // skips though the cull keeps them.
+        assert!(kept > 20 && skipped > 20, "kept {kept}, skipped {skipped}");
+    }
+
+    /// A chunk of air holding a lamp at level 15 of each of `colors` light
+    /// colours, the light colour as the lamp's material, and the emissive
+    /// list giving each its colour.
+    fn lamps_of_colors(colors: u16) -> (Neighbourhood, EmissionTable<u16>) {
+        let mut occupancy = Occupancy::Open;
+        let lamps: Vec<EmissiveVoxel> = (0..colors)
+            .map(|material| {
+                let x = 4 + 3 * material as usize;
+                occupancy.set(x, 16, 16, true);
+                EmissiveVoxel::new(
+                    x as u8,
+                    16,
+                    16,
+                    Emitter {
+                        level: 15,
+                        material,
+                    },
+                )
+            })
+            .collect();
+        occupancy.normalize();
+        let hues = [
+            LinearRgba::RED,
+            LinearRgba::GREEN,
+            LinearRgba::BLUE,
+            LinearRgba::rgb(1.0, 1.0, 0.0),
+            LinearRgba::rgb(0.0, 1.0, 1.0),
+        ];
+        let emission: Vec<(u16, Emission)> = (0..colors)
+            .map(|material| {
+                (
+                    material,
+                    Emission::level(15.0).with_color(hues[material as usize]),
+                )
+            })
+            .collect();
+        let held = inputs(occupancy, lamps, ColumnAnswer::none());
+        (
+            around(&[(IVec3::ZERO, held)]),
+            EmissionTable::new(&emission),
+        )
+    }
+
+    #[test]
+    fn the_reach_run_runs_only_on_light_boxes_of_four_or_more_colours() {
+        for (colors, skip, expected) in [
+            (2, true, 0),
+            (3, true, 0),
+            (4, true, 1),
+            (5, true, 1),
+            (4, false, 0),
+        ] {
+            let (neighbours, emission) = lamps_of_colors(colors);
+            let counters = LightCounters::default();
+            solve_voxel_colors(
+                &neighbours,
+                Missing::Solid,
+                &scale(),
+                LightShape::Round,
+                &emission,
+                skip,
+                &counters,
+            );
+            let runs = counters.reach_runs.load(Ordering::Relaxed);
+            assert_eq!(runs, expected, "{colors} colours, skipping {skip}");
+        }
+    }
+
+    #[test]
+    fn skipping_unreached_colours_changes_no_solve_of_a_walled_light_box() {
+        let mut random = Random(0x2545_f491_4f6c_dd1d);
+        let emission: Vec<(u16, Emission)> = (0..8u16)
+            .map(|material| {
+                let hue = LinearRgba::rgb(1.0, material as f32 / 8.0, 0.0);
+                (material, Emission::level(15.0).with_color(hue))
+            })
+            .collect();
+        let emission = EmissionTable::new(&emission);
+        let counters = LightCounters::default();
+        for shape in [LightShape::Round, LightShape::Diamond] {
+            for _ in 0..3 {
+                let neighbours = random_box(&mut random, 14, 8, true);
+                let solve = |skip| {
+                    let missing = Missing::Solid;
+                    solve_voxel_colors(
+                        &neighbours,
+                        missing,
+                        &scale(),
+                        shape,
+                        &emission,
+                        skip,
+                        &counters,
+                    )
+                };
+                assert!(solve(true) == solve(false), "{shape:?}");
+            }
+        }
+        assert!(counters.colors_skipped.load(Ordering::Relaxed) > 0);
     }
 }
