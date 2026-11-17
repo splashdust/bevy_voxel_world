@@ -10,7 +10,7 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use super::super::{
-    chunk_status_of, meshing_app, move_cameras, spawn_camera, update_until,
+    chunk_keys, chunk_status_of, meshing_app, move_cameras, spawn_camera, update_until,
 };
 use super::voxel_light::{Hold, Scene, LAMP};
 use crate::chunk::CHUNK_SIZE_F;
@@ -555,7 +555,7 @@ fn hinted_air_of_a_lod_world_walks_the_column_and_follows_an_edit_above() {
     for _ in 0..10 {
         app.update();
     }
-    let spawned = super::super::chunk_keys::<CoarseWorld>(&mut app);
+    let spawned = chunk_keys::<CoarseWorld>(&mut app);
     for position in [UNDER_ROOF, OPEN_COLUMN] {
         assert!(
             spawned
@@ -688,21 +688,21 @@ fn coarse_solves(app: &App) -> u64 {
         .coarse_solves
 }
 
-/// Runs `app` until its light is settled and no coarse chunk has solved for
-/// 20 frames and half a second, so streaming is done even on a busy machine.
+/// Runs `app` until streaming is done and its light is settled: every chunk
+/// is Ready and no chunk has spawned or retired for 20 frames in a row, and
+/// light is settled. It counts frames and waits on chunk states, never on
+/// time, so a busy machine only makes it take longer.
 fn until_still(app: &mut App) {
-    let mut still = (0, Instant::now());
-    let mut solves = coarse_solves(app);
+    let mut still = 0;
+    let mut keys = chunk_keys::<CoarseWorld>(app);
     update_until(app, "the world to stream in and settle", |app| {
-        let now = coarse_solves(app);
-        if now != solves {
-            still = (0, Instant::now());
-        }
-        still.0 += 1;
-        solves = now;
-        still.0 >= 20
-            && still.1.elapsed() >= Duration::from_millis(500)
-            && light_is_settled(app)
+        let now = chunk_keys::<CoarseWorld>(app);
+        let ready = now.iter().all(|key| {
+            chunk_status_of::<CoarseWorld>(app, *key) == Some(ChunkStatus::Ready)
+        });
+        still = if ready && now == keys { still + 1 } else { 0 };
+        keys = now;
+        still >= 20 && light_is_settled(app)
     });
 }
 

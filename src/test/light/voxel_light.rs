@@ -220,11 +220,16 @@ fn lamps_in_air(lamps: Vec<(IVec3, u8)>, shape: LightShape) -> LampWorld {
     }
 }
 
-/// An app of `world`, run until the chunk at the origin is ready.
+/// An app of `world`, run until the chunk at the origin is ready and, in a
+/// lit world, its light has landed and light is settled.
 fn origin_ready(world: LampWorld) -> App {
+    let lit = world.light.is_some();
     let mut app = app(world);
-    update_until(&mut app, "the origin chunk to be ready", |app| {
+    update_until(&mut app, "the origin chunk and its light", |app| {
         chunk_status::<LampWorld>(app, IVec3::ZERO) == Some(ChunkStatus::Ready)
+            && (!lit
+                || landed_stamp(app, IVec3::ZERO).is_some()
+                    && super::sky_light::light_is_settled(app))
     });
     app
 }
@@ -519,9 +524,12 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
         .resource::<VoxelEdits<LampWorld, u8>>()
         .edit_stamp(IVec3::ZERO);
     hold.release();
+    // The chunks beside the lamp's relight as it arrives, so light settles
+    // after the origin's own light lands.
     update_until(&mut app, "the follow-up task's light to land", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
             && landed_stamp(app, IVec3::ZERO) == Some(stamp)
+            && super::sky_light::light_is_settled(app)
     });
 
     assert!(voxel_boxes_culled(&app) > 0);
@@ -693,9 +701,12 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         .edit_stamp(IVec3::ZERO);
     hold.release();
     // The held task's light reflects the stamp before the edit.
+    // The chunks beside the lamp's relight as it arrives, so light settles
+    // after the origin's own light lands.
     update_until(&mut app, "the follow-up task's light to land", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
             && landed_stamp(app, IVec3::ZERO) == Some(stamp)
+            && super::sky_light::light_is_settled(app)
     });
 
     let reference = reference(IVec3::splat(-32), IVec3::splat(64));
