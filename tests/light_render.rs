@@ -35,18 +35,28 @@
 //!   and off in turn, so their chunks take and give back the same slot, while
 //!   every frame of the dark room beside one of them stays black.
 //!
+//! - In a world coloured from startup, with sky light off, sealed rooms each
+//!   lit by a red, a green, a blue or a white lamp:
+//!   - every chunk draws from the first frame every chunk is ready, which the
+//!     red room's picture shows by holding no pixel of the blue clear colour;
+//!   - a red lamp's pool shows exactly 0 green and blue, a green one's 0 red
+//!     and blue, and a blue one's 0 red and green;
+//!   - `tinted_glow` tints the green lamp's own faces on the next frame, and
+//!     leaves the white lamp's glow as it was.
+//!
 //! The lamp room's checks run with sky light off because the room spans a
 //! chunk boundary with more open columns than a chunk's walk can settle, so
 //! its lower chunk shows direct sky until a sky probe disproves it.
 //!
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there. `check-sky-off`, `check-sky-on`,
-//! `check-sky-openness`, `check-fill-paths` and `check-fill-openness` each run
-//! one part of the checks.
+//! `check-sky-openness`, `check-fill-paths`, `check-fill-openness` and
+//! `check-color` each run one part of the checks.
 //!
 //! In the browser, `check` can't start processes of its own, so each part
 //! runs from its own page load: `?check-sky-off`, `?check-sky-on`,
-//! `?check-sky-openness`, `?check-fill-paths` and `?check-fill-openness`. Each
+//! `?check-sky-openness`, `?check-fill-paths`, `?check-fill-openness` and
+//! `?check-color`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -56,7 +66,10 @@
 //! on the main thread, within the world's `wasm_relight_budget` each frame.
 //!
 //! A `sky_reach=N` argument sets the world's sky reach, 30 by default on
-//! native and 16 on WASM, as a WASM application should use.
+//! native and 16 on WASM, as a WASM application should use. A
+//! `material=standard` argument gives the world plain `StandardMaterial` in
+//! place of the crate's default material, so the checks run on the crate's
+//! lit PBR shader.
 //!
 //! On WASM it takes its arguments from the page address's query, split at
 //! `&`, and draws into the page's canvas whose id is `bevy`. Build it with
@@ -101,6 +114,11 @@ const DIRT: u8 = 1;
 const STONE: u8 = 2;
 const LAMP: u8 = 3;
 const DIM_LAMP: u8 = 4;
+/// The lamps of the colour rooms, emissive only in the colour checks' world.
+const RED_LAMP: u8 = 5;
+const GREEN_LAMP: u8 = 6;
+const BLUE_LAMP: u8 = 7;
+const WHITE_LAMP: u8 = 8;
 
 /// The level the dim lamp is declared at.
 const DIM_LEVEL: f32 = 8.0;
@@ -177,6 +195,19 @@ const DIM_LAMP_AT: IVec3 = IVec3::new(332, -41, -310);
 /// An overhang: a slab sticking out of a mesa.
 const MESA: Bounds = Bounds::new([-48, 32, 290], [48, 84, 340]);
 const SLAB: Bounds = Bounds::new([-48, 72, 340], [48, 84, 404]);
+
+/// The colour rooms, sealed in the rock below the cave floor, each in a chunk
+/// of its own, by the material of its lamp.
+const COLOR_ROOMS: [(u8, IVec3); 4] = [
+    (RED_LAMP, IVec3::new(0, -18, 0)),
+    (GREEN_LAMP, IVec3::new(2, -18, 0)),
+    (BLUE_LAMP, IVec3::new(4, -18, 0)),
+    (WHITE_LAMP, IVec3::new(6, -18, 0)),
+];
+/// Each colour room, in its chunk's voxels.
+const COLOR_ROOM: Bounds = Bounds::new([8, 4, 8], [24, 14, 24]);
+/// The lamp on each colour room's floor, in its chunk's voxels.
+const COLOR_LAMP: IVec3 = IVec3::new(16, 4, 22);
 
 const PLATEAUS: [Plateau; 4] = [
     Plateau {
@@ -285,6 +316,15 @@ impl Scene {
     fn voxel(&self, position: IVec3) -> WorldVoxel {
         let IVec3 { x, y, z } = position;
         let surface = self.surface(x, z);
+        for (lamp, chunk) in COLOR_ROOMS {
+            let local = position - chunk * 32;
+            if local == COLOR_LAMP {
+                return WorldVoxel::Solid(lamp);
+            }
+            if COLOR_ROOM.contains(local.x, local.y, local.z) {
+                return WorldVoxel::Air;
+            }
+        }
         if self.open(x, y, z, surface) {
             return WorldVoxel::Air;
         }
@@ -344,6 +384,9 @@ struct CaveWorld {
     /// fill under this model, over the worlds laid out by [`fill_world_at`]
     /// in place of the caves.
     check_fill: Option<SkyFill>,
+    /// For the pixel checks of light colour: the colour rooms' lamps are
+    /// emissive, in their colours.
+    check_color: bool,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -358,6 +401,7 @@ impl Default for CaveWorld {
             check_sky: None,
             check_openness: false,
             check_fill: None,
+            check_color: false,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -479,10 +523,20 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
-        vec![
+        let mut emissive = vec![
             (LAMP, Emission::level(15.0)),
             (DIM_LAMP, Emission::level(DIM_LEVEL)),
-        ]
+        ];
+        if self.check_color {
+            let lamp = Emission::level(15.0);
+            emissive.extend([
+                (RED_LAMP, lamp.with_color(LinearRgba::RED)),
+                (GREEN_LAMP, lamp.with_color(LinearRgba::GREEN)),
+                (BLUE_LAMP, lamp.with_color(LinearRgba::BLUE)),
+                (WHITE_LAMP, lamp),
+            ]);
+        }
+        emissive
     }
 }
 
@@ -511,6 +565,24 @@ const SUNLIT_FACE_CAMERA: FixedCamera = camera([20.0, 60.0, 250.0], [0.0, 40.0, 
 /// Looks past the slab from the side the sun shines in from, at ground whose
 /// sky light falls off beside the slab and the cave mouths beyond it.
 const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 372.0]);
+
+/// A camera in the colour room of chunk `x` along x, looking away from its
+/// lamp, so it sees only the lamp's pool.
+const fn pool_camera(x: f32) -> FixedCamera {
+    camera([x * 32.0 + 16.5, -566.0, 20.0], [x * 32.0 + 16.5, -571.0, 9.0])
+}
+
+const RED_POOL_CAMERA: FixedCamera = pool_camera(0.0);
+const GREEN_POOL_CAMERA: FixedCamera = pool_camera(2.0);
+const BLUE_POOL_CAMERA: FixedCamera = pool_camera(4.0);
+
+/// A camera in the colour room of chunk `x` along x, looking at its lamp.
+const fn lamp_camera(x: f32) -> FixedCamera {
+    camera([x * 32.0 + 16.5, -567.0, 10.0], [x * 32.0 + 16.5, -571.0, 22.5])
+}
+
+const GREEN_LAMP_CAMERA: FixedCamera = lamp_camera(2.0);
+const WHITE_LAMP_CAMERA: FixedCamera = lamp_camera(6.0);
 
 fn transform_of(camera: &FixedCamera) -> Transform {
     Transform::from_translation(camera.position).looking_at(camera.look_at, Vec3::Y)
@@ -546,11 +618,13 @@ fn main() {
         Some("check-fill-openness") => {
             check_fill_part("openness", SkyFill::Openness(OpenFill::default()))
         }
+        Some("check-color") => check_color_part(),
         Some("budget") => budget(),
         Some(other) => {
             eprintln!(
                 "unknown argument {other:?}: expected check, check-sky-off, check-sky-on, \
-                 check-sky-openness, check-fill-paths, check-fill-openness or budget"
+                 check-sky-openness, check-fill-paths, check-fill-openness, check-color \
+                 or budget"
             );
             std::process::exit(2);
         }
@@ -584,6 +658,10 @@ struct Check {
     next_frame: bool,
     /// How many levels light holds for the picture.
     precision: LightPrecision,
+    /// Whether it takes the picture on the first frame every chunk is ready,
+    /// without waiting for light to settle. The camera must be where the app
+    /// starts it.
+    first_ready: bool,
 }
 
 type Judge =
@@ -611,6 +689,7 @@ const fn settled_check(
         look: LightLook::default,
         next_frame: false,
         precision: LightPrecision::Steps16,
+        first_ready: false,
     }
 }
 
@@ -637,6 +716,7 @@ const fn look_check(
         look,
         next_frame: true,
         precision: LightPrecision::Steps16,
+        first_ready: false,
     }
 }
 
@@ -812,6 +892,7 @@ const CHECKS: [Check; 23] = [
         look: LightLook::default,
         next_frame: false,
         precision: LightPrecision::Steps16,
+        first_ready: false,
     },
     settled_check(
         "a sun with no shadow map leaves a sealed pocket exactly black",
@@ -911,6 +992,92 @@ const CHECKS: [Check; 23] = [
     ),
 ];
 
+/// The checks of light colour, in a world coloured from startup with sky
+/// light off.
+const COLOR_CHECKS: [Check; 8] = [
+    Check {
+        first_ready: true,
+        ..settled_check(
+            "a world coloured from startup draws every chunk from its first frame",
+            "color_startup.png",
+            false,
+            &RED_POOL_CAMERA,
+            true,
+            None,
+            only_red,
+        )
+    },
+    settled_check(
+        "a red lamp's pool shows exactly 0 green and blue",
+        "color_red.png",
+        false,
+        &RED_POOL_CAMERA,
+        true,
+        None,
+        only_red,
+    ),
+    settled_check(
+        "a green lamp's pool shows exactly 0 red and blue",
+        "color_green.png",
+        false,
+        &GREEN_POOL_CAMERA,
+        true,
+        None,
+        only_green,
+    ),
+    settled_check(
+        "a blue lamp's pool shows exactly 0 red and green",
+        "color_blue.png",
+        false,
+        &BLUE_POOL_CAMERA,
+        true,
+        None,
+        only_blue,
+    ),
+    settled_check(
+        "a green lamp's own faces glow in their base colour",
+        "color_green_glow.png",
+        false,
+        &GREEN_LAMP_CAMERA,
+        true,
+        None,
+        green_lamp_untinted,
+    ),
+    look_check(
+        "tinted glow tints a green lamp's own faces on the next frame",
+        "color_green_glow_tinted.png",
+        false,
+        &GREEN_LAMP_CAMERA,
+        Some("color_green_glow.png"),
+        green_lamp_tinted,
+        || LightLook {
+            tinted_glow: true,
+            ..default()
+        },
+    ),
+    settled_check(
+        "a white lamp's own faces glow",
+        "color_white_glow.png",
+        false,
+        &WHITE_LAMP_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "tinted glow leaves a white lamp's glow as it was",
+        "color_white_glow_tinted.png",
+        false,
+        &WHITE_LAMP_CAMERA,
+        Some("color_white_glow.png"),
+        matches_earlier,
+        || LightLook {
+            tinted_glow: true,
+            ..default()
+        },
+    ),
+];
+
 /// The checks run with sky fill on under sky openness.
 const OPENNESS_CHECKS: [Check; 1] = [settled_check(
     "a sealed pocket under sky openness is exactly black",
@@ -997,6 +1164,8 @@ struct CheckPlan {
     moved_at_frame: u32,
     /// The last frame on which a chunk wasn't Ready or light hadn't settled.
     last_busy_frame: u32,
+    /// The last frame on which a chunk wasn't Ready, or none was spawned.
+    last_unready_frame: u32,
     frame: u32,
     waiting: bool,
     failed: bool,
@@ -1022,7 +1191,7 @@ struct CheckPlan {
 fn check() {
     error!(
         "in the browser, run ?check-sky-off, ?check-sky-on, ?check-sky-openness, \
-         ?check-fill-paths and ?check-fill-openness, each in a page load"
+         ?check-fill-paths, ?check-fill-openness and ?check-color, each in a page load"
     );
 }
 
@@ -1038,6 +1207,7 @@ fn check() {
         "sky-openness",
         "fill-paths",
         "fill-openness",
+        "color",
     ] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
@@ -1082,11 +1252,37 @@ fn check_fill_part(model: &'static str, fill: SkyFill) {
     );
 }
 
+/// Runs the checks of light colour, in a world coloured from startup with
+/// sky light off. The clear colour is blue, so a chunk that doesn't draw shows
+/// as blue in the red room.
+fn check_color_part() {
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            ..default()
+        },
+        COLOR_CHECKS.iter().collect(),
+    );
+}
+
 fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
-    App::new()
-        .add_plugins(plugins_without_window())
-        .add_plugins(VoxelWorldPlugin::with_config(world))
-        .init_resource::<Pictures>()
+    let clear = if world.check_color {
+        Color::srgb(0.0, 0.0, 1.0)
+    } else {
+        ClearColor::default().0
+    };
+    let mut app = App::new();
+    app.insert_resource(ClearColor(clear))
+        .add_plugins(plugins_without_window());
+    if arguments().iter().any(|argument| argument == "material=standard") {
+        app.add_plugins(
+            VoxelWorldPlugin::with_config(world).with_material(StandardMaterial::default()),
+        );
+    } else {
+        app.add_plugins(VoxelWorldPlugin::with_config(world));
+    }
+    app.init_resource::<Pictures>()
         .add_systems(
             Startup,
             move |commands: Commands, images: ResMut<Assets<Image>>| {
@@ -1195,6 +1391,7 @@ fn setup_check(
         next: 0,
         moved_at_frame: 0,
         last_busy_frame: 0,
+        last_unready_frame: 0,
         frame: 0,
         waiting: false,
         failed: false,
@@ -1226,11 +1423,14 @@ fn run_checks(
 ) {
     plan.frame += 1;
     let frame = plan.frame;
-    if !voxel_world.light_is_settled()
+    let unready = chunks.is_empty()
         || chunks
             .iter()
-            .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready))
-    {
+            .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready));
+    if unready {
+        plan.last_unready_frame = frame;
+    }
+    if unready || !voxel_world.light_is_settled() {
         plan.last_busy_frame = frame;
     }
     if plan.waiting {
@@ -1282,8 +1482,10 @@ fn run_checks(
     }
     let waited = frame - plan.moved_at_frame;
     let quiet = frame - plan.last_busy_frame.max(plan.moved_at_frame);
-    // A look change shows on the next frame, with no waiting.
-    if !check.next_frame && !(quiet >= 60 && waited >= 120) {
+    // A look change shows on the next frame, with no waiting, and a check of
+    // the first frame every chunk is ready waits for nothing more.
+    let ready = check.first_ready && plan.last_unready_frame < frame;
+    if !check.next_frame && !ready && !(quiet >= 60 && waited >= 120) {
         if waited >= 3600 {
             report!("FAIL {}: the world never settled", check.name);
             plan.failed = true;
@@ -1472,6 +1674,113 @@ fn glow_changes_and_scales(
         "bright lamp {bright}, dim lamp {dim}, dim lamp before the change {dim_before}"
     );
     if dim > 0 && dim < bright && dim != dim_before {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether every pixel of `image` holds exactly 0 in each channel `missing`
+/// names, and at least a tenth of its pixels are lit.
+fn only_in(image: &Image, missing: [bool; 3]) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pixels = data.as_chunks::<4>().0;
+    let wrong = pixels
+        .iter()
+        .filter(|pixel| (0..3).any(|channel| missing[channel] && pixel[channel] != 0))
+        .count();
+    let lit = pixels
+        .iter()
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    let note = format!(
+        "{wrong} pixels show a missing component, {lit} of {} lit",
+        pixels.len()
+    );
+    if wrong == 0 && lit * 10 >= pixels.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+fn only_red(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [false, true, true])
+}
+
+fn only_green(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [true, false, true])
+}
+
+fn only_blue(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [true, true, false])
+}
+
+/// The channels of the pixel where the middle of the top face of the green
+/// colour room's lamp shows.
+fn green_lamp_top(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<[u8; 3], String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let lamp = COLOR_ROOMS[1].1 * 32 + COLOR_LAMP;
+    let point = lamp.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+    let at = camera
+        .world_to_viewport(global, point)
+        .map_err(|error| format!("{point} isn't in view: {error:?}"))?;
+    let (x, y) = (
+        (at.x as usize).min(WIDTH as usize - 1),
+        (at.y as usize).min(HEIGHT as usize - 1),
+    );
+    let index = (y * WIDTH as usize + x) * 4;
+    Ok([data[index], data[index + 1], data[index + 2]])
+}
+
+/// Whether the green lamp's top face shows red or blue, from its base colour.
+fn green_lamp_untinted(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let top = green_lamp_top(image, camera, global)?;
+    let note = format!("the lamp's top face shows {top:?}");
+    if top[0] > 0 || top[2] > 0 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether the green lamp's top face shows green alone, where the earlier
+/// picture showed something else.
+fn green_lamp_tinted(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let earlier = earlier.ok_or("no earlier picture")?;
+    let top = green_lamp_top(image, camera, global)?;
+    let before = green_lamp_top(earlier, camera, global)?;
+    let note = format!("the lamp's top face shows {top:?}, and before {before:?}");
+    if top[0] == 0 && top[2] == 0 && top[1] > 0 && top != before {
         Ok(note)
     } else {
         Err(note)

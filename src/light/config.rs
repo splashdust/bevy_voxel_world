@@ -859,6 +859,15 @@ pub struct LightLook {
     ///
     /// Shows on the next frame, for one uniform write. Defaults to 6.
     pub emissive_glow: f32,
+    /// Whether an emissive voxel's own faces glow in their base colour tinted by
+    /// its light colour, rather than in their base colour alone.
+    ///
+    /// Off, the material decides how an emissive voxel looks, and a white one
+    /// glows the same either way. On, the faces of coloured emissive voxels cost
+    /// a little more shader work, and no other face does.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to `false`.
+    pub tinted_glow: bool,
     /// What the mesh's ambient occlusion darkens.
     ///
     /// Shows on the next frame, for one uniform write. Defaults to
@@ -881,6 +890,7 @@ impl Default for LightLook {
             sun: SunGate::default(),
             voxel_brightness: 1000.0,
             emissive_glow: 6.0,
+            tinted_glow: false,
             ao: LightAo::default(),
             minimum_brightness: 0.0,
         }

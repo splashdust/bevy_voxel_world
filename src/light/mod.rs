@@ -1138,6 +1138,16 @@ fn relight_settings<C: VoxelWorldConfig>(
 
 /// The packed light colour of each material index of `emission`, for a
 /// world's route, or `None` where every one is white.
+/// Makes `route` read the light colours of world `C`'s emissive materials,
+/// before [`build`] does.
+pub(crate) fn read_light_colors<C: VoxelWorldConfig>(
+    route: &mut route::LightRoute<C>,
+    world: &C,
+) {
+    let table = color::EmissionTable::new(&clamped_emission(world));
+    route.set_light_colors(light_colors(&table));
+}
+
 fn light_colors<I>(emission: &color::EmissionTable<I>) -> Option<&[u16]> {
     emission.is_colored().then(|| emission.colors())
 }
