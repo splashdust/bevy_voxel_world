@@ -768,6 +768,7 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
             Missing::Solid,
             &task.voxel_scale,
             task.shape,
+            &task.counters,
         ));
     }
     (boxes.len(), start.elapsed().as_secs_f64() * 1000.0)

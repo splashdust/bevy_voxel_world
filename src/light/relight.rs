@@ -1788,7 +1788,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             inputs: Arc::new(light.inputs.with_columns(answer)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
-                            color: light.color,
+                            color: light.color.clone(),
                             precision: light.precision,
                         });
                     }
@@ -2115,7 +2115,7 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         inputs: chunk.light.inputs.clone(),
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
-        color: light.color,
+        color: light.color.clone(),
         precision: light.precision,
     });
 }

@@ -92,6 +92,11 @@ fn a_coloured_worlds_levels_match_a_white_worlds() {
             (MIDDLE + IVec3::new(6, 2, 0), BLUE_LAMP),
         ],
         vec![(MIDDLE, ORANGE_LAMP), (IVec3::new(40, 16, 16), LAMP)],
+        vec![
+            (MIDDLE - IVec3::X * 5, ORANGE_LAMP),
+            (MIDDLE + IVec3::new(4, 3, 0), BLUE_LAMP),
+            (MIDDLE + IVec3::new(1, -5, 2), LAMP),
+        ],
     ];
     for scene in scenes {
         let white = scene.iter().map(|(p, _)| (*p, LAMP)).collect();

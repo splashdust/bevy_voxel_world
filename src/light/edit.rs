@@ -279,7 +279,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs: std::sync::Arc::new(inputs),
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
-                    color: chunk.light.color,
+                    color: chunk.light.color.clone(),
                     precision: chunk.light.precision,
                 });
                 relight.insert(position);
@@ -380,7 +380,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             inputs: std::sync::Arc::new(inputs),
             sky: chunk.light.sky.clone(),
             voxel: chunk.light.voxel.clone(),
-            color: chunk.light.color,
+            color: chunk.light.color.clone(),
             precision: chunk.light.precision,
         });
         chunk.edits = count;
@@ -562,7 +562,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                             inputs: std::sync::Arc::new(light.inputs.with_columns(new)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
-                            color: light.color,
+                            color: light.color.clone(),
                             precision: light.precision,
                         });
                     }
