@@ -363,7 +363,8 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// added or dropped, relights like a change of reach: every chunk with a
     /// solid looks for its emissive voxels again in a relight task on the task
     /// pool, and its neighbours relight again where its emissive voxels
-    /// changed.
+    /// changed. A chunk above LOD level 0 holding such a material is solved
+    /// again on the task pool too, and shows its old light until then.
     ///
     /// Each [`Emission`] can give its light a colour. A change of colour alone
     /// changes no level, so it relights only the chunks whose light box, the

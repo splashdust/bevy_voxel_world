@@ -1,6 +1,6 @@
 use std::{
     marker::PhantomData,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crate::{
@@ -15,14 +15,16 @@ use bevy::{math::Vec3A, prelude::*};
 use hashbrown::DefaultHashBuilder;
 
 /// The published data of chunks by grid key, with each grid's LOD levels in
-/// use and the bounds of its published chunks.
+/// use and the bounds of the world's published chunks.
 ///
 /// The methods that take a `ChunkKey` or a voxel position read the world's
 /// grid.
 pub struct ChunkMapData<I> {
     data: GridTable<ChunkKey, chunk::ChunkData<I>, DefaultHashBuilder>,
     levels: PerGrid<LevelCounts>,
-    bounds: PerGrid<Aabb3d>,
+    /// The bounds of the world's published chunks. A sub-grid's chunks have
+    /// none kept, since nothing reads them.
+    bounds: Aabb3d,
 }
 
 impl<I> ChunkMapData<I> {
@@ -73,28 +75,30 @@ impl<I> ChunkMapData<I> {
         })
     }
 
-    /// The bounding box of `grid`'s published chunks, in chunk coordinates,
-    /// both corners inclusive. A grid with no published chunk has an empty
-    /// box at the origin.
-    pub(crate) fn bounds_in(&self, grid: GridId) -> Aabb3d {
-        self.bounds.get(grid).copied().unwrap_or(EMPTY_BOUNDS)
+    /// The bounding box of the world's published chunks, in chunk
+    /// coordinates, both corners inclusive. With no published chunk it is an
+    /// empty box at the origin.
+    pub(crate) fn bounds(&self) -> Aabb3d {
+        self.bounds
     }
 
     /// Publishes `chunk_data` as the data of the chunk at `key`, growing its
-    /// grid's bounds and LOD levels. Returns the data it replaced, if any.
+    /// grid's LOD levels, and the world's bounds for a world chunk. Returns
+    /// the data it replaced, if any.
     pub(crate) fn insert(
         &mut self,
         key: GridKey,
         chunk_data: chunk::ChunkData<I>,
     ) -> Option<chunk::ChunkData<I>> {
         let previous = self.data.insert(key, chunk_data);
-        let (min, max) = chunk_corners(&key.key());
-        let bounds = self.bounds.get_or_insert_with(key.grid(), || EMPTY_BOUNDS);
-        if min.cmplt(bounds.min).any() {
-            bounds.min = min.min(bounds.min);
-        }
-        if max.cmpgt(bounds.max).any() {
-            bounds.max = max.max(bounds.max);
+        if key.is_world() {
+            let (min, max) = chunk_corners(&key.key());
+            if min.cmplt(self.bounds.min).any() {
+                self.bounds.min = min.min(self.bounds.min);
+            }
+            if max.cmpgt(self.bounds.max).any() {
+                self.bounds.max = max.max(self.bounds.max);
+            }
         }
         if previous.is_none() {
             self.levels
@@ -104,18 +108,21 @@ impl<I> ChunkMapData<I> {
         previous
     }
 
-    /// Removes the data of the chunk at `key`. Returns whether the chunk was
-    /// its grid's last or on the edge of its grid's bounds, so they need
-    /// [`rebuild_bounds`](Self::rebuild_bounds).
+    /// Removes the data of the chunk at `key`. Returns whether it was a world
+    /// chunk that was the world's last or on the edge of the world's bounds,
+    /// so they need [`rebuild_bounds`](Self::rebuild_bounds).
     fn remove(&mut self, key: &GridKey) -> bool {
         if self.data.remove(key).is_none() {
             return false;
         }
         let levels = self.levels.get_or_insert_with(key.grid(), LevelCounts::new);
         levels.remove(key.lod_level());
+        if !key.is_world() {
+            return false;
+        }
         let last = levels.total() == 0;
         let (min, max) = chunk_corners(&key.key());
-        let bounds = self.bounds_in(key.grid());
+        let bounds = self.bounds;
         last || bounds.min.floor().cmpeq(min).any() || bounds.max.floor().cmpeq(max).any()
     }
 
@@ -127,19 +134,19 @@ impl<I> ChunkMapData<I> {
             .is_some_and(|levels| levels.total() > 0)
     }
 
-    /// Works `grid`'s bounds out again from its published chunks. Its cost
-    /// grows with `grid`'s published chunks.
-    fn rebuild_bounds(&mut self, grid: GridId) {
+    /// Works the world's bounds out again from its published chunks. Its
+    /// cost grows with the world's published chunks.
+    fn rebuild_bounds(&mut self) {
         let empty = self
             .levels
-            .get(grid)
+            .get(GridId::WORLD)
             .is_none_or(|levels| levels.total() == 0);
-        let bounds = if empty {
+        self.bounds = if empty {
             EMPTY_BOUNDS
         } else {
             let corners: Vec<Vec3A> = self
                 .data
-                .grid_keys(grid)
+                .grid_keys(GridId::WORLD)
                 .flat_map(|key| {
                     let (min, max) = chunk_corners(&key.key());
                     [min, max]
@@ -147,11 +154,10 @@ impl<I> ChunkMapData<I> {
                 .collect();
             Aabb3d::from_point_cloud(Isometry3d::IDENTITY, corners.into_iter())
         };
-        *self.bounds.get_or_insert_with(grid, || EMPTY_BOUNDS) = bounds;
     }
 }
 
-/// The bounds of a grid with no published chunk.
+/// The bounds of the world with no published chunk.
 const EMPTY_BOUNDS: Aabb3d = Aabb3d {
     min: Vec3A::ZERO,
     max: Vec3A::ZERO,
@@ -184,7 +190,7 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
     ///
     /// Expressed in **chunk coordinates**. Bounds are **inclusive**.
     pub fn get_bounds(read_lock: &RwLockReadGuard<ChunkMapData<I>>) -> Aabb3d {
-        read_lock.bounds_in(GridId::WORLD)
+        read_lock.bounds()
     }
 
     /// Get the current bounding box of loaded chunks in this map.
@@ -207,6 +213,13 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         self.map.clone()
     }
 
+    /// The chunk map held for writing, or `None` if another thread holds it
+    /// now. It never waits for the lock, so a thread reading the chunk map
+    /// never stalls the frame.
+    pub(crate) fn try_write(&self) -> Option<RwLockWriteGuard<'_, ChunkMapData<I>>> {
+        self.map.try_write().ok()
+    }
+
     pub(crate) fn apply_buffers(
         &self,
         update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
@@ -218,62 +231,71 @@ impl<C: VoxelWorldConfig, I: Copy> ChunkMap<C, I> {
         if update_buffer.is_empty() && remove_buffer.is_empty() {
             return;
         }
+        // A held lock leaves the data for a later flush, while the chunks'
+        // meshes already show.
+        if let Some(mut write_lock) = self.try_write() {
+            Self::write_buffers(
+                &mut write_lock,
+                update_buffer,
+                remove_buffer,
+                ev_chunk_published,
+                ev_chunk_will_spawn,
+                index,
+            );
+        }
+    }
 
-        // A held read lock leaves the data for a later flush, while the
-        // chunks' meshes already show. A landing handover can't wait, since
-        // every chunk in it must be readable in the frame its mesh shows.
-        #[cfg(feature = "sub_grids")]
-        let lock = if std::mem::take(&mut update_buffer.must_land) {
-            Ok(self.map.write().unwrap())
-        } else {
-            self.map.try_write().map_err(|_| ())
-        };
-        #[cfg(not(feature = "sub_grids"))]
-        let lock = self.map.try_write();
-        if let Ok(mut write_lock) = lock {
-            for (key, chunk_data, entity) in update_buffer.iter() {
-                // A sub-grid's chunk despawned while its data waited for the
-                // lock publishes nothing, so its grid holds no data once its
-                // chunks are gone.
-                if !key.is_world() && index.get_in(*key) != Some(*entity) {
-                    continue;
-                }
-                let previous = write_lock.insert(
-                    *key,
-                    ChunkData {
-                        key: key.key(),
-                        ..chunk_data.clone()
-                    },
-                );
-                // A chunk is published for the first time when the key has no
-                // data, or still holds the data of a despawned chunk.
-                if previous.map(|data| data.entity) != Some(*entity) {
-                    if let Some(message) = index.message(*key, *entity) {
-                        ev_chunk_will_spawn.write(message);
-                    }
-                }
+    /// Writes the data and the removals waiting in the buffers into
+    /// `write_lock`, the chunk map held for writing, and empties the
+    /// buffers. It writes a `ChunkPublished` for each chunk it publishes.
+    pub(crate) fn write_buffers(
+        write_lock: &mut ChunkMapData<I>,
+        update_buffer: &mut ChunkMapUpdateBuffer<C, I>,
+        remove_buffer: &mut ChunkMapRemoveBuffer<C>,
+        ev_chunk_published: &mut MessageWriter<ChunkPublished<C>>,
+        ev_chunk_will_spawn: &mut MessageWriter<ChunkWillSpawn<C>>,
+        index: &ChunkIndex<C>,
+    ) {
+        for (key, chunk_data, entity) in update_buffer.iter() {
+            // A sub-grid's chunk despawned while its data waited for the
+            // lock publishes nothing, so its grid holds no data once its
+            // chunks are gone.
+            if !key.is_world() && index.get_in(*key) != Some(*entity) {
+                continue;
+            }
+            let previous = write_lock.insert(
+                *key,
+                ChunkData {
+                    key: key.key(),
+                    ..chunk_data.clone()
+                },
+            );
+            // A chunk is published for the first time when the key has no
+            // data, or still holds the data of a despawned chunk.
+            if previous.map(|data| data.entity) != Some(*entity) {
                 if let Some(message) = index.message(*key, *entity) {
-                    ev_chunk_published.write(message);
+                    ev_chunk_will_spawn.write(message);
                 }
             }
-            update_buffer.clear();
+            if let Some(message) = index.message(*key, *entity) {
+                ev_chunk_published.write(message);
+            }
+        }
+        update_buffer.clear();
 
-            let mut rebuild: Vec<GridId> = Vec::new();
-            for (key, entity) in remove_buffer.iter() {
-                // The chunk may have spawned again and published while this
-                // removal waited for the lock. Its data stays.
-                if write_lock.get_in(key).map(|data| data.entity) != Some(*entity) {
-                    continue;
-                }
-                if write_lock.remove(key) && !rebuild.contains(&key.grid()) {
-                    rebuild.push(key.grid());
-                }
+        let mut rebuild = false;
+        for (key, entity) in remove_buffer.iter() {
+            // The chunk may have spawned again and published while this
+            // removal waited for the lock. Its data stays.
+            if write_lock.get_in(key).map(|data| data.entity) != Some(*entity) {
+                continue;
             }
-            remove_buffer.clear();
+            rebuild |= write_lock.remove(key);
+        }
+        remove_buffer.clear();
 
-            for grid in rebuild {
-                write_lock.rebuild_bounds(grid);
-            }
+        if rebuild {
+            write_lock.rebuild_bounds();
         }
     }
 }
@@ -292,7 +314,7 @@ impl<C, I> Default for ChunkMap<C, I> {
             map: Arc::new(RwLock::new(ChunkMapData {
                 data: GridTable::with_capacity(1000),
                 levels: PerGrid::new(LevelCounts::new()),
-                bounds: PerGrid::new(EMPTY_BOUNDS),
+                bounds: EMPTY_BOUNDS,
             })),
             _marker: PhantomData,
         }
@@ -305,11 +327,6 @@ impl<C, I> Default for ChunkMap<C, I> {
 pub(crate) struct ChunkMapUpdateBuffer<C: VoxelWorldConfig, I> {
     #[deref]
     queued: Vec<(GridKey, chunk::ChunkData<I>, Entity)>,
-    /// Whether the next flush waits for the chunk map's lock rather than
-    /// trying it, so the queued data is readable in the frame its meshes
-    /// show. A landing handover sets it.
-    #[cfg(feature = "sub_grids")]
-    pub must_land: bool,
     _world: PhantomData<C>,
 }
 

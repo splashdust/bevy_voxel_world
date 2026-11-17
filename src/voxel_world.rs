@@ -455,8 +455,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// `stamp`'s does.
     ///
     /// Returns `None` where `stamp` would refuse: `sub_grid` isn't a live
-    /// sub-grid, `target` names an entity that isn't one, or `target` is
-    /// the sub-grid or one of its descendants.
+    /// sub-grid, `target` names an entity that isn't one, `target` is the
+    /// sub-grid or one of its descendants, or either was stamped already and
+    /// that stamp hasn't landed.
     pub fn stamp_preview(&self, sub_grid: Entity, target: Grid) -> Option<StampPreview> {
         crate::sub_grid::preview(self.stamp_parts(), sub_grid, target)
     }
@@ -507,11 +508,13 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     ///
     /// [`StampError::NoSuchSubGrid`] when `sub_grid` isn't a live sub-grid
     /// of this world, [`StampError::NoSuchTarget`] when `target` names an
-    /// entity that isn't one, and [`StampError::IntoItself`] when `target`
-    /// is the sub-grid or one of its descendants. Nothing is changed. A
-    /// sub-grid counts as a descendant of the sub-grids above it in the
-    /// hierarchy as it was when last frame's transforms propagated, or from
-    /// the call for one lifted this frame.
+    /// entity that isn't one, [`StampError::IntoItself`] when `target` is
+    /// the sub-grid or one of its descendants, and
+    /// [`StampError::AlreadyStamped`] when `sub_grid`, or a sub-grid
+    /// `target`, was stamped already and that stamp hasn't landed. Nothing is
+    /// changed. A sub-grid counts as a descendant of the sub-grids above it
+    /// in the hierarchy as it was when last frame's transforms propagated,
+    /// or from the call for one lifted this frame.
     pub fn stamp(
         &mut self,
         sub_grid: Entity,
@@ -668,9 +671,10 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// Chunk tasks still running aren't counted, though their light may start
     /// relights once it lands. Chunks above LOD level 0 have no relights to
     /// wait for, except after a change of precision, which solves them all
-    /// again. Settled doesn't mean exact: light beside a chunk that isn't
-    /// loaded can be darker than the truth. A world without light propagation
-    /// is always settled.
+    /// again, and a change to the emissive list, which solves again those
+    /// holding a material whose entry changed. Settled doesn't mean exact:
+    /// light beside a chunk that isn't loaded can be darker than the truth. A
+    /// world without light propagation is always settled.
     #[cfg(feature = "light_propagation")]
     pub fn light_is_settled(&self) -> bool {
         let reset = self
