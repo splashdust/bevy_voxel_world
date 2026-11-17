@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use super::super::{
     chunk_status_of, meshing_app, move_cameras, spawn_camera, update_until,
 };
-use super::voxel_light::Scene;
+use super::voxel_light::{Hold, Scene, LAMP};
 use crate::chunk::CHUNK_SIZE_F;
 use crate::prelude::*;
 
@@ -28,7 +28,11 @@ struct CoarseWorld {
     near: i32,
     data: u32,
     hints: Option<KeyHints>,
-    precision: LightPrecision,
+    light: LightPropagation,
+    emissive: Vec<(u8, Emission)>,
+    /// Holds back the padding lookups of the chunk task at its chunk
+    /// position, at any level.
+    hold: Option<Arc<Hold>>,
     /// The `min_despawn_distance`, within which chunks spawn whatever their
     /// fill hint.
     protected: u32,
@@ -44,7 +48,12 @@ impl Default for CoarseWorld {
             near: 2,
             data: 32,
             hints: None,
-            precision: LightPrecision::Steps16,
+            light: LightPropagation {
+                sky_fill: None,
+                ..default()
+            },
+            emissive: Vec::new(),
+            hold: None,
             protected: 1,
         }
     }
@@ -72,9 +81,18 @@ impl VoxelWorldConfig for CoarseWorld {
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
         let scene = self.scene.clone();
-        Box::new(move |_, _, _| {
+        let hold = self.hold.clone();
+        Box::new(move |chunk, _, _| {
             let scene = scene.clone();
-            Box::new(move |position, _| scene(position))
+            let hold = hold.clone().filter(|hold| hold.chunk == chunk);
+            Box::new(move |position, _| {
+                // A chunk task generates its padding first.
+                let inside = position.div_euclid(IVec3::splat(32)) == chunk;
+                if let Some(hold) = hold.as_ref().filter(|_| !inside) {
+                    hold.wait();
+                }
+                scene(position)
+            })
         })
     }
 
@@ -107,11 +125,11 @@ impl VoxelWorldConfig for CoarseWorld {
     }
 
     fn light_propagation(&self) -> Option<LightPropagation> {
-        Some(LightPropagation {
-            sky_fill: None,
-            precision: self.precision,
-            ..default()
-        })
+        Some(self.light.clone())
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        self.emissive.clone()
     }
 }
 
@@ -297,7 +315,10 @@ fn a_change_of_precision_solves_coarse_chunks_again_at_the_new_precision() {
     };
     assert_eq!(fractions(&mut app), 0, "16 levels read whole levels");
 
-    app.world_mut().resource_mut::<CoarseWorld>().precision = LightPrecision::Steps256;
+    app.world_mut()
+        .resource_mut::<CoarseWorld>()
+        .light
+        .precision = LightPrecision::Steps256;
     update_until(&mut app, "light to settle at 256 levels", |app| {
         light_is_settled(app) && tag_of(app, ABOVE).is_some_and(|tag| tag & HAS_SLOT != 0)
     });
@@ -628,4 +649,213 @@ fn a_walk_on_request_in_a_world_with_slow_lookups_runs_once_per_voxel() {
         before + made,
         "the second reading walks nothing"
     );
+}
+
+// --- A change of emission ----------------------------------------------------
+
+/// [`slab_and_shaft`] with a block of lamps floating in the sunlit part of
+/// [`ABOVE`], away from its padding, so [`BELOW`] holds no lamp.
+fn slab_and_lamp(p: IVec3) -> WorldVoxel {
+    let lamp =
+        (112..116).contains(&p.x) && (20..24).contains(&p.y) && (40..44).contains(&p.z);
+    if lamp {
+        WorldVoxel::Solid(LAMP)
+    } else {
+        slab_and_shaft(p)
+    }
+}
+
+/// Beside the lamps of [`slab_and_lamp`], in [`ABOVE`].
+const BY_LAMP: IVec3 = IVec3::new(114, 26, 42);
+/// Under the slab, in [`ABOVE`], out of the lamps' reach.
+const FAR_FROM_LAMP: IVec3 = IVec3::new(70, 4, 4);
+/// In the shaft, in [`BELOW`].
+const SHAFT: IVec3 = IVec3::new(106, -10, 26);
+
+fn emission_app(world: CoarseWorld) -> App {
+    let mut app = meshing_app();
+    app.add_plugins(VoxelWorldPlugin::with_config(CoarseWorld {
+        protected: 2,
+        ..world
+    }))
+    .add_systems(Startup, spawn_camera::<CoarseWorld>);
+    app
+}
+
+fn coarse_solves(app: &App) -> u64 {
+    crate::light::bench::light_stats::<CoarseWorld>(app.world())
+        .unwrap()
+        .coarse_solves
+}
+
+/// Runs `app` until its light is settled and no coarse chunk has solved for
+/// 20 frames and half a second, so streaming is done even on a busy machine.
+fn until_still(app: &mut App) {
+    let mut still = (0, Instant::now());
+    let mut solves = coarse_solves(app);
+    update_until(app, "the world to stream in and settle", |app| {
+        let now = coarse_solves(app);
+        if now != solves {
+            still = (0, Instant::now());
+        }
+        still.0 += 1;
+        solves = now;
+        still.0 >= 20
+            && still.1.elapsed() >= Duration::from_millis(500)
+            && light_is_settled(app)
+    });
+}
+
+fn set_emissive(app: &mut App, emissive: Vec<(u8, Emission)>) {
+    app.world_mut().resource_mut::<CoarseWorld>().emissive = emissive;
+}
+
+fn lamp_world(level: f32) -> CoarseWorld {
+    CoarseWorld {
+        scene: Arc::new(slab_and_lamp),
+        emissive: vec![(LAMP, Emission::level(level))],
+        ..default()
+    }
+}
+
+fn voxel_at(app: &mut App, position: IVec3) -> f32 {
+    light_at(app, position)
+        .unwrap_or_else(|| panic!("no light at {position}"))
+        .voxel
+}
+
+#[test]
+fn raising_a_lamps_level_solves_again_the_coarse_chunk_holding_it_alone() {
+    let mut app = emission_app(lamp_world(6.0));
+    until_still(&mut app);
+    let old = voxel_at(&mut app, BY_LAMP);
+    let below = light_at(&mut app, SHAFT);
+    let far = light_at(&mut app, FAR_FROM_LAMP);
+    let solves = coarse_solves(&app);
+
+    set_emissive(&mut app, vec![(LAMP, Emission::level(15.0))]);
+    app.update();
+    assert!(
+        !light_is_settled(&mut app),
+        "the coarse solve is waited for"
+    );
+    let mut new = old;
+    update_until(&mut app, "the coarse chunk's new light to land", |app| {
+        new = voxel_at(app, BY_LAMP);
+        assert!(
+            new >= old,
+            "old light shows until new light lands, read {new} after {old}"
+        );
+        new > old && light_is_settled(app)
+    });
+    for _ in 0..20 {
+        app.update();
+    }
+    assert_eq!(
+        coarse_solves(&app),
+        solves + 1,
+        "only the coarse chunk holding the lamp solved again"
+    );
+    assert_eq!(light_at(&mut app, SHAFT), below);
+    assert_eq!(light_at(&mut app, FAR_FROM_LAMP), far);
+}
+
+#[test]
+fn adding_or_dropping_an_emissive_material_solves_again_the_coarse_chunks_holding_it() {
+    let mut app = emission_app(CoarseWorld {
+        scene: Arc::new(slab_and_lamp),
+        ..default()
+    });
+    until_still(&mut app);
+    assert_eq!(voxel_at(&mut app, BY_LAMP), 0.0);
+    let solves = coarse_solves(&app);
+
+    set_emissive(&mut app, vec![(LAMP, Emission::level(15.0))]);
+    update_until(&mut app, "the added lamp's light to land", |app| {
+        voxel_at(app, BY_LAMP) > 0.0 && light_is_settled(app)
+    });
+    assert_eq!(coarse_solves(&app), solves + 1);
+
+    set_emissive(&mut app, Vec::new());
+    update_until(&mut app, "the dropped lamp's light to go", |app| {
+        voxel_at(app, BY_LAMP) == 0.0 && light_is_settled(app)
+    });
+    assert_eq!(coarse_solves(&app), solves + 2);
+}
+
+#[test]
+fn a_coarse_chunk_task_solved_under_the_old_emissive_list_solves_again_as_it_lands() {
+    let _exclusive = Hold::exclusive();
+    let hold = Hold::new(ABOVE.position);
+    let mut app = emission_app(CoarseWorld {
+        hold: Some(hold.clone()),
+        ..lamp_world(6.0)
+    });
+    update_until(&mut app, "the lamps' coarse chunk task to be held", |_| {
+        hold.waited.load(Ordering::Acquire) > 0
+    });
+    // Into the light the held task solves at level 6.
+    set_emissive(&mut app, vec![(LAMP, Emission::level(15.0))]);
+    for _ in 0..5 {
+        app.update();
+    }
+    hold.release();
+    until_still(&mut app);
+
+    let mut fresh = emission_app(lamp_world(15.0));
+    until_still(&mut fresh);
+    assert_eq!(
+        voxel_at(&mut app, BY_LAMP),
+        voxel_at(&mut fresh, BY_LAMP),
+        "the light of level 15"
+    );
+}
+
+#[test]
+fn a_level_0_chunk_with_another_data_shape_follows_a_change_of_emission() {
+    let lamp = |p: IVec3| {
+        if (14..18).contains(&p.x) && (8..12).contains(&p.y) && (14..18).contains(&p.z) {
+            WorldVoxel::Solid(LAMP)
+        } else {
+            roofed(p)
+        }
+    };
+    let mut app = emission_app(CoarseWorld {
+        scene: Arc::new(lamp),
+        data: 16,
+        emissive: vec![(LAMP, Emission::level(6.0))],
+        ..default()
+    });
+    until_still(&mut app);
+    let by_lamp = IVec3::new(16, 14, 16);
+    let old = voxel_at(&mut app, by_lamp);
+
+    set_emissive(&mut app, vec![(LAMP, Emission::level(15.0))]);
+    update_until(&mut app, "the new light to land", |app| {
+        voxel_at(app, by_lamp) > old && light_is_settled(app)
+    });
+}
+
+#[test]
+fn a_change_of_reach_shape_sky_or_sky_fill_leaves_coarse_chunks_as_they_are() {
+    let mut app = emission_app(lamp_world(15.0));
+    until_still(&mut app);
+    let changes: [fn(&mut LightPropagation); 4] = [
+        |light| light.voxel_reach = 8,
+        |light| light.shape = LightShape::Diamond,
+        |light| light.sky_fill = Some(default()),
+        |light| light.sky = Sky::Off,
+    ];
+    for change in changes {
+        let (solves, by_lamp) = (coarse_solves(&app), light_at(&mut app, BY_LAMP));
+        change(&mut app.world_mut().resource_mut::<CoarseWorld>().light);
+        update_until(&mut app, "the change to settle", |app| {
+            light_is_settled(app)
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(coarse_solves(&app), solves);
+        assert_eq!(light_at(&mut app, BY_LAMP), by_lamp);
+    }
 }

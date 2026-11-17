@@ -63,6 +63,15 @@ fn work_out<C: VoxelWorldConfig>(
             return Err(StampError::IntoItself);
         }
     }
+    // A stamped sub-grid's voxels are already on their way into another
+    // grid, and it despawns once they land, with anything stamped into it.
+    let stamped = |grid: Grid| match grid {
+        Grid::World => false,
+        Grid::SubGrid(entity) => parts.handovers.is_stamped_away(entity),
+    };
+    if stamped(Grid::SubGrid(sub_grid)) || stamped(target) {
+        return Err(StampError::AlreadyStamped);
+    }
     let bounds = parts
         .edits
         .solid_bounds_in(grid)
@@ -237,6 +246,9 @@ pub enum StampError {
     NoSuchTarget,
     /// The target is the sub-grid itself or one of its descendants.
     IntoItself,
+    /// The sub-grid, or the target sub-grid, was stamped already, and that
+    /// stamp hasn't landed yet.
+    AlreadyStamped,
 }
 
 impl std::fmt::Display for StampError {
@@ -246,6 +258,9 @@ impl std::fmt::Display for StampError {
             Self::NoSuchTarget => write!(f, "the stamp's target is not a live grid"),
             Self::IntoItself => {
                 write!(f, "the stamp's target is the sub-grid or inside it")
+            }
+            Self::AlreadyStamped => {
+                write!(f, "the sub-grid or the stamp's target was stamped already")
             }
         }
     }
