@@ -400,7 +400,8 @@ pub(crate) struct Solved {
     pub light: Arc<ChunkLight>,
     pub faces: FaceHashes,
     /// The version of each face neighbour's light the solve compared against,
-    /// by [`Face`], or `None` where it had no neighbour.
+    /// by [`Face`], or `None` where it had no neighbour or compared nothing.
+    /// Only a world chunk's chunk task compares.
     pub seen: [Option<u64>; 6],
     /// By [`Face`], whether the chunk's light could reach the neighbour sooner
     /// than the neighbour's light says, judged against the version in `seen`.
@@ -493,8 +494,18 @@ impl<I: Copy + PartialEq> LightTask<I> {
         let seeding = seeding(settings, &inputs, key, take_fill);
         let snapshot = read_snapshot(&self.view, key, missing, settings);
         let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
-        let mut solved =
-            solve(key, snapshot, Arc::new(inputs), settings, seeding, direct);
+        // Only a world chunk's arrival reads the comparison: a sub-grid's
+        // chunk relights none of its neighbours as its light lands.
+        let compare = key.is_world();
+        let mut solved = solve(
+            key,
+            snapshot,
+            Arc::new(inputs),
+            settings,
+            seeding,
+            direct,
+            compare,
+        );
         #[cfg(feature = "sub_grids")]
         if self.grid != GridId::WORLD {
             settings
@@ -598,7 +609,7 @@ pub(crate) fn relight<I: Copy + PartialEq>(
     }
     let snapshot = read_snapshot(view, key, missing, settings);
     let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
-    let mut solved = solve(key, snapshot, inputs, settings, seeding, direct);
+    let mut solved = solve(key, snapshot, inputs, settings, seeding, direct, false);
     solved.rescanned = rescanned;
     Some(solved)
 }
@@ -656,8 +667,11 @@ fn read_snapshot<I>(
 
 /// Solves the light of the chunk whose own inputs are `inputs`, among the
 /// chunks around it in `snapshot`, with its sky fill seeds `seeding` and its
-/// box's direct sky from `direct`, and compares it with its face neighbours'
-/// light. `key` is the chunk's.
+/// box's direct sky from `direct`. `key` is the chunk's.
+///
+/// With `compare`, it also compares the light with its face neighbours', for
+/// an arrival: see [`Solved::reaches`]. A relight's landing never reads the
+/// comparison.
 fn solve<I>(
     key: GridKey,
     mut snapshot: Snapshot,
@@ -665,6 +679,7 @@ fn solve<I>(
     settings: &LightTaskSettings<I>,
     seeding: Option<Seeding>,
     direct: DirectSky,
+    compare: bool,
 ) -> Solved {
     snapshot.neighbours[neighbour_index(IVec3::ZERO)] = Some(inputs.clone());
     let started = Instant::now();
@@ -730,7 +745,7 @@ fn solve<I>(
     };
     let mut seen = [None; 6];
     let mut reaches = [false; 6];
-    for face in Face::ALL {
+    for face in Face::ALL.into_iter().filter(|_| compare) {
         if let Some((neighbour, version)) = &snapshot.faces[face as usize] {
             seen[face as usize] = Some(*version);
             reaches[face as usize] = could_reach_sooner(
