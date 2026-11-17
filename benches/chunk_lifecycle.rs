@@ -14,6 +14,21 @@
 //! the before build and within the after build, and the change between them;
 //! they gate nothing either.
 //!
+//! Gated metrics are listed in `gate`; a scenario's own thresholds are
+//! checked as it runs and reported as its `gate_failures`.
+//!
+//! The edit scenarios, `edits_lit` on the sine terrain and `edits_lamps`
+//! beside the lamp world's lamps, count an edit's frames to its last light
+//! change: the last frame in which a relight landed that changed a voxel's
+//! level. Light can settle later, on relights that change nothing, and
+//! frames to settle are reported beside them. Each edit's frames are the
+//! median over the scenario's runs, and its main thread the worst run.
+//!
+//! `caves` and `edits_lamps` end with the fresh-solve check: every chunk and
+//! light entry is solved again from the world view and compared, voxel by
+//! voxel, with the light it holds. Those that differ are reported as
+//! `stale_chunks`, and listed on stderr.
+//!
 //! Background load on a desktop drifts by more than the gates over minutes, so
 //! comparisons alternate the two builds instead of reusing an old recording:
 //!     cargo bench --bench chunk_lifecycle -- save-binary baseline   # on the baseline commit
@@ -1546,13 +1561,14 @@ const SLOT_BYTES: f64 = 39_304.0;
 /// The thresholds of `caves`; see `scenario_caves`. Each is the most a metric
 /// may reach. The two counts sit about 20% above a run on an idle machine
 /// (4.55 solves per arrival, 1.93 visible changes per shown chunk); the costs
-/// have no threshold.
+/// have no threshold. No chunk may be stale after the stream settles.
 #[cfg(feature = "light_propagation")]
-const CAVE_GATES: [(&str, f64); 4] = [
+const CAVE_GATES: [(&str, f64); 5] = [
     ("solves_per_arrival", CAVE_SOLVES_PER_ARRIVAL),
     ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
     ("pool_solve_us_per_chunk", CAVE_SOLVE_US),
     ("relight_us_per_relight", CAVE_RELIGHT_US),
+    ("stale_chunks", 0.0),
 ];
 #[cfg(feature = "light_propagation")]
 const CAVE_SOLVES_PER_ARRIVAL: f64 = 5.5;
@@ -1581,13 +1597,20 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 ///   with changes of several causes counts for the first.
 ///
 /// It also reports what the solves cost in chunk tasks, emissive scan
-/// included, and the slots and memory light took at their peak.
+/// included, the slots and memory light took at their peak, and relight
+/// landings by whether they changed a voxel's level.
+///
+/// It ends with the fresh-solve check, reported as `stale_chunks`: the
+/// chunks and light entries whose light differs from a fresh solve of the
+/// settled world.
 ///
 /// Thresholds, checked here and reported as `gate_failures`, are in
 /// `CAVE_GATES`.
 #[cfg(feature = "light_propagation")]
 fn scenario_caves() -> Metrics {
-    use bevy_voxel_world::light_bench::{change_counts, count_changes, light_stats};
+    use bevy_voxel_world::light_bench::{
+        change_counts, count_changes, fresh_solve_check, light_stats,
+    };
 
     type World = CaveWorld;
     let prefix = "caves";
@@ -1602,11 +1625,22 @@ fn scenario_caves() -> Metrics {
         app.update();
     }
     let idle = light_stats::<World>(app.world()).expect("a lit world");
+    let fresh = fresh_solve_check::<World>(app.world());
+    report_stale(prefix, &fresh);
 
     let mut metrics = Metrics::new();
     let mut put = |name: &str, value: f64| {
         metrics.insert(format!("{prefix}.{name}"), value);
     };
+    put("stale_chunks", fresh.stale.len() as f64);
+    put(
+        "landed_changing_levels",
+        stats.landed_changing_levels as f64,
+    );
+    put(
+        "landed_changing_nothing",
+        stats.landed_changing_nothing as f64,
+    );
     let arrivals = counts.arrivals.max(1) as f64;
     let shown = counts.shown.max(1) as f64;
     put("time_ms", result.stream.time_ms);
@@ -1829,58 +1863,178 @@ fn sine_height(x: i32, z: i32) -> i32 {
     (8.0 * (x as f32 / 23.0).sin() + 8.0 * (z as f32 / 17.0).cos()) as i32
 }
 
-/// Single voxel edits on the lit sine terrain once its light is at rest:
-/// placing a block on its surface and digging one from it, each followed by
-/// its undo, mid-chunk and against chunk faces, then a radius-8 bomb and its
-/// undo. Reports each edit's frames to land, counted from the edit's frame
-/// with frames paced at 60 a second, and the most main thread relighting took
-/// in any frame.
-///
-/// Gate, checked here and reported as `gate_failures`: a single voxel edit
-/// lands within 2 frames and relighting takes at most 1 ms of main thread in
-/// any frame. The bomb has no gate.
+/// One edit's light in one run of an edit scenario. Frames count from the
+/// edit's frame, frame 0, paced at 60 a second.
 #[cfg(feature = "light_propagation")]
-fn scenario_edits_lit() -> Metrics {
+#[derive(Clone, Copy, Debug)]
+struct EditRun {
+    /// The frame of the edit's last light change: the last frame in which a
+    /// relight landed that changed a voxel's level. 0 if none did.
+    frames: u32,
+    /// The frame light settled in.
+    settled: u32,
+    /// The most main thread light took in one frame, in microseconds.
+    main_thread_us: f64,
+    /// Relights started.
+    relights: u64,
+}
+
+/// Makes `edits` in world `C` and runs paced frames until its light settles.
+#[cfg(feature = "light_propagation")]
+fn run_edit<C: VoxelWorldConfig<MaterialIndex = u8>>(
+    app: &mut App,
+    edits: &[(IVec3, WorldVoxel<u8>)],
+) -> EditRun {
     use bevy_voxel_world::light_bench::light_stats;
 
-    type Lit = LitBenchWorld<SINE>;
-    let prefix = "edits_lit";
-    let mut app = build_app(Lit::default());
-    stream_in::<Lit>(&mut app);
-    settle_light::<Lit>(&mut app);
-
-    let main_ms = |app: &App| light_stats::<Lit>(app.world()).unwrap().main_thread_ms;
-    let relights = |app: &App| light_stats::<Lit>(app.world()).unwrap().relights;
-    let set = |app: &mut App, edits: &[(IVec3, WorldVoxel<u8>)]| {
-        let mut state = SystemState::<VoxelWorld<Lit>>::new(app.world_mut());
+    let stats = |app: &App| light_stats::<C>(app.world()).unwrap();
+    {
+        let mut state = SystemState::<VoxelWorld<C>>::new(app.world_mut());
         let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
         for (position, voxel) in edits {
             voxel_world.set_voxel(*position, *voxel);
         }
+    }
+    let started = stats(app);
+    let mut run = EditRun {
+        frames: 0,
+        settled: 0,
+        main_thread_us: 0.0,
+        relights: 0,
     };
-    // Runs paced frames from the edit's frame until light settles. Returns
-    // the frames after the edit's, and the most main thread in one frame, in
-    // microseconds.
-    let run_edit = |app: &mut App, edits: &[(IVec3, WorldVoxel<u8>)]| -> (u32, f64) {
-        set(app, edits);
-        let mut frames = 0;
-        let mut worst_us: f64 = 0.0;
-        loop {
-            let start = Instant::now();
-            let before = main_ms(app);
-            app.update();
-            worst_us = worst_us.max((main_ms(app) - before) * 1000.0);
-            if light_is_settled::<Lit>(app) {
-                break;
-            }
-            frames += 1;
-            assert!(frames < MAX_FRAMES, "the edit's light didn't land");
-            std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
+    loop {
+        let start = Instant::now();
+        let before = stats(app);
+        app.update();
+        let after = stats(app);
+        run.main_thread_us = run
+            .main_thread_us
+            .max((after.main_thread_ms - before.main_thread_ms) * 1000.0);
+        if after.landed_changing_levels > before.landed_changing_levels {
+            run.frames = run.settled;
         }
-        // A frame's rest, as a game's frame would give the edit's frame.
-        std::thread::sleep(PACED_FRAME);
-        (frames, worst_us)
+        if light_is_settled::<C>(app) {
+            break;
+        }
+        run.settled += 1;
+        assert!(run.settled < MAX_FRAMES, "the edit's light didn't land");
+        std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
+    }
+    run.relights = stats(app).relights - started.relights;
+    // A frame's rest, as a game's frame would give the edit's frame.
+    std::thread::sleep(PACED_FRAME);
+    run
+}
+
+/// Each edit's runs summed up, from `runs[run][edit]`: its frames, frames to
+/// settle and relights take the median over runs, and its main thread the
+/// worst run, since a frame's budget must hold in every run.
+#[cfg(feature = "light_propagation")]
+fn edit_medians(runs: &[Vec<EditRun>]) -> Vec<EditRun> {
+    (0..runs[0].len())
+        .map(|edit| {
+            let of = |field: fn(&EditRun) -> f64| -> Vec<f64> {
+                runs.iter().map(|run| field(&run[edit])).collect()
+            };
+            EditRun {
+                frames: percentile(&of(|e| e.frames as f64), 0.5) as u32,
+                settled: percentile(&of(|e| e.settled as f64), 0.5) as u32,
+                main_thread_us: percentile(&of(|e| e.main_thread_us), 1.0),
+                relights: percentile(&of(|e| e.relights as f64), 0.5) as u64,
+            }
+        })
+        .collect()
+}
+
+/// Puts the summary of an edit scenario's `edits` into `metrics` under
+/// `prefix`, and returns how many missed the gate: frames over
+/// `EDIT_FRAMES_GATE`, if `frames_gated`, or main thread over
+/// `EDIT_MAIN_THREAD_GATE_US`.
+#[cfg(feature = "light_propagation")]
+fn put_edits(
+    prefix: &str,
+    edits: &[EditRun],
+    frames_gated: bool,
+    metrics: &mut Metrics,
+) -> usize {
+    let frames: Vec<f64> = edits.iter().map(|e| e.frames as f64).collect();
+    let settled: Vec<f64> = edits.iter().map(|e| e.settled as f64).collect();
+    let worst: Vec<f64> = edits.iter().map(|e| e.main_thread_us).collect();
+    let relights: Vec<f64> = edits.iter().map(|e| e.relights as f64).collect();
+    let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
+    let mut put = |name: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}"), value);
     };
+    put("edits", edits.len() as f64);
+    put("max_frames_to_land", max(&frames));
+    put("p50_frames_to_land", percentile(&frames, 0.5));
+    put("max_frames_to_settle", max(&settled));
+    put("p50_frames_to_settle", percentile(&settled, 0.5));
+    put("max_main_thread_us", max(&worst));
+    put("p50_main_thread_us", percentile(&worst, 0.5));
+    put("max_relights", max(&relights));
+    put("p50_relights", percentile(&relights, 0.5));
+    put(
+        "mean_relights",
+        relights.iter().sum::<f64>() / relights.len() as f64,
+    );
+    let failures = edits
+        .iter()
+        .filter(|e| {
+            (frames_gated && e.frames > EDIT_FRAMES_GATE)
+                || e.main_thread_us > EDIT_MAIN_THREAD_GATE_US
+        })
+        .count();
+    if failures > 0 {
+        eprintln!(
+            "{prefix}: {failures} of {} single voxel edits missed the gate \
+             (frames {frames:?}, main thread µs {worst:?})",
+            edits.len()
+        );
+    }
+    failures
+}
+
+/// Prints the chunks the fresh-solve check found stale, if any.
+#[cfg(feature = "light_propagation")]
+fn report_stale(prefix: &str, fresh: &bevy_voxel_world::light_bench::FreshSolve) {
+    if !fresh.stale.is_empty() {
+        eprintln!(
+            "{prefix}: {} of {} chunks and light entries differ from a fresh solve, \
+             as (position, light entry): {:?}",
+            fresh.stale.len(),
+            fresh.checked,
+            fresh.stale
+        );
+    }
+}
+
+/// How many runs a scenario that repeats itself makes: `runs`, or 1 when
+/// profiling.
+#[cfg(feature = "light_propagation")]
+fn repeats(runs: usize) -> usize {
+    if PROFILING.load(Ordering::Relaxed) {
+        1
+    } else {
+        runs
+    }
+}
+
+/// Single voxel edits on the lit sine terrain once its light is at rest:
+/// placing a block on its surface and digging one from it, each followed by
+/// its undo, mid-chunk and against chunk faces, then a radius-8 bomb and its
+/// undo. Reports each edit's frames to its last light change and to settle,
+/// the most main thread light took in any frame, and the relights it started:
+/// see `EditRun`. The world is built and edited `runs` times, and each
+/// edit's runs are summed up by `edit_medians`.
+///
+/// Gate, checked here and reported as `gate_failures`: a single voxel edit's
+/// last light change lands within 2 frames, and light takes at most 1 ms of
+/// main thread in any frame. The bomb has no gate.
+#[cfg(feature = "light_propagation")]
+fn scenario_edits_lit(runs: usize) -> Metrics {
+    type Lit = LitBenchWorld<SINE>;
+    let prefix = "edits_lit";
 
     let mut sites = Vec::new();
     for (x, z) in [(16, 16), (48, 20), (80, 72), (31, 40), (32, 40), (100, 63)] {
@@ -1892,31 +2046,6 @@ fn scenario_edits_lit() -> Metrics {
         sites.push(vec![(surface, WorldVoxel::Air)]);
         sites.push(vec![(surface, WorldVoxel::Solid(0))]);
     }
-    let mut frames = Vec::new();
-    let mut worst = Vec::new();
-    let mut tasks = Vec::new();
-    for edit in &sites {
-        let started = relights(&app);
-        let (edit_frames, edit_worst) = run_edit(&mut app, edit);
-        frames.push(edit_frames as f64);
-        worst.push(edit_worst);
-        tasks.push((relights(&app) - started) as f64);
-    }
-    let failures = frames
-        .iter()
-        .zip(&worst)
-        .filter(|(frames, worst)| {
-            **frames > EDIT_FRAMES_GATE as f64 || **worst > EDIT_MAIN_THREAD_GATE_US
-        })
-        .count();
-    if failures > 0 {
-        eprintln!(
-            "{prefix}: {failures} of {} single voxel edits missed the gate \
-             (frames {frames:?}, main thread µs {worst:?})",
-            sites.len()
-        );
-    }
-
     let centre = IVec3::new(48, sine_height(48, 48) - 2, 48);
     let bomb: Vec<IVec3> = (-8..=8)
         .flat_map(|z| {
@@ -1927,7 +2056,6 @@ fn scenario_edits_lit() -> Metrics {
         .collect();
     let dug: Vec<(IVec3, WorldVoxel<u8>)> =
         bomb.iter().map(|p| (*p, WorldVoxel::Air)).collect();
-    let (bomb_frames, bomb_worst) = run_edit(&mut app, &dug);
     let undo: Vec<(IVec3, WorldVoxel<u8>)> = bomb
         .iter()
         .map(|p| {
@@ -1943,31 +2071,119 @@ fn scenario_edits_lit() -> Metrics {
             (*p, voxel)
         })
         .collect();
-    let (undo_frames, undo_worst) = run_edit(&mut app, &undo);
+    let singles = sites.len();
+    sites.push(dug);
+    sites.push(undo);
+
+    let runs: Vec<Vec<EditRun>> = (0..runs)
+        .map(|_| {
+            let mut app = build_app(Lit::default());
+            stream_in::<Lit>(&mut app);
+            settle_light::<Lit>(&mut app);
+            sites
+                .iter()
+                .map(|edit| run_edit::<Lit>(&mut app, edit))
+                .collect()
+        })
+        .collect();
+    let edits = edit_medians(&runs);
+    let (singles, bombs) = edits.split_at(singles);
 
     let mut metrics = Metrics::new();
-    let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
-    metrics.insert(format!("{prefix}.edits"), sites.len() as f64);
-    metrics.insert(format!("{prefix}.max_frames_to_land"), max(&frames));
-    metrics.insert(
-        format!("{prefix}.p50_frames_to_land"),
-        percentile(&frames, 0.5),
-    );
-    metrics.insert(format!("{prefix}.max_main_thread_us"), max(&worst));
-    metrics.insert(
-        format!("{prefix}.p50_main_thread_us"),
-        percentile(&worst, 0.5),
-    );
-    metrics.insert(format!("{prefix}.max_relights"), max(&tasks));
-    metrics.insert(format!("{prefix}.p50_relights"), percentile(&tasks, 0.5));
+    let failures = put_edits(prefix, singles, true, &mut metrics);
     metrics.insert(format!("{prefix}.gate_failures"), failures as f64);
-    metrics.insert(format!("{prefix}.bomb_frames_to_land"), bomb_frames as f64);
-    metrics.insert(format!("{prefix}.bomb_main_thread_us"), bomb_worst);
+    for (name, edit) in [("bomb", bombs[0]), ("bomb_undo", bombs[1])] {
+        metrics.insert(
+            format!("{prefix}.{name}_frames_to_land"),
+            edit.frames as f64,
+        );
+        metrics.insert(
+            format!("{prefix}.{name}_frames_to_settle"),
+            edit.settled as f64,
+        );
+        metrics.insert(
+            format!("{prefix}.{name}_main_thread_us"),
+            edit.main_thread_us,
+        );
+    }
+    metrics
+}
+
+/// How long `edits_lamps` lets the lamp world stream before calling its
+/// light unsettled.
+#[cfg(feature = "light_propagation")]
+const LAMP_EDITS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `edits_lit` on the lamp world, `LampWorld`, with each edit beside one of
+/// its lamps so it relights voxel light: a block placed on the ground beside
+/// the lamp, the lamp replaced by plain ground, and each undone, at six
+/// sites. The world streams until its light settles, as `caves` streams.
+/// Reports as `edits_lit` does, and ends each run with the fresh-solve
+/// check, reported as `stale_chunks`, the most of any run.
+///
+/// Gate, checked here and reported as `gate_failures`: light takes at most
+/// 1 ms of main thread in any frame, the stream settles, and no chunk is
+/// stale. Frames only report: an edit directly relights only the chunks
+/// within `FILL_RUN_REACH` voxels of it, so the light of a chunk farther off
+/// that still holds the edit in its light box arrives a face neighbour a
+/// frame.
+#[cfg(feature = "light_propagation")]
+fn scenario_edits_lamps(runs: usize) -> Metrics {
+    use bevy_voxel_world::light_bench::fresh_solve_check;
+
+    type Lit = LampWorld<true>;
+    let prefix = "edits_lamps";
+    let is_lamp = |x: i32, z: i32| {
+        let hash = (x.wrapping_mul(73_856_093) ^ z.wrapping_mul(19_349_663)) as u32;
+        hash.is_multiple_of(64)
+    };
+    let mut sites = Vec::new();
+    for (x, z) in [(16, 16), (48, 20), (80, 72), (31, 40), (32, 40), (100, 63)] {
+        // The lamp nearest the site, by rings.
+        let lamp = (0..32)
+            .flat_map(|r: i32| {
+                (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (x + dx, z + dz)))
+            })
+            .find(|&(lx, lz)| is_lamp(lx, lz))
+            .expect("a lamp near the site");
+        let lamp = IVec3::new(lamp.0, sine_height(lamp.0, lamp.1) - 1, lamp.1);
+        let beside = IVec3::new(lamp.x + 1, sine_height(lamp.x + 1, lamp.z), lamp.z);
+        sites.push(vec![(beside, WorldVoxel::Solid(0))]);
+        sites.push(vec![(beside, WorldVoxel::Air)]);
+        sites.push(vec![(lamp, WorldVoxel::Solid(0))]);
+        sites.push(vec![(lamp, WorldVoxel::Solid(LAMP))]);
+    }
+
+    let mut capped = false;
+    let mut stale = 0;
+    let runs: Vec<Vec<EditRun>> = (0..runs)
+        .map(|_| {
+            let mut app = build_app(Lit::default());
+            let streamed = stream_in_settled::<Lit>(&mut app, LAMP_EDITS_CAP, |_| {});
+            capped |= streamed.capped;
+            let edits = sites
+                .iter()
+                .map(|edit| run_edit::<Lit>(&mut app, edit))
+                .collect();
+            let fresh = fresh_solve_check::<Lit>(app.world());
+            report_stale(prefix, &fresh);
+            stale = stale.max(fresh.stale.len());
+            edits
+        })
+        .collect();
+    let edits = edit_medians(&runs);
+
+    let mut metrics = Metrics::new();
+    let failures = put_edits(prefix, &edits, false, &mut metrics);
+    if capped {
+        eprintln!("{prefix}: the lamp world's light didn't settle");
+    }
+    metrics.insert(format!("{prefix}.capped"), capped as u8 as f64);
+    metrics.insert(format!("{prefix}.stale_chunks"), stale as f64);
     metrics.insert(
-        format!("{prefix}.bomb_undo_frames_to_land"),
-        undo_frames as f64,
+        format!("{prefix}.gate_failures"),
+        (failures + capped as usize + (stale > 0) as usize) as f64,
     );
-    metrics.insert(format!("{prefix}.bomb_undo_main_thread_us"), undo_worst);
     metrics
 }
 
@@ -4321,9 +4537,9 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
 /// whole-run totals take their best run; everything else, already summarised over
 /// many frames, takes the median.
 ///
-/// `gate_failures` and `errors` take the worst run: a scenario's promise must
-/// hold in every run, and the median would read 0 for a promise broken in
-/// fewer than half.
+/// `gate_failures`, `errors` and `stale_chunks` take the worst run: a
+/// scenario's promise must hold in every run, and the median would read 0 for
+/// a promise broken in fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     combine(&samples, |key, values| {
@@ -4331,7 +4547,9 @@ fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
             "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
                 percentile(values, 0.0)
             }
-            "chunks_per_s" | "gate_failures" | "errors" => percentile(values, 1.0),
+            "chunks_per_s" | "gate_failures" | "errors" | "stale_chunks" => {
+                percentile(values, 1.0)
+            }
             _ => percentile(values, 0.5),
         }
     })
@@ -4501,7 +4719,11 @@ fn run_all(only: Option<&str>) -> Metrics {
         step("lod_scale", 1, &scenario_lod_scale);
     }
     #[cfg(feature = "light_propagation")]
-    step("edits_lit", RUNS, &scenario_edits_lit);
+    // The edit scenarios run their own repeats, to sum each edit up over
+    // runs: see `edit_medians`.
+    step("edits_lit", 1, &|| scenario_edits_lit(repeats(RUNS)));
+    #[cfg(feature = "light_propagation")]
+    step("edits_lamps", 1, &|| scenario_edits_lamps(repeats(RUNS)));
     #[cfg(feature = "light_propagation")]
     step("settings_lit", RUNS, &scenario_settings_lit);
     #[cfg(feature = "dislodged_fragments")]
@@ -4540,6 +4762,7 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_flat_lit")
         || key.starts_with("stream_in_islands")
         || key.starts_with("edits_lit")
+        || key.starts_with("edits_lamps")
         || key.starts_with("settings_lit")
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
