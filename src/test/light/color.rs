@@ -10,9 +10,15 @@ use super::edits::{set_voxels, settle};
 use super::settings::warned;
 use super::sky_light::{chunk_light, settled};
 use super::voxel_light::{app, light_at, lit, LampWorld, LAMP};
+use bevy::ecs::system::RunSystemOnce;
+use bevy::render::render_resource::AsBindGroup;
+
+use super::super::{chunk_materials, update_until, DefaultVoxelMaterial};
 use crate::light::color::ChunkColor;
+use crate::light::route::LightRoute;
 use crate::light::LightSettings;
 use crate::prelude::*;
+use crate::rendering::VoxelWorldMaterial;
 
 const ORANGE_LAMP: u8 = 4;
 const BLUE_LAMP: u8 = 5;
@@ -274,4 +280,88 @@ fn a_light_entry_in_hinted_air_reads_its_colour_and_hinted_air_without_one_white
     assert!(!holds_entry(&app, IVec3::X));
     let past = light_at(&mut app, IVec3::new(48, 16, 16)).unwrap();
     assert_eq!(past.voxel_color, LinearRgba::WHITE);
+}
+
+type LitMaterial = VoxelWorldMaterial<DefaultVoxelMaterial>;
+
+/// Whether each of the world's chunk materials carries the `LIGHT_COLOR`
+/// shader def in its key.
+fn material_keys(app: &mut App) -> Vec<bool> {
+    let handles = chunk_materials::<LampWorld, LitMaterial>(app);
+    let materials = app.world().resource::<Assets<LitMaterial>>();
+    handles
+        .iter()
+        .map(|handle| {
+            let material = materials.get(handle).unwrap();
+            material.extension.bind_group_data().light_color
+        })
+        .collect()
+}
+
+#[test]
+fn a_world_coloured_at_startup_keys_its_material_with_light_color_before_a_chunk_draws() {
+    let mut app = app(lamps(vec![(MIDDLE, ORANGE_LAMP)]));
+    app.update();
+    let materials = app.world().resource::<Assets<LitMaterial>>();
+    assert!(materials.len() > 0);
+    assert!(materials
+        .iter()
+        .all(|(_, material)| material.extension.bind_group_data().light_color));
+
+    update_until(&mut app, "a chunk to show its material", |app| {
+        !chunk_materials::<LampWorld, LitMaterial>(app).is_empty()
+    });
+    assert!(material_keys(&mut app).iter().all(|colored| *colored));
+}
+
+#[test]
+fn a_white_or_grey_worlds_materials_carry_no_light_color() {
+    let mut world = lamps(vec![(MIDDLE, LAMP), (MIDDLE + IVec3::X * 40, ORANGE_LAMP)]);
+    world.emissive = vec![
+        (LAMP, Emission::level(15.0)),
+        (
+            ORANGE_LAMP,
+            Emission::level(12.0).with_color(Color::srgb(0.3, 0.3, 0.3)),
+        ),
+    ];
+    let mut app = settled(world);
+    let keys = material_keys(&mut app);
+    assert!(!keys.is_empty());
+    assert!(keys.iter().all(|colored| !colored));
+}
+
+#[test]
+fn a_coloured_worlds_materials_bind_its_colour_texture_once_made() {
+    let mut app = settled(lamps(vec![(MIDDLE, ORANGE_LAMP)]));
+    let route = app.world().resource::<LightRoute<LampWorld>>();
+    let texture = route.color_texture();
+    assert_ne!(texture, route.color_placeholder);
+    let handles = chunk_materials::<LampWorld, LitMaterial>(&mut app);
+    let materials = app.world().resource::<Assets<LitMaterial>>();
+    for handle in handles {
+        let material = materials.get(&handle).unwrap();
+        assert_eq!(material.extension.light_colors().id(), texture.id());
+    }
+}
+
+#[test]
+fn turning_coloured_and_back_at_runtime_gains_and_loses_light_color() {
+    let mut world = lamps(vec![(MIDDLE, ORANGE_LAMP)]);
+    let colored = world.emissive.clone();
+    let white = vec![(ORANGE_LAMP, Emission::level(15.0))];
+    world.emissive = white.clone();
+    let mut app = settled(world);
+    assert!(material_keys(&mut app).iter().all(|colored| !colored));
+
+    for (emissive, expected) in [(colored, true), (white, false)] {
+        app.world_mut()
+            .run_system_once(move |mut world: ResMut<LampWorld>| {
+                world.emissive = emissive.clone();
+            })
+            .unwrap();
+        app.update();
+        let keys = material_keys(&mut app);
+        assert!(!keys.is_empty());
+        assert!(keys.iter().all(|colored| *colored == expected));
+    }
 }

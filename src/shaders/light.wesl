@@ -37,10 +37,20 @@
 // by that width, keeping the corner of its first cell at (1, 1, 1).
 //
 // Bit 30 marks a sub-grid's chunk, with or without a slot. A tag with a slot
-// sets bit 29 when the chunk shows a light colour other than white, and a tag
-// with no slot holds its light colour in bits 16-29; this shader doesn't read
-// them yet. Every read of a field masks it to its width, so a tag reads the
-// same slot, LOD level and levels whatever its colour and sub-grid bits hold.
+// sets bit 29 when the chunk shows a light colour other than white, which its
+// entry in the colour texture holds, and a tag with no slot holds its light
+// colour in bits 16-29. Every read of a field masks it to its width, so a tag
+// reads the same slot, LOD level and levels whatever its colour and sub-grid
+// bits hold.
+//
+// A world whose emissive materials give a light colour other than white sets
+// the `LIGHT_COLOR` shader def, and its material holds the world's colour
+// texture at binding 203: one `R16Uint` texel per slot, the slot's entry, at
+// the slot's place in the grid of slots. An entry holds the packed light
+// colour of its chunk. Only under `LIGHT_COLOR` does the shader read colours,
+// all in `chunk_color`. Without it, every colour is white, so a white world's
+// shader does no colour work at all. In a coloured world, a chunk whose tag
+// says white costs one bit test more.
 //
 // With the crate's `sub_grids` feature, a lit world sets the `SUB_GRIDS`
 // shader def, and its material holds the world's tag map at binding 202: a
@@ -101,6 +111,9 @@ struct LightLook {
     // 1 when a sub-grid's enclosure caps the world's voxel light its faces
     // show, as it caps the world's sky: see `sample_face_light`.
     enclosure_caps_voxel: u32,
+    // 1 when an emissive voxel's own faces glow tinted by its light colour:
+    // see `voxel_brightness`.
+    tinted_glow: u32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(200)
@@ -114,11 +127,24 @@ var<uniform> light_look: LightLook;
 @group(constants::MATERIAL_BIND_GROUP) @binding(202)
 var tag_map: texture_2d<u32>;
 
+// The world's colour texture, under `LIGHT_COLOR`: see `chunk_color`.
+@if(LIGHT_COLOR)
+@group(constants::MATERIAL_BIND_GROUP) @binding(203)
+var light_colors: texture_3d<u32>;
+
 const HAS_SLOT: u32 = 0x80000000u;
 const SLOT_SIDE: u32 = 34u;
 
 // Bit 30 of a tag: the chunk is a sub-grid's.
 const SUB_GRID: u32 = 0x40000000u;
+
+// Bit 29 of a tag with a slot: the chunk's entry holds a light colour other
+// than white.
+const COLORED: u32 = 0x20000000u;
+
+// The lowest of the tag bits holding the light colour of a chunk with no
+// slot.
+const COLOR_SHIFT: u32 = 16u;
 
 // The tag of an empty entry of the tag map.
 const EMPTY: u32 = 0xFFFFFFFFu;
@@ -134,12 +160,71 @@ const SKY_TABLE: u32 = 0u;
 const VOXEL_TABLE: u32 = 1u;
 const SUN_TABLE: u32 = 2u;
 
-// The light a face sees, as levels from 0 to 15. `own_voxel` is the level of
-// the lamp behind the face, or 0 if the voxel behind it isn't a lamp.
+// The light a face sees. `sky` and `voxel` are the levels, from 0 to 15, of
+// the light in front of the face, and `voxel_color` the colour of that
+// voxel light, with its brightest component 1. `own_voxel` is the level of
+// the emissive voxel behind the face, or 0 if the voxel behind it isn't
+// emissive, and `own_voxel_color` its light colour. Without `LIGHT_COLOR`,
+// both colours are white.
 struct LightLevels {
     sky: f32,
-    voxel: vec3<f32>,
-    own_voxel: vec3<f32>,
+    voxel: f32,
+    own_voxel: f32,
+    voxel_color: vec3<f32>,
+    own_voxel_color: vec3<f32>,
+}
+
+// The light colour `packed` holds, packed as the crate's `light::color`
+// packs it with `bits` bits a component. The 2 bits above them name the
+// brightest component, 0 for red to 2 for blue, which reads 1. Each of the
+// other two, in order, falls short of 1 by the next `bits` bits and then the
+// lowest `bits` bits, in steps of 1 / `steps`. 3 in the top bits names no
+// colour and reads white.
+fn unpack_color(packed: u32, bits: u32, steps: f32) -> vec3<f32> {
+    let top = (packed >> (2u * bits)) & 3u;
+    let mask = (1u << bits) - 1u;
+    let first = 1.0 - f32((packed >> bits) & mask) / steps;
+    let second = 1.0 - f32(packed & mask) / steps;
+    if top == 0u {
+        return vec3<f32>(1.0, first, second);
+    } else if top == 1u {
+        return vec3<f32>(first, 1.0, second);
+    } else if top == 2u {
+        return vec3<f32>(first, second, 1.0);
+    }
+    return vec3<f32>(1.0);
+}
+
+// The one light colour a chunk shows on every face, from its tag: for a tag
+// with a slot, white or, with bit 29 set, its entry's, and for a tag with no
+// slot, the colour its bits 16-29 hold, cut to 6 bits a component. White
+// without `LIGHT_COLOR`.
+fn chunk_color(tag: u32) -> vec3<f32> {
+    @if(LIGHT_COLOR) {
+        if (tag & HAS_SLOT) == 0u {
+            return unpack_color((tag >> COLOR_SHIFT) & 0x3FFFu, 6u, 63.0);
+        }
+        if (tag & COLORED) == 0u {
+            return vec3<f32>(1.0);
+        }
+        // An entry marked by the spare value, 3 in its top bits, names a
+        // colour slot instead of a colour, and reads white here.
+        return unpack_color(color_entry(tag), 7u, 127.0);
+    }
+    @else {
+        return vec3<f32>(1.0);
+    }
+}
+
+// The packed light colour in the entry of the slot `tag` names: the texel of
+// the colour texture at the slot's place in the grid of slots. Until the
+// colour texture is made, the material binds a placeholder of one white
+// texel, which every entry reads.
+@if(LIGHT_COLOR)
+fn color_entry(tag: u32) -> u32 {
+    let slot = vec3<u32>(slot_origin(tag)) / SLOT_SIDE;
+    let entry = min(slot, textureDimensions(light_colors) - vec3<u32>(1u));
+    return textureLoad(light_colors, entry, 0).r;
 }
 
 // The texel of the slot `tag` names where its rows begin.
@@ -326,7 +411,7 @@ fn tag_levels(tag: u32) -> LightLevels {
         sky = f32(tag & 255u) / 17.0;
         voxel = f32((tag >> 8u) & 255u) / 17.0;
     }
-    return LightLevels(sky, vec3<f32>(voxel), vec3<f32>(0.0));
+    return LightLevels(sky, voxel, 0.0, chunk_color(tag), vec3<f32>(1.0));
 }
 
 // How many voxels wide the cells of the slot `tag` names are: `1 << L` for a
@@ -383,7 +468,10 @@ fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLev
     let n = unit_normal(normal);
     let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));
     let levels = read_front(origin, local, n);
-    return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(behind.z));
+    // The emissive voxel behind the face is in the chunk, so its light colour
+    // is the chunk's one colour too.
+    let color = chunk_color(tag);
+    return LightLevels(levels.x, levels.y, behind.z, color, color);
 }
 
 // The tag map's hash of the level-0 world chunk position `position`, the
@@ -448,7 +536,7 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
     let chunk = nearest >> vec3<u32>(CHUNK_SHIFT);
     let tag = tag_map_tag(chunk);
     if tag == EMPTY {
-        return LightLevels(15.0, vec3<f32>(0.0), vec3<f32>(0.0));
+        return LightLevels(15.0, 0.0, 0.0, vec3<f32>(1.0), vec3<f32>(1.0));
     }
     if (tag & HAS_SLOT) == 0u {
         return tag_levels(tag);
@@ -460,7 +548,7 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
     let offset = world_position - vec3<f32>(corner) * f32(1u << CHUNK_SHIFT);
     let local = offset / cell_width(tag) + vec3<f32>(1.0);
     let levels = read_front(slot_origin(tag), local, n);
-    return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(0.0));
+    return LightLevels(levels.x, levels.y, 0.0, chunk_color(tag), vec3<f32>(1.0));
 }
 
 // The light any chunk face shows, a world chunk's or a sub-grid's: the light
@@ -476,7 +564,7 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
 // is. When `light_look.enclosure_caps_voxel` is set, the world's voxel light
 // is capped the same way, so the world's lamps don't shine through a closed
 // cabin's walls. The face then shows the larger of that and its own lamps'
-// light. Its glow is its own.
+// light, in the colour of the world's light. Its glow is its own.
 fn sample_face_light(
     tag: u32,
     local_position: vec3<f32>,
@@ -490,12 +578,14 @@ fn sample_face_light(
             let world = world_light(world_position, world_normal);
             var world_voxel = world.voxel;
             if light_look.enclosure_caps_voxel == 1u {
-                world_voxel = min(world_voxel, vec3<f32>(own.sky));
+                world_voxel = min(world_voxel, own.sky);
             }
             return LightLevels(
                 min(world.sky, own.sky),
                 max(world_voxel, own.voxel),
                 own.own_voxel,
+                world.voxel_color,
+                own.own_voxel_color,
             );
         }
     }
@@ -526,12 +616,14 @@ fn falloff(table: u32, level: f32) -> f32 {
     return mix(a, b, l - floor(l));
 }
 
-fn voxel_falloff(levels: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        falloff(VOXEL_TABLE, levels.x),
-        falloff(VOXEL_TABLE, levels.y),
-        falloff(VOXEL_TABLE, levels.z),
-    );
+fn voxel_falloff(level: f32) -> f32 {
+    return falloff(VOXEL_TABLE, level);
+}
+
+// The light colour a face's glow is tinted by: its emissive voxel's light
+// colour when the look's `tinted_glow` is on, or else white.
+fn glow_color(levels: LightLevels) -> vec3<f32> {
+    return select(vec3<f32>(1.0), levels.own_voxel_color, light_look.tinted_glow == 1u);
 }
 
 // How much of Bevy's directional lights reaches a face at sky light `level`,
@@ -551,11 +643,11 @@ fn sky_brightness(level: f32) -> f32 {
 }
 
 // The voxel light a face shows, as light to multiply by its diffuse colour:
-// the light around it, and its glow if it's a lamp's face. Includes the view's
-// exposure.
+// the light around it in its light colour, and its glow if it's a lamp's
+// face. Includes the view's exposure.
 fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
-    let around = voxel_falloff(levels.voxel);
-    let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel);
+    let around = voxel_falloff(levels.voxel) * levels.voxel_color;
+    let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel) * glow_color(levels);
     return (around + glow) * light_look.voxel_brightness * view_bindings::view.exposure;
 }
 
@@ -566,10 +658,10 @@ fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
 // occlusion terms, and its directional lights through
 // `directional_shadow_factor`. Bevy applies that factor only to a directional
 // light with a shadow map, so a shader calling this must also call
-// `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light
-// and a lamp's glow add through the
-// emissive output, in the forward pass only, so no other pass counts them
-// twice.
+// `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light,
+// in its light colour, and a lamp's glow add through the emissive output, in
+// the forward pass only, so no other pass counts them twice. The glow takes
+// the lamp's light colour only when the look's `tinted_glow` is on.
 //
 // `ao` is the face's ambient occlusion, from 0 to 1, applied as the look's
 // `ao` says: by default it darkens ambient light and voxel light, and leaves
@@ -598,8 +690,8 @@ fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, fa
             material.specular_transmission,
             material.diffuse_transmission,
         );
-        let around = voxel_falloff(levels.voxel) * ao;
-        let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel);
+        let around = voxel_falloff(levels.voxel) * ao * levels.voxel_color;
+        let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel) * glow_color(levels);
         let exposure = view_bindings::view.exposure;
         let light = (around + glow) * light_look.voxel_brightness * exposure;
         // Bevy multiplies emissive light by the exposure as far as the

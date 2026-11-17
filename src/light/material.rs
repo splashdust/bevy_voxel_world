@@ -34,6 +34,15 @@
 //! grows, and the world's materials bind the new one in the same frame, as
 //! they do the light texture once it's made.
 //!
+//! The extension also binds the world's colour texture at 203, a placeholder
+//! of one white texel until a chunk with a slot shows a light colour other
+//! than white. When the world's emission table holds such a colour, the
+//! extension adds the `LIGHT_COLOR` shader def through the material's key,
+//! from when the material is made for a world coloured at startup. Under it
+//! the shader reads each chunk's light colour from its tag and its entry in
+//! the colour texture. Without it, the shader's colours are white, and a
+//! white world's shader does no colour work at all.
+//!
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
 //! extension alone, so the extension passes on the wrapped material's. It
 //! takes the opaque render method from the wrapped material, so the extension
@@ -208,9 +217,13 @@ pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 /// [`LightAo`] setting doesn't apply to it, since the vertex colour belongs
 /// to the mesher. Any other `M`, `ExtendedMaterial<StandardMaterial, _>`
 /// included, reads light in its own shader by importing the
-/// `bevy_voxel_world::light` module, which declares bindings 200 and 201.
+/// `bevy_voxel_world::light` module, which declares the crate's bindings.
 /// With the `sub_grids` feature it also binds the world's tag map at 202 and
-/// adds the `SUB_GRIDS` shader def. Bindings 200 to 219 are the crate's.
+/// adds the `SUB_GRIDS` shader def. It binds the world's colour texture at 203,
+/// and adds the `LIGHT_COLOR` shader def when the world's emissive materials
+/// give a light colour other than white. A custom shader can test
+/// `LIGHT_COLOR`: without it, the light colours the module's `LightLevels`
+/// holds are white. Bindings 200 to 219 are the crate's.
 ///
 /// # Meshes and vertex shaders
 ///
@@ -241,6 +254,7 @@ pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 /// world position as a position in the world's grid, so it assumes the
 /// world's `WorldRoot` is at the identity.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+#[bind_group_data(VoxelWorldBindingsKey)]
 pub struct VoxelWorldBindings<M: Material> {
     #[texture(200, dimension = "3d", sample_type = "u_int")]
     light_texture: Handle<Image>,
@@ -251,7 +265,29 @@ pub struct VoxelWorldBindings<M: Material> {
     #[cfg(feature = "sub_grids")]
     #[texture(202, sample_type = "u_int")]
     tag_map: Handle<Image>,
+    /// The world's colour texture, or a placeholder of one white texel until a
+    /// chunk with a slot shows a light colour other than white.
+    #[texture(203, dimension = "3d", sample_type = "u_int")]
+    light_colors: Handle<Image>,
+    /// Whether the world's emission table holds a light colour other than
+    /// white, which sets the `LIGHT_COLOR` shader def.
+    light_color: bool,
     _material: PhantomData<fn() -> M>,
+}
+
+/// The part of [`VoxelWorldBindings`] that picks its pipeline: whether the
+/// shader def `LIGHT_COLOR` is set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoxelWorldBindingsKey {
+    pub(crate) light_color: bool,
+}
+
+impl<M: Material> From<&VoxelWorldBindings<M>> for VoxelWorldBindingsKey {
+    fn from(bindings: &VoxelWorldBindings<M>) -> Self {
+        Self {
+            light_color: bindings.light_color,
+        }
+    }
 }
 
 impl<M: Material> VoxelWorldBindings<M> {
@@ -259,6 +295,12 @@ impl<M: Material> VoxelWorldBindings<M> {
     #[cfg(test)]
     pub(crate) fn look(&self) -> &LookUniform {
         &self.look
+    }
+
+    /// The colour texture the shader reads.
+    #[cfg(test)]
+    pub(crate) fn light_colors(&self) -> &Handle<Image> {
+        &self.light_colors
     }
 
     /// The tag map the shader reads.
@@ -289,11 +331,14 @@ impl<M: Material> MaterialExtension for VoxelWorldBindings<M> {
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let mut defs = vec![ShaderDefVal::Bool("VOXEL_LIGHT".into(), true)];
         if cfg!(feature = "sub_grids") {
             defs.push(ShaderDefVal::Bool("SUB_GRIDS".into(), true));
+        }
+        if key.bind_group_data.light_color {
+            defs.push(ShaderDefVal::Bool("LIGHT_COLOR".into(), true));
         }
         descriptor.vertex.shader_defs.extend(defs.iter().cloned());
         if let Some(fragment) = descriptor.fragment.as_mut() {
@@ -341,6 +386,8 @@ pub(crate) struct LookUniform {
     /// 1 when a sub-grid's enclosure caps the world's voxel light its faces
     /// show, as it caps the world's sky. 0 without the `sub_grids` feature.
     pub enclosure_caps_voxel: u32,
+    /// 1 when an emissive voxel's own faces glow tinted by its light colour.
+    pub tinted_glow: u32,
 }
 
 impl LookUniform {
@@ -374,6 +421,7 @@ impl LookUniform {
             enclosure_caps_voxel: config.enclosure_caps_voxel_light() as u32,
             #[cfg(not(feature = "sub_grids"))]
             enclosure_caps_voxel: 0,
+            tinted_glow: look.tinted_glow as u32,
         }
     }
 }
@@ -431,12 +479,17 @@ pub(crate) fn add_light_shader(shaders: &mut Assets<Shader>) {
 /// Sets up giving the chunks of lit world `C` its material `base` wrapped in
 /// [`VoxelWorldBindings`], with the world's light texture, and the crate's tag.
 ///
+/// The route reads `world`'s light colours from the start, so a world
+/// coloured at startup makes its material with the `LIGHT_COLOR` shader def
+/// already in its key.
+///
 /// With no `base`, the world's material is added by hand: each time
 /// `VoxelWorldMaterialHandle<M>` names another material, the world wraps a
 /// copy of it. Returns the wrapped material's handle when there's a `base`.
 pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
     app: &mut App,
     base: Option<M>,
+    world: &C,
     config: &LightPropagation,
 ) -> Option<Handle<VoxelWorldMaterial<M>>>
 where
@@ -451,20 +504,22 @@ where
     }
 
     let config = config.clamped();
-    let route = LightRoute::<C>::new(
+    let mut route = LightRoute::<C>::new(
         &config,
         super::placeholder_sky(&config),
         &mut app.world_mut().resource_mut::<Assets<Image>>(),
     );
+    super::read_light_colors(&mut route, world);
     let look = LookUniform::new(&config);
     #[cfg(feature = "sub_grids")]
     let tag_map =
         TagMapBinding::<C>::new(&mut app.world_mut().resource_mut::<Assets<Image>>());
-    let textures = Textures {
-        light: route.texture(),
+    let textures = Textures::of(
+        &route,
         #[cfg(feature = "sub_grids")]
-        tag_map: tag_map.bound(&route),
-    };
+        &tag_map,
+    );
+    let color_binding = ColorBinding::<C>::new(&route);
     let handle = base.map(|base| {
         let material = wrap(base, textures, look);
         app.world_mut()
@@ -472,6 +527,7 @@ where
             .add(material)
     });
     app.insert_resource(route);
+    app.insert_resource(color_binding);
     #[cfg(feature = "sub_grids")]
     app.insert_resource(tag_map);
     route::add_render_systems::<C>(app);
@@ -503,6 +559,10 @@ where
             route::make_color_texture::<C>
                 .run_if(|route: Res<LightRoute<C>>| route.color_texture_wanted())
                 .after(make_texture::<C, M>),
+            bind_colors::<C, M>
+                .after(super::follow_config::<C>)
+                .after(route::make_color_texture::<C>)
+                .before(AssetEventSystems),
             apply_look::<C, M>
                 .run_if(resource_changed::<C>)
                 .after(super::follow_config::<C>)
@@ -538,11 +598,30 @@ where
     handle
 }
 
-/// The textures a world's material binds for the shader to read light.
+/// The textures a world's material binds for the shader to read light, and
+/// whether it reads light colours.
 struct Textures {
     light: Handle<Image>,
     #[cfg(feature = "sub_grids")]
     tag_map: Handle<Image>,
+    light_colors: Handle<Image>,
+    light_color: bool,
+}
+
+impl Textures {
+    /// What a material made now binds for the world `route` belongs to.
+    fn of<C: VoxelWorldConfig>(
+        route: &LightRoute<C>,
+        #[cfg(feature = "sub_grids")] tag_map: &TagMapBinding<C>,
+    ) -> Self {
+        Self {
+            light: route.texture(),
+            #[cfg(feature = "sub_grids")]
+            tag_map: tag_map.bound(route),
+            light_colors: route.color_texture(),
+            light_color: route.is_colored(),
+        }
+    }
 }
 
 /// `base` wrapped with a world's textures and look.
@@ -558,6 +637,8 @@ fn wrap<M: Material>(
             look,
             #[cfg(feature = "sub_grids")]
             tag_map: textures.tag_map,
+            light_colors: textures.light_colors,
+            light_color: textures.light_color,
             _material: PhantomData,
         },
     }
@@ -602,11 +683,11 @@ fn wrap_hand_added_material<C: VoxelWorldConfig, M: Material>(
         return;
     };
     let look = LookUniform::new(&settings.config);
-    let textures = Textures {
-        light: route.texture(),
+    let textures = Textures::of(
+        &route,
         #[cfg(feature = "sub_grids")]
-        tag_map: tag_map.bound(&route),
-    };
+        &tag_map,
+    );
     let handle = wrapped.add(wrap(base, textures, look));
     state.wrapped_from = Some(id);
     world_material.handle = Some(handle.clone());
@@ -701,6 +782,70 @@ where
     for id in ours {
         if let Some(mut material) = materials.get_mut(id) {
             material.extension.light_texture = texture.clone();
+        }
+    }
+}
+
+/// What world `C`'s materials last bound as its colour texture, and whether
+/// they carry the `LIGHT_COLOR` shader def.
+#[derive(Resource)]
+struct ColorBinding<C> {
+    bound: AssetId<Image>,
+    light_color: bool,
+    _world: PhantomData<C>,
+}
+
+impl<C: VoxelWorldConfig> ColorBinding<C> {
+    fn new(route: &LightRoute<C>) -> Self {
+        Self {
+            bound: route.color_texture().id(),
+            light_color: route.is_colored(),
+            _world: PhantomData,
+        }
+    }
+}
+
+/// Gives world `C`'s materials its colour texture in place of the one they
+/// bind, and sets or clears their `LIGHT_COLOR` shader def, when either
+/// changes: when the colour texture is made or replaced, and when the
+/// world's emission table gains or loses a light colour other than white.
+///
+/// A world coloured at startup makes its material with the def already set,
+/// so only a change of emission while the world runs changes it here.
+/// Changing the def changes the material's key, so Bevy specializes its
+/// pipelines again. It runs before Bevy sends this frame's asset events, so
+/// the frame renders with the new binding.
+fn bind_colors<C: VoxelWorldConfig, M: Material>(
+    route: Res<LightRoute<C>>,
+    mut binding: ResMut<ColorBinding<C>>,
+    mut materials: ResMut<Assets<VoxelWorldMaterial<M>>>,
+) where
+    <VoxelWorldMaterial<M> as AsBindGroup>::Data:
+        PartialEq + Eq + std::hash::Hash + Clone,
+{
+    let texture = route.color_texture();
+    let light_color = route.is_colored();
+    if texture.id() == binding.bound && light_color == binding.light_color {
+        return;
+    }
+    let old = std::mem::replace(&mut binding.bound, texture.id());
+    binding.light_color = light_color;
+    // Each world has its own placeholder and colour texture, so the materials
+    // binding the old texture are this world's: its material, and any earlier
+    // copy of a hand-added material that chunks still show.
+    let ours: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| {
+            let bound = material.extension.light_colors.id();
+            let ours = bound == old || bound == texture.id();
+            ours && (bound != texture.id() || material.extension.light_color != light_color)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in ours {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.light_colors = texture.clone();
+            material.extension.light_color = light_color;
         }
     }
 }

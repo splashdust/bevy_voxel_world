@@ -514,6 +514,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.light_colors.is_some() && key.is_world()
     }
 
+    /// Whether the world's emission table holds a light colour other than
+    /// white, so its materials carry the `LIGHT_COLOR` shader def.
+    pub fn is_colored(&self) -> bool {
+        self.light_colors.is_some()
+    }
+
     /// The packed light colour of the emissive material index `material`.
     fn lamp_color(&self, material: u16) -> u16 {
         self.light_colors
@@ -817,7 +823,6 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// The colour texture a material made now binds: the colour texture once
     /// it's made, or else its placeholder.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by tests until materials bind it"))]
     pub fn color_texture(&self) -> Handle<Image> {
         self.color_texture
             .clone()
