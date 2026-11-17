@@ -500,6 +500,9 @@ where
             make_texture::<C, M>
                 .run_if(|route: Res<LightRoute<C>>| route.texture_wanted())
                 .after(release_texture::<C, M>),
+            route::make_color_texture::<C>
+                .run_if(|route: Res<LightRoute<C>>| route.color_texture_wanted())
+                .after(make_texture::<C, M>),
             apply_look::<C, M>
                 .run_if(resource_changed::<C>)
                 .after(super::follow_config::<C>)

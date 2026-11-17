@@ -163,18 +163,18 @@ const SPREAD: [u64; 256] = {
     table
 };
 
-/// What some open voxels hold of one kind of light: no voxel at all, one level,
-/// or more than one.
+/// What some voxels hold of one kind of light: no voxel at all, one value,
+/// or more than one. The value is a level, or a packed light colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Seen {
+pub(crate) enum Seen<T = u8> {
     #[default]
     Nothing,
-    One(u8),
+    One(T),
     Mixed,
 }
 
-impl Seen {
-    pub fn join(self, other: Seen) -> Seen {
+impl<T: Copy + PartialEq> Seen<T> {
+    pub fn join(self, other: Seen<T>) -> Seen<T> {
         match (self, other) {
             (Seen::Nothing, seen) | (seen, Seen::Nothing) => seen,
             (Seen::One(a), Seen::One(b)) if a == b => Seen::One(a),
@@ -190,6 +190,10 @@ pub(crate) struct FacesSee {
     pub voxel: Seen,
     /// Whether an emissive voxel of the chunk touches one of these voxels.
     pub lamp: bool,
+    /// The packed light colours of these voxels' voxel light, and of the
+    /// emissive voxels touching them. Only a coloured world's chunks read
+    /// colours; elsewhere it's [`Seen::Nothing`].
+    pub color: Seen<u16>,
 }
 
 impl FacesSee {
@@ -198,6 +202,7 @@ impl FacesSee {
             sky: self.sky.join(other.sky),
             voxel: self.voxel.join(other.voxel),
             lamp: self.lamp || other.lamp,
+            color: self.color.join(other.color),
         }
     }
 
@@ -220,12 +225,135 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
             .emissive
             .iter()
             .any(|lamp| touches_open(solid, lamp)),
+        color: Seen::Nothing,
+    }
+}
+
+/// The packed light colours a chunk's faces read from its own voxels, given
+/// its `light`: the voxel light of its open voxels touching one of its solid
+/// voxels, and each of its emissive voxels touching an open voxel, whose
+/// material index `lamp_color` gives the packed colour of.
+///
+/// Its cost grows with the chunk's columns.
+pub(crate) fn own_colors_seen(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    let Occupancy::Mixed(solid) = &light.inputs.occupancy else {
+        return Seen::Nothing;
+    };
+    let seen = colors_seen(light, &touching_open(solid));
+    lamps_seen(light, solid, seen, lamp_color)
+}
+
+/// The packed light colours of every open voxel's voxel light in the chunk
+/// lit by `light`, and of each of its emissive voxels touching an open voxel,
+/// as [`own_colors_seen`] gives them.
+///
+/// Unlike [`own_colors_seen`], it reads open voxels far from any solid too.
+pub(crate) fn open_colors_seen(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    let Some(open) = open_voxels(&light.inputs.occupancy) else {
+        return Seen::Nothing;
+    };
+    let seen = colors_seen(light, &open);
+    match &light.inputs.occupancy {
+        Occupancy::Mixed(solid) => lamps_seen(light, solid, seen, lamp_color),
+        _ => seen,
+    }
+}
+
+/// `seen` joined with the packed light colour of each emissive voxel of
+/// `light` touching an open voxel, a chunk whose solid voxels are `solid`.
+fn lamps_seen(
+    light: &ChunkLight,
+    solid: &Plane,
+    mut seen: Seen<u16>,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    for lamp in light.inputs.emissive.iter() {
+        if seen == Seen::Mixed {
+            break;
+        }
+        if touches_open(solid, lamp) {
+            seen = seen.join(Seen::One(lamp_color(lamp.material())));
+        }
+    }
+    seen
+}
+
+/// The packed light colours of the voxel light at the voxels set in
+/// `voxels`, of the chunk lit by `light`. A voxel with no voxel light has no
+/// colour, so it adds none.
+pub(crate) fn colors_seen(light: &ChunkLight, voxels: &Plane) -> Seen<u16> {
+    if lit_count(&light.voxel, voxels, None) == 0 {
+        Seen::Nothing
+    } else {
+        Seen::One(light.color.packed())
+    }
+}
+
+/// Adds to `counts` how many of the voxels set in `voxels`, of the chunk lit
+/// by `light`, have voxel light of each packed light colour, counting only
+/// those at the voxel light level `level` if it's given, a step of the
+/// light's precision.
+pub(crate) fn count_colors(
+    light: &ChunkLight,
+    voxels: &Plane,
+    level: Option<u8>,
+    counts: &mut Vec<(u16, u32)>,
+) {
+    let count = lit_count(&light.voxel, voxels, level);
+    if count == 0 {
+        return;
+    }
+    let packed = light.color.packed();
+    match counts.iter_mut().find(|(color, _)| *color == packed) {
+        Some((_, counted)) => *counted += count,
+        None => counts.push((packed, count)),
+    }
+}
+
+/// How many of the voxels set in `voxels` hold voxel light in `levels`: any
+/// level above 0, or only `level` if it's given.
+fn lit_count(levels: &ChunkLevels, voxels: &Plane, level: Option<u8>) -> u32 {
+    if level == Some(0) {
+        return 0;
+    }
+    match levels {
+        ChunkLevels::Uniform(held) => {
+            if *held == 0 || level.is_some_and(|level| level != *held) {
+                0
+            } else {
+                voxels.iter().map(|column| column.count_ones()).sum()
+            }
+        }
+        ChunkLevels::Planes(planes) => (0..CHUNK * CHUNK)
+            .filter(|column| voxels[*column] != 0)
+            .map(|column| {
+                let at = match level {
+                    None => planes.iter().fold(0, |lit, plane| lit | plane[column]),
+                    Some(level) => {
+                        planes.iter().enumerate().fold(!0, |at, (bit, plane)| {
+                            if level >> bit & 1 == 1 {
+                                at & plane[column]
+                            } else {
+                                at & !plane[column]
+                            }
+                        })
+                    }
+                };
+                (at & voxels[column]).count_ones()
+            })
+            .sum(),
     }
 }
 
 /// The open voxels of a chunk touching one of its `solid` voxels by a face,
 /// an edge or a corner, as columns along z like `solid`'s.
-fn touching_open(solid: &Plane) -> Box<Plane> {
+pub(crate) fn touching_open(solid: &Plane) -> Box<Plane> {
     let mut along_z: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
     for (spread, column) in along_z.iter_mut().zip(solid.iter()) {
         *spread = column | column << 1 | column >> 1;
@@ -430,8 +558,75 @@ pub(crate) fn border_plane(
 /// What the faces of a chunk whose voxels are `own` read across `face` from
 /// the neighbour there, lit by `neighbour`: the neighbour's open border voxels
 /// touching one of the chunk's solid voxels, with levels in steps of
-/// `precision`.
+/// `precision`. With `colored`, it reads their light colours too.
 pub(crate) fn across(
+    own: &LightInputs,
+    face: Face,
+    neighbour: &ChunkLight,
+    precision: LightPrecision,
+    colored: bool,
+) -> FacesSee {
+    let mut seen = across_levels(own, face, neighbour, precision);
+    if colored {
+        seen.color = colors_seen(neighbour, &across_voxels(own, face, &neighbour.inputs));
+    }
+    seen
+}
+
+/// The voxels of the neighbour across `face` from a chunk whose voxels are
+/// `own` that the chunk's faces read: the neighbour's open border voxels
+/// touching one of the chunk's solid voxels, as columns along z like a
+/// [`Plane`], in the neighbour's coordinates.
+pub(crate) fn across_voxels(
+    own: &LightInputs,
+    face: Face,
+    neighbour: &LightInputs,
+) -> Box<Plane> {
+    let back = face.opposite();
+    let solid = rows(|u, v| {
+        let (x, y, z) = face.voxel(u, v);
+        own.occupancy.is_solid(x, y, z)
+    });
+    let mut voxels: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    if solid.iter().all(|row| *row == 0) {
+        return voxels;
+    }
+    let near = spread(solid);
+    for (v, near) in near.iter().enumerate() {
+        let mut cells = *near;
+        while cells != 0 {
+            let u = cells.trailing_zeros() as usize;
+            cells &= cells - 1;
+            let (x, y, z) = back.voxel(u, v);
+            if !neighbour.occupancy.is_solid(x, y, z) {
+                voxels[x + y * CHUNK] |= 1 << z;
+            }
+        }
+    }
+    voxels
+}
+
+/// The open voxels on `face` of a chunk whose voxels are `inputs`, as columns
+/// along z like a [`Plane`].
+pub(crate) fn border_voxels(inputs: &LightInputs, face: Face) -> Box<Plane> {
+    let mut voxels: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    if let Occupancy::Solid = inputs.occupancy {
+        return voxels;
+    }
+    for v in 0..CHUNK {
+        for u in 0..CHUNK {
+            let (x, y, z) = face.voxel(u, v);
+            if !inputs.occupancy.is_solid(x, y, z) {
+                voxels[x + y * CHUNK] |= 1 << z;
+            }
+        }
+    }
+    voxels
+}
+
+/// What the faces of a chunk whose voxels are `own` read across `face` of
+/// the levels of `neighbour`, as [`across`] gives them.
+fn across_levels(
     own: &LightInputs,
     face: Face,
     neighbour: &ChunkLight,
@@ -491,7 +686,7 @@ pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
 
 /// The open voxels of a chunk of `occupancy`, as columns along z like a
 /// [`Plane`], or `None` for a chunk with none.
-fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
+pub(crate) fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
     match occupancy {
         Occupancy::Open => Some(Box::new([!0; CHUNK * CHUNK])),
         Occupancy::Solid => None,
@@ -734,6 +929,6 @@ mod tests {
         assert_eq!(Seen::Nothing.join(Seen::One(3)), Seen::One(3));
         assert_eq!(Seen::One(3).join(Seen::One(3)), Seen::One(3));
         assert_eq!(Seen::One(3).join(Seen::One(4)), Seen::Mixed);
-        assert_eq!(Seen::Mixed.join(Seen::Nothing), Seen::Mixed);
+        assert_eq!(Seen::<u8>::Mixed.join(Seen::Nothing), Seen::Mixed);
     }
 }
