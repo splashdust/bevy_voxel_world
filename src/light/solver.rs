@@ -13,6 +13,17 @@
 //! instead be given its box's voxels with direct sky as [`DirectSky::Cells`],
 //! so sky can enter a voxel from any side, and can be told to take no sky fill.
 //!
+//! An emissive voxel joins a solve only if its light could reach the chunk in
+//! the rounds it has left, which the solve tells from how far outside the
+//! chunk it is along each axis. With [`LightShape::Diamond`] every round is
+//! one face step, so the sum of those distances bounds it. With
+//! [`LightShape::Round`] every even round moves light a voxel along every
+//! axis at once, so neither that sum nor a path distance bounds how far light
+//! gets. The solve counts the rounds instead: each even round left takes one
+//! off every distance, and the face steps of the other rounds must cover what
+//! is left. Where no emissive voxel passes, voxel light isn't spread at all.
+//! The check costs a few additions per emissive voxel in the box.
+//!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
 //! and it holds no sources. A solve can be told to read it as air instead,
 //! with [`Missing`]. Air a fill hint keeps from spawning reads as what its
@@ -193,6 +204,10 @@ pub(crate) struct LightCounters {
     /// two or more light colours. A light box of one colour runs as in a white
     /// world, uncounted.
     pub color_runs: AtomicU64,
+    /// Solves of voxel light that spread none, because no emissive voxel
+    /// around the chunk could light it, though some chunk around it held
+    /// emissive voxels.
+    pub voxel_boxes_culled: AtomicU64,
     /// Time spent solving, in nanoseconds, summed over every chunk task.
     pub solve_nanos: AtomicU64,
     /// Time spent reading the world view before solving, in nanoseconds,
@@ -629,6 +644,7 @@ fn solve<I>(
             snapshot.missing,
             &settings.voxel_scale,
             settings.shape,
+            &settings.counters,
         );
         (voxel, faces, ChunkColor::White)
     };
@@ -702,14 +718,22 @@ pub(crate) fn solve_voxel(
     missing: Missing,
     scale: &LevelScale,
     shape: LightShape,
+    counters: &LightCounters,
 ) -> (ChunkLevels, [u64; 6]) {
     let centre = centre(neighbours);
     let unlit = (ChunkLevels::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
-    let seeds = seeds(neighbours, scale, |_| true);
+    let seeds = seeds(neighbours, scale, shape, |_| true);
     if seeds.is_empty() {
+        let held = neighbours
+            .iter()
+            .flatten()
+            .any(|inputs| !inputs.emissive.is_empty());
+        if held {
+            counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
+        }
         return unlit;
     }
     let (planes, faces) = spread(neighbours, missing, scale, shape, &seeds, None, None);
@@ -738,7 +762,7 @@ pub(crate) fn solve_voxel_colors<I>(
 ) -> (ChunkLevels, [u64; 6], ChunkColor) {
     let colors = light_colors(neighbours, emission);
     if colors.len() <= 1 {
-        let (voxel, faces) = solve_voxel(neighbours, missing, scale, shape);
+        let (voxel, faces) = solve_voxel(neighbours, missing, scale, shape, counters);
         let color = match colors.first() {
             Some(color) if voxel != ChunkLevels::Uniform(0) => ChunkColor::of(*color),
             _ => ChunkColor::White,
@@ -755,13 +779,15 @@ pub(crate) fn solve_voxel_colors<I>(
         return unlit;
     }
     let mut runs = Vec::new();
+    let mut spread_any = false;
     for color in colors {
-        let seeds = seeds(neighbours, scale, |voxel| {
+        let seeds = seeds(neighbours, scale, shape, |voxel| {
             emission.color(voxel.material()) == color
         });
         if seeds.is_empty() {
             continue;
         }
+        spread_any = true;
         let (planes, faces) =
             spread(neighbours, missing, scale, shape, &seeds, None, None);
         counters.color_runs.fetch_add(1, Ordering::Relaxed);
@@ -772,6 +798,9 @@ pub(crate) fn solve_voxel_colors<I>(
                 faces,
             });
         }
+    }
+    if !spread_any {
+        counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
     }
     match runs.len() {
         0 => unlit,
@@ -1103,15 +1132,17 @@ fn spread_in<R: Row>(
     })
 }
 
-/// The emissive voxels whose light could reach the chunk, as seeds in its box,
-/// sorted by where their light starts. Only the emissive voxels `keep` holds
-/// for count.
+/// The emissive voxels whose light could reach the chunk, spreading in
+/// `shape`, as seeds in its box, sorted by where their light starts. Only the
+/// emissive voxels `keep` holds for count.
 fn seeds(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
+    shape: LightShape,
     keep: impl Fn(&EmissiveVoxel) -> bool,
 ) -> Vec<Seed> {
     let reach = scale.reach() as i32;
+    let last = scale.last_distance(1) as i32;
     let side = CHUNK_SIZE_I + 2 * reach;
     let mut seeds = Vec::new();
     for (index, inputs) in neighbours.iter().enumerate() {
@@ -1136,12 +1167,10 @@ fn seeds(
             {
                 continue;
             }
-            // How far outside the chunk the voxel is, at least one step.
             let outside = (IVec3::splat(reach) - position)
                 .max(position - IVec3::splat(reach + CHUNK_SIZE_I - 1))
-                .max_element()
-                .max(1);
-            if outside + start as i32 > reach {
+                .max(IVec3::ZERO);
+            if !could_reach(outside, start as i32, last, shape) {
                 continue;
             }
             seeds.push(Seed {
@@ -1154,6 +1183,24 @@ fn seeds(
     }
     seeds.sort_by_key(|seed| seed.start);
     seeds
+}
+
+/// Whether light from a source `outside` voxels outside the chunk along each
+/// axis, starting at step `start`, could reach a voxel of the chunk by the
+/// last lit round `last`, spreading in `shape`.
+///
+/// Light joins in the round after `start`. Of the rounds left, a round
+/// spreading by three passes moves light a voxel along every axis, and any
+/// other round a face step along one. So light gets there only if the face
+/// steps left cover what the three-pass rounds leave of each distance.
+fn could_reach(outside: IVec3, start: i32, last: i32, shape: LightShape) -> bool {
+    let rounds = last - start;
+    let three_pass = match shape {
+        LightShape::Round => last / 2 - start / 2,
+        LightShape::Diamond => 0,
+    };
+    let left = (outside - IVec3::splat(three_pass)).max(IVec3::ZERO);
+    rounds > 0 && left.element_sum() <= rounds - three_pass
 }
 
 /// Fills a box's `rows`, at `x + y × side`, from a `u32` column along z of
@@ -1310,7 +1357,13 @@ mod tests {
         let alone = around(&[(IVec3::ZERO, centre.clone())]);
         let shape = LightShape::Diamond;
 
-        let (air, _) = solve_voxel(&alone, Missing::Air, &scale(), shape);
+        let (air, _) = solve_voxel(
+            &alone,
+            Missing::Air,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
         // One step out of the lamp, ten along z, one step back in.
         assert_eq!(air.at(31, 10, 10), 15 - 12);
         let open_beside = around(&[
@@ -1320,10 +1373,22 @@ mod tests {
                 inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()),
             ),
         ]);
-        let (open, _) = solve_voxel(&open_beside, Missing::Solid, &scale(), shape);
+        let (open, _) = solve_voxel(
+            &open_beside,
+            Missing::Solid,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
         assert_eq!(air, open);
 
-        let (solid, _) = solve_voxel(&alone, Missing::Solid, &scale(), shape);
+        let (solid, _) = solve_voxel(
+            &alone,
+            Missing::Solid,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
         assert_eq!(solid, ChunkLevels::Uniform(0));
     }
 
@@ -1488,5 +1553,122 @@ mod tests {
         assert!(world.seeds.is_some());
 
         assert!(seeding(&settings, &mixed, in_world(position), false).is_none());
+    }
+
+    /// A neighbourhood holding only one lamp at `level`, at `position` in the
+    /// box of light of `reach` around the chunk, in the chunk position that
+    /// holds it.
+    fn lamp_at(position: IVec3, reach: i32, level: u8) -> Neighbourhood {
+        let voxel = position - IVec3::splat(reach);
+        let chunk = voxel.div_euclid(IVec3::splat(CHUNK_SIZE_I));
+        let local = voxel.rem_euclid(IVec3::splat(CHUNK_SIZE_I)).as_uvec3();
+        let lamp = EmissiveVoxel::new(
+            local.x as u8,
+            local.y as u8,
+            local.z as u8,
+            Emitter { level, material: 0 },
+        );
+        let held = inputs(Occupancy::Open, vec![lamp], ColumnAnswer::none());
+        around(&[(chunk, held)])
+    }
+
+    /// Whether light from lamps at `positions` in the box, each starting at
+    /// `start`, reaches a voxel of the chunk, as the kernel spreads it
+    /// through a box of air.
+    fn kernel_reaches(
+        positions: &[IVec3],
+        start: u8,
+        scale: &LevelScale,
+        shape: LightShape,
+    ) -> bool {
+        let seeds: Vec<Seed> = positions
+            .iter()
+            .map(|position| Seed {
+                x: position.x as u8,
+                y: position.y as u8,
+                z: position.z as u8,
+                start,
+            })
+            .collect();
+        let mut air = around(&[]);
+        air[neighbour_index(IVec3::ZERO)] =
+            Some(inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()));
+        let (planes, _) = spread(&air, Missing::Air, scale, shape, &seeds, None, None);
+        planes.iter().flatten().any(|column| *column != 0)
+    }
+
+    #[test]
+    fn the_cull_keeps_every_lamp_whose_light_reaches_the_chunk() {
+        for reach in [14, 17] {
+            for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
+                let scale = LevelScale::new(reach, precision);
+                for shape in [LightShape::Round, LightShape::Diamond] {
+                    let side = CHUNK_SIZE_I + 2 * reach as i32;
+                    // The box and the kernel are the same mirrored along
+                    // each axis, so one corner of the box stands for all.
+                    let half = side / 2;
+                    for level in 1..=15 {
+                        let Some(start) = scale.start(precision.of_whole(level)) else {
+                            continue;
+                        };
+                        let mut culled = Vec::new();
+                        for z in 0..half {
+                            for y in 0..half {
+                                for x in 0..half {
+                                    let position = IVec3::new(x, y, z);
+                                    let neighbours =
+                                        lamp_at(position, reach as i32, level);
+                                    if seeds(&neighbours, &scale, shape, |_| true)
+                                        .is_empty()
+                                    {
+                                        culled.push(position);
+                                    }
+                                }
+                            }
+                        }
+                        assert!(!culled.is_empty());
+                        // Light only adds up, so if all of them together
+                        // light nothing, none of them does alone.
+                        if !kernel_reaches(&culled, start, &scale, shape) {
+                            continue;
+                        }
+                        let reaching = culled
+                            .iter()
+                            .find(|position| {
+                                kernel_reaches(&[**position], start, &scale, shape)
+                            })
+                            .expect("one lamp reaches the chunk alone");
+                        panic!(
+                            "the cull drops a lamp at level {level} at {reaching} in \
+                             the box, whose light reaches the chunk at reach {reach}, \
+                             {precision:?}, {shape:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cull_drops_a_lamp_past_a_corner_whose_light_cant_reach_the_chunk() {
+        // Five voxels outside the chunk along every axis: 15 face steps away,
+        // and the light of a lamp at level 15 takes 14.
+        let position = IVec3::splat(14 - 5);
+        let neighbours = lamp_at(position, 14, 15);
+
+        assert!(seeds(&neighbours, &scale(), LightShape::Diamond, |_| true).is_empty());
+        assert!(!kernel_reaches(
+            &[position],
+            0,
+            &scale(),
+            LightShape::Diamond
+        ));
+        // Round light moves along every axis at once in its even rounds, so
+        // it gets there.
+        assert_eq!(
+            seeds(&neighbours, &scale(), LightShape::Round, |_| true).len(),
+            1
+        );
+        assert!(kernel_reaches(&[position], 0, &scale(), LightShape::Round));
     }
 }
