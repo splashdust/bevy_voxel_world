@@ -184,6 +184,9 @@ fn mix(lights: impl IntoIterator<Item = (LinearRgba, f32)>) -> LinearRgba {
 /// Each component is the max over the lights of colour times weight, scaled
 /// so the brightest component is 1. Where every light weighs 0, at level 1,
 /// each weighs 1 instead, so they mix evenly. No light mixes to white.
+///
+/// The light shader's `mix_color` and `mixed_color` mirror this rule and
+/// [`mixing_weight`], so a change here changes them too.
 pub(crate) fn mix_weighted(
     lights: impl IntoIterator<Item = (LinearRgba, f32)>,
 ) -> LinearRgba {

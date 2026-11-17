@@ -39,14 +39,19 @@
 //!   every frame of the dark room beside one of them stays black.
 //!
 //! - In a world coloured from startup, with sky light off, sealed rooms each
-//!   lit by a red, a green, a blue or a white lamp:
+//!   lit by a red, a green, a blue or a white lamp, each with a closet of
+//!   another light colour in its chunk, so that the chunk takes a colour slot:
 //!   - every chunk draws from the first frame every chunk is ready and Bevy
 //!     has compiled its own pipelines, which the red room's picture shows by
 //!     holding no pixel of the blue clear colour;
 //!   - a red lamp's pool shows exactly 0 green and blue, a green one's 0 red
 //!     and blue, and a blue one's 0 red and green;
 //!   - `tinted_glow` tints the green lamp's own faces on the next frame, and
-//!     leaves the white lamp's glow as it was.
+//!     leaves the white lamp's glow as it was;
+//!   - where a red and a green lamp's pools meet on grey stone, each pixel's
+//!     brightest channel matches the same room lit by two white lamps, so
+//!     mixing never darkens;
+//!   - those rooms' chunks take colour slots.
 //! - In a world whose colour rooms' lamps are white until it has settled,
 //!   with sky light off, giving the lamps their colours draws every chunk in
 //!   the red room's picture, which holds no pixel of the blue clear colour,
@@ -214,17 +219,33 @@ const MESA: Bounds = Bounds::new([-48, 32, 290], [48, 84, 340]);
 const SLAB: Bounds = Bounds::new([-48, 72, 340], [48, 84, 404]);
 
 /// The colour rooms, sealed in the rock below the cave floor, each in a chunk
-/// of its own, by the material of its lamp.
-const COLOR_ROOMS: [(u8, IVec3); 4] = [
-    (RED_LAMP, IVec3::new(0, -18, 0)),
-    (GREEN_LAMP, IVec3::new(2, -18, 0)),
-    (BLUE_LAMP, IVec3::new(4, -18, 0)),
-    (WHITE_LAMP, IVec3::new(6, -18, 0)),
+/// of its own, by the material of its lamp and of its closet's lamp.
+const COLOR_ROOMS: [(u8, IVec3, u8); 4] = [
+    (RED_LAMP, IVec3::new(0, -18, 0), GREEN_LAMP),
+    (GREEN_LAMP, IVec3::new(2, -18, 0), RED_LAMP),
+    (BLUE_LAMP, IVec3::new(4, -18, 0), RED_LAMP),
+    (WHITE_LAMP, IVec3::new(6, -18, 0), RED_LAMP),
 ];
 /// Each colour room, in its chunk's voxels.
 const COLOR_ROOM: Bounds = Bounds::new([8, 4, 8], [24, 14, 24]);
 /// The lamp on each colour room's floor, in its chunk's voxels.
 const COLOR_LAMP: IVec3 = IVec3::new(16, 4, 22);
+/// A closet one voxel big, sealed from its colour room, and the lamp beside
+/// it, in its chunk's voxels. Its lamp has another light colour than the
+/// room's, so the chunk's faces see two light colours and it takes a colour
+/// slot.
+const CLOSET: IVec3 = IVec3::new(1, 1, 1);
+const CLOSET_LAMP: IVec3 = IVec3::new(2, 1, 1);
+
+/// The mixing rooms, built as the colour rooms are: one lit by a red and a
+/// green lamp, and its twin lit by two white lamps in the same places.
+const MIX_ROOMS: [(IVec3, [u8; 2]); 2] = [
+    (IVec3::new(8, -18, 0), [RED_LAMP, GREEN_LAMP]),
+    (IVec3::new(10, -18, 0), [WHITE_LAMP, WHITE_LAMP]),
+];
+/// The two lamps on each mixing room's floor, in its chunk's voxels, close
+/// enough that their pools overlap across the floor.
+const MIX_LAMPS: [IVec3; 2] = [IVec3::new(10, 4, 16), IVec3::new(22, 4, 16)];
 
 const PLATEAUS: [Plateau; 4] = [
     Plateau {
@@ -333,10 +354,22 @@ impl Scene {
     fn voxel(&self, position: IVec3) -> WorldVoxel {
         let IVec3 { x, y, z } = position;
         let surface = self.surface(x, z);
-        for (lamp, chunk) in COLOR_ROOMS {
+        for (lamp, chunk, closet_lamp) in COLOR_ROOMS {
             let local = position - chunk * 32;
             if local == COLOR_LAMP {
                 return WorldVoxel::Solid(lamp);
+            }
+            if local == CLOSET_LAMP {
+                return WorldVoxel::Solid(closet_lamp);
+            }
+            if local == CLOSET || COLOR_ROOM.contains(local.x, local.y, local.z) {
+                return WorldVoxel::Air;
+            }
+        }
+        for (chunk, lamps) in MIX_ROOMS {
+            let local = position - chunk * 32;
+            if let Some(at) = MIX_LAMPS.iter().position(|lamp| *lamp == local) {
+                return WorldVoxel::Solid(lamps[at]);
             }
             if COLOR_ROOM.contains(local.x, local.y, local.z) {
                 return WorldVoxel::Air;
@@ -611,6 +644,15 @@ const fn lamp_camera(x: f32) -> FixedCamera {
 
 const GREEN_LAMP_CAMERA: FixedCamera = lamp_camera(2.0);
 const WHITE_LAMP_CAMERA: FixedCamera = lamp_camera(6.0);
+
+/// A camera in the mixing room of chunk `x` along x, looking down at the
+/// floor between its lamps.
+const fn mix_camera(x: f32) -> FixedCamera {
+    camera([x * 32.0 + 16.0, -563.0, 9.0], [x * 32.0 + 16.0, -572.0, 16.5])
+}
+
+const MIX_CAMERA: FixedCamera = mix_camera(8.0);
+const WHITE_MIX_CAMERA: FixedCamera = mix_camera(10.0);
 
 fn transform_of(camera: &FixedCamera) -> Transform {
     Transform::from_translation(camera.position).looking_at(camera.look_at, Vec3::Y)
@@ -1051,7 +1093,7 @@ const CHECKS: [Check; 25] = [
 
 /// The checks of light colour, in a world coloured from startup with sky
 /// light off.
-const COLOR_CHECKS: [Check; 8] = [
+const COLOR_CHECKS: [Check; 10] = [
     Check {
         first_ready: true,
         ..settled_check(
@@ -1132,6 +1174,24 @@ const COLOR_CHECKS: [Check; 8] = [
             tinted_glow: true,
             ..default()
         },
+    ),
+    settled_check(
+        "two white lamps light the white mixing room",
+        "color_mix_white.png",
+        false,
+        &WHITE_MIX_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    settled_check(
+        "red and green pools mixing never darken",
+        "color_mix.png",
+        false,
+        &MIX_CAMERA,
+        true,
+        Some("color_mix_white.png"),
+        mixing_never_darkens,
     ),
 ];
 
@@ -1415,6 +1475,8 @@ fn check_first_flip_part() {
 }
 
 fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
+    let check_color = world.check_color;
+    let white_lamps = world.white_lamps;
     let clear = if world.check_color {
         Color::srgb(0.0, 0.0, 1.0)
     } else {
@@ -1443,7 +1505,33 @@ fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
     app.sub_app_mut(RenderApp)
         .insert_resource(renderer_ready)
         .add_systems(Render, follow_renderer_ready.in_set(RenderSystems::Cleanup));
+    if check_color && !white_lamps {
+        app.add_systems(Update, colour_rooms_take_colour_slots.before(run_checks));
+    }
     app.run();
+}
+
+/// Once every check has judged its picture, checks that chunks took a colour
+/// slot at least once for each colour room and the red and green mixing
+/// room, so that the colour checks read light colours from colour slots.
+/// Only the chunks near the camera are loaded, so each room's chunk takes
+/// one as the camera reaches it.
+fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
+    let plan = world.resource::<CheckPlan>();
+    if *done || plan.next != plan.checks.len() || plan.waiting {
+        return;
+    }
+    *done = true;
+    let taken = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world)
+        .map_or(0, |stats| stats.color_allocations);
+    let wanted = COLOR_ROOMS.len() as u64 + 1;
+    let name = "the colour rooms and the mixing room take colour slots";
+    if taken >= wanted {
+        report!("PASS {name}: {taken} taken");
+    } else {
+        report!("FAIL {name}: {taken} taken, of {wanted}");
+        world.resource_mut::<CheckPlan>().failed = true;
+    }
 }
 
 /// A check of each shot of each sky fill world under the model named
@@ -1971,6 +2059,66 @@ fn only_blue(
     _: Option<&Image>,
 ) -> Result<String, String> {
     only_in(image, [true, true, false])
+}
+
+/// Whether each pixel's brightest channel matches the earlier picture's,
+/// the same room lit white, within two steps at it or a pixel beside it,
+/// and the red and green pools meet somewhere in the picture. A pixel in
+/// 10,000 may miss, where an edge's or a seam's pixel blends with what's
+/// behind it in one picture and not the other.
+///
+/// The room's stone is grey, so a pixel's brightest channel is the
+/// brightness of its light whatever its light colour, which mixing scales
+/// back to a brightest component of 1.
+fn mixing_never_darkens(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let earlier = earlier
+        .and_then(|earlier| earlier.data.as_ref())
+        .ok_or("no earlier picture")?;
+    let pixels = data.as_chunks::<4>().0;
+    let white = earlier.as_chunks::<4>().0;
+    let brightest = |pixel: &[u8; 4]| pixel[0].max(pixel[1]).max(pixel[2]);
+    let (width, height) = (WIDTH as usize, HEIGHT as usize);
+    let mut darker = 0;
+    let mut worst = 0;
+    for (index, pixel) in pixels.iter().enumerate() {
+        let (x, y) = (index % width, index / width);
+        // The rooms lie at different places in the world, so a few pixels
+        // of a texture's edges or a mesh's seams land one pixel apart.
+        let off = (y.saturating_sub(1)..(y + 2).min(height))
+            .flat_map(|y| (x.saturating_sub(1)..(x + 2).min(width)).map(move |x| (x, y)))
+            .map(|(x, y)| brightest(pixel).abs_diff(brightest(&white[y * width + x])))
+            .min()
+            .unwrap_or(u8::MAX);
+        worst = worst.max(off);
+        if off > 2 {
+            darker += 1;
+        }
+    }
+    // Where the pools meet, a pixel shows both red and green, at least half
+    // as much of the dimmer as of the brighter.
+    let yellow = pixels
+        .iter()
+        .filter(|pixel| {
+            let (red, green) = (pixel[0] as u16, pixel[1] as u16);
+            pixel[2] == 0 && red.min(green) * 2 >= red.max(green) && red > 8
+        })
+        .count();
+    let note = format!(
+        "{darker} pixels off by more than 2 in their brightest channel, at most {worst}; \
+         {yellow} of {} pixels yellow",
+        pixels.len()
+    );
+    if darker * 10_000 <= pixels.len() && yellow * 20 >= pixels.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
 }
 
 /// The channels of the pixel where the middle of the top face of the green
