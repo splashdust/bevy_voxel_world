@@ -23,7 +23,7 @@ use bevy::prelude::*;
 
 use super::faces::Face;
 use super::inputs::Occupancy;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::ViewMaps;
 use crate::chunk::CHUNK_SIZE_U;
 use crate::grid::GridKey;
@@ -129,7 +129,7 @@ impl ChangeCensus {
                 }
             }
             Some(old) => {
-                if old.same_levels(new) {
+                if old.same_light(new) {
                     return;
                 }
                 self.counts.changed_relights += 1;
@@ -225,8 +225,8 @@ fn visible_voxels(occupancy: &Occupancy) -> Vec<u32> {
 /// faces show.
 fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
     let visible = visible_voxels(&new.inputs.occupancy);
-    let channels = [(&old.sky, &new.sky), (&old.voxel, &new.voxel)];
-    channels
+    let kinds = [(&old.sky, &new.sky), (&old.voxel, &new.voxel)];
+    kinds
         .into_iter()
         .filter(|(old, new)| old != new)
         .any(|(old, new)| {
@@ -254,11 +254,10 @@ fn shell_change_shows(
     face: Face,
     solid: &Occupancy,
 ) -> bool {
-    let level =
-        |light: &ChunkLight, channel: fn(&ChunkLight) -> &ChannelLight, x, y, z| {
-            channel(light).at(x, y, z)
-        };
-    let channels: [fn(&ChunkLight) -> &ChannelLight; 2] =
+    let level = |light: &ChunkLight, kind: fn(&ChunkLight) -> &ChunkLevels, x, y, z| {
+        kind(light).at(x, y, z)
+    };
+    let kinds: [fn(&ChunkLight) -> &ChunkLevels; 2] =
         [|light| &light.sky, |light| &light.voxel];
     (0..CHUNK).any(|v| {
         (0..CHUNK).any(|u| {
@@ -267,9 +266,9 @@ fn shell_change_shows(
             if new.inputs.occupancy.is_solid(x, y, z) || !solid.is_solid(ax, ay, az) {
                 return false;
             }
-            channels.iter().any(|channel| {
-                let before = old.map_or(0, |old| level(old, *channel, x, y, z));
-                before != level(new, *channel, x, y, z)
+            kinds.iter().any(|kind| {
+                let before = old.map_or(0, |old| level(old, *kind, x, y, z));
+                before != level(new, *kind, x, y, z)
             })
         })
     })

@@ -260,6 +260,7 @@ impl<C: VoxelWorldConfig> SkyProbes<C> {
                 inputs: Arc::new(inputs.with_columns(answer)),
                 sky: light.sky.clone(),
                 voxel: light.voxel.clone(),
+                color: light.color.clone(),
                 precision: light.precision,
             });
         }
@@ -848,6 +849,7 @@ pub(crate) fn replace_columns(
         inputs: Arc::new(light.inputs.with_columns(answer)),
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
+        color: light.color.clone(),
         precision: light.precision,
     });
 }

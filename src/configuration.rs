@@ -359,12 +359,21 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The materials whose voxels give off light, and how much. Empty by
     /// default, and then no chunk looks for light sources among its voxels.
     ///
-    /// Relights on change, like a change of reach: every chunk with a solid
-    /// looks for its emissive voxels again in a relight task on the task
+    /// Relights on change. A change of a material's level, or a material
+    /// added or dropped, relights like a change of reach: every chunk with a
+    /// solid looks for its emissive voxels again in a relight task on the task
     /// pool, and its neighbours relight again where its emissive voxels
-    /// changed. A chunk above LOD level 0 holding a material whose entry was
-    /// added, dropped or given a new level is solved again on the task pool
-    /// too, and shows its old light until then.
+    /// changed. A chunk above LOD level 0 holding such a material is solved
+    /// again on the task pool too, and shows its old light until then.
+    ///
+    /// Each [`Emission`] can give its light a colour. A change of colour alone
+    /// changes no level, so it relights only the chunks whose light box, the
+    /// chunk and the 26 around it, holds an emissive voxel of a recoloured
+    /// material, nearest the camera first, with old light shown until new
+    /// light lands. Materials whose colours are the same once scaled give the
+    /// same light, so a change between them relights nothing. A world declaring more
+    /// than 8,192 emissive materials warns once, and gives each one past that
+    /// the colour of the earlier one nearest it.
     ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.

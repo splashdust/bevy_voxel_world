@@ -35,15 +35,16 @@ use std::sync::Arc;
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
+use super::color::{ChunkColor, EmissionTable};
 use super::config::LightPrecision;
 use super::faces::{Face, FaceHashes};
-use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
+use super::inputs::{uniform_emission, EmissiveVoxel, LightInputs, Occupancy};
 use super::probe::{air_answer, replace_columns, SkyProbes};
 use super::record::SkyRecord;
 use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::{ColumnAnswer, SkyRule};
-use super::solver::{neighbour_index, ChannelLight, ChunkLight, Neighbourhood};
+use super::solver::{neighbour_index, ChunkLevels, ChunkLight, Neighbourhood};
 use super::view::{in_world, AirInputs, ViewChunk, ViewMaps, ENTRY};
 use super::LightSettings;
 use crate::chunk::{ChunkKey, CHUNK_SIZE_I, CHUNK_SIZE_U};
@@ -68,7 +69,7 @@ pub(crate) fn is_hinted_air<C: VoxelWorldConfig>(world: &C, position: IVec3) -> 
 pub(crate) fn air_inputs<C: VoxelWorldConfig>(
     position: IVec3,
     edits: &VoxelEdits<C, C::MaterialIndex>,
-    emission: &[(C::MaterialIndex, u8)],
+    emission: &EmissionTable<C::MaterialIndex>,
     columns: ColumnAnswer,
 ) -> AirInputs {
     let count = edits.edit_stamp(position);
@@ -81,20 +82,8 @@ pub(crate) fn air_inputs<C: VoxelWorldConfig>(
                 let local = (at - min).as_uvec3();
                 let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
                 occupancy.set(x, y, z, voxel.is_solid());
-                let level = match voxel {
-                    crate::voxel::WorldVoxel::Solid(material) => emission
-                        .iter()
-                        .find(|(emissive, _)| *emissive == material)
-                        .map(|(_, level)| *level),
-                    _ => None,
-                };
-                if let Some(level) = level {
-                    emissive.push(EmissiveVoxel {
-                        x: x as u8,
-                        y: y as u8,
-                        z: z as u8,
-                        level,
-                    });
+                if let Some(emitter) = uniform_emission(voxel, emission) {
+                    emissive.push(EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter));
                 }
             }
             occupancy.normalize();
@@ -103,7 +92,7 @@ pub(crate) fn air_inputs<C: VoxelWorldConfig>(
     AirInputs {
         inputs: Arc::new(LightInputs {
             occupancy,
-            emissive,
+            emissive: emissive.into(),
             columns,
             ring: false,
         }),
@@ -170,16 +159,17 @@ pub(crate) fn known_light(
     precision: LightPrecision,
 ) -> ChunkLight {
     let sky = match inputs.direct_sky() {
-        None => ChannelLight::Uniform(0),
-        Some(_) if inputs.all_open_direct() => ChannelLight::Uniform(precision.top()),
+        None => ChunkLevels::Uniform(0),
+        Some(_) if inputs.all_open_direct() => ChunkLevels::Uniform(precision.top()),
         Some(direct) => {
-            ChannelLight::Planes(vec![*direct; precision.bits()].into_boxed_slice())
+            ChunkLevels::Planes(vec![*direct; precision.bits()].into_boxed_slice())
         }
     };
     ChunkLight {
         inputs: inputs.clone(),
         sky,
-        voxel: ChannelLight::Uniform(0),
+        voxel: ChunkLevels::Uniform(0),
+        color: ChunkColor::White,
         precision,
     }
 }
@@ -192,7 +182,7 @@ pub(crate) fn add_air_around<C: VoxelWorldConfig>(
     position: IVec3,
     world: &C,
     edits: &VoxelEdits<C, C::MaterialIndex>,
-    emission: &[(C::MaterialIndex, u8)],
+    emission: &EmissionTable<C::MaterialIndex>,
     rule: Option<SkyRule>,
     mut record: Option<&mut SkyRecord>,
 ) -> Vec<IVec3> {

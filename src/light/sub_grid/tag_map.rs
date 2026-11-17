@@ -19,12 +19,12 @@
 //! keeps the level-0 world chunk there, a chunk of air with no mesh
 //! included, and gives it a slot unless every one of its open voxels, and
 //! every open voxel its slot's shell copies from its face neighbours, holds
-//! one level per channel. Its slot's bytes are made from the light the
-//! world view already stores, so no relight runs. A chunk of air with no
-//! solid in its padding shows the larger of its own sky light and the sky
-//! fill field's, as `light_at` reads it. Slots come from the world's budget
-//! under the rule the route describes, with no priority for sub-grids, and
-//! while a chunk has none its entry holds the most common level among its
+//! one sky light level and one voxel light level. Its slot's bytes are made
+//! from the light the world view already stores, so no relight runs. A chunk of
+//! air with no solid in its padding shows the larger of its own sky light and
+//! the sky fill field's, as `light_at` reads it. Slots come from the world's
+//! budget under the rule the route describes, with no priority for sub-grids,
+//! and while a chunk has none its entry holds the most common level among its
 //! open voxels. When the map stops holding the position, the chunk's slot
 //! is freed in the frame its entry leaves, and a chunk showing its mesh
 //! goes back to the slot rule in [`slot`](crate::light::slot).

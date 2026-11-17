@@ -2,16 +2,27 @@
 //! it.
 //!
 //! A chunk's light is a pure function of the occupancy, direct sky and emissive
-//! voxels of the 3×3×3 chunks around it, read into a box per channel that
-//! reaches that channel's reach past each of the chunk's faces. It never reads
-//! a neighbour's light, so the order chunks arrive in can't change a chunk's
-//! light, and no light outlives what made it.
+//! voxels of the 3×3×3 chunks around it, read into a box for sky light and one
+//! for voxel light, each reaching that light's reach past each of the chunk's
+//! faces. It never reads a neighbour's light, so the order chunks arrive in
+//! can't change a chunk's light, and no light outlives what made it.
 //!
 //! Sky light spreads from voxels with direct sky, each from its own chunk's
 //! column answer (see [`sky`](super::sky)). Voxel light spreads from emissive
-//! voxels. A channel with no source in its box does no work. A solve can
+//! voxels. A kind of light with no source in its box does no work. A solve can
 //! instead be given its box's voxels with direct sky as [`DirectSky::Cells`],
 //! so sky can enter a voxel from any side, and can be told to take no sky fill.
+//!
+//! An emissive voxel joins a solve only if its light could reach the chunk in
+//! the rounds it has left, which the solve tells from how far outside the
+//! chunk it is along each axis. With [`LightShape::Diamond`] every round is
+//! one face step, so the sum of those distances bounds it. With
+//! [`LightShape::Round`] every even round moves light a voxel along every
+//! axis at once, so neither that sum nor a path distance bounds how far light
+//! gets. The solve counts the rounds instead: each even round left takes one
+//! off every distance, and the face steps of the other rounds must cover what
+//! is left. Where no emissive voxel passes, voxel light isn't spread at all.
+//! The check costs a few additions per emissive voxel in the box.
 //!
 //! A neighbour that isn't loaded reads as solid: no light passes through it
 //! and it holds no sources. A solve can be told to read it as air instead,
@@ -50,12 +61,15 @@ use std::time::Duration;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+use super::color::{
+    mix_weighted, mixing_weight, pack, unpack, ChunkColor, EmissionTable, Emitter, WHITE,
+};
 use super::config::LightPrecision;
 use super::config::LightShape;
-use super::faces::{could_reach_sooner, Face, FaceHashes};
+use super::faces::{could_reach_sooner, mix as mix_hash, Face, FaceHashes};
 use super::fill::seed::{CellsAround, FillSeeds, Seeding};
 use super::fill::{FillCells, CELL};
-use super::inputs::{LightInputs, Occupancy, Rescan};
+use super::inputs::{EmissiveVoxel, LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
@@ -67,21 +81,21 @@ use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// One channel of a chunk's light, in steps of its precision: one level for
-/// every open voxel, or a level per voxel as one bit plane per bit of the
-/// level, 16 KiB at 16 levels and 32 KiB at 256.
+/// One kind of a chunk's light, sky or voxel, in steps of its precision: one
+/// level for every open voxel, or a level per voxel as one bit plane per bit of
+/// the level, 16 KiB at 16 levels and 32 KiB at 256.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ChannelLight {
+pub(crate) enum ChunkLevels {
     Uniform(u8),
     Planes(Box<[Plane]>),
 }
 
-impl ChannelLight {
+impl ChunkLevels {
     /// The level at the chunk's voxel `x`, `y`, `z`, which must be open.
     pub fn at(&self, x: usize, y: usize, z: usize) -> u8 {
         match self {
-            ChannelLight::Uniform(level) => *level,
-            ChannelLight::Planes(planes) => planes
+            ChunkLevels::Uniform(level) => *level,
+            ChunkLevels::Planes(planes) => planes
                 .iter()
                 .enumerate()
                 .map(|(bit, plane)| ((plane[x + y * CHUNK] >> z & 1) as u8) << bit)
@@ -94,47 +108,64 @@ impl ChannelLight {
 #[derive(Debug)]
 pub(crate) struct ChunkLight {
     pub inputs: Arc<LightInputs>,
-    pub sky: ChannelLight,
-    pub voxel: ChannelLight,
+    pub sky: ChunkLevels,
+    pub voxel: ChunkLevels,
+    /// The light colour of its voxel light.
+    pub color: ChunkColor,
     /// The precision its levels are steps of: the world's when it was
     /// solved, which a change of precision leaves behind until it relights.
     pub precision: LightPrecision,
 }
 
 impl ChunkLight {
-    /// Whether `other` holds the same levels as this light in every voxel.
-    pub fn same_levels(&self, other: &ChunkLight) -> bool {
+    /// Whether `other` holds the same levels and light colours as this light
+    /// in every voxel.
+    pub fn same_light(&self, other: &ChunkLight) -> bool {
         self.precision == other.precision
             && self.sky == other.sky
             && self.voxel == other.voxel
+            && self.color == other.color
     }
 
     /// The light at the chunk's voxel `local`, which holds `voxel`. A solid
-    /// voxel holds no light, except an emissive one, which holds its level.
+    /// voxel holds no light, except an emissive one, which holds its level
+    /// and light colour.
     pub fn levels_at<I: Copy + PartialEq>(
         &self,
         local: UVec3,
         voxel: WorldVoxel<I>,
-        emission: &[(I, u8)],
+        emission: &EmissionTable<I>,
     ) -> LightLevels {
         match voxel {
-            WorldVoxel::Solid(material) => {
-                let level = emission
-                    .iter()
-                    .find(|(emissive, _)| *emissive == material)
-                    .map_or(0, |(_, level)| *level);
-                LightLevels::new(0, level)
-            }
+            WorldVoxel::Solid(material) => emitted(emission, emission.get(material)),
             _ => {
-                let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
-                LightLevels::of_steps(
-                    self.sky.at(x, y, z),
-                    self.voxel.at(x, y, z),
-                    self.precision,
-                )
+                self.open_levels_at(local.x as usize, local.y as usize, local.z as usize)
             }
         }
     }
+
+    /// The light at the chunk's open voxel `x`, `y`, `z`.
+    pub fn open_levels_at(&self, x: usize, y: usize, z: usize) -> LightLevels {
+        LightLevels::of_steps(
+            self.sky.at(x, y, z),
+            self.voxel.at(x, y, z),
+            self.precision,
+        )
+        .with_voxel_color(self.color.at(x, y, z))
+    }
+}
+
+/// The light at an emissive voxel giving off what `emitter` says, under the
+/// emissive list `emission`, or at a solid voxel that isn't emissive.
+pub(crate) fn emitted<I: Copy + PartialEq>(
+    emission: &EmissionTable<I>,
+    emitter: Option<Emitter>,
+) -> LightLevels {
+    let Some(emitter) = emitter else {
+        return LightLevels::new(0, 0);
+    };
+    LightLevels::new(0, emitter.level)
+        .with_voxel_color(unpack(emission.color(emitter.material)))
 }
 
 /// What a world's chunk tasks need to solve light, shared by all of them.
@@ -147,8 +178,8 @@ pub(crate) struct LightTaskSettings<I> {
     /// Whether the world's chunks show their light, so a solve turns a
     /// chunk's light into the bytes of its slot.
     pub routed: bool,
-    /// Each emissive material and its level, as a whole level from 0 to 15.
-    pub emission: Vec<(I, u8)>,
+    /// Each emissive material, its level and its light colour.
+    pub emission: EmissionTable<I>,
     pub counters: Arc<LightCounters>,
     /// Counts the world's changes to these settings, so light solved under
     /// older settings can be told apart as it lands.
@@ -158,6 +189,12 @@ pub(crate) struct LightTaskSettings<I> {
     /// The `generation` of the last change to the emissive list. A chunk's
     /// emissive voxels found before it are stale.
     pub emission_generation: u64,
+    /// Counts the world's changes to the emissive list that changed only
+    /// light colours, leaving every level alone.
+    pub color_generation: u64,
+    /// For each material index of `emission`, the `color_generation` of the
+    /// last change to its light colour alone, or 0.
+    pub recolored: Arc<[u64]>,
     /// The cells of the world's sky fill field, with sky light and sky fill
     /// on.
     pub fill: Option<FillCells>,
@@ -169,6 +206,14 @@ pub(crate) struct LightCounters {
     /// Chunks whose voxels were scanned for emissive voxels.
     pub emissive_scans: AtomicU64,
     pub solves: AtomicU64,
+    /// Runs of voxel light, each of one light colour, on light boxes holding
+    /// two or more light colours. A light box of one colour runs as in a white
+    /// world, uncounted.
+    pub color_runs: AtomicU64,
+    /// Solves of voxel light that spread none, because no emissive voxel
+    /// around the chunk could light it, though some chunk around it held
+    /// emissive voxels.
+    pub voxel_boxes_culled: AtomicU64,
     /// Time spent solving, in nanoseconds, summed over every chunk task.
     pub solve_nanos: AtomicU64,
     /// Time spent reading the world view before solving, in nanoseconds,
@@ -345,6 +390,9 @@ pub(crate) struct Solved {
     /// The [emission generation](LightTaskSettings::emission_generation) its
     /// inputs' emissive voxels were found under.
     pub emission: u64,
+    /// The [colour generation](LightTaskSettings::color_generation) of the
+    /// settings it was solved under.
+    pub color_generation: u64,
     /// For a relight that found the chunk's emissive voxels again, the inputs
     /// it read from the world view, which its light's inputs replace.
     pub rescanned: Option<Arc<LightInputs>>,
@@ -408,7 +456,8 @@ impl<I: Copy + PartialEq> LightTask<I> {
         let seeding = seeding(settings, &inputs, key, take_fill);
         let snapshot = read_snapshot(&self.view, key, missing, settings);
         let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
-        let mut solved = solve(snapshot, Arc::new(inputs), settings, seeding, direct);
+        let mut solved =
+            solve(key, snapshot, Arc::new(inputs), settings, seeding, direct);
         #[cfg(feature = "sub_grids")]
         if self.grid != GridId::WORLD {
             settings
@@ -504,7 +553,7 @@ pub(crate) fn relight<I: Copy + PartialEq>(
     }
     let snapshot = read_snapshot(view, key, missing, settings);
     let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
-    let mut solved = solve(snapshot, inputs, settings, seeding, direct);
+    let mut solved = solve(key, snapshot, inputs, settings, seeding, direct);
     solved.rescanned = rescanned;
     Some(solved)
 }
@@ -563,8 +612,9 @@ fn read_snapshot<I>(
 /// Solves the light of the chunk whose own inputs are `inputs`, among the
 /// chunks around it in `snapshot`, with its sky fill seeds `seeding` and its
 /// box's direct sky from `direct`, and compares it with its face neighbours'
-/// light.
+/// light. `key` is the chunk's.
 fn solve<I>(
+    key: GridKey,
     mut snapshot: Snapshot,
     inputs: Arc<LightInputs>,
     settings: &LightTaskSettings<I>,
@@ -584,14 +634,29 @@ fn solve<I>(
             seeding.as_ref(),
             &settings.counters,
         ),
-        None => (ChannelLight::Uniform(0), FaceHashes::uniform(0)),
+        None => (ChunkLevels::Uniform(0), FaceHashes::uniform(0)),
     };
-    let (voxel, voxel_faces) = solve_voxel(
-        &snapshot.neighbours,
-        snapshot.missing,
-        &settings.voxel_scale,
-        settings.shape,
-    );
+    // A sub-grid's own voxel light stays white.
+    let (voxel, voxel_faces, color) = if settings.emission.is_colored() && key.is_world()
+    {
+        solve_voxel_colors(
+            &snapshot.neighbours,
+            snapshot.missing,
+            &settings.voxel_scale,
+            settings.shape,
+            &settings.emission,
+            &settings.counters,
+        )
+    } else {
+        let (voxel, faces) = solve_voxel(
+            &snapshot.neighbours,
+            snapshot.missing,
+            &settings.voxel_scale,
+            settings.shape,
+            &settings.counters,
+        );
+        (voxel, faces, ChunkColor::White)
+    };
     let counters = &settings.counters;
     counters.solves.fetch_add(1, Ordering::Relaxed);
     counters
@@ -602,6 +667,7 @@ fn solve<I>(
         inputs,
         sky,
         voxel,
+        color,
         precision: settings.precision,
     });
     let faces = FaceHashes {
@@ -640,6 +706,7 @@ fn solve<I>(
         edit_frame: 0,
         generation: settings.generation,
         emission: settings.emission_generation,
+        color_generation: settings.color_generation,
         rescanned: None,
         fill_seeds,
         read: Box::new(snapshot.neighbours),
@@ -661,18 +728,223 @@ pub(crate) fn solve_voxel(
     missing: Missing,
     scale: &LevelScale,
     shape: LightShape,
-) -> (ChannelLight, [u64; 6]) {
+    counters: &LightCounters,
+) -> (ChunkLevels, [u64; 6]) {
     let centre = centre(neighbours);
-    let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
+    let unlit = (ChunkLevels::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
-    let seeds = seeds(neighbours, scale);
+    let seeds = seeds(neighbours, scale, shape, |_| true);
     if seeds.is_empty() {
+        let held = neighbours
+            .iter()
+            .flatten()
+            .any(|inputs| !inputs.emissive.is_empty());
+        if held {
+            counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
+        }
         return unlit;
     }
     let (planes, faces) = spread(neighbours, missing, scale, shape, &seeds, None, None);
-    (channel_light(planes, &centre.occupancy), faces)
+    (chunk_levels(planes, &centre.occupancy), faces)
+}
+
+/// Solves voxel light for the chunk at the centre of `neighbours`, as
+/// [`solve_voxel`] does, in a world whose emissive list `emission` holds a
+/// light colour other than white. Returns its levels, face hashes and light
+/// colour.
+///
+/// The light colours come from the notes of the emissive materials each
+/// chunk around it holds. With one, light is solved in one run, as in a
+/// white world. With more, it runs once per light colour, from that colour's
+/// emissive voxels alone, and runs that light no voxel of the chunk are
+/// dropped. A voxel's level is then the highest of the runs', which is the
+/// level one run of all of them gives, and its light colour the runs' colours
+/// at their levels, mixed by [`mix_weighted`].
+pub(crate) fn solve_voxel_colors<I>(
+    neighbours: &Neighbourhood,
+    missing: Missing,
+    scale: &LevelScale,
+    shape: LightShape,
+    emission: &EmissionTable<I>,
+    counters: &LightCounters,
+) -> (ChunkLevels, [u64; 6], ChunkColor) {
+    let colors = light_colors(neighbours, emission);
+    if colors.len() <= 1 {
+        let (voxel, faces) = solve_voxel(neighbours, missing, scale, shape, counters);
+        let color = match colors.first() {
+            Some(color) if voxel != ChunkLevels::Uniform(0) => ChunkColor::of(*color),
+            _ => ChunkColor::White,
+        };
+        return (voxel, faces, color);
+    }
+    let unlit = (
+        ChunkLevels::Uniform(0),
+        FaceHashes::uniform(0),
+        ChunkColor::White,
+    );
+    let centre = centre(neighbours);
+    if !centre.occupancy.has_open_voxel() {
+        return unlit;
+    }
+    let mut runs = Vec::new();
+    let mut spread_any = false;
+    for color in colors {
+        let seeds = seeds(neighbours, scale, shape, |voxel| {
+            emission.color(voxel.material()) == color
+        });
+        if seeds.is_empty() {
+            continue;
+        }
+        spread_any = true;
+        let (planes, faces) =
+            spread(neighbours, missing, scale, shape, &seeds, None, None);
+        counters.color_runs.fetch_add(1, Ordering::Relaxed);
+        if lights_any(&planes, &centre.occupancy) {
+            runs.push(Run {
+                color,
+                planes,
+                faces,
+            });
+        }
+    }
+    if !spread_any {
+        counters.voxel_boxes_culled.fetch_add(1, Ordering::Relaxed);
+    }
+    match runs.len() {
+        0 => unlit,
+        1 => {
+            let run = runs.pop().expect("one run");
+            (
+                chunk_levels(run.planes, &centre.occupancy),
+                run.faces,
+                ChunkColor::of(run.color),
+            )
+        }
+        _ => mixed(&runs, &centre.occupancy, scale.precision()),
+    }
+}
+
+/// One light colour's run over a light box.
+struct Run {
+    /// The packed light colour of the emissive voxels it spread from.
+    color: u16,
+    planes: Box<[Plane]>,
+    faces: [u64; 6],
+}
+
+/// The packed light colours of the emissive materials the chunks of
+/// `neighbours` note, each once, in order.
+fn light_colors<I>(neighbours: &Neighbourhood, emission: &EmissionTable<I>) -> Vec<u16> {
+    let mut colors = Vec::new();
+    let materials = neighbours
+        .iter()
+        .flatten()
+        .flat_map(|inputs| inputs.emissive.materials());
+    for material in materials {
+        let color = emission.color(*material);
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    colors.sort_unstable();
+    colors
+}
+
+/// Whether `planes` light any open voxel of the chunk.
+fn lights_any(planes: &[Plane], occupancy: &Occupancy) -> bool {
+    planes.iter().any(|plane| {
+        plane.iter().enumerate().any(|(column, bits)| {
+            bits & !occupancy.solid_column(column % CHUNK, column / CHUNK) != 0
+        })
+    })
+}
+
+/// The levels, face hashes and light colour of a chunk two or more of whose
+/// `runs` light its voxels, with levels in steps of `precision`.
+///
+/// A voxel only one run lights takes that run's light colour as it is. The
+/// face hashes mix each run's with its light colour, so they change wherever
+/// a run's light crosses a face at another time.
+fn mixed(
+    runs: &[Run],
+    occupancy: &Occupancy,
+    precision: LightPrecision,
+) -> (ChunkLevels, [u64; 6], ChunkColor) {
+    let weights: Vec<f32> = (0..=precision.top())
+        .map(|steps| mixing_weight(precision.level_of(steps)))
+        .collect();
+    let levels: Vec<Vec<u8>> = runs.iter().map(|run| voxel_levels(&run.planes)).collect();
+    let colors: Vec<LinearRgba> = runs.iter().map(|run| unpack(run.color)).collect();
+    let mut packed = vec![WHITE; CHUNK * CHUNK * CHUNK];
+    let mut planes = empty_planes(precision);
+    let (mut one, mut uniform) = (None, true);
+    for column in 0..CHUNK * CHUNK {
+        let mut open = !occupancy.solid_column(column % CHUNK, column / CHUNK);
+        while open != 0 {
+            let z = open.trailing_zeros() as usize;
+            open &= open - 1;
+            let index = column + z * CHUNK * CHUNK;
+            let (mut top, mut lit, mut only) = (0, 0, 0);
+            for (run, levels) in levels.iter().enumerate() {
+                if levels[index] > 0 {
+                    top = top.max(levels[index]);
+                    lit += 1;
+                    only = run;
+                }
+            }
+            if lit == 0 {
+                continue;
+            }
+            packed[index] = if lit == 1 {
+                runs[only].color
+            } else {
+                pack(mix_weighted(
+                    levels
+                        .iter()
+                        .zip(&colors)
+                        .filter(|(levels, _)| levels[index] > 0)
+                        .map(|(levels, color)| (*color, weights[levels[index] as usize])),
+                ))
+            };
+            // Whether every lit voxel has the one light colour.
+            uniform &= *one.get_or_insert(packed[index]) == packed[index];
+            for (bit, plane) in planes.iter_mut().enumerate() {
+                plane[column] |= ((top >> bit & 1) as u32) << z;
+            }
+        }
+    }
+    let mut faces = [0; 6];
+    for run in runs {
+        for (face, hash) in faces.iter_mut().zip(run.faces) {
+            if hash != 0 {
+                *face = mix_hash(mix_hash(*face, run.color as u64), hash);
+            }
+        }
+    }
+    let color = match one {
+        Some(one) if uniform => ChunkColor::of(one),
+        _ => ChunkColor::Mixed(packed.into()),
+    };
+    (chunk_levels(planes, occupancy), faces, color)
+}
+
+/// The level in `planes` of each voxel of the chunk, at
+/// [`voxel_index`](super::color::voxel_index).
+fn voxel_levels(planes: &[Plane]) -> Vec<u8> {
+    let mut levels = vec![0; CHUNK * CHUNK * CHUNK];
+    for (bit, plane) in planes.iter().enumerate() {
+        for (column, bits) in plane.iter().enumerate() {
+            let mut bits = *bits;
+            while bits != 0 {
+                let z = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                levels[column + z * CHUNK * CHUNK] |= 1 << bit;
+            }
+        }
+    }
+    levels
 }
 
 /// The sky fill cells of the 27 positions around `position`.
@@ -702,9 +974,9 @@ pub(crate) fn solve_sky(
     shape: LightShape,
     fill: Option<&Seeding>,
     counters: &LightCounters,
-) -> (ChannelLight, [u64; 6]) {
+) -> (ChunkLevels, [u64; 6]) {
     let centre = centre(neighbours);
-    let unlit = (ChannelLight::Uniform(0), FaceHashes::uniform(0));
+    let unlit = (ChunkLevels::Uniform(0), FaceHashes::uniform(0));
     if !centre.occupancy.has_open_voxel() {
         return unlit;
     }
@@ -729,7 +1001,7 @@ pub(crate) fn solve_sky(
         });
         if all_direct {
             let top = scale.precision().top();
-            return (ChannelLight::Uniform(top), FaceHashes::uniform(top));
+            return (ChunkLevels::Uniform(top), FaceHashes::uniform(top));
         }
     }
     let seeds = fill.and_then(|seeding| Some((seeding.seeds.as_ref()?, seeding.took)));
@@ -752,7 +1024,7 @@ pub(crate) fn solve_sky(
             }
         }
     }
-    (channel_light(planes, &centre.occupancy), faces)
+    (chunk_levels(planes, &centre.occupancy), faces)
 }
 
 /// Adds to `direct` the voxels of the cells `sunlit` holds for each position
@@ -784,9 +1056,9 @@ fn centre(neighbours: &Neighbourhood) -> &LightInputs {
         .expect("the chunk's own inputs")
 }
 
-fn channel_light(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChannelLight {
+fn chunk_levels(planes: Box<[Plane]>, occupancy: &Occupancy) -> ChunkLevels {
     one_level(&planes, occupancy)
-        .map_or(ChannelLight::Planes(planes), ChannelLight::Uniform)
+        .map_or(ChunkLevels::Planes(planes), ChunkLevels::Uniform)
 }
 
 /// Sky fill's seeds for a solve, the time finding them took, and where to
@@ -870,10 +1142,17 @@ fn spread_in<R: Row>(
     })
 }
 
-/// The emissive voxels whose light could reach the chunk, as seeds in its box,
-/// sorted by where their light starts.
-fn seeds(neighbours: &Neighbourhood, scale: &LevelScale) -> Vec<Seed> {
+/// The emissive voxels whose light could reach the chunk, spreading in
+/// `shape`, as seeds in its box, sorted by where their light starts. Only the
+/// emissive voxels `keep` holds for count.
+fn seeds(
+    neighbours: &Neighbourhood,
+    scale: &LevelScale,
+    shape: LightShape,
+    keep: impl Fn(&EmissiveVoxel) -> bool,
+) -> Vec<Seed> {
     let reach = scale.reach() as i32;
+    let last = scale.last_distance(1) as i32;
     let side = CHUNK_SIZE_I + 2 * reach;
     let mut seeds = Vec::new();
     for (index, inputs) in neighbours.iter().enumerate() {
@@ -883,24 +1162,25 @@ fn seeds(neighbours: &Neighbourhood, scale: &LevelScale) -> Vec<Seed> {
         let index = index as i32;
         let offset = IVec3::new(index % 3, index / 3 % 3, index / 9) - IVec3::ONE;
         for voxel in &inputs.emissive {
-            let level = scale.precision().of_whole(voxel.level);
+            if !keep(voxel) {
+                continue;
+            }
+            let level = scale.precision().of_whole(voxel.level());
             let Some(start) = scale.start(level) else {
                 continue;
             };
             let position = offset * CHUNK_SIZE_I
-                + IVec3::new(voxel.x as i32, voxel.y as i32, voxel.z as i32)
+                + IVec3::new(voxel.x() as i32, voxel.y() as i32, voxel.z() as i32)
                 + IVec3::splat(reach);
             if position.cmplt(IVec3::ZERO).any()
                 || position.cmpge(IVec3::splat(side)).any()
             {
                 continue;
             }
-            // How far outside the chunk the voxel is, at least one step.
             let outside = (IVec3::splat(reach) - position)
                 .max(position - IVec3::splat(reach + CHUNK_SIZE_I - 1))
-                .max_element()
-                .max(1);
-            if outside + start as i32 > reach {
+                .max(IVec3::ZERO);
+            if !could_reach(outside, start as i32, last, shape) {
                 continue;
             }
             seeds.push(Seed {
@@ -913,6 +1193,24 @@ fn seeds(neighbours: &Neighbourhood, scale: &LevelScale) -> Vec<Seed> {
     }
     seeds.sort_by_key(|seed| seed.start);
     seeds
+}
+
+/// Whether light from a source `outside` voxels outside the chunk along each
+/// axis, starting at step `start`, could reach a voxel of the chunk by the
+/// last lit round `last`, spreading in `shape`.
+///
+/// Light joins in the round after `start`. Of the rounds left, a round
+/// spreading by three passes moves light a voxel along every axis, and any
+/// other round a face step along one. So light gets there only if the face
+/// steps left cover what the three-pass rounds leave of each distance.
+fn could_reach(outside: IVec3, start: i32, last: i32, shape: LightShape) -> bool {
+    let rounds = last - start;
+    let three_pass = match shape {
+        LightShape::Round => last / 2 - start / 2,
+        LightShape::Diamond => 0,
+    };
+    let left = (outside - IVec3::splat(three_pass)).max(IVec3::ZERO);
+    rounds > 0 && left.element_sum() <= rounds - three_pass
 }
 
 /// Fills a box's `rows`, at `x + y × side`, from a `u32` column along z of
@@ -1021,7 +1319,7 @@ mod tests {
     ) -> Arc<LightInputs> {
         Arc::new(LightInputs {
             occupancy,
-            emissive,
+            emissive: emissive.into(),
             columns,
             ring: true,
         })
@@ -1052,12 +1350,15 @@ mod tests {
         // The chunk is solid but for one open voxel on its +X face, and a lamp
         // ten voxels along that face. The only way between them runs outside
         // the chunk, through the +X neighbour, which isn't loaded.
-        let lamp = EmissiveVoxel {
-            x: 31,
-            y: 10,
-            z: 20,
-            level: 15,
-        };
+        let lamp = EmissiveVoxel::new(
+            31,
+            10,
+            20,
+            Emitter {
+                level: 15,
+                material: 0,
+            },
+        );
         let centre = inputs(
             solid_except([(31, 10, 10)]),
             vec![lamp],
@@ -1066,7 +1367,13 @@ mod tests {
         let alone = around(&[(IVec3::ZERO, centre.clone())]);
         let shape = LightShape::Diamond;
 
-        let (air, _) = solve_voxel(&alone, Missing::Air, &scale(), shape);
+        let (air, _) = solve_voxel(
+            &alone,
+            Missing::Air,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
         // One step out of the lamp, ten along z, one step back in.
         assert_eq!(air.at(31, 10, 10), 15 - 12);
         let open_beside = around(&[
@@ -1076,11 +1383,23 @@ mod tests {
                 inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()),
             ),
         ]);
-        let (open, _) = solve_voxel(&open_beside, Missing::Solid, &scale(), shape);
+        let (open, _) = solve_voxel(
+            &open_beside,
+            Missing::Solid,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
         assert_eq!(air, open);
 
-        let (solid, _) = solve_voxel(&alone, Missing::Solid, &scale(), shape);
-        assert_eq!(solid, ChannelLight::Uniform(0));
+        let (solid, _) = solve_voxel(
+            &alone,
+            Missing::Solid,
+            &scale(),
+            shape,
+            &LightCounters::default(),
+        );
+        assert_eq!(solid, ChunkLevels::Uniform(0));
     }
 
     #[test]
@@ -1197,7 +1516,7 @@ mod tests {
             None,
             &counters,
         );
-        assert_eq!(columns, ChannelLight::Uniform(0));
+        assert_eq!(columns, ChunkLevels::Uniform(0));
     }
 
     fn settings_with_fill(fill: FillCells) -> LightTaskSettings<u8> {
@@ -1207,11 +1526,13 @@ mod tests {
             sky_scale: Some(scale()),
             shape: LightShape::Round,
             routed: false,
-            emission: Vec::new(),
+            emission: EmissionTable::default(),
             counters: Arc::new(LightCounters::default()),
             generation: 0,
             sky_generation: 0,
             emission_generation: 0,
+            color_generation: 0,
+            recolored: Arc::from([]),
             fill: Some(fill),
         }
     }
@@ -1244,5 +1565,122 @@ mod tests {
         assert!(world.seeds.is_some());
 
         assert!(seeding(&settings, &mixed, in_world(position), false).is_none());
+    }
+
+    /// A neighbourhood holding only one lamp at `level`, at `position` in the
+    /// box of light of `reach` around the chunk, in the chunk position that
+    /// holds it.
+    fn lamp_at(position: IVec3, reach: i32, level: u8) -> Neighbourhood {
+        let voxel = position - IVec3::splat(reach);
+        let chunk = voxel.div_euclid(IVec3::splat(CHUNK_SIZE_I));
+        let local = voxel.rem_euclid(IVec3::splat(CHUNK_SIZE_I)).as_uvec3();
+        let lamp = EmissiveVoxel::new(
+            local.x as u8,
+            local.y as u8,
+            local.z as u8,
+            Emitter { level, material: 0 },
+        );
+        let held = inputs(Occupancy::Open, vec![lamp], ColumnAnswer::none());
+        around(&[(chunk, held)])
+    }
+
+    /// Whether light from lamps at `positions` in the box, each starting at
+    /// `start`, reaches a voxel of the chunk, as the kernel spreads it
+    /// through a box of air.
+    fn kernel_reaches(
+        positions: &[IVec3],
+        start: u8,
+        scale: &LevelScale,
+        shape: LightShape,
+    ) -> bool {
+        let seeds: Vec<Seed> = positions
+            .iter()
+            .map(|position| Seed {
+                x: position.x as u8,
+                y: position.y as u8,
+                z: position.z as u8,
+                start,
+            })
+            .collect();
+        let mut air = around(&[]);
+        air[neighbour_index(IVec3::ZERO)] =
+            Some(inputs(Occupancy::Open, Vec::new(), ColumnAnswer::none()));
+        let (planes, _) = spread(&air, Missing::Air, scale, shape, &seeds, None, None);
+        planes.iter().flatten().any(|column| *column != 0)
+    }
+
+    #[test]
+    fn the_cull_keeps_every_lamp_whose_light_reaches_the_chunk() {
+        for reach in [14, 17] {
+            for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
+                let scale = LevelScale::new(reach, precision);
+                for shape in [LightShape::Round, LightShape::Diamond] {
+                    let side = CHUNK_SIZE_I + 2 * reach as i32;
+                    // The box and the kernel are the same mirrored along
+                    // each axis, so one corner of the box stands for all.
+                    let half = side / 2;
+                    for level in 1..=15 {
+                        let Some(start) = scale.start(precision.of_whole(level)) else {
+                            continue;
+                        };
+                        let mut culled = Vec::new();
+                        for z in 0..half {
+                            for y in 0..half {
+                                for x in 0..half {
+                                    let position = IVec3::new(x, y, z);
+                                    let neighbours =
+                                        lamp_at(position, reach as i32, level);
+                                    if seeds(&neighbours, &scale, shape, |_| true)
+                                        .is_empty()
+                                    {
+                                        culled.push(position);
+                                    }
+                                }
+                            }
+                        }
+                        assert!(!culled.is_empty());
+                        // Light only adds up, so if all of them together
+                        // light nothing, none of them does alone.
+                        if !kernel_reaches(&culled, start, &scale, shape) {
+                            continue;
+                        }
+                        let reaching = culled
+                            .iter()
+                            .find(|position| {
+                                kernel_reaches(&[**position], start, &scale, shape)
+                            })
+                            .expect("one lamp reaches the chunk alone");
+                        panic!(
+                            "the cull drops a lamp at level {level} at {reaching} in \
+                             the box, whose light reaches the chunk at reach {reach}, \
+                             {precision:?}, {shape:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cull_drops_a_lamp_past_a_corner_whose_light_cant_reach_the_chunk() {
+        // Five voxels outside the chunk along every axis: 15 face steps away,
+        // and the light of a lamp at level 15 takes 14.
+        let position = IVec3::splat(14 - 5);
+        let neighbours = lamp_at(position, 14, 15);
+
+        assert!(seeds(&neighbours, &scale(), LightShape::Diamond, |_| true).is_empty());
+        assert!(!kernel_reaches(
+            &[position],
+            0,
+            &scale(),
+            LightShape::Diamond
+        ));
+        // Round light moves along every axis at once in its even rounds, so
+        // it gets there.
+        assert_eq!(
+            seeds(&neighbours, &scale(), LightShape::Round, |_| true).len(),
+            1
+        );
+        assert!(kernel_reaches(&[position], 0, &scale(), LightShape::Round));
     }
 }

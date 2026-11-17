@@ -56,6 +56,7 @@ use bevy::platform::collections::HashMap;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+use super::color::EmissionTable;
 use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
@@ -88,7 +89,7 @@ pub(crate) fn takes_coarse_path(key: ChunkKey, data_shape: UVec3) -> bool {
 /// A coarse chunk's light, as its task worked it out.
 pub(crate) struct CoarseSolved<I> {
     /// The sky light and voxel light its tag holds without a slot: the one
-    /// level per channel its faces see, or else the brightest level a tenth
+    /// level of each that its faces see, or else the brightest level a tenth
     /// of them see.
     pub levels: (u8, u8),
     /// The precision of its levels and of its slot's format.
@@ -115,11 +116,7 @@ pub(crate) fn emission_changed<I: Copy + PartialEq>(
         return false;
     }
     let entry = |settings: &LightTaskSettings<I>, material: I| {
-        settings
-            .emission
-            .iter()
-            .find(|(emissive, _)| *emissive == material)
-            .map(|(_, level)| *level)
+        settings.emission.get(material).map(|emitter| emitter.level)
     };
     materials
         .iter()
@@ -198,7 +195,7 @@ struct Cells<I> {
 }
 
 impl<I: Copy + PartialEq> Cells<I> {
-    fn of(chunk: &ChunkData<I>, emission: &[(I, u8)]) -> Self {
+    fn of(chunk: &ChunkData<I>, emission: &EmissionTable<I>) -> Self {
         let uniform = |open: bool| Self {
             open: vec![if open { ALL_CELLS } else { 0 }; SIDE * SIDE],
             lamps: Vec::new(),
@@ -253,10 +250,8 @@ impl<I: Copy + PartialEq> Cells<I> {
                                 if !materials.contains(&material) {
                                     materials.push(material);
                                 }
-                                let level = emission
-                                    .iter()
-                                    .find(|(emissive, _)| *emissive == material)
-                                    .map(|(_, level)| *level);
+                                let level =
+                                    emission.get(material).map(|emitter| emitter.level);
                                 last = Some((material, level));
                                 level
                             }
@@ -554,9 +549,9 @@ thread_local! {
     static TWO_WORD_BOXES: RefCell<Vec<LightBox<TwoWords>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Spreads one channel through the `open` cells, from the `lit` cells and
-/// the emissive cells `lamps`. Returns each cell's level in slot order,
-/// padding included.
+/// Spreads sky light or voxel light through the `open` cells, from the `lit`
+/// cells and the emissive cells `lamps`. Returns each cell's level in slot
+/// order, padding included.
 fn spread(
     open: &[u64],
     lit: Option<&[u64]>,

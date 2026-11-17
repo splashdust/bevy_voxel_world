@@ -21,6 +21,7 @@ use std::fmt::Display;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use bevy::color::{Color, LinearRgba};
 use bevy::log::{warn, warn_once};
 use bevy::reflect::Reflect;
 
@@ -71,6 +72,10 @@ use bevy::reflect::Reflect;
 /// [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
 /// is false until every relight has landed.
 ///
+/// A change of an emissive material's light colour alone relights only the
+/// chunks whose light box holds an emissive voxel of that material: see
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials).
+///
 /// A chunk of air with no solid beside it isn't relit, so
 /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) there can
 /// read light from the old settings. A chunk above LOD level 0 takes the new
@@ -97,6 +102,27 @@ use bevy::reflect::Reflect;
 /// Landing relit light takes at most about 1 ms of the main thread per frame,
 /// so an edit whose light reaches many chunks lands over a few more frames.
 /// An edit where no light is, such as in a dark cave, relights nothing.
+///
+/// # Light colour
+///
+/// An emissive material's light can take a colour, with
+/// [`Emission::with_color`]. Where light of several colours reaches a voxel,
+/// each of its red, green and blue takes the brightest of them, so a red
+/// and a green emissive voxel light the voxels between them yellow, no
+/// brighter than either. Sky light has no colour of its own: it takes the
+/// colour of Bevy's ambient light, environment map and sun.
+///
+/// In a world with colours other than white, a chunk whose voxel light is
+/// all one colour solves as a white chunk does and keeps one colour for all
+/// its voxels. Where light of two or more colours reaches a chunk, it costs
+/// more, and each cost grows with:
+///
+/// - **Solving:** the light colours among the emissive voxels within voxel
+///   reach of the chunk, since its voxel light is solved once for each
+///   colour. The colours around each chunk count, not how many the world
+///   declares.
+/// - **Memory:** the chunks that light of two or more colours reaches, each
+///   holding a light colour for every voxel, 64 KiB a chunk.
 ///
 /// # WASM
 ///
@@ -291,10 +317,10 @@ pub struct LightPropagation {
     /// the GPU memory per slot: see [`slot_capacity`](Self::slot_capacity).
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, every loaded chunk
-    /// relights, coarse chunks included, and the new texture is made when a
-    /// chunk next needs a slot. Chunks look flat until their light lands
-    /// again, which takes longer than other relights.
+    /// sky light level and one voxel light level, the old texture is released,
+    /// every loaded chunk relights, coarse chunks included, and the new texture
+    /// is made when a chunk next needs a slot. Chunks look flat until their
+    /// light lands again, which takes longer than other relights.
     ///
     /// Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
@@ -319,9 +345,9 @@ pub struct LightPropagation {
     /// glow. Raise the count if that warning appears.
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, the settings relight
-    /// runs, and the new texture is made when a chunk next needs a slot. Chunks
-    /// look flat until they take slots again.
+    /// sky light level and one voxel light level, the old texture is released,
+    /// the settings relight runs, and the new texture is made when a chunk next
+    /// needs a slot. Chunks look flat until they take slots again.
     ///
     /// Defaults to 1,024.
     pub slot_capacity: u32,
@@ -775,6 +801,10 @@ pub struct LightLook {
     /// The brightness of each voxel light level, as a share of
     /// `voxel_brightness`.
     ///
+    /// Where light of several colours meets, the colours mix in the
+    /// proportions of the default curve, whatever this curve is, so changing
+    /// it never relights.
+    ///
     /// Shows on the next frame, for one uniform write. Defaults to
     /// `0.7^(15 - level)`, with level 0 exactly black.
     pub voxel_falloff: LevelCurve,
@@ -1007,24 +1037,57 @@ pub enum LightAo {
     Off,
 }
 
-/// The light an emissive material gives off.
+/// The light an emissive material gives off: a level, and a light colour.
 ///
-/// Built with [`Emission::level`].
+/// Built with [`Emission::level`], which gives white light, and coloured
+/// with [`with_color`](Self::with_color).
 #[derive(Reflect, Clone, Copy, PartialEq, Debug)]
 pub struct Emission {
     level: f32,
+    /// The light colour, scaled so its brightest component is 1, or black.
+    color: LinearRgba,
 }
 
 impl Emission {
-    /// Light at `level`, from 0 to 15. A voxel at level 8 lights about half as
-    /// far as one at 15.
+    /// White light at `level`, from 0 to 15. A voxel at level 8 lights about
+    /// half as far as one at 15.
     pub fn level(level: f32) -> Self {
-        Self { level }
+        Self {
+            level,
+            color: LinearRgba::WHITE,
+        }
     }
 
-    /// The level as a whole level from 0 to 15.
+    /// This emission with its light in `color`.
+    ///
+    /// Only the colour's hue and saturation count. It's scaled so its brightest
+    /// component is 1, so `Color::srgb(0.5, 0.0, 0.0)` gives the same light as
+    /// `Color::srgb(1.0, 0.0, 0.0)`, and grey gives white. The level alone sets
+    /// how bright the light is and how far it reaches. Black gives no light, as
+    /// level 0 does. Alpha is ignored, and a negative component is read as 0,
+    /// with a warning logged once.
+    pub fn with_color(self, color: impl Into<Color>) -> Self {
+        let (color, negative) = super::color::scaled(color.into().to_linear());
+        if negative {
+            warn_once!(
+                "light propagation: an emission colour has a negative component, \
+                 which is read as 0"
+            );
+        }
+        Self { color, ..self }
+    }
+
+    /// The level as a whole level from 0 to 15, and 0 for black light.
     pub(crate) fn whole_level(&self) -> u8 {
+        if self.color == LinearRgba::BLACK {
+            return 0;
+        }
         self.level.round().clamp(0.0, 15.0) as u8
+    }
+
+    /// The light colour, with its brightest component 1, or black.
+    pub(crate) fn color(&self) -> LinearRgba {
+        self.color
     }
 
     /// This emission with its level clamped to 0 to 15, logging a warning once
@@ -1032,6 +1095,7 @@ impl Emission {
     pub(crate) fn clamped(self) -> Self {
         Self {
             level: clamp_setting(self.level, 0.0, 15.0, "emission level"),
+            ..self
         }
     }
 }

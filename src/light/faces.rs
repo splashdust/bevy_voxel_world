@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 
 use super::levels::LevelScale;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -98,8 +98,8 @@ pub(crate) fn mix(hash: u64, value: u64) -> u64 {
     (hash.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
-/// Per channel and per face, a hash of when light reached each of a chunk's
-/// voxels on that face: 96 B a chunk.
+/// For sky light and voxel light and per face, a hash of when light reached
+/// each of a chunk's voxels on that face: 96 B a chunk.
 ///
 /// A neighbour's light can only change with a chunk's light where light
 /// crosses their shared face at another time, so a relight that leaves a
@@ -120,8 +120,8 @@ impl FaceHashes {
         self.sky[face] != other.sky[face] || self.voxel[face] != other.voxel[face]
     }
 
-    /// The hashes of a channel holding `level` in every open voxel, which no
-    /// kernel run spread.
+    /// The hashes of sky light or voxel light holding `level` in every open
+    /// voxel, which no kernel run spread.
     pub fn uniform(level: u8) -> [u64; 6] {
         [if level == 0 { 0 } else { mix(0, level as u64) }; 6]
     }
@@ -131,11 +131,11 @@ impl FaceHashes {
 /// `to`, sooner than `to`'s levels say light got there, so the neighbour must
 /// relight.
 ///
-/// It holds when, in either channel, at some pair of touching open voxels, the
-/// first distance from a source that holds `from`'s level is less than the
-/// last distance that holds `to`'s, with level 0 counting as `reach + 1`.
-/// Direct sky, at the top level, is a source itself, so a neighbour beside it
-/// is one step from a source. `sky_scale` is `None` with sky light off.
+/// It holds when, in sky light or voxel light, at some pair of touching open
+/// voxels, the first distance from a source that holds `from`'s level is less
+/// than the last distance that holds `to`'s, with level 0 counting as
+/// `reach + 1`. Direct sky, at the top level, is a source itself, so a
+/// neighbour beside it is one step from a source. `sky_scale` is `None` with sky light off.
 ///
 /// It also holds when an emissive voxel of `from` on the face could light the
 /// open voxel of `to` across it sooner than `to`'s voxel light there says:
@@ -152,8 +152,8 @@ pub(crate) fn could_reach_sooner(
     if from.precision != to.precision {
         return true;
     }
-    let channel_reaches = |scale: &LevelScale, of: fn(&ChunkLight) -> &ChannelLight| {
-        if let ChannelLight::Uniform(0) = of(from) {
+    let reaches = |scale: &LevelScale, of: fn(&ChunkLight) -> &ChunkLevels| {
+        if let ChunkLevels::Uniform(0) = of(from) {
             return false;
         }
         let back = face.opposite();
@@ -175,9 +175,9 @@ pub(crate) fn could_reach_sooner(
         }
         false
     };
-    channel_reaches(voxel_scale, |light| &light.voxel)
+    reaches(voxel_scale, |light| &light.voxel)
         || emissive_reaches_sooner(from, to, face, voxel_scale)
-        || sky_scale.is_some_and(|scale| channel_reaches(scale, |light| &light.sky))
+        || sky_scale.is_some_and(|scale| reaches(scale, |light| &light.sky))
 }
 
 /// Whether an emissive voxel of `from` on `face` could light the open voxel of
@@ -198,7 +198,8 @@ fn emissive_reaches_sooner(
 ) -> bool {
     let back = face.opposite();
     from.inputs.emissive.iter().any(|voxel| {
-        let Some((u, v)) = face.uv(voxel.x as usize, voxel.y as usize, voxel.z as usize)
+        let Some((u, v)) =
+            face.uv(voxel.x() as usize, voxel.y() as usize, voxel.z() as usize)
         else {
             return false;
         };
@@ -206,7 +207,7 @@ fn emissive_reaches_sooner(
         if to.inputs.occupancy.is_solid(tx, ty, tz) {
             return false;
         }
-        let Some(start) = scale.start(scale.precision().of_whole(voxel.level)) else {
+        let Some(start) = scale.start(scale.precision().of_whole(voxel.level())) else {
             return false;
         };
         start as u32 + 1 < scale.last_distance(to.voxel.at(tx, ty, tz))

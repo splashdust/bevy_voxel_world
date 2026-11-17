@@ -20,7 +20,8 @@
 // The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
 // chunk's slot in the texture: 34 texels a side, the chunk's voxels in its
 // padded local coordinates, with texel rows along z. Without it, the low bits
-// hold the one level of each channel every face of the chunk sees.
+// hold the one sky light level and voxel light level every face of the chunk
+// sees.
 //
 // The look's `steps_256` says how levels are stored. At 16 levels a texel is
 // one `R8Uint` byte, sky light in its low nibble and voxel light in its high
@@ -35,9 +36,11 @@
 // Its slot's cells are `1 << L` voxels wide, so its local position is divided
 // by that width, keeping the corner of its first cell at (1, 1, 1).
 //
-// Bit 30 marks a sub-grid's chunk, with or without a slot, and bits 28 and 29
-// are clear. Every read of a field masks it to its width, so a sub-grid's tag
-// reads the same slot, LOD level and levels it would without bit 30.
+// Bit 30 marks a sub-grid's chunk, with or without a slot. A tag with a slot
+// sets bit 29 when the chunk shows a light colour other than white, and a tag
+// with no slot holds its light colour in bits 16-29; this shader doesn't read
+// them yet. Every read of a field masks it to its width, so a tag reads the
+// same slot, LOD level and levels whatever its colour and sub-grid bits hold.
 //
 // With the crate's `sub_grids` feature, a lit world sets the `SUB_GRIDS`
 // shader def, and its material holds the world's tag map at binding 202: a
@@ -66,7 +69,7 @@
 //   https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp
 // - tesserae's light propagation, where sky light scales Bevy's occlusion
 //   terms and `directional_shadow_factor`, and voxel light adds through the
-//   emissive channel:
+//   emissive output:
 //   https://github.com/mkappworks-dev/tesserae/pull/3
 
 import bevy_pbr::render::{
@@ -170,10 +173,10 @@ fn load_cell(origin: vec3<i32>, cell: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(f32(sky), f32(voxel), 0.0) / per_level;
 }
 
-// Blends one channel of the cell in front of a face with its neighbours in the
-// face's plane, `du` and `dv` along each. A zero reads as a wall and is left
-// out, and the diagonal is left out when both cells beside it are, so no light
-// passes through a corner between two solids.
+// Blends sky light or voxel light of the cell in front of a face with its
+// neighbours in the face's plane, `du` and `dv` along each. A zero reads as a
+// wall and is left out, and the diagonal is left out when both cells beside it
+// are, so no light passes through a corner between two solids.
 fn blend(front: f32, side_u: f32, side_v: f32, diagonal: f32, du: f32, dv: f32) -> f32 {
     var total = front * (1.0 - du) * (1.0 - dv);
     var weight = step(0.01, front) * (1.0 - du) * (1.0 - dv);
@@ -238,11 +241,12 @@ fn joined_to(mask: u32, start: u32) -> u32 {
     return reached;
 }
 
-// One channel of a 2x2x2 block of voxels, from each voxel's level and weight.
-// A zero reads as a wall and is left out, and a voxel counts only if it's
-// joined through counted voxels to `nearest`, the voxel of the most weight,
-// which joins its neighbours even when it reads zero. Smoothed light takes the
-// weighted mean of the counted voxels, and stepped light the nearest of them.
+// Sky light or voxel light of a 2x2x2 block of voxels, from each voxel's level
+// and weight. A zero reads as a wall and is left out, and a voxel counts only
+// if it's joined through counted voxels to `nearest`, the voxel of the most
+// weight, which joins its neighbours even when it reads zero. Smoothed light
+// takes the weighted mean of the counted voxels, and stepped light the nearest
+// of them.
 fn blend_eight(levels: array<f32, 8>, weights: array<f32, 8>, nearest: u32) -> f32 {
     // Copies, since a function's arguments can't be indexed by a variable.
     var l = levels;
@@ -313,8 +317,8 @@ fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
     );
 }
 
-// The one level of each channel that every face of a chunk sees, from the
-// chunk's tag when it names no slot.
+// The one sky light level and voxel light level that every face of a chunk
+// sees, from the chunk's tag when it names no slot.
 fn tag_levels(tag: u32) -> LightLevels {
     var sky = f32(tag & 15u);
     var voxel = f32((tag >> 4u) & 15u);
@@ -564,7 +568,7 @@ fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
 // light with a shadow map, so a shader calling this must also call
 // `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light
 // and a lamp's glow add through the
-// emissive channel, in the forward pass only, so no other pass counts them
+// emissive output, in the forward pass only, so no other pass counts them
 // twice.
 //
 // `ao` is the face's ambient occlusion, from 0 to 1, applied as the look's

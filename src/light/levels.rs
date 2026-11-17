@@ -12,6 +12,8 @@
 //!   a 0 to 15 scale for sky light and for light from blocks, the scale
 //!   gameplay code reads here.
 
+use bevy::color::LinearRgba;
+
 use super::config::LightPrecision;
 
 impl LightPrecision {
@@ -25,8 +27,8 @@ impl LightPrecision {
         }
     }
 
-    /// How many bits a level has, which is how many bit planes a channel
-    /// stores for a chunk.
+    /// How many bits a level has, which is how many bit planes sky light
+    /// or voxel light stores for a chunk.
     #[inline]
     pub(crate) fn bits(self) -> usize {
         match self {
@@ -71,7 +73,8 @@ impl LightPrecision {
 }
 
 /// The light at a voxel, as read by
-/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at).
+/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at): a level for
+/// each kind of light, and the colour of its voxel light.
 ///
 /// Each kind of light is a level from 0, pitch black, to 15. Sky light at 15
 /// means the voxel has direct sky. At 16 levels every level is a whole
@@ -83,6 +86,12 @@ pub struct LightLevels {
     pub sky: f32,
     /// Light from emissive voxels.
     pub voxel: f32,
+    /// The colour of the voxel light, with its brightest component 1, so
+    /// [`voxel`](Self::voxel) alone says how bright it is. Where light of several
+    /// colours reaches the voxel, it's the colour they mix to. An emissive voxel
+    /// reads its own colour. White where `voxel` is 0, and everywhere in a world
+    /// whose emissive voxels are all white.
+    pub voxel_color: LinearRgba,
 }
 
 impl LightLevels {
@@ -91,6 +100,7 @@ impl LightLevels {
         Self {
             sky: sky as f32,
             voxel: voxel as f32,
+            voxel_color: LinearRgba::WHITE,
         }
     }
 
@@ -99,6 +109,19 @@ impl LightLevels {
         Self {
             sky: precision.level_of(sky),
             voxel: precision.level_of(voxel),
+            voxel_color: LinearRgba::WHITE,
+        }
+    }
+
+    /// These levels with their voxel light in `color`, where it has any.
+    pub(crate) fn with_voxel_color(self, color: LinearRgba) -> Self {
+        Self {
+            voxel_color: if self.voxel > 0.0 {
+                color
+            } else {
+                LinearRgba::WHITE
+            },
+            ..self
         }
     }
 

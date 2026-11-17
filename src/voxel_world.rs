@@ -603,8 +603,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
     /// renders, which is plausible rather than exact: the cell holding the
     /// voxel while the chunk holds a slot in the world's light texture, and
-    /// otherwise the one level per channel its tag shows. A solid cell reads
-    /// the brightest of its six neighbours, or 0 if all six are solid.
+    /// otherwise the one sky light level and voxel light level its tag shows. A
+    /// solid cell reads the brightest of its six neighbours, or 0 if all six
+    /// are solid.
     ///
     /// Where nothing renders, in such a chunk with no voxels to mesh or in air
     /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,
@@ -671,9 +672,9 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
     /// relights once it lands. Chunks above LOD level 0 have no relights to
     /// wait for, except after a change of precision, which solves them all
     /// again, and a change to the emissive list, which solves again those
-    /// holding a material whose entry changed. Settled doesn't mean exact: light beside a chunk that isn't
-    /// loaded can be darker than the truth. A world without light propagation
-    /// is always settled.
+    /// holding a material whose entry changed. Settled doesn't mean exact:
+    /// light beside a chunk that isn't loaded can be darker than the truth. A
+    /// world without light propagation is always settled.
     #[cfg(feature = "light_propagation")]
     pub fn light_is_settled(&self) -> bool {
         let reset = self

@@ -885,9 +885,15 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         let caps_voxel = config.enclosure_caps_voxel_light();
         let Some(own) = light.settings.own_light_at(grid, position) else {
             if light.settings.closed_in_at(grid, position) {
+                let voxel = if caps_voxel { 0.0 } else { world.voxel };
                 return Some(crate::light::LightLevels {
                     sky: 0.0,
-                    voxel: if caps_voxel { 0.0 } else { world.voxel },
+                    voxel,
+                    voxel_color: if voxel > 0.0 {
+                        world.voxel_color
+                    } else {
+                        LinearRgba::WHITE
+                    },
                 });
             }
             return Some(world);
@@ -899,13 +905,21 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         } else {
             world.voxel
         };
+        // A sub-grid's own voxel light is white, so it takes the colour of
+        // the world's light only where that's the brighter.
+        let voxel = world_voxel.max(own.voxel);
         Some(crate::light::LightLevels {
             sky: if capped {
                 world.sky.min(own.sky)
             } else {
                 world.sky
             },
-            voxel: world_voxel.max(own.voxel),
+            voxel,
+            voxel_color: if voxel > 0.0 && world_voxel >= own.voxel {
+                world.voxel_color
+            } else {
+                LinearRgba::WHITE
+            },
         })
     }
 }

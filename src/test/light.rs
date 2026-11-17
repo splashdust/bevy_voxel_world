@@ -12,6 +12,8 @@ use crate::prelude::*;
 #[cfg(feature = "light_propagation")]
 mod coarse;
 #[cfg(feature = "light_propagation")]
+mod color;
+#[cfg(feature = "light_propagation")]
 mod edits;
 #[cfg(feature = "light_propagation")]
 mod hinted_air;
@@ -19,6 +21,10 @@ mod hinted_air;
 mod look;
 #[cfg(feature = "light_propagation")]
 mod materials;
+#[cfg(feature = "light_propagation")]
+mod mixing;
+#[cfg(feature = "light_propagation")]
+mod recolor;
 #[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
