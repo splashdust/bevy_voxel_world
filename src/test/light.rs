@@ -24,6 +24,8 @@ mod materials;
 #[cfg(feature = "light_propagation")]
 mod mixing;
 #[cfg(feature = "light_propagation")]
+mod recolor;
+#[cfg(feature = "light_propagation")]
 mod reference;
 #[cfg(feature = "light_propagation")]
 mod relights;

@@ -332,6 +332,25 @@ impl<I: Copy + PartialEq> EmissionTable<I> {
     pub fn is_empty(&self) -> bool {
         self.materials.is_empty()
     }
+
+    /// The material indices whose packed light colour differs in `new`, if
+    /// `new` gives each material the same level and index as this table, so
+    /// that only light colours changed. `None` if any material's level or
+    /// index changed, or a material came or went.
+    pub fn recolored(&self, new: &Self) -> Option<Vec<u16>> {
+        if self.materials != new.materials {
+            return None;
+        }
+        let changed = self
+            .colors
+            .iter()
+            .zip(&new.colors)
+            .enumerate()
+            .filter(|(_, (old, new))| old != new)
+            .map(|(index, _)| index as u16)
+            .collect();
+        Some(changed)
+    }
 }
 
 impl<I> EmissionTable<I> {
