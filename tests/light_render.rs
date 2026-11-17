@@ -37,12 +37,18 @@
 //!
 //! - In a world coloured from startup, with sky light off, sealed rooms each
 //!   lit by a red, a green, a blue or a white lamp:
-//!   - every chunk draws from the first frame every chunk is ready, which the
-//!     red room's picture shows by holding no pixel of the blue clear colour;
+//!   - every chunk draws from the first frame every chunk is ready and Bevy
+//!     has compiled its own pipelines, which the red room's picture shows by
+//!     holding no pixel of the blue clear colour;
 //!   - a red lamp's pool shows exactly 0 green and blue, a green one's 0 red
 //!     and blue, and a blue one's 0 red and green;
 //!   - `tinted_glow` tints the green lamp's own faces on the next frame, and
 //!     leaves the white lamp's glow as it was.
+//! - In a world whose colour rooms' lamps are white until it has settled,
+//!   with sky light off, giving the lamps their colours draws every chunk in
+//!   the red room's picture, which holds no pixel of the blue clear colour,
+//!   in the frame they change and in each frame after it. The red lamp's pool
+//!   then settles to exactly 0 green and blue.
 //!
 //! The lamp room's checks run with sky light off because the room spans a
 //! chunk boundary with more open columns than a chunk's walk can settle, so
@@ -50,13 +56,13 @@
 //!
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there. `check-sky-off`, `check-sky-on`,
-//! `check-sky-openness`, `check-fill-paths`, `check-fill-openness` and
-//! `check-color` each run one part of the checks.
+//! `check-sky-openness`, `check-fill-paths`, `check-fill-openness`,
+//! `check-color` and `check-first-flip` each run one part of the checks.
 //!
 //! In the browser, `check` can't start processes of its own, so each part
 //! runs from its own page load: `?check-sky-off`, `?check-sky-on`,
-//! `?check-sky-openness`, `?check-fill-paths`, `?check-fill-openness` and
-//! `?check-color`. Each
+//! `?check-sky-openness`, `?check-fill-paths`, `?check-fill-openness`,
+//! `?check-color` and `?check-first-flip`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -84,14 +90,22 @@ use bevy::{
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     light::CascadeShadowConfigBuilder,
     prelude::*,
+    pbr::{
+        SpecializedMaterialPipelineCache, SpecializedPrepassMaterialPipelineCache,
+        SpecializedShadowMaterialPipelineCache,
+    },
+    platform::collections::HashSet,
     render::{
-        render_resource::{TextureFormat, TextureUsages},
+        render_resource::{CachedPipelineState, PipelineCache, TextureFormat, TextureUsages},
         view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
+        Render, RenderApp, RenderSystems,
     },
     window::ExitCondition,
 };
 use bevy_voxel_world::prelude::*;
 use noise::{NoiseFn, Perlin};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[path = "../benches/common/fill_worlds.rs"]
 mod fill_worlds;
@@ -387,6 +401,9 @@ struct CaveWorld {
     /// For the pixel checks of light colour: the colour rooms' lamps are
     /// emissive, in their colours.
     check_color: bool,
+    /// For the check of the first flip: the colour rooms' lamps are white
+    /// until the check gives them their colours.
+    white_lamps: bool,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -402,6 +419,7 @@ impl Default for CaveWorld {
             check_openness: false,
             check_fill: None,
             check_color: false,
+            white_lamps: false,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -527,7 +545,10 @@ impl VoxelWorldConfig for CaveWorld {
             (LAMP, Emission::level(15.0)),
             (DIM_LAMP, Emission::level(DIM_LEVEL)),
         ];
-        if self.check_color {
+        if self.check_color && self.white_lamps {
+            let lamp = Emission::level(15.0);
+            emissive.extend([RED_LAMP, GREEN_LAMP, BLUE_LAMP, WHITE_LAMP].map(|lamp_at| (lamp_at, lamp)));
+        } else if self.check_color {
             let lamp = Emission::level(15.0);
             emissive.extend([
                 (RED_LAMP, lamp.with_color(LinearRgba::RED)),
@@ -619,12 +640,13 @@ fn main() {
             check_fill_part("openness", SkyFill::Openness(OpenFill::default()))
         }
         Some("check-color") => check_color_part(),
+        Some("check-first-flip") => check_first_flip_part(),
         Some("budget") => budget(),
         Some(other) => {
             eprintln!(
                 "unknown argument {other:?}: expected check, check-sky-off, check-sky-on, \
-                 check-sky-openness, check-fill-paths, check-fill-openness, check-color \
-                 or budget"
+                 check-sky-openness, check-fill-paths, check-fill-openness, check-color, \
+                 check-first-flip or budget"
             );
             std::process::exit(2);
         }
@@ -658,10 +680,14 @@ struct Check {
     next_frame: bool,
     /// How many levels light holds for the picture.
     precision: LightPrecision,
-    /// Whether it takes the picture on the first frame every chunk is ready,
-    /// without waiting for light to settle. The camera must be where the app
-    /// starts it.
+    /// Whether it takes the picture on the first frame every chunk is ready
+    /// and [`RendererReady`] is set, without waiting for light to settle. The
+    /// camera must be where the app starts it.
     first_ready: bool,
+    /// Whether, once the world has settled with the colour rooms' lamps
+    /// white, it gives them their colours and judges a picture of each frame
+    /// from that frame on.
+    flips_color: bool,
 }
 
 type Judge =
@@ -690,6 +716,7 @@ const fn settled_check(
         next_frame: false,
         precision: LightPrecision::Steps16,
         first_ready: false,
+        flips_color: false,
     }
 }
 
@@ -717,6 +744,7 @@ const fn look_check(
         next_frame: true,
         precision: LightPrecision::Steps16,
         first_ready: false,
+        flips_color: false,
     }
 }
 
@@ -893,6 +921,7 @@ const CHECKS: [Check; 23] = [
         next_frame: false,
         precision: LightPrecision::Steps16,
         first_ready: false,
+        flips_color: false,
     },
     settled_check(
         "a sun with no shadow map leaves a sealed pocket exactly black",
@@ -1078,6 +1107,32 @@ const COLOR_CHECKS: [Check; 8] = [
     ),
 ];
 
+/// The checks of a running world's first flip to light colour, in a world
+/// whose colour rooms' lamps start white, with sky light off.
+const FIRST_FLIP_CHECKS: [Check; 2] = [
+    Check {
+        flips_color: true,
+        ..settled_check(
+            "a running world that turns coloured draws every chunk from the frame it turns",
+            "first_flip.png",
+            false,
+            &RED_POOL_CAMERA,
+            true,
+            None,
+            draws_every_chunk,
+        )
+    },
+    settled_check(
+        "a red lamp's pool shows exactly 0 green and blue after the first flip",
+        "first_flip_red.png",
+        false,
+        &RED_POOL_CAMERA,
+        true,
+        None,
+        only_red,
+    ),
+];
+
 /// The checks run with sky fill on under sky openness.
 const OPENNESS_CHECKS: [Check; 1] = [settled_check(
     "a sealed pocket under sky openness is exactly black",
@@ -1155,6 +1210,50 @@ fn switch_lamps(voxel_world: &mut VoxelWorld<CaveWorld>, lit_room: bool) {
     voxel_world.set_voxel(DARK_CHUNK * 32 + SEALED_LAMP, lamp(!lit_room));
 }
 
+/// Whether Bevy has compiled every pipeline that draws no chunk, in both the
+/// main world and the render world.
+///
+/// Bevy loads its own shaders in the background, so in the first frames its
+/// mesh preprocessing pipelines can still be waiting on them, and then no
+/// mesh draws at all, whatever its material.
+#[derive(Resource, Clone, Default)]
+struct RendererReady(Arc<AtomicBool>);
+
+/// Sets [`RendererReady`] once every pipeline but those Bevy specialized for
+/// a material's meshes has compiled.
+fn follow_renderer_ready(
+    ready: Res<RendererReady>,
+    pipelines: Res<PipelineCache>,
+    main_pass: Res<SpecializedMaterialPipelineCache>,
+    prepass: Res<SpecializedPrepassMaterialPipelineCache>,
+    shadows: Res<SpecializedShadowMaterialPipelineCache>,
+) {
+    if ready.0.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut materials: HashSet<usize> = main_pass
+        .values()
+        .flat_map(|view| view.values().map(|id| id.id()))
+        .collect();
+    materials.extend(
+        prepass
+            .values()
+            .flat_map(|view| view.values().map(|(_, id, _)| id.id())),
+    );
+    materials.extend(
+        shadows
+            .values()
+            .flat_map(|view| view.values().map(|(id, _, _)| id.id())),
+    );
+    let compiled = pipelines
+        .pipelines()
+        .enumerate()
+        .all(|(id, pipeline)| {
+            materials.contains(&id) || matches!(pipeline.state, CachedPipelineState::Ok(_))
+        });
+    ready.0.store(compiled, Ordering::Relaxed);
+}
+
 #[derive(Resource)]
 struct CheckPlan {
     target: Handle<Image>,
@@ -1164,7 +1263,8 @@ struct CheckPlan {
     moved_at_frame: u32,
     /// The last frame on which a chunk wasn't Ready or light hadn't settled.
     last_busy_frame: u32,
-    /// The last frame on which a chunk wasn't Ready, or none was spawned.
+    /// The last frame on which a chunk wasn't Ready, or none was spawned, or
+    /// Bevy hadn't compiled its own pipelines.
     last_unready_frame: u32,
     frame: u32,
     waiting: bool,
@@ -1174,6 +1274,9 @@ struct CheckPlan {
     /// Pictures of the switching frames not yet judged, and how many failed.
     shots_out: u32,
     shots_failed: u32,
+    /// Whether the check of the first flip has given the colour rooms' lamps
+    /// their colours, which `follow_plan_look` gives the world.
+    lamps_colored: bool,
     /// Where to save the pictures, if anywhere.
     directory: Option<std::path::PathBuf>,
     /// The look the current check wants, which `follow_plan_look` gives the
@@ -1191,7 +1294,8 @@ struct CheckPlan {
 fn check() {
     error!(
         "in the browser, run ?check-sky-off, ?check-sky-on, ?check-sky-openness, \
-         ?check-fill-paths, ?check-fill-openness and ?check-color, each in a page load"
+         ?check-fill-paths, ?check-fill-openness, ?check-color and ?check-first-flip, \
+         each in a page load"
     );
 }
 
@@ -1208,6 +1312,7 @@ fn check() {
         "fill-paths",
         "fill-openness",
         "color",
+        "first-flip",
     ] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
@@ -1266,6 +1371,21 @@ fn check_color_part() {
     );
 }
 
+/// Runs the checks of a running world's first flip to light colour, with sky
+/// light off. The clear colour is blue, so a chunk that doesn't draw shows as
+/// blue in the red room.
+fn check_first_flip_part() {
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            white_lamps: true,
+            ..default()
+        },
+        FIRST_FLIP_CHECKS.iter().collect(),
+    );
+}
+
 fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
     let clear = if world.check_color {
         Color::srgb(0.0, 0.0, 1.0)
@@ -1289,8 +1409,13 @@ fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
                 setup_check(commands, images, checks.clone())
             },
         )
-        .add_systems(Update, (run_checks, follow_plan_look).chain())
-        .run();
+        .add_systems(Update, (run_checks, follow_plan_look).chain());
+    let renderer_ready = RendererReady::default();
+    app.insert_resource(renderer_ready.clone());
+    app.sub_app_mut(RenderApp)
+        .insert_resource(renderer_ready)
+        .add_systems(Render, follow_renderer_ready.in_set(RenderSystems::Cleanup));
+    app.run();
 }
 
 /// A check of each shot of each sky fill world under the model named
@@ -1359,6 +1484,9 @@ fn lit_share(
 
 /// Gives the world the look the current check wants.
 fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
+    if plan.lamps_colored && world.white_lamps {
+        world.white_lamps = false;
+    }
     if world.look != plan.look {
         world.look = plan.look.clone();
     }
@@ -1398,6 +1526,7 @@ fn setup_check(
         switched: 0,
         shots_out: 0,
         shots_failed: 0,
+        lamps_colored: false,
         directory: arguments()
             .get(1)
             .filter(|argument| !argument.contains('='))
@@ -1419,11 +1548,13 @@ fn run_checks(
     mut suns: Query<&mut DirectionalLight>,
     chunks: Query<&Chunk<CaveWorld>>,
     mut voxel_world: VoxelWorld<CaveWorld>,
+    renderer_ready: Res<RendererReady>,
     mut exit: MessageWriter<AppExit>,
 ) {
     plan.frame += 1;
     let frame = plan.frame;
-    let unready = chunks.is_empty()
+    let unready = !renderer_ready.0.load(Ordering::Relaxed)
+        || chunks.is_empty()
         || chunks
             .iter()
             .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready));
@@ -1476,6 +1607,10 @@ fn run_checks(
         }
         return;
     }
+    if check.flips_color && plan.switched > 0 {
+        flip_and_judge(&mut commands, &mut plan, check.name);
+        return;
+    }
     if check.switches_lamps && plan.switched > 0 {
         switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
@@ -1494,6 +1629,10 @@ fn run_checks(
         return;
     }
 
+    if check.flips_color {
+        flip_and_judge(&mut commands, &mut plan, check.name);
+        return;
+    }
     if check.switches_lamps {
         switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
@@ -1622,6 +1761,81 @@ fn differs_from_earlier(
         Ok(note)
     } else {
         Err(note)
+    }
+}
+
+/// How many frames the check of the first flip judges, from the frame of the
+/// flip on.
+const FLIPPED_FRAMES: u32 = 30;
+
+/// Gives the colour rooms' lamps their colours, and judges a picture of that
+/// frame and of each frame after it, until [`FLIPPED_FRAMES`] are judged.
+fn flip_and_judge(commands: &mut Commands, plan: &mut CheckPlan, name: &'static str) {
+    if plan.switched < FLIPPED_FRAMES {
+        plan.lamps_colored = true;
+        plan.switched += 1;
+        plan.shots_out += 1;
+        let frame = plan.switched;
+        let mut screenshot = commands.spawn(Screenshot::image(plan.target.clone()));
+        if frame == 1 {
+            if let Some(directory) = &plan.directory {
+                std::fs::create_dir_all(directory).unwrap();
+                screenshot.observe(save_to_disk(directory.join("first_flip_frame.png")));
+            }
+        }
+        screenshot.observe(
+            move |captured: On<ScreenshotCaptured>, mut plan: ResMut<CheckPlan>| {
+                plan.shots_out -= 1;
+                if let Err(note) = draws_every_chunk(
+                    &captured.image,
+                    &Camera::default(),
+                    &GlobalTransform::default(),
+                    None,
+                ) {
+                    report!("  frame {frame}: {note}");
+                    plan.shots_failed += 1;
+                }
+            },
+        );
+        return;
+    }
+    if plan.shots_out > 0 {
+        return;
+    }
+    if plan.shots_failed == 0 {
+        report!("PASS {name}: {FLIPPED_FRAMES} frames drew every chunk");
+    } else {
+        report!(
+            "FAIL {name}: {} of {FLIPPED_FRAMES} frames showed the clear colour",
+            plan.shots_failed
+        );
+        plan.failed = true;
+    }
+    plan.switched = 0;
+    plan.shots_failed = 0;
+    plan.next += 1;
+}
+
+/// Whether no pixel of `image` is the blue clear colour, so every chunk in
+/// view drew, and at least a tenth of its pixels are lit.
+fn draws_every_chunk(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let clear = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[..3] == [0, 0, 255])
+        .count();
+    let rendered = renders(image, camera, global, earlier)?;
+    if clear == 0 {
+        Ok(rendered)
+    } else {
+        Err(format!("{clear} pixels show the clear colour, {rendered}"))
     }
 }
 
