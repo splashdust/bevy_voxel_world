@@ -9,7 +9,11 @@
 //! light did. The chunk task makes that comparison against the neighbours it
 //! read, and landing makes it again only for neighbours whose light has
 //! changed since. Landing also checks the other way for those, so a chunk
-//! whose task missed a neighbour arriving relights itself.
+//! whose task missed a neighbour arriving relights itself. Those checks find
+//! only light that could get somewhere sooner, so a chunk whose solve, in its
+//! chunk task or a relight, read inputs around it that were replaced before
+//! its light landed, such as a column answer a sky probe disproved, relights
+//! itself too: its light may hold light those inputs no longer give.
 //!
 //! A relight goes on as a relight ripple: when its light lands, it relights a
 //! neighbour only across faces where light reached the chunk at another time
@@ -114,9 +118,13 @@ use super::probe::{face_neighbours, SkyProbes};
 use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
-use super::solver::{relight, ChunkLight, KeptLight, LightTaskSettings, Solved};
+use super::solver::{
+    neighbour_index, relight, ChunkLight, KeptLight, LightTaskSettings, Neighbourhood,
+    Solved,
+};
 use super::view::{
-    chunk_centre, in_world, world_position, AirInputs, LightView, ViewChunk, ENTRY,
+    chunk_centre, in_world, world_position, AirInputs, LightView, ViewChunk, ViewMaps,
+    ENTRY,
 };
 use super::{LightSettings, SolvedLight, TaskLight};
 use crate::chunk::{ChunkKey, CHUNK_SIZE_U};
@@ -1042,6 +1050,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             let mut view = view.write();
             match source {
                 Source::Relight => {
+                    // Inputs around the chunk replaced while the relight
+                    // ran: see `inputs_replaced`.
+                    let outdated = inputs_replaced(&view, key, &solved.read);
                     let chunk = view.chunks.get_mut(&key)?;
                     // A chunk task landed new voxels since the relight
                     // started, and solved them from a newer view.
@@ -1066,7 +1077,14 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         }
                         chunk.faces = solved.faces;
                         self.held.remove(&key);
+                        if outdated {
+                            drop(view);
+                            self.trigger_from(key, key, urgent, cause);
+                        }
                         return None;
+                    }
+                    if outdated {
+                        triggers.push(key);
                     }
                     for face in Face::ALL {
                         if ripples
@@ -1119,7 +1137,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         }
                     }
                     view.air.remove(&key);
-                    if changed_across_air(&view, key, &solved.read) {
+                    if changed_across_air(&view, key, &solved.read)
+                        || inputs_replaced(&view, key, &solved.read)
+                    {
                         triggers.push(key);
                     }
                     for face in Face::ALL.into_iter().filter(|_| passes_light_on(key)) {
@@ -2236,6 +2256,27 @@ fn around(key: GridKey) -> impl Iterator<Item = GridKey> {
                 .filter(|offset| *offset != IVec3::ZERO)
                 .map(move |offset| key + offset)
         })
+    })
+}
+
+/// Whether a chunk, light entry or hinted air in the 3×3×3 around the chunk
+/// at `key` holds other inputs than its solve `read` there. A position that
+/// held nothing then counts as unchanged: a chunk arriving there compares its
+/// light with this chunk's as it lands.
+///
+/// Replaced inputs, such as a column answer a sky probe disproved, relight
+/// the chunks around them and ripple on, but that never reaches a chunk whose
+/// chunk task is still running, and not always one whose relight is: a
+/// ripple stops at faces where light crosses at the same times as before.
+/// Light solved from the old inputs may hold light the new ones no longer
+/// give, so the chunk solves again.
+fn inputs_replaced(view: &ViewMaps, key: GridKey, read: &Neighbourhood) -> bool {
+    around(key).any(|at| {
+        let offset = at.position() - key.position();
+        match (view.inputs(at), &read[neighbour_index(offset)]) {
+            (Some(now), Some(was)) => !Arc::ptr_eq(now, was),
+            _ => false,
+        }
     })
 }
 
