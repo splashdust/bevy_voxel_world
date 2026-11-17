@@ -38,6 +38,35 @@ pub(super) struct Reference {
     voxel: Vec<u8>,
     /// The sky light level of every voxel.
     sky: Vec<u8>,
+    /// The light colour of every voxel's voxel light, in linear RGB.
+    color: Vec<[f32; 3]>,
+}
+
+/// `color` scaled so its brightest component is 1, each negative component
+/// read as 0, or `None` for black.
+fn brightest_at_1(color: [f32; 3]) -> Option<[f32; 3]> {
+    let color = color.map(|component| component.max(0.0));
+    let brightest = color[0].max(color[1]).max(color[2]);
+    (brightest > 0.0).then(|| color.map(|component| component / brightest))
+}
+
+/// The light colour that light of each of `reaching`'s light colours, at its
+/// level on the 0 to 15 scale, mixes to.
+fn mixed(reaching: &[([f32; 3], f32)]) -> [f32; 3] {
+    let weight = |level: f32| {
+        (0.7f64.powf(15.0 - level as f64) - 0.7f64.powi(14)) / (1.0 - 0.7f64.powi(14))
+    };
+    let weights: Vec<f64> = reaching.iter().map(|(_, level)| weight(*level)).collect();
+    let even = weights.iter().all(|weight| *weight <= 0.0);
+    let mut mix = [0.0f64; 3];
+    for ((color, _), weight) in reaching.iter().zip(weights) {
+        let weight = if even { 1.0 } else { weight.max(0.0) };
+        for component in 0..3 {
+            mix[component] = mix[component].max(color[component] as f64 * weight);
+        }
+    }
+    let brightest = mix[0].max(mix[1]).max(mix[2]);
+    mix.map(|component| (component / brightest) as f32)
 }
 
 impl Reference {
@@ -68,21 +97,63 @@ impl Reference {
         voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
         emission: impl Fn(I) -> Option<f32>,
     ) -> Self {
+        Self::colored_voxel_light_in_steps(
+            top,
+            min,
+            max,
+            reach,
+            shape,
+            voxel_at,
+            |material| emission(material).map(|level| (level, [1.0; 3])),
+        )
+    }
+
+    /// [`voxel_light_in_steps`](Self::voxel_light_in_steps) of emissive
+    /// voxels that each give off a light colour. `emission` gives the
+    /// declared level and light colour, in linear RGB, of an emissive
+    /// material.
+    ///
+    /// A light colour counts only by its hue and saturation: it's scaled so
+    /// its brightest component is 1, a negative component reads as 0, and
+    /// black gives no light. Light of each light colour floods on its own. A
+    /// voxel's level is the highest of the floods', and its light colour, per
+    /// component, the max over the floods reaching it of colour times
+    /// `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`, scaled back to a brightest
+    /// component of 1. Where those weights are all 0, at level 1, each flood
+    /// weighs 1. An emissive voxel has its own light colour, and a voxel no
+    /// light reaches is white.
+    pub fn colored_voxel_light_in_steps<I: Copy + PartialEq>(
+        top: u32,
+        min: IVec3,
+        max: IVec3,
+        reach: u32,
+        shape: LightShape,
+        voxel_at: impl Fn(IVec3) -> WorldVoxel<I>,
+        emission: impl Fn(I) -> Option<(f32, [f32; 3])>,
+    ) -> Self {
         let size = max - min;
         let count = (size.x * size.y * size.z) as usize;
         let mut open = Vec::with_capacity(count);
         let mut emissive = Vec::with_capacity(count);
+        let mut own_color = Vec::with_capacity(count);
         for z in 0..size.z {
             for y in 0..size.y {
                 for x in 0..size.x {
                     let voxel = voxel_at(min + IVec3::new(x, y, z));
                     open.push(!voxel.is_solid());
-                    emissive.push(match voxel {
-                        WorldVoxel::Solid(material) => {
-                            emission(material).map(|level| level.round() as u8)
-                        }
+                    let declared = match voxel {
+                        WorldVoxel::Solid(material) => emission(material),
                         _ => None,
-                    });
+                    };
+                    let (level, color) = match declared {
+                        Some((level, color)) => match brightest_at_1(color) {
+                            Some(color) => (Some(level.round() as u8), color),
+                            None => (Some(0), [1.0; 3]),
+                        },
+                        None => (None, [1.0; 3]),
+                    };
+                    emissive.push(level);
+                    own_color.push(color);
                 }
             }
         }
@@ -96,26 +167,62 @@ impl Reference {
             top,
             voxel: vec![0; count],
             sky: vec![0; count],
+            color: vec![[1.0; 3]; count],
         };
 
-        let sources: Vec<(usize, u32)> = (0..count)
-            .filter_map(|i| {
-                let level = reference.emissive[i]?;
-                reference
-                    .start_distance(level as u32 * top / 15)
-                    .map(|start| (i, start))
-            })
-            .collect();
-        let distances = reference.flood(&sources);
-        reference.voxel = distances
+        let mut colors: Vec<[f32; 3]> = Vec::new();
+        for (level, color) in reference.emissive.iter().zip(&own_color) {
+            if level.is_some_and(|level| level > 0) && !colors.contains(color) {
+                colors.push(*color);
+            }
+        }
+        // Each voxel's level from each light colour's flood.
+        let floods: Vec<([f32; 3], Vec<u8>)> = colors
             .iter()
-            .enumerate()
-            .map(|(i, distance)| match reference.emissive[i] {
-                Some(level) => (level as u32 * top / 15) as u8,
-                None if !reference.open[i] => 0,
-                None => reference.level(*distance),
+            .map(|color| {
+                let sources: Vec<(usize, u32)> = (0..count)
+                    .filter(|&i| own_color[i] == *color)
+                    .filter_map(|i| {
+                        let level = reference.emissive[i]?;
+                        reference
+                            .start_distance(level as u32 * top / 15)
+                            .map(|start| (i, start))
+                    })
+                    .collect();
+                let distances = reference.flood(&sources);
+                let levels = distances
+                    .iter()
+                    .enumerate()
+                    .map(|(i, distance)| {
+                        if reference.open[i] {
+                            reference.level(*distance)
+                        } else {
+                            0
+                        }
+                    })
+                    .collect();
+                (*color, levels)
             })
             .collect();
+        for i in 0..count {
+            if let Some(level) = reference.emissive[i] {
+                reference.voxel[i] = (level as u32 * top / 15) as u8;
+                reference.color[i] = if level > 0 { own_color[i] } else { [1.0; 3] };
+                continue;
+            }
+            let reaching: Vec<([f32; 3], f32)> = floods
+                .iter()
+                .filter(|(_, levels)| levels[i] > 0)
+                .map(|(color, levels)| (*color, reference.read(levels[i])))
+                .collect();
+            let Some(level) = floods.iter().map(|(_, levels)| levels[i]).max() else {
+                continue;
+            };
+            reference.voxel[i] = level;
+            if level > 0 {
+                reference.color[i] = mixed(&reaching);
+            }
+        }
         reference
     }
 
@@ -262,6 +369,16 @@ impl Reference {
     /// The voxel light level at `position`, in steps.
     pub fn voxel_at(&self, position: IVec3) -> u8 {
         self.voxel[self.index(position).expect("a position in the box")]
+    }
+
+    /// Whether `position` is in the box.
+    pub fn holds(&self, position: IVec3) -> bool {
+        self.index(position).is_some()
+    }
+
+    /// The light colour of the voxel light at `position`, in linear RGB.
+    pub fn color_at(&self, position: IVec3) -> [f32; 3] {
+        self.color[self.index(position).expect("a position in the box")]
     }
 
     /// The sky light level at `position`, in steps.

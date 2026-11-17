@@ -87,9 +87,10 @@ pub struct LightLevels {
     /// Light from emissive voxels.
     pub voxel: f32,
     /// The colour of the voxel light, with its brightest component 1, so
-    /// [`voxel`](Self::voxel) alone says how bright it is. An emissive voxel
-    /// reads its own colour. White where `voxel` is 0, and everywhere in a
-    /// world whose emissive voxels are all white.
+    /// [`voxel`](Self::voxel) alone says how bright it is. Where light of several
+    /// colours reaches the voxel, it's the colour they mix to. An emissive voxel
+    /// reads its own colour. White where `voxel` is 0, and everywhere in a world
+    /// whose emissive voxels are all white.
     pub voxel_color: LinearRgba,
 }
 

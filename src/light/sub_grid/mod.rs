@@ -246,7 +246,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs,
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
-                    color: chunk.light.color,
+                    color: chunk.light.color.clone(),
                     precision: chunk.light.precision,
                 });
                 chunk.edits = stamp;
