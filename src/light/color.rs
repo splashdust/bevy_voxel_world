@@ -124,6 +124,20 @@ pub(crate) fn tag_cut(packed: u16) -> u32 {
     top << 12 | cut(packed >> 7 & 0x7f) << 6 | cut(packed & 0x7f)
 }
 
+/// The top 2 bits of an entry naming a colour slot: 3, the spare value,
+/// which no packed light colour holds there.
+pub(crate) const SPARE: u16 = 3 << 14;
+
+/// How many colour slots an entry can name: the 14 bits below [`SPARE`].
+pub(crate) const MAX_COLOR_SLOTS: u32 = 1 << 14;
+
+/// The entry of a chunk holding the colour slot `index`: [`SPARE`] in the
+/// top 2 bits and the index in the other 14.
+pub(crate) fn color_slot_entry(index: u32) -> u16 {
+    debug_assert!(index < MAX_COLOR_SLOTS);
+    SPARE | index as u16
+}
+
 /// The light colour `packed` holds, which must name one.
 pub(crate) fn unpack(packed: u16) -> LinearRgba {
     let top = (packed >> 14) as usize;

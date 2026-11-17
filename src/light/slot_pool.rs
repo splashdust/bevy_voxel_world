@@ -14,6 +14,12 @@
 //! taken, the holder farthest from the cameras gives way to a nearer chunk,
 //! never to a farther one, and the pool warns once. Finding that holder
 //! costs a pass over every holder, so it grows with the slot count.
+//!
+//! A pool made with [`SlotPool::growing`] starts with no slots, and its
+//! adapter raises the count with [`SlotPool::grow`] as its texture grows.
+//! Growing never moves a slot. Its adapter places its slots in its texture
+//! and checks the device itself, so the pool never clamps it. The route's
+//! colour slots are such a pool.
 
 use bevy::log::warn_once;
 use bevy::platform::collections::HashMap;
@@ -57,6 +63,9 @@ pub(crate) struct SlotPool<H> {
     holders: HashMap<u32, H>,
     /// How many times the pool warned that every slot is taken.
     full_warnings: u32,
+    /// Whether its adapter grows it, so the pool sets no shape and never
+    /// clamps its count.
+    grows: bool,
 }
 
 impl<H: Copy> SlotPool<H> {
@@ -70,7 +79,29 @@ impl<H: Copy> SlotPool<H> {
             free: Vec::new(),
             holders: HashMap::default(),
             full_warnings: 0,
+            grows: false,
         }
+    }
+
+    /// A pool of no slots, which its adapter grows with [`grow`](Self::grow).
+    pub fn growing() -> Self {
+        Self {
+            grows: true,
+            ..Self::new(0)
+        }
+    }
+
+    /// Raises the slot count to `capacity`, keeping every slot taken where it
+    /// is. Only a pool made with [`growing`](Self::growing) grows.
+    pub fn grow(&mut self, capacity: u32) {
+        debug_assert!(self.grows);
+        self.capacity = self.capacity.max(capacity);
+    }
+
+    /// The slot count: for a pool that doesn't grow, clamped to the device
+    /// once the first slot is taken.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
     }
 
     /// Notes the device's largest 3D texture side, if there is a device,
@@ -88,6 +119,7 @@ impl<H: Copy> SlotPool<H> {
     pub fn reset(&mut self, capacity: u32) {
         *self = Self {
             max_side: self.max_side,
+            grows: self.grows,
             ..Self::new(capacity)
         };
     }
@@ -108,7 +140,7 @@ impl<H: Copy> SlotPool<H> {
         near: f32,
         holders: &mut A,
     ) -> Option<u32> {
-        if self.shape.is_none() {
+        if self.shape.is_none() && !self.grows {
             self.set_shape::<A>();
         }
         let slot = match self.free.pop() {
@@ -304,6 +336,37 @@ mod tests {
         // The device is read only until the shape is set.
         pool.set_device(Some(4096));
         assert!(!pool.has_free());
+    }
+
+    #[test]
+    fn a_growing_pool_keeps_every_slot_where_it_is_and_gives_way_once_grown_to_its_ceiling(
+    ) {
+        let mut holders = ByDistance::default();
+        let mut pool = SlotPool::growing();
+        assert!(!pool.has_free());
+
+        pool.grow(1);
+        let first = pool.take(10, 10.0, &mut holders).unwrap();
+        assert!(!pool.has_free());
+        pool.grow(2);
+        assert!(pool.has_free());
+        let second = pool.take(20, 20.0, &mut holders).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(pool.capacity(), 2);
+
+        // Grown no further, the farthest holder gives way to a nearer chunk.
+        assert_eq!(pool.take(15, 15.0, &mut holders), Some(second));
+        assert_eq!(holders.gave_way, [20]);
+        assert!(pool.warned_full());
+
+        // A growing pool is never clamped to a device.
+        let mut pool = SlotPool::<u32>::growing();
+        pool.set_device(Some(34));
+        pool.grow(64);
+        for holder in 0..64 {
+            assert!(pool.take(holder, holder as f32, &mut holders).is_some());
+        }
+        assert_eq!(pool.capacity(), 64);
     }
 
     #[test]

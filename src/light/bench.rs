@@ -22,7 +22,7 @@ use super::levels::LevelScale;
 use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::ColumnAnswer;
-use super::slot::{border_plane, slot_bytes, write_shell};
+use super::slot::{border_plane, slot_bytes, texel_bytes, write_shell};
 use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel, DirectSky};
 use super::solver::{relight, ChunkLevels, ChunkLight};
 use super::view::{in_world, Missing, Snapshot};
@@ -372,7 +372,7 @@ impl SlotBox {
             let precision = self.light.precision;
             let neighbour = &self.neighbours[face as usize];
             let plane = border_plane(neighbour, face.opposite(), precision);
-            write_shell(bytes, face, Some(&plane), precision);
+            write_shell(bytes, face, Some(&plane), texel_bytes(precision));
         }
     }
 }

@@ -416,7 +416,8 @@ fn a_world_whose_emissions_are_white_or_grey_has_a_white_worlds_tags_and_no_colo
         ]))
     };
     let mut grey = lamps(GREY_LAMP);
-    grey.emissive.retain(|(material, _)| *material != ORANGE_LAMP);
+    grey.emissive
+        .retain(|(material, _)| *material != ORANGE_LAMP);
     let mut white = lamps(LAMP);
     white.emissive = ground(Vec::new()).emissive;
     assert_eq!(tags(grey.clone(), &AROUND), tags(white, &AROUND));
@@ -503,7 +504,11 @@ fn a_one_colour_chunk_with_no_slot_carries_its_colour_in_bits_16_to_29() {
 
     let orange = packed_at(&mut app, far + IVec3::X);
     let tag = tag_of(&mut app, far_chunk).unwrap();
-    assert_eq!(tag & 0xFFFF, 13 << 4, "the levels a white lamp's chunk shows");
+    assert_eq!(
+        tag & 0xFFFF,
+        13 << 4,
+        "the levels a white lamp's chunk shows"
+    );
     assert_eq!(tag >> 16, tag_cut(orange), "tag {tag:#x}");
     assert_ne!(tag >> 16, 0);
     assert_eq!(tag & 1 << 28, 0);
@@ -515,8 +520,11 @@ fn a_change_of_precision_replaces_the_colour_texture() {
     let mut world = with_colors(ground(vec![(lamp, ORANGE_LAMP)]));
     let mut app = app(world.clone());
     run_until_shown(&mut app, &[IVec3::ZERO]);
-    let color_texture =
-        |app: &App| app.world().resource::<LightRoute<LampWorld>>().color_texture();
+    let color_texture = |app: &App| {
+        app.world()
+            .resource::<LightRoute<LampWorld>>()
+            .color_texture()
+    };
     let before = color_texture(&app).id();
     assert_eq!(color_textures(&app).len(), 1);
 
@@ -528,24 +536,32 @@ fn a_change_of_precision_replaces_the_colour_texture() {
     run_until(&mut app, "the colour texture to be replaced", |app| {
         let now = color_texture(app);
         now.id() != before
-            && now != app.world().resource::<LightRoute<LampWorld>>().color_placeholder
+            && now
+                != app
+                    .world()
+                    .resource::<LightRoute<LampWorld>>()
+                    .color_placeholder
     });
     run_until_shown(&mut app, &[IVec3::ZERO]);
     let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
     assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
     update_until(&mut app, "the old colour texture to be dropped", |app| {
-        app.world().resource::<Assets<Image>>().get(before).is_none()
+        app.world()
+            .resource::<Assets<Image>>()
+            .get(before)
+            .is_none()
     });
     assert_eq!(color_textures(&app).len(), 1);
 }
 
 #[test]
-fn a_chunk_whose_faces_see_several_colours_shows_the_most_common() {
+fn a_chunk_whose_faces_see_several_colours_takes_a_colour_slot() {
     // A dim blue lamp mixes its colour into the few voxels it lights, far
     // from the orange lamp, whose pool is orange everywhere else.
     let orange = IVec3::new(8, 1, 16);
     let blue = IVec3::new(24, 1, 16);
-    let mut world = with_colors(ground(vec![(orange, ORANGE_LAMP), (blue, DIM_BLUE_LAMP)]));
+    let mut world =
+        with_colors(ground(vec![(orange, ORANGE_LAMP), (blue, DIM_BLUE_LAMP)]));
     world.emissive.push((
         DIM_BLUE_LAMP,
         Emission::level(4.0).with_color(bevy::color::palettes::css::BLUE),
@@ -553,12 +569,176 @@ fn a_chunk_whose_faces_see_several_colours_shows_the_most_common() {
     let mut app = app(world);
     run_until_shown(&mut app, &[IVec3::ZERO]);
     let pure = packed_at(&mut app, orange + IVec3::Y);
-    assert_ne!(packed_at(&mut app, blue + IVec3::Y), pure);
+    let tinted = packed_at(&mut app, blue + IVec3::Y);
+    assert_ne!(tinted, pure);
     let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
     assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
-    let route = app.world().resource::<LightRoute<LampWorld>>();
-    assert_eq!(route.queued_entry(tag & 0xFF_FFFF), Some(pure));
+    let bytes = color_slot_bytes(&mut app, IVec3::ZERO);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, orange + IVec3::Y), pure);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, blue + IVec3::Y), tinted);
 }
 
 /// A material emitting blue light at level 4.
 const DIM_BLUE_LAMP: u8 = 7;
+
+/// A material emitting red light at level 15.
+const RED_LAMP: u8 = 8;
+
+/// The entry queued for the slot of the chunk at `position`, which has one.
+fn entry_of(app: &mut App, position: IVec3) -> u16 {
+    let tag = tag_of(app, position).expect("the chunk shows its mesh");
+    assert_ne!(tag & HAS_SLOT, 0, "the chunk at {position} has no slot");
+    app.world()
+        .resource::<LightRoute<LampWorld>>()
+        .queued_entry(tag & 0xFF_FFFF)
+        .expect("the slot's entry is queued")
+}
+
+/// The bytes queued for the colour slot of the chunk at `position`, which
+/// has one.
+fn color_slot_bytes(app: &mut App, position: IVec3) -> Vec<u8> {
+    let entry = entry_of(app, position);
+    assert_eq!(entry >> 14, 3, "the chunk at {position} has no colour slot");
+    app.world()
+        .resource::<LightRoute<LampWorld>>()
+        .queued_color_upload(u32::from(entry & 0x3FFF))
+        .expect("the colour slot's bytes are queued")
+        .to_vec()
+}
+
+/// The packed light colour of a colour slot at the cell of the chunk at
+/// `chunk` holding the voxel at `voxel`, which may be in its shell.
+fn color_at(bytes: &[u8], chunk: IVec3, voxel: IVec3) -> u16 {
+    let cell = voxel - chunk * 32 + IVec3::ONE;
+    assert!(cell.cmpge(IVec3::ZERO).all() && cell.cmplt(IVec3::splat(34)).all());
+    let at = 2 * (cell.z + cell.x * 34 + cell.y * 34 * 34) as usize;
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+/// Where the red lamp of [`walled`] is, in the chunk beside the origin's
+/// along x.
+const RED_AT: IVec3 = IVec3::new(40, 1, 16);
+
+/// Ground lit by a lamp of material `own` in the chunk at the origin and by
+/// a red lamp in the chunk beside it along x, with a wall filling the
+/// origin chunk's voxels at x = 31 between them, which neither lamp's light
+/// gets past.
+fn walled(own: u8) -> LampWorld {
+    let lamp = IVec3::new(16, 1, 16);
+    let mut world = with_colors(ground(Vec::new()));
+    world.scene = Arc::new(move |p| {
+        if p == lamp {
+            WorldVoxel::Solid(own)
+        } else if p == RED_AT {
+            WorldVoxel::Solid(RED_LAMP)
+        } else if p.y <= 0 || (p.x == 31 && p.y < 32) {
+            WorldVoxel::Solid(STONE)
+        } else {
+            WorldVoxel::Air
+        }
+    });
+    world.emissive.push((
+        RED_LAMP,
+        Emission::level(15.0).with_color(bevy::color::palettes::css::RED),
+    ));
+    world
+}
+
+#[test]
+fn a_white_lit_chunk_with_a_wall_facing_a_red_lit_neighbour_takes_a_colour_slot() {
+    let mut app = app(walled(LAMP));
+    run_until_shown(&mut app, &[IVec3::ZERO, IVec3::X]);
+    assert_eq!(packed_at(&mut app, IVec3::new(16, 2, 16)), 0);
+    assert_ne!(packed_at(&mut app, IVec3::new(32, 1, 16)), 0);
+
+    let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
+    let entry = entry_of(&mut app, IVec3::ZERO);
+    assert_eq!(entry >> 14, 3, "entry {entry:#x}");
+    // The red-lit chunk's faces see red alone.
+    assert_ne!(entry_of(&mut app, IVec3::X) >> 14, 3);
+}
+
+#[test]
+fn a_colour_slot_holds_its_voxels_colours_and_its_neighbours_border_colours_and_goes_back_once_its_faces_see_one(
+) {
+    let lamp = IVec3::new(16, 1, 16);
+    let mut app = app(walled(ORANGE_LAMP));
+    run_until_shown(&mut app, &[IVec3::ZERO, IVec3::X]);
+    let orange = packed_at(&mut app, lamp + IVec3::Y);
+    let red = packed_at(&mut app, IVec3::new(32, 1, 16));
+    assert_ne!(orange, 0);
+    assert_ne!(red, 0);
+    assert_ne!(red, orange);
+
+    let bytes = color_slot_bytes(&mut app, IVec3::ZERO);
+    let lit = IVec3::new(20, 3, 18);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, lit), packed_at(&mut app, lit));
+    assert_eq!(
+        color_at(&bytes, IVec3::ZERO, lamp),
+        orange,
+        "the lamp's own colour"
+    );
+    // Out of the lamp's reach, an open voxel has no colour.
+    let dark = IVec3::new(16, 20, 16);
+    assert_eq!(light_at(&mut app, dark).unwrap().voxel, 0.0);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, dark), 0);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, IVec3::new(16, 0, 16)), 0);
+    assert_eq!(color_at(&bytes, IVec3::ZERO, IVec3::new(31, 1, 16)), 0);
+    for shell in [IVec3::new(32, 1, 16), IVec3::new(32, 3, 12)] {
+        assert_eq!(
+            color_at(&bytes, IVec3::ZERO, shell),
+            packed_at(&mut app, shell),
+            "at {shell}"
+        );
+    }
+
+    set_voxel(&mut app, RED_AT, WorldVoxel::Air);
+    run_until(&mut app, "the chunk to give its colour slot back", |app| {
+        tag_of(app, IVec3::ZERO).is_some_and(|tag| tag & HAS_SLOT != 0)
+            && entry_of(app, IVec3::ZERO) == orange
+    });
+    let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
+    assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
+    let route = app.world().resource::<LightRoute<LampWorld>>();
+    assert_eq!(route.counters.color_given_back, 1);
+}
+
+#[test]
+fn a_change_of_precision_gives_chunks_colour_slots_again_as_their_light_lands() {
+    let mut world = walled(LAMP);
+    let mut app = app(world.clone());
+    run_until_shown(&mut app, &[IVec3::ZERO, IVec3::X]);
+    let color_texture = |app: &App| {
+        app.world()
+            .resource::<LightRoute<LampWorld>>()
+            .color_texture()
+    };
+    let before = color_texture(&app).id();
+    assert_eq!(
+        color_slot_bytes(&mut app, IVec3::ZERO).len(),
+        2 * 34 * 34 * 34
+    );
+
+    world.light = Some(LightPropagation {
+        precision: LightPrecision::Steps256,
+        ..lit(LightShape::Diamond)
+    });
+    *app.world_mut().resource_mut::<LampWorld>() = world;
+    run_until(&mut app, "the colour texture to be replaced", |app| {
+        let now = color_texture(app);
+        now.id() != before
+            && now
+                != app
+                    .world()
+                    .resource::<LightRoute<LampWorld>>()
+                    .color_placeholder
+    });
+    run_until_shown(&mut app, &[IVec3::ZERO, IVec3::X]);
+    let bytes = color_slot_bytes(&mut app, IVec3::ZERO);
+    let shell = IVec3::new(32, 1, 16);
+    assert_eq!(
+        color_at(&bytes, IVec3::ZERO, shell),
+        packed_at(&mut app, shell)
+    );
+}

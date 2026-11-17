@@ -207,8 +207,20 @@ impl FacesSee {
         }
     }
 
+    /// Whether the chunk needs a slot: its faces see more than one level, an
+    /// emissive voxel of its own touches one of these voxels, or it needs a
+    /// colour slot, which takes a slot too.
     pub fn needs_slot(&self) -> bool {
-        self.lamp || self.sky == Seen::Mixed || self.voxel == Seen::Mixed
+        self.lamp
+            || self.sky == Seen::Mixed
+            || self.voxel == Seen::Mixed
+            || self.needs_color_slot()
+    }
+
+    /// Whether the chunk needs a colour slot: its faces see more than one
+    /// light colour.
+    pub fn needs_color_slot(&self) -> bool {
+        self.color == Seen::Mixed
     }
 }
 
@@ -325,11 +337,12 @@ pub(crate) fn count_colors(
     counts: &mut Vec<(u16, u32)>,
 ) {
     let lit = lit_voxels(&light.voxel, voxels, level);
-    let mut add = |packed: u16, count: u32| {
-        match counts.iter_mut().find(|(color, _)| *color == packed) {
-            Some((_, counted)) => *counted += count,
-            None => counts.push((packed, count)),
-        }
+    let mut add = |packed: u16, count: u32| match counts
+        .iter_mut()
+        .find(|(color, _)| *color == packed)
+    {
+        Some((_, counted)) => *counted += count,
+        None => counts.push((packed, count)),
     };
     match &light.color {
         ChunkColor::Mixed(_) => for_each_voxel(&lit, |x, y, z| {
@@ -539,14 +552,14 @@ pub(crate) fn cell_index(cell: UVec3) -> usize {
 }
 
 /// Writes `plane` into the shell of `bytes` on `face`, or zeros with no plane,
-/// both in the format of `precision`.
+/// both `wide` bytes a texel: a slot's [`texel_bytes`], or a colour slot's
+/// [`COLOR_TEXEL_BYTES`].
 pub(crate) fn write_shell(
     bytes: &mut [u8],
     face: Face,
     plane: Option<&ShellPlane>,
-    precision: LightPrecision,
+    wide: usize,
 ) {
-    let wide = texel_bytes(precision);
     for v in 0..CHUNK {
         for u in 0..CHUNK {
             let to = cell_index(shell_cell(face, u, v)) * wide;
@@ -583,6 +596,73 @@ pub(crate) fn border_plane(
     }
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
         put_lamp(&mut plane, u + v * CHUNK, lamp.level(), precision);
+    });
+    plane
+}
+
+/// How many bytes a texel of a colour slot has: one packed light colour, in
+/// little-endian order.
+pub(crate) const COLOR_TEXEL_BYTES: usize = 2;
+
+/// Writes the packed light colour `packed` into the texel at `texel` of
+/// `bytes`, a colour slot or a colour shell plane.
+#[inline]
+fn put_color(bytes: &mut [u8], texel: usize, packed: u16) {
+    let at = texel * COLOR_TEXEL_BYTES;
+    bytes[at..at + COLOR_TEXEL_BYTES].copy_from_slice(&packed.to_le_bytes());
+}
+
+/// The packed light colours a chunk's colour slot holds for its own voxels,
+/// with its shell at 0, given its `light`, in the layout of a slot.
+///
+/// An open voxel holds the colour of its voxel light, or 0 where it has
+/// none. A solid voxel holds 0, apart from each emissive voxel, which holds
+/// its own colour: `lamp_color` gives the packed colour of a material index.
+///
+/// Its cost grows with the chunk's lit voxels.
+pub(crate) fn color_slot_bytes(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Box<[u8]> {
+    let mut bytes = vec![0u8; SLOT_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
+    if let Some(open) = open_voxels(&light.inputs.occupancy) {
+        let lit = lit_voxels(&light.voxel, &open, None);
+        for_each_voxel(&lit, |x, y, z| {
+            let cell = UVec3::new(x as u32 + 1, y as u32 + 1, z as u32 + 1);
+            put_color(&mut bytes, cell_index(cell), light.color.packed_at(x, y, z));
+            false
+        });
+    }
+    for lamp in &light.inputs.emissive {
+        let cell = UVec3::new(lamp.x() as u32, lamp.y() as u32, lamp.z() as u32) + 1;
+        put_color(&mut bytes, cell_index(cell), lamp_color(lamp.material()));
+    }
+    bytes
+}
+
+/// The packed light colours a chunk's voxels on `face` hold, as a colour
+/// slot holds them: the colour shell plane that goes into the colour slot of
+/// the chunk across `face`. `lamp_color` gives the packed colour of an
+/// emissive material index.
+pub(crate) fn border_colors(
+    light: &ChunkLight,
+    face: Face,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Box<ShellPlane> {
+    let mut plane = vec![0; PLANE_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
+    let occupancy = &light.inputs.occupancy;
+    if !matches!(light.voxel, ChunkLevels::Uniform(0)) {
+        for v in 0..CHUNK {
+            for u in 0..CHUNK {
+                let (x, y, z) = face.voxel(u, v);
+                if !occupancy.is_solid(x, y, z) && light.voxel.at(x, y, z) > 0 {
+                    put_color(&mut plane, u + v * CHUNK, light.color.packed_at(x, y, z));
+                }
+            }
+        }
+    }
+    for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
+        put_color(&mut plane, u + v * CHUNK, lamp_color(lamp.material()));
     });
     plane
 }

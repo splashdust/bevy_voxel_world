@@ -328,11 +328,18 @@ pub struct LightPropagation {
     /// How many chunks the world's light texture holds at once, at least 1.
     ///
     /// A chunk takes a slot in the texture when its faces see more than one
-    /// level of light. Each slot costs about 38 KiB of GPU memory at 16
-    /// levels and 77 KiB at 256, so the default of 1,024 slots takes about
-    /// 38 MiB or 77 MiB. The texture is made when the first chunk needs a
-    /// slot, so a world where every chunk's faces see one level costs
-    /// nothing.
+    /// level of light, or more than one light colour. Each slot costs about
+    /// 38 KiB of GPU memory at 16 levels and 77 KiB at 256, so the default of
+    /// 1,024 slots takes about 38 MiB or 77 MiB. The texture is made when the
+    /// first chunk needs a slot, so a world where every chunk's faces see one
+    /// level costs nothing.
+    ///
+    /// In a world with light colours other than white, a chunk whose faces see
+    /// more than one light colour also takes a colour slot, about 77 KiB more at
+    /// either precision, in a second texture. That texture is made when the
+    /// first chunk needs a colour slot, grows as more chunks need one at once,
+    /// up to this count, and never shrinks. So its GPU memory grows with the
+    /// most chunks at once whose faces see more than one light colour.
     ///
     /// The count is clamped to what the device's largest 3D texture holds,
     /// with a warning: WebGL2 guarantees 256 texels a side, which is 343
@@ -342,7 +349,10 @@ pub struct LightPropagation {
     /// theirs to nearer ones, and the world logs a warning once. A chunk
     /// with no slot shows one level of each kind of light on all its faces:
     /// it looks flat, losing its shadows, and its lamps' faces lose their
-    /// glow. Raise the count if that warning appears.
+    /// glow.
+    /// It also shows one light colour, the most common one among its voxels
+    /// at the level it shows. Colour slots give way the same way.
+    /// Raise the count if that warning appears.
     ///
     /// Replaces the texture on change: every chunk with a slot drops to one
     /// sky light level and one voxel light level, the old texture is released,
