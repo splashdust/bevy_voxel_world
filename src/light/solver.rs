@@ -573,7 +573,15 @@ pub(crate) fn relight<I: Copy + PartialEq>(
                     .fetch_add(1, Ordering::Relaxed);
             }
             let inputs = read.rescanned(key.position(), &rescan, &settings.emission);
-            (Arc::new(inputs), Some(read))
+            // Inputs that found the same emissive voxels keep the ones the
+            // world view holds, so the solves around the chunk that read
+            // them don't count them as replaced as its light lands.
+            let inputs = if inputs.emissive == read.emissive {
+                read.clone()
+            } else {
+                Arc::new(inputs)
+            };
+            (inputs, Some(read))
         }
         None => (read, None),
     };

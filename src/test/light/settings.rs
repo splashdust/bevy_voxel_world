@@ -13,8 +13,8 @@ use bevy::prelude::*;
 
 use super::edits::{assert_matches, cavern, relights_started, settle};
 use super::reference::Reference;
-use super::sky_light::{light_is_settled, sky_light};
-use super::voxel_light::{app, LampWorld, DIM_LAMP, LAMP};
+use super::sky_light::{light_is_settled, sky_light, spawned};
+use super::voxel_light::{app, lit, LampWorld, DIM_LAMP, LAMP, STONE};
 use crate::light::LightSettings;
 use crate::light_bench::light_stats;
 use crate::prelude::*;
@@ -266,6 +266,38 @@ fn changing_the_emissive_list_settles_on_the_reference_for_the_new_list_with_no_
             },
         ],
     );
+}
+
+/// A stone at every fourth voxel along each axis, so every chunk holds both
+/// stone and air, with a lamp in the chunk at the origin.
+fn lattice(p: IVec3) -> WorldVoxel {
+    if p == IVec3::new(17, 17, 17) {
+        WorldVoxel::Solid(LAMP)
+    } else if p.rem_euclid(IVec3::splat(4)) == IVec3::ZERO {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+#[test]
+fn an_emissive_list_change_that_finds_the_same_emissive_voxels_relights_each_chunk_once()
+{
+    let mut app = app(LampWorld {
+        scene: Arc::new(lattice),
+        light: Some(lit(LightShape::Round)),
+        ..default()
+    });
+    settle(&mut app, "the world to stream in");
+    let chunks = spawned(&mut app).len() as u64;
+    let relights = relights_started(&app);
+    // A material no voxel holds: every chunk finds its emissive voxels again
+    // and they are the ones it had, so no chunk's light changes.
+    change(&mut app, |world| {
+        world.emissive.push((STONE + 100, Emission::level(4.0)))
+    });
+    settle(&mut app, "light to settle after the change");
+    assert_eq!(relights_started(&app) - relights, chunks);
 }
 
 #[test]
