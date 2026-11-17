@@ -203,6 +203,12 @@ pub(crate) struct LightTaskSettings<I> {
     /// The `generation` of the last change to the emissive list. A chunk's
     /// emissive voxels found before it are stale.
     pub emission_generation: u64,
+    /// Counts the world's changes to the emissive list that changed only
+    /// light colours, leaving every level alone.
+    pub color_generation: u64,
+    /// For each material index of `emission`, the `color_generation` of the
+    /// last change to its light colour alone, or 0.
+    pub recolored: Arc<[u64]>,
     /// The cells of the world's sky fill field, with sky light and sky fill
     /// on.
     pub fill: Option<FillCells>,
@@ -398,6 +404,9 @@ pub(crate) struct Solved {
     /// The [emission generation](LightTaskSettings::emission_generation) its
     /// inputs' emissive voxels were found under.
     pub emission: u64,
+    /// The [colour generation](LightTaskSettings::color_generation) of the
+    /// settings it was solved under.
+    pub color_generation: u64,
     /// For a relight that found the chunk's emissive voxels again, the inputs
     /// it read from the world view, which its light's inputs replace.
     pub rescanned: Option<Arc<LightInputs>>,
@@ -714,6 +723,7 @@ fn solve<I>(
         edit_frame: 0,
         generation: settings.generation,
         emission: settings.emission_generation,
+        color_generation: settings.color_generation,
         rescanned: None,
         fill_seeds,
         read: Box::new(snapshot.neighbours),
@@ -1548,6 +1558,8 @@ mod tests {
             generation: 0,
             sky_generation: 0,
             emission_generation: 0,
+            color_generation: 0,
+            recolored: Arc::from([]),
             fill: Some(fill),
         }
     }

@@ -153,6 +153,10 @@ struct LightChunk {
     urgent: bool,
     /// Why its next relight, or the one running, was started.
     cause: Cause,
+    /// Whether its next relight was triggered by a change of light colour
+    /// alone, so its light lands without rippling: see
+    /// [`trigger_recolor`](LightWork::trigger_recolor).
+    only_recolored: bool,
 }
 
 /// Where a result to land came from.
@@ -178,6 +182,9 @@ struct Landing {
     version: u64,
     /// For a relight, why it was started.
     cause: Cause,
+    /// Whether its light relights the chunks beside it whose light could
+    /// change with it. A relight for a change of light colour alone doesn't.
+    ripples: bool,
 }
 
 /// A relight that started.
@@ -188,6 +195,7 @@ struct Started {
     edit_frame: u64,
     version: u64,
     cause: Cause,
+    ripples: bool,
 }
 
 /// A relight running on the task pool.
@@ -214,6 +222,31 @@ struct LandedLight {
     bytes: Option<Box<[u8]>>,
     /// Whether it came from a chunk task, whose voxels may be new.
     new_voxels: bool,
+}
+
+/// Relight landings by what they changed. A relight lands when its light is
+/// written into the world view, or when it's found equal to the light there
+/// and thrown away. Light held for a chunk's new mesh counts when it's
+/// released.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LandedRelights {
+    /// Landings that changed the level of a voxel, of sky light or voxel
+    /// light.
+    pub changed_levels: u64,
+    /// Landings that left every voxel's levels as they were.
+    pub changed_nothing: u64,
+}
+
+impl LandedRelights {
+    /// Counts a landing that replaced the light `old` with `new`.
+    fn count(&mut self, old: &ChunkLight, new: &ChunkLight) {
+        if old.precision == new.precision && old.sky == new.sky && old.voxel == new.voxel
+        {
+            self.changed_nothing += 1;
+        } else {
+            self.changed_levels += 1;
+        }
+    }
 }
 
 /// The light work of world `C` on the main thread: each chunk's light state,
@@ -283,6 +316,8 @@ pub(crate) struct LightWork<C> {
     fresh: HashSet<GridKey>,
     /// Counts of changes to shown light, once a bench turns them on.
     pub census: Option<ChangeCensus>,
+    /// Relight landings by what they changed.
+    pub landed: LandedRelights,
     /// Chunks holding voxels edited since their last relight started. When
     /// relights run on the main thread, theirs start first.
     edited: HashSet<GridKey>,
@@ -321,6 +356,7 @@ impl<C> Default for LightWork<C> {
             hinted_touched: Vec::new(),
             fresh: HashSet::new(),
             census: None,
+            landed: LandedRelights::default(),
             edited: HashSet::new(),
             relight_time: Duration::ZERO,
             #[cfg(feature = "sub_grids")]
@@ -461,6 +497,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 edit_frame: 0,
                 version: 0,
                 cause: Cause::Other,
+                ripples: true,
             }),
         }
     }
@@ -564,6 +601,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             self.handovers.triggered(key);
         }
         chunk.urgent |= urgent;
+        chunk.only_recolored = false;
         // The first trigger since the last relight started names its cause.
         if matches!(
             chunk.state,
@@ -628,6 +666,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 state: LightState::Clean,
                 urgent: false,
                 cause: Cause::Other,
+                only_recolored: false,
             },
         );
         self.fresh.insert(key);
@@ -668,6 +707,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 state: LightState::Clean,
                 urgent: false,
                 cause: Cause::Other,
+                only_recolored: false,
             },
         );
         self.positions.insert(entity, key);
@@ -769,6 +809,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return;
         };
+        chunk.only_recolored = false;
         if chunk.state == LightState::Clean {
             chunk.state = LightState::Dirty;
             self.settings_queue.insert(key);
@@ -785,6 +826,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return;
         };
+        chunk.only_recolored = false;
         match chunk.state {
             LightState::Clean => {
                 chunk.state = LightState::Dirty;
@@ -797,6 +839,33 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
+    /// Marks the chunk at `key` for a relight with the settings relights
+    /// because the light colour of an emissive material in its light box
+    /// changed, and nothing else did, if it has light.
+    ///
+    /// A chunk already dirty needs nothing more, since its relight reads the
+    /// new colours. A relight running now lands, and another follows. Unless
+    /// something else triggers it meanwhile, its relight's light lands without
+    /// relighting the chunks beside it: a change of colour moves no level,
+    /// and every chunk whose light it changes is marked itself.
+    pub fn trigger_recolor(&mut self, key: GridKey) {
+        let Some(chunk) = self.chunks.get_mut(&key) else {
+            return;
+        };
+        match chunk.state {
+            LightState::Clean => {
+                chunk.state = LightState::Dirty;
+                chunk.only_recolored = true;
+                self.settings_queue.insert(key);
+            }
+            LightState::Dirty | LightState::Relighting { dirty: true } => {}
+            LightState::Relighting { dirty: false } => {
+                chunk.state = LightState::Relighting { dirty: true };
+                chunk.only_recolored = true;
+            }
+        }
+    }
+
     /// Marks the chunk at `key` for a relight because a sky fill cell it
     /// reads changed, if it has light. The relight starts after chunk tasks,
     /// unless something else triggers it meanwhile. A chunk already dirty
@@ -805,6 +874,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return;
         };
+        chunk.only_recolored = false;
         match chunk.state {
             LightState::Clean => {
                 chunk.state = LightState::Dirty;
@@ -843,7 +913,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
         if let LightState::Relighting { dirty } = chunk.state {
             chunk.state = LightState::Clean;
-            if dirty {
+            if dirty && chunk.only_recolored {
+                chunk.state = LightState::Dirty;
+                self.settings_queue.insert(key);
+            } else if dirty {
                 let cause = chunk.cause;
                 self.trigger_as(key, false, cause);
             }
@@ -896,6 +969,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             mut solved,
             urgent,
             cause,
+            ripples,
             ..
         } = landing;
         let old_settings = solved.generation != generation;
@@ -932,6 +1006,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     if solved.rescanned.is_none()
                         && chunk.light.same_light_and_borders(&solved.light)
                     {
+                        self.landed.changed_nothing += 1;
                         // The light already there is the light these seeds
                         // give.
                         if chunk.solved_from_seeds().is_some() {
@@ -944,7 +1019,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         return None;
                     }
                     for face in Face::ALL {
-                        if !fresh
+                        if ripples
+                            && !fresh
                             && passes_light_on(key)
                             && chunk.faces.differs_at(&solved.faces, face)
                         {
@@ -961,6 +1037,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         .fill_seeds
                         .map(|hash| (Arc::downgrade(&solved.light), hash));
                     let old = std::mem::replace(&mut chunk.light, solved.light);
+                    self.landed.count(&old, &chunk.light);
                     if self.census.is_some() && chunk.entity != ENTRY {
                         replaced = Some(old);
                     }
@@ -1074,6 +1151,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     // The running relight read the old inputs, so it is
                     // thrown away as it lands, and another must follow.
                     chunk.state = LightState::Relighting { dirty: true };
+                    chunk.only_recolored = false;
                 }
             }
             self.chunks.entry(key).or_insert(LightChunk {
@@ -1081,6 +1159,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 state: LightState::Clean,
                 urgent: false,
                 cause: Cause::Other,
+                only_recolored: false,
             });
             self.positions.insert(entity, key);
             self.fill_touch(key);
@@ -1133,7 +1212,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 return;
             }
             for face in Face::ALL {
-                if passes_light_on(key)
+                if landing.ripples
+                    && passes_light_on(key)
                     && chunk.faces.differs_at(&landing.solved.faces, face)
                 {
                     triggers.push(key + face.offset());
@@ -1145,6 +1225,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         };
         let (urgent, cause) = (landing.urgent, landing.cause);
         if same {
+            self.landed.changed_nothing += 1;
             self.held.remove(&key);
         } else {
             self.held.insert(key, landing);
@@ -1182,6 +1263,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 chunk.emission = solved.emission;
                 read.emissive != solved.light.inputs.emissive
             });
+            self.landed.count(&chunk.light, &solved.light);
             chunk.light = solved.light.clone();
             chunk.version = self.clock;
             self.clock += 1;
@@ -1270,6 +1352,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     state: LightState::Clean,
                     urgent: false,
                     cause: Cause::Other,
+                    only_recolored: false,
                 },
             );
             // Its relight was cut short with the chunk.
@@ -1362,6 +1445,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             edit_frame,
             version,
             cause,
+            ripples,
         } = relight;
         let Some(solved) = solved else {
             self.note_solved(key, edit_frame);
@@ -1377,6 +1461,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             edit_frame,
             version,
             cause,
+            ripples,
         };
         if urgent {
             self.landing.push_front(landing);
@@ -1421,6 +1506,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let chunk = self.chunks.get_mut(&key).unwrap();
         chunk.state = LightState::Relighting { dirty: false };
         let urgent = std::mem::take(&mut chunk.urgent);
+        let ripples = !std::mem::take(&mut chunk.only_recolored);
         let (entity, cause) = (chunk.entity, chunk.cause);
         let edit_frame = settings.edit_frame.load(Ordering::Relaxed);
         let (version, emission, solved_from) = settings
@@ -1459,6 +1545,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             edit_frame,
             version,
             cause,
+            ripples,
         };
         settings.counters().relights.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "sub_grids")]
@@ -1793,6 +1880,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
                         &settings.view,
                     );
                 }
+                let recolored = source == Source::ChunkTask
+                    && landing.solved.generation == generation
+                    && solved_before_recolor(&landing.solved, &settings.task.recolored);
                 let landed = work.land(
                     landing,
                     &settings.view,
@@ -1801,6 +1891,9 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     ready(entity),
                     generation,
                 );
+                if recolored {
+                    work.trigger_recolor(key);
+                }
                 if let Some(probes) = probes.as_mut() {
                     for position in probes.take_relights() {
                         work.trigger_column(in_world(position));
@@ -2057,6 +2150,22 @@ impl<C: VoxelWorldConfig> Rescans<'_, C> {
 
 /// The 26 chunks around the chunk at `key`, on its grid, whose solves read
 /// its emissive voxels.
+/// Whether `solved` was solved under light colours changed since for an
+/// emissive material its light box holds: whether a material the chunks it
+/// read note has a later colour generation in `recolored` than its own.
+fn solved_before_recolor(solved: &Solved, recolored: &[u64]) -> bool {
+    solved
+        .read
+        .iter()
+        .flatten()
+        .flat_map(|inputs| inputs.emissive.materials())
+        .any(|material| {
+            recolored
+                .get(*material as usize)
+                .is_some_and(|at| *at > solved.color_generation)
+        })
+}
+
 fn around(key: GridKey) -> impl Iterator<Item = GridKey> {
     (-1..=1).flat_map(move |z| {
         (-1..=1).flat_map(move |y| {

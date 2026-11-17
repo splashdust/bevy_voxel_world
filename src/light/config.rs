@@ -72,6 +72,10 @@ use bevy::reflect::Reflect;
 /// [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
 /// is false until every relight has landed.
 ///
+/// A change of an emissive material's light colour alone relights only the
+/// chunks whose light box holds an emissive voxel of that material: see
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials).
+///
 /// A chunk of air with no solid beside it isn't relit, so
 /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) there can
 /// read light from the old settings. A chunk above LOD level 0 takes the new

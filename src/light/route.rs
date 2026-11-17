@@ -20,11 +20,40 @@
 //!   bits 0–15 hold the one sky level and voxel level every face of the chunk
 //!   sees: 4 bits each at 16 levels, sky in bits 0–3 and voxel in 4–7, and 8
 //!   bits each at 256 levels, sky in bits 0–7 and voxel in 8–15. Bit 30 is
-//!   set on every chunk of a sub-grid and never on a world chunk, and bits
-//!   28 and 29 are always clear. Every reader of a field masks it to its
-//!   width, so bit 30 never reads as part of the slot, the LOD level or the
-//!   levels. The crate sets the tag on every chunk of a lit world showing
+//!   set on every chunk of a sub-grid and never on a world chunk. Bits 28
+//!   and 29 carry light colour, below. Every reader of a field masks it to
+//!   its width, so bit 30 never reads as part of the slot, the LOD level or
+//!   the levels. The crate sets the tag on every chunk of a lit world showing
 //!   its light, replacing any tag the world's own systems set.
+//!
+//! # Light colour
+//!
+//! A chunk shows one light colour, from the voxels the slot rule counts plus
+//! its emissive voxels touching an open voxel. A voxel with no voxel light
+//! has no colour and doesn't count. Where the counted voxels see one light
+//! colour the chunk shows it. Otherwise it shows the most common light colour
+//! among them, counting only those at the voxel light level its tag shows
+//! when it has no slot. Its cost grows with the chunk's voxels, and only
+//! chunks of a world whose emissive list holds a colour other than white
+//! pay it. Sub-grids' chunks show white.
+//!
+//! - **A tag with a slot** sets bit 29 when the chunk shows a light colour
+//!   other than white, and keeps bit 28 clear. Its colour is in its entry.
+//! - **A tag with no slot** holds its colour in bits 16–29, at both
+//!   precisions: the packed light colour cut to 14 bits (see
+//!   [`tag_cut`]). White is 0, so a white chunk's tag in a coloured world is
+//!   the tag it would have in a white world.
+//! - **The colour texture** is an `R16Uint` 3D texture beside the light
+//!   texture, holding an entry for every slot: the slot's chunk's packed
+//!   light colour. A slot's entry is the texel at the slot's place among the
+//!   light texture's slots, so the texture is as many texels a side as the
+//!   light texture is slots. It's made when the first chunk with a slot
+//!   shows a colour other than white. Until then the route offers a
+//!   one-texel placeholder in its place, as a world with no sub-grid has
+//!   for its tag map. An entry is written
+//!   in the same frame as its slot's bytes and its chunk's tag, so the mesh,
+//!   the tag and the colour show together. Replacing the light texture
+//!   replaces this one too.
 //!
 //! A slot's shell holds copies of the six face neighbours' border planes, so
 //! a face on a chunk boundary reads the light in front of it. The shell is
@@ -117,15 +146,19 @@ use bevy::render::{
 use std::hash::BuildHasher;
 
 use super::coarse::takes_coarse_path;
+use super::color::{tag_cut, WHITE};
 use super::config::{LightPrecision, LightPropagation};
 use super::faces::Face;
 use super::fill::{cell_level, CellFill, FillCells, CELL};
+use super::inputs::Occupancy;
 use super::kernel::Plane;
 use super::levels::LightLevels;
 use super::slot::{
-    across, border_plane, border_sees, cell_index, convert_texels, most_common,
-    most_common_open, open_voxels_see, shell_cell, slot_bytes, texel_at, texel_bytes,
-    texel_levels, texture_format, write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
+    across, across_voxels, border_plane, border_sees, border_voxels, cell_index,
+    colors_seen, convert_texels, count_colors, most_common, most_common_open,
+    open_colors_seen, open_voxels, open_voxels_see, own_colors_seen, shell_cell, slot_bytes,
+    texel_at, texel_bytes, texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen,
+    ShellPlane, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -152,6 +185,14 @@ pub(crate) const HAS_SLOT: u32 = 1 << 31;
 
 /// The tag bit of a sub-grid's chunk.
 pub(crate) const SUB_GRID: u32 = 1 << 30;
+
+/// The tag bit of a chunk with a slot showing a light colour other than
+/// white, which its entry in the colour texture holds.
+pub(crate) const COLORED: u32 = 1 << 29;
+
+/// The lowest of the tag bits holding the light colour of a chunk with no
+/// slot.
+pub(crate) const COLOR_SHIFT: u32 = 16;
 
 /// The lowest of the tag bits holding a coarse chunk's LOD level when it has
 /// a slot.
@@ -214,11 +255,11 @@ enum Tagged {
 }
 
 /// What a chunk's tag shows: its slot, or one sky level and voxel level in
-/// steps of the route's precision.
+/// steps of the route's precision, with the packed light colour it shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shows {
-    Slot(u32),
-    Levels(u8, u8),
+    Slot(u32, u16),
+    Levels(u8, u8, u16),
 }
 
 /// A level-0 chunk the route knows of: one whose light has landed, which
@@ -285,6 +326,21 @@ pub(crate) struct LightRoute<C> {
     released: Vec<Handle<Image>>,
     /// Whether the texture waits to be made.
     texture_wanted: bool,
+    /// A colour texture of one texel, which stands in for the colour texture
+    /// until a chunk with a slot shows a light colour other than white.
+    pub color_placeholder: Handle<Image>,
+    color_texture: Option<Handle<Image>>,
+    /// Whether the colour texture waits to be made.
+    color_texture_wanted: bool,
+    /// The packed light colour each slot's entry holds, or will once the
+    /// render world writes it. A slot not here holds white.
+    entries_held: HashMap<u32, u16>,
+    /// The entries to write, by slot, taken by the render world each frame.
+    entry_uploads: HashMap<u32, u16>,
+    /// The packed light colour of each material index of the world's
+    /// emission table, or `None` in a world whose emissive materials all give
+    /// white, where every chunk shows white.
+    light_colors: Option<Box<[u16]>>,
     /// The precision of the texture's format, and of the levels in tags.
     precision: LightPrecision,
     slots: SlotPool<Tagged>,
@@ -384,11 +440,25 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             RenderAssetUsages::RENDER_WORLD,
         );
         placeholder.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING;
+        let mut color_placeholder = Image::new_fill(
+            Extent3d::default(),
+            TextureDimension::D3,
+            &WHITE.to_le_bytes(),
+            TextureFormat::R16Uint,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        color_placeholder.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING;
         Self {
             placeholder: images.add(placeholder),
             texture: None,
             released: Vec::new(),
             texture_wanted: false,
+            color_placeholder: images.add(color_placeholder),
+            color_texture: None,
+            color_texture_wanted: false,
+            entries_held: HashMap::default(),
+            entry_uploads: HashMap::default(),
+            light_colors: None,
             precision: config.precision,
             slots: SlotPool::new(config.slot_capacity),
             chunks: HashMap::default(),
@@ -429,31 +499,69 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.fill_cells = cells;
     }
 
-    /// What a chunk with no light of its own shows.
-    fn unlit(&self) -> Shows {
-        Shows::Levels(self.precision.of_whole(self.unlit_sky), 0)
+    /// Makes chunks read light colours from `colors`, the packed light colour
+    /// of each material index of the world's emission table, from now on, or
+    /// show white everywhere with `None`. Chunks already placed keep what
+    /// they show until their light lands again.
+    pub fn set_light_colors(&mut self, colors: Option<&[u16]>) {
+        self.light_colors = colors.map(Box::from);
     }
 
-    /// What a chunk with no slot showing `levels`, steps of `from`, shows.
-    fn flat_levels(&self, (sky, voxel): (u8, u8), from: LightPrecision) -> Shows {
+    /// Whether the level-0 chunk at `key` reads light colours: it's a world
+    /// chunk, and the world's emission table holds a light colour other than
+    /// white.
+    fn reads_colors(&self, key: GridKey) -> bool {
+        self.light_colors.is_some() && key.is_world()
+    }
+
+    /// The packed light colour of the emissive material index `material`.
+    fn lamp_color(&self, material: u16) -> u16 {
+        self.light_colors
+            .as_ref()
+            .and_then(|colors| colors.get(material as usize).copied())
+            .unwrap_or(WHITE)
+    }
+
+    /// What a chunk with no light of its own shows.
+    fn unlit(&self) -> Shows {
+        Shows::Levels(self.precision.of_whole(self.unlit_sky), 0, WHITE)
+    }
+
+    /// What a chunk with no slot showing `levels`, steps of `from`, and the
+    /// packed light colour `color` shows.
+    fn flat_levels(
+        &self,
+        (sky, voxel): (u8, u8),
+        from: LightPrecision,
+        color: u16,
+    ) -> Shows {
         let to = self.precision;
-        Shows::Levels(to.convert(sky, from), to.convert(voxel, from))
+        Shows::Levels(to.convert(sky, from), to.convert(voxel, from), color)
     }
 
     /// Sets the tag of `chunk` to show `shows`. Every tag the route gives a
     /// chunk is set here. A changed tag of a chunk showing its mesh waits in
     /// [`take_changed_tags`](Self::take_changed_tags).
+    ///
+    /// A slot's entry is queued here too when the light colour it holds
+    /// changes, so it's written in the frame that extracts the tag.
     fn retag(&mut self, chunk: Tagged, shows: Shows) {
+        if let Shows::Slot(slot, color) = shows {
+            self.hold_entry(slot, color);
+        }
         let precision = self.precision;
-        let levels = |sky, voxel| tag_levels(sky, voxel, precision);
+        let levels = |sky, voxel, color| {
+            tag_levels(sky, voxel, precision) | tag_cut(color) << COLOR_SHIFT
+        };
+        let colored = |color| if color == WHITE { 0 } else { COLORED };
         let (tag, shown, entity) = match chunk {
             Tagged::Chunk(id) => {
                 let Some(chunk) = self.chunks.get_mut(&id) else {
                     return;
                 };
                 let mut tag = match shows {
-                    Shows::Slot(slot) => HAS_SLOT | slot,
-                    Shows::Levels(sky, voxel) => levels(sky, voxel),
+                    Shows::Slot(slot, color) => HAS_SLOT | colored(color) | slot,
+                    Shows::Levels(sky, voxel, color) => levels(sky, voxel, color),
                 };
                 if !chunk.key.is_world() {
                     tag |= SUB_GRID;
@@ -477,10 +585,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     return;
                 };
                 let tag = match shows {
-                    Shows::Slot(slot) => {
-                        HAS_SLOT | (chunk.key.lod_level as u32) << LOD_SHIFT | slot
+                    Shows::Slot(slot, color) => {
+                        HAS_SLOT
+                            | colored(color)
+                            | (chunk.key.lod_level as u32) << LOD_SHIFT
+                            | slot
                     }
-                    Shows::Levels(sky, voxel) => levels(sky, voxel),
+                    Shows::Levels(sky, voxel, color) => levels(sky, voxel, color),
                 };
                 if chunk.tag == tag {
                     return;
@@ -496,6 +607,25 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let (true, Some(entity)) = (shown, entity) {
             self.changed_tags.push((entity, tag));
         }
+    }
+
+    /// Queues the entry of `slot` to hold the packed light colour `color`,
+    /// if it holds another. The first entry other than white makes the
+    /// colour texture wait to be made, holding white everywhere else.
+    fn hold_entry(&mut self, slot: u32, color: u16) {
+        let held = self.entries_held.get(&slot).copied().unwrap_or(WHITE);
+        if held == color {
+            return;
+        }
+        if color == WHITE {
+            self.entries_held.remove(&slot);
+        } else {
+            self.entries_held.insert(slot, color);
+            if self.color_texture.is_none() {
+                self.color_texture_wanted = true;
+            }
+        }
+        self.entry_uploads.insert(slot, color);
     }
 
     /// Adds the level-0 chunk `id` at `key`, showing the levels of a chunk
@@ -515,7 +645,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return;
         }
         self.coarse.insert(entity, CoarseChunk::new(key, levels));
-        self.retag(Tagged::Coarse(entity), Shows::Levels(levels.0, levels.1));
+        self.retag(
+            Tagged::Coarse(entity),
+            Shows::Levels(levels.0, levels.1, WHITE),
+        );
     }
 
     /// Replaces the texture with one of `precision`'s format holding
@@ -523,10 +656,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     ///
     /// Every chunk with a slot drops it and shows its most common sky light
     /// level and voxel light level, and changed tags wait in
-    /// [`take_changed_tags`](Self::take_changed_tags). The old texture waits
-    /// in [`take_released`](Self::take_released) for the world's materials to
-    /// stop binding it, and the new one is made only when a chunk next takes
-    /// a slot. A level-0 chunk takes one again when its light lands at the
+    /// [`take_changed_tags`](Self::take_changed_tags). The old texture and
+    /// the colour texture wait in [`take_released`](Self::take_released) for
+    /// the world's materials to stop binding them. The new texture is made
+    /// only when a chunk next takes a slot, and the new colour texture when a
+    /// chunk with a slot next shows a light colour other than white. A level-0 chunk takes one again when its light lands at the
     /// new precision, or, with the precision unchanged, as slots are
     /// refilled. A coarse chunk's slot is converted to the new format and
     /// placed again.
@@ -536,6 +670,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.slots.reset(capacity);
         self.released.extend(self.texture.take());
         self.texture_wanted = false;
+        self.released.extend(self.color_texture.take());
+        self.color_texture_wanted = false;
+        self.entries_held.clear();
+        self.entry_uploads.clear();
         self.uploads.clear();
         self.starved.clear();
         let unlit = self.unlit();
@@ -552,10 +690,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 Some((_, sees)) if had_slot || sees.needs_slot() => {
                     (self.most_common_shows(id), sees.needs_slot())
                 }
-                Some((light, sees)) => (
-                    self.flat_levels(flat_tag(&sees, &light), light.precision),
-                    false,
-                ),
+                Some((light, sees)) => (self.flat_shows(id, &sees, &light), false),
             };
             let starved = current && (had_slot || needs_slot);
             let chunk = self.chunks.get_mut(&id).unwrap();
@@ -588,7 +723,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .take()
                 .map(|bytes| convert_texels(&bytes, old, precision));
             let (sky, voxel) = chunk.levels;
-            self.retag(Tagged::Coarse(entity), Shows::Levels(sky, voxel));
+            self.retag(Tagged::Coarse(entity), Shows::Levels(sky, voxel, WHITE));
             self.settle_coarse(entity);
         }
     }
@@ -655,6 +790,52 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.texture_wanted = false;
     }
 
+    /// Whether the colour texture waits to be made.
+    pub fn color_texture_wanted(&self) -> bool {
+        self.color_texture_wanted
+    }
+
+    /// The colour texture, holding white in every entry: one texel for each
+    /// of the light texture's slots, in the same shape.
+    pub fn color_texture_image(&self) -> Image {
+        let size = self.slots.shape().unwrap_or(UVec3::ONE);
+        let mut image = Image::new_fill(
+            Extent3d {
+                width: size.x,
+                height: size.y,
+                depth_or_array_layers: size.z,
+            },
+            TextureDimension::D3,
+            &WHITE.to_le_bytes(),
+            TextureFormat::R16Uint,
+            RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.usage =
+            TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+        image
+    }
+
+    /// The colour texture a material made now binds: the colour texture once
+    /// it's made, or else its placeholder.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by tests until materials bind it"))]
+    pub fn color_texture(&self) -> Handle<Image> {
+        self.color_texture
+            .clone()
+            .unwrap_or_else(|| self.color_placeholder.clone())
+    }
+
+    pub fn color_texture_made(&mut self, texture: Handle<Image>) {
+        self.color_texture = Some(texture);
+        self.color_texture_wanted = false;
+    }
+
+    /// The packed light colour queued for the entry of `slot` and not yet
+    /// taken by the render world.
+    #[cfg(test)]
+    pub fn queued_entry(&self, slot: u32) -> Option<u16> {
+        self.entry_uploads.get(&slot).copied()
+    }
+
     /// Whether the world has warned that its slots ran out.
     #[cfg_attr(not(test), expect(dead_code, reason = "read by tests"))]
     pub fn warned_full(&self) -> bool {
@@ -701,6 +882,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .is_some_and(|old| Arc::ptr_eq(&old.inputs, &light.inputs))
         });
         self.add_chunk(id, key);
+        let colored = self.reads_colors(key);
+        let mut own = own;
+        if colored {
+            own.color = own_colors_seen(&light, |material| self.lamp_color(material));
+        }
         let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.light = Some(light.clone());
         chunk.own = own;
@@ -717,7 +903,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let across = Face::ALL.map(|face| {
                 self.neighbour_light(key, face)
                     .map_or(FacesSee::default(), |neighbour| {
-                        across(&light.inputs, face, &neighbour, self.precision)
+                        across(&light.inputs, face, &neighbour, self.precision, colored)
                     })
             });
             self.chunks.get_mut(&id).unwrap().across = across;
@@ -813,6 +999,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// entry at `key` read across their faces in line with its new `light`,
     /// and their shells and tags with it.
     fn neighbours_follow(&mut self, key: GridKey, light: &Arc<ChunkLight>) {
+        let colored = self.reads_colors(key);
         for face in Face::ALL {
             let Some(&neighbour) = self.at.get(&(key + face.offset())) else {
                 continue;
@@ -824,8 +1011,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let Some(neighbour_light) = &chunk.light else {
                 continue;
             };
-            chunk.across[back as usize] =
-                across(&neighbour_light.inputs, back, light, self.precision);
+            chunk.across[back as usize] = across(
+                &neighbour_light.inputs,
+                back,
+                light,
+                self.precision,
+                colored,
+            );
             self.settle(neighbour, Some(back));
         }
     }
@@ -976,11 +1168,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     .expect("a chunk taking a slot has bytes");
                 self.uploads.insert(slot, Upload::Full(bytes));
                 self.counters.full_writes += 1;
-                Shows::Slot(slot)
+                Shows::Slot(slot, WHITE)
             }
             None => {
                 chunk.bytes = None;
-                Shows::Levels(chunk.levels.0, chunk.levels.1)
+                Shows::Levels(chunk.levels.0, chunk.levels.1, WHITE)
             }
         };
         self.retag(Tagged::Coarse(entity), shows);
@@ -1051,11 +1243,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             match (slot, face) {
                 (Some(slot), Some(face)) => {
                     self.write_plane(id, slot, face);
-                    Shows::Slot(slot)
+                    Shows::Slot(slot, self.shown_color(id, &light, &sees, None))
                 }
                 (Some(slot), None) => {
                     self.write_full(id, slot, &light);
-                    Shows::Slot(slot)
+                    Shows::Slot(slot, self.shown_color(id, &light, &sees, None))
                 }
                 (None, _) => {
                     match self.take_slot(Tagged::Chunk(id), self.distance(key)) {
@@ -1065,7 +1257,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                                 self.counters.late_allocations += 1;
                             }
                             self.write_full(id, slot, &light);
-                            Shows::Slot(slot)
+                            Shows::Slot(slot, self.shown_color(id, &light, &sees, None))
                         }
                         None => {
                             self.starved.insert(id);
@@ -1080,7 +1272,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 self.free_slot(slot);
                 self.counters.given_back += 1;
             }
-            self.flat_levels(flat_tag(&sees, &light), light.precision)
+            self.flat_shows(id, &sees, &light)
         };
         let chunk = self.chunks.get_mut(&id).unwrap();
         if chunk.slot.is_none() {
@@ -1106,6 +1298,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             sky,
             voxel,
             lamp: chunk.own.lamp,
+            color: Seen::Nothing,
         };
         for face in Face::ALL {
             if sees.needs_slot() {
@@ -1118,27 +1311,125 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     sky,
                     voxel,
                     lamp: false,
+                    color: Seen::Nothing,
                 });
             }
         }
+        if self.reads_colors(chunk.key) {
+            sees.color = self.kept_colors_seen(chunk.key, &light);
+        }
         Some((light, sees))
+    }
+
+    /// The packed light colours a kept chunk at `key` lit by `light` reads:
+    /// those of every one of its open voxels and its emissive voxels touching
+    /// one, and those of every open voxel its shell copies.
+    fn kept_colors_seen(&self, key: GridKey, light: &ChunkLight) -> Seen<u16> {
+        let mut seen = open_colors_seen(light, |material| self.lamp_color(material));
+        for face in Face::ALL {
+            if seen == Seen::Mixed {
+                break;
+            }
+            if let Some(neighbour) = self.neighbour_light(key, face) {
+                let border = border_voxels(&neighbour.inputs, face.opposite());
+                seen = seen.join(colors_seen(&neighbour, &border));
+            }
+        }
+        seen
     }
 
     /// What the level-0 chunk `id` shows with no slot while its light needs
     /// one: the most common sky light level and voxel light level among the
     /// voxels its slot rule reads, or the levels of a chunk with no light if
-    /// its light hasn't landed.
+    /// its light hasn't landed, with the light colour
+    /// [`shown_color`](Self::shown_color) gives at that voxel light level.
     fn most_common_shows(&self, id: RouteId) -> Shows {
         let chunk = &self.chunks[&id];
         let Some(light) = &chunk.light else {
             return self.unlit();
         };
-        if chunk.kept {
+        let (light, levels) = if chunk.kept {
             let light = self.kept_light(chunk.key, light);
-            self.flat_levels(most_common_open(&light), light.precision)
+            let levels = most_common_open(&light);
+            (light, levels)
         } else {
-            self.flat_levels(most_common(light), light.precision)
+            (light.clone(), most_common(light))
+        };
+        let color = if self.reads_colors(chunk.key) && levels.1 > 0 {
+            match self.placed_light(id) {
+                Some((_, sees)) => self.shown_color(id, &light, &sees, Some(levels.1)),
+                None => WHITE,
+            }
+        } else {
+            WHITE
+        };
+        self.flat_levels(levels, light.precision, color)
+    }
+
+    /// What the level-0 chunk `id`, lit by `light`, shows with no slot when
+    /// its faces see `sees`.
+    fn flat_shows(&self, id: RouteId, sees: &FacesSee, light: &ChunkLight) -> Shows {
+        let levels = flat_tag(sees, light);
+        let color = self.shown_color(id, light, sees, Some(levels.1));
+        self.flat_levels(levels, light.precision, color)
+    }
+
+    /// The packed light colour the level-0 chunk `id`, lit by `light`, shows
+    /// when its faces see `sees`: the one light colour they see, or else the
+    /// most common light colour among the voxels they read, counting only
+    /// those at the voxel light level `level` if it's given, a step of the
+    /// light's precision. White where they see none, or at `level` 0.
+    fn shown_color(
+        &self,
+        id: RouteId,
+        light: &ChunkLight,
+        sees: &FacesSee,
+        level: Option<u8>,
+    ) -> u16 {
+        if level == Some(0) {
+            return WHITE;
         }
+        match sees.color {
+            Seen::Nothing => WHITE,
+            Seen::One(color) => color,
+            Seen::Mixed => self.most_common_color(id, light, level),
+        }
+    }
+
+    /// The most common packed light colour among the voxels the level-0
+    /// chunk `id`, lit by `light`, reads with voxel light, counting only those
+    /// at the voxel light level `level` if it's given, a step of the light's
+    /// precision. White where none counts.
+    ///
+    /// Its cost grows with the chunk's voxels and its face neighbours' border
+    /// voxels.
+    fn most_common_color(&self, id: RouteId, light: &ChunkLight, level: Option<u8>) -> u16 {
+        let chunk = &self.chunks[&id];
+        let mut counts = Vec::new();
+        let own = match &light.inputs.occupancy {
+            Occupancy::Mixed(solid) if !chunk.kept => Some(touching_open(solid)),
+            occupancy if chunk.kept => open_voxels(occupancy),
+            _ => None,
+        };
+        if let Some(own) = own {
+            count_colors(light, &own, level, &mut counts);
+        }
+        for face in Face::ALL {
+            let Some(neighbour) = self.neighbour_light(chunk.key, face) else {
+                continue;
+            };
+            let voxels = if chunk.kept {
+                border_voxels(&neighbour.inputs, face.opposite())
+            } else {
+                across_voxels(&light.inputs, face, &neighbour.inputs)
+            };
+            let level = level.map(|level| neighbour.precision.convert(level, light.precision));
+            count_colors(&neighbour, &voxels, level, &mut counts);
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(color, count)| (*count, std::cmp::Reverse(*color)))
+            .map_or(WHITE, |(color, _)| color)
     }
 
     /// The light a kept chunk at `key` lit by `light` shows. A chunk of air
@@ -1654,7 +1945,7 @@ impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
                 chunk.slot = None;
                 chunk.bytes = None;
                 let (sky, voxel) = chunk.levels;
-                self.retag(holder, Shows::Levels(sky, voxel));
+                self.retag(holder, Shows::Levels(sky, voxel, WHITE));
             }
             Tagged::Chunk(id) => {
                 let shows = self.most_common_shows(id);
@@ -1791,6 +2082,9 @@ pub(crate) fn add_render_systems<C: VoxelWorldConfig>(app: &mut App) {
             slots_per_axis: UVec3::ONE,
             texel_bytes: 1,
             pending: Vec::new(),
+            color_texture: None,
+            entries_per_axis: UVec3::ONE,
+            entries: Vec::new(),
             #[cfg(feature = "sub_grids")]
             tag_map: PendingWrites::default(),
             _world: PhantomData,
@@ -1810,14 +2104,18 @@ struct RenderUploads<C> {
     texel_bytes: usize,
     /// Each slot and what to write into it, oldest first.
     pending: Vec<(u32, Upload)>,
+    color_texture: Option<AssetId<Image>>,
+    entries_per_axis: UVec3,
+    /// Each slot whose entry to write, and the packed light colour it holds.
+    entries: Vec<(u32, u16)>,
     /// The tag map's writes.
     #[cfg(feature = "sub_grids")]
     tag_map: PendingWrites,
     _world: PhantomData<C>,
 }
 
-/// Takes the slot writes and the tag map's writes queued in the main world
-/// this frame, in the extract that takes the chunks' tags.
+/// Takes the slot writes, the entries and the tag map's writes queued in the
+/// main world this frame, in the extract that takes the chunks' tags.
 fn extract_uploads<C: VoxelWorldConfig>(
     mut main_world: ResMut<MainWorld>,
     mut uploads: ResMut<RenderUploads<C>>,
@@ -1828,6 +2126,22 @@ fn extract_uploads<C: VoxelWorldConfig>(
     #[cfg(feature = "sub_grids")]
     if let Some(writes) = route.take_tag_map_writes() {
         uploads.tag_map.extend(writes);
+    }
+    if !route.entry_uploads.is_empty() {
+        match (&route.color_texture, route.slots.shape()) {
+            (Some(texture), Some(axes)) => {
+                let id = texture.id();
+                if uploads.color_texture != Some(id) {
+                    uploads.entries.clear();
+                }
+                uploads.color_texture = Some(id);
+                uploads.entries_per_axis = axes;
+                uploads.entries.extend(route.entry_uploads.drain());
+            }
+            // A colour texture made later holds white in every entry.
+            _ if !route.color_texture_wanted => route.entry_uploads.clear(),
+            _ => {}
+        }
     }
     if route.uploads.is_empty() {
         return;
@@ -1845,9 +2159,9 @@ fn extract_uploads<C: VoxelWorldConfig>(
     uploads.pending.extend(route.uploads.drain());
 }
 
-/// Writes each pending slot write into its part of the texture, and each
-/// pending tag map write into the tag map's texture, once the texture exists
-/// on the GPU.
+/// Writes each pending slot write into its part of the texture, each pending
+/// entry into the colour texture, and each pending tag map write into the
+/// tag map's texture, once each texture exists on the GPU.
 fn write_uploads<C: VoxelWorldConfig>(
     mut uploads: ResMut<RenderUploads<C>>,
     images: Res<RenderAssets<GpuImage>>,
@@ -1855,6 +2169,7 @@ fn write_uploads<C: VoxelWorldConfig>(
 ) {
     #[cfg(feature = "sub_grids")]
     uploads.tag_map.write(&images, &queue);
+    write_entries(&mut uploads, &images, &queue);
     if uploads.pending.is_empty() {
         return;
     }
@@ -1908,6 +2223,54 @@ fn write_uploads<C: VoxelWorldConfig>(
             }
         }
     }
+}
+
+/// Writes each pending entry into its texel of the colour texture, once the
+/// texture exists on the GPU. Its cost grows with the entries written.
+fn write_entries<C>(
+    uploads: &mut RenderUploads<C>,
+    images: &RenderAssets<GpuImage>,
+    queue: &RenderQueue,
+) {
+    if uploads.entries.is_empty() {
+        return;
+    }
+    let Some(image) = uploads.color_texture.and_then(|texture| images.get(texture))
+    else {
+        return;
+    };
+    let axes = uploads.entries_per_axis;
+    for (slot, color) in uploads.entries.drain(..) {
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &image.texture,
+                mip_level: 0,
+                origin: Origin3d {
+                    x: slot % axes.x,
+                    y: slot / axes.x % axes.y,
+                    z: slot / (axes.x * axes.y),
+                },
+                aspect: TextureAspect::All,
+            },
+            &color.to_le_bytes(),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(2),
+                rows_per_image: Some(1),
+            },
+            Extent3d::default(),
+        );
+    }
+}
+
+/// Makes world `C`'s colour texture, once a chunk with a slot first shows a
+/// light colour other than white.
+pub(crate) fn make_color_texture<C: VoxelWorldConfig>(
+    mut route: ResMut<LightRoute<C>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let texture = images.add(route.color_texture_image());
+    route.color_texture_made(texture);
 }
 
 /// Where a shell plane on `face` lies in its slot's texels, as the region's
