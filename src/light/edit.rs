@@ -13,7 +13,11 @@
 //! hashes change (see [`relight`](super::relight)). Where an edit touches no
 //! light, nothing relights: a placed solid relights only if its voxel held
 //! light, a dug one only if a voxel beside it did, sky light or voxel light.
-//! Placing or removing an emissive voxel always relights. Every edit committed
+//! Placing or removing an emissive voxel always relights, and so does swapping
+//! one for an emissive voxel of another light colour, whose ripple goes on
+//! because face hashes are keyed by light colour (see
+//! [`faces`](super::faces)). Light here means a level above 0 from light of
+//! any colour, which is the level a chunk stores. Every edit committed
 //! in one frame is worked out together, as one change.
 //!
 //! The ripple compares a solve's face hashes with those the world view holds.
@@ -280,6 +284,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
                     color: chunk.light.color.clone(),
+                    borders: chunk.light.borders.clone(),
                     precision: chunk.light.precision,
                 });
                 relight.insert(position);
@@ -360,12 +365,6 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     emissive.push(emitter);
                 }
                 relight.insert(*position);
-                // A change of light colour alone changes no level at a face,
-                // so it ripples nowhere: the chunks its light reaches relight
-                // too.
-                if emission.is_colored() {
-                    relight.extend(within_reach(*p, reach));
-                }
             }
         }
         occupancy.normalize();
@@ -381,6 +380,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             sky: chunk.light.sky.clone(),
             voxel: chunk.light.voxel.clone(),
             color: chunk.light.color.clone(),
+            borders: chunk.light.borders.clone(),
             precision: chunk.light.precision,
         });
         chunk.edits = count;
@@ -563,6 +563,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
                             color: light.color.clone(),
+                            borders: light.borders.clone(),
                             precision: light.precision,
                         });
                     }

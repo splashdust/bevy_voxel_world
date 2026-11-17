@@ -156,9 +156,9 @@ use super::levels::LightLevels;
 use super::slot::{
     across, across_voxels, border_plane, border_sees, border_voxels, cell_index,
     colors_seen, convert_texels, count_colors, most_common, most_common_open,
-    open_colors_seen, open_voxels, open_voxels_see, own_colors_seen, shell_cell, slot_bytes,
-    texel_at, texel_bytes, texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen,
-    ShellPlane, PLANE_TEXELS,
+    open_colors_seen, open_voxels, open_voxels_see, own_colors_seen, shell_cell,
+    slot_bytes, texel_at, texel_bytes, texel_levels, texture_format, touching_open,
+    write_shell, FacesSee, Seen, ShellPlane, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -1408,7 +1408,12 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     ///
     /// Its cost grows with the chunk's voxels and its face neighbours' border
     /// voxels.
-    fn most_common_color(&self, id: RouteId, light: &ChunkLight, level: Option<u8>) -> u16 {
+    fn most_common_color(
+        &self,
+        id: RouteId,
+        light: &ChunkLight,
+        level: Option<u8>,
+    ) -> u16 {
         let chunk = &self.chunks[&id];
         let mut counts = Vec::new();
         let own = match &light.inputs.occupancy {
@@ -1428,7 +1433,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             } else {
                 across_voxels(&light.inputs, face, &neighbour.inputs)
             };
-            let level = level.map(|level| neighbour.precision.convert(level, light.precision));
+            let level =
+                level.map(|level| neighbour.precision.convert(level, light.precision));
             count_colors(&neighbour, &voxels, level, &mut counts);
         }
         counts
@@ -2044,6 +2050,7 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
         sky: ChunkLevels::Planes(planes.into_boxed_slice()),
         voxel: light.voxel.clone(),
         color: light.color.clone(),
+        borders: light.borders.clone(),
         precision,
     })
 }
@@ -2239,7 +2246,9 @@ fn write_entries<C>(
     if uploads.entries.is_empty() {
         return;
     }
-    let Some(image) = uploads.color_texture.and_then(|texture| images.get(texture))
+    let Some(image) = uploads
+        .color_texture
+        .and_then(|texture| images.get(texture))
     else {
         return;
     };
@@ -2340,6 +2349,7 @@ mod tests {
             sky: ChunkLevels::Planes(vec![above; precision.bits()].into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision,
         };
         let own = own_faces_see(&light);
@@ -2463,6 +2473,7 @@ mod tests {
             sky: ChunkLevels::Planes(sky.into_boxed_slice()),
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         })
     }
@@ -2590,6 +2601,7 @@ mod tests {
             },
             voxel: ChunkLevels::Uniform(0),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         });
         let own = own_faces_see(&light);

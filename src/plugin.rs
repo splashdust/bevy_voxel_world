@@ -352,8 +352,13 @@ where
             app.add_systems(
                 PreUpdate,
                 (
+                    // Before the lifecycle forgets despawned chunk entities:
+                    // a sub-grid's chunks despawn with its entity, and only
+                    // this system fires their `ChunkWillDespawn`, which it
+                    // can't once they have left the chunk index.
                     SubGrids::<C>::forget_despawned
                         .run_if(in_use)
+                        .before(ChunkLifecycle::<C>::forget_despawned_chunks)
                         .before(Internals::<C>::commit_voxel_edits),
                     // A commit spawns and retires sub-grids' chunks in place of
                     // the streaming policy.

@@ -729,14 +729,15 @@ fn sub_grid_removals<I: Copy + PartialEq>(
     });
 }
 
-/// Whether the sub-grid `grid`'s committed edits in `buckets` hold a solid
-/// voxel. Its cost grows with the grid's chunks up to the first one holding
-/// a solid.
+/// The box around the sub-grid `grid`'s committed solids in `buckets`, both
+/// corners inclusive, or `None` if it has none. It reads the box each bucket
+/// keeps, so its cost grows with the grid's chunks holding edits.
 #[cfg(feature = "sub_grids")]
-fn holds_solid<I>(buckets: &BucketMap<I>, grid: GridId) -> bool {
+fn solids_around<I>(buckets: &BucketMap<I>, grid: GridId) -> Option<(IVec3, IVec3)> {
     buckets
         .grid_entries(grid)
-        .any(|(_, bucket)| bucket.solids.is_some())
+        .filter_map(|(_, bucket)| bucket.solids)
+        .reduce(|(low, high), (min, max)| (low.min(min), high.max(max)))
 }
 
 /// Drops `grid`'s pending edits, copying the others' only when a reader still
@@ -783,6 +784,12 @@ pub struct VoxelEdits<C, I> {
     /// [`ChangeOrigin`].
     #[cfg(feature = "dislodged_fragments")]
     tracks_origin: bool,
+    /// The box around each sub-grid's committed solids, both corners
+    /// inclusive, for each sub-grid with any. Changed only with the pending
+    /// edits locked, by a commit or a dropped grid, so a reader holding that
+    /// lock finds it in step with the committed edits.
+    #[cfg(feature = "sub_grids")]
+    solid_bounds: Mutex<HashMap<GridId, (IVec3, IVec3)>>,
     _marker: PhantomData<C>,
 }
 
@@ -792,6 +799,8 @@ impl<C, I> Default for VoxelEdits<C, I> {
             pending: Mutex::default(),
             committed: Arc::default(),
             forgotten: Mutex::default(),
+            #[cfg(feature = "sub_grids")]
+            solid_bounds: Mutex::default(),
             #[cfg(any(feature = "light_propagation", feature = "dislodged_fragments"))]
             forget_epoch: Arc::default(),
             #[cfg(feature = "dislodged_fragments")]
@@ -1059,6 +1068,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
         let mut pending = self.pending.lock().unwrap();
         clear_pending(&mut pending, grid);
         self.committed.write().unwrap().clear_grid(grid);
+        self.solid_bounds.lock().unwrap().remove(&grid);
     }
 
     /// Drops every edit of the world and every edit sequence at once, pending
@@ -1246,17 +1256,28 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             .collect()
     }
 
+    /// Whether the sub-grid `grid`'s committed edits hold a solid voxel.
+    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
+    pub(crate) fn holds_solid_in(&self, grid: GridId) -> bool {
+        self.solid_bounds.lock().unwrap().contains_key(&grid)
+    }
+
     /// The box around `grid`'s solid edits, pending ones included, both
     /// corners inclusive, or `None` if it has none. For a sub-grid, whose
     /// edits are its solids.
     ///
-    /// A committed chunk with no pending edits gives the box its commit kept.
-    /// A chunk with pending edits is worked out from them, and also from its
-    /// committed edits where a pending one removes a voxel, so the cost grows
-    /// with the edits of the chunks edited since the last commit.
+    /// A sub-grid with no pending edits gives the box its last commit kept,
+    /// at no cost that grows. Otherwise a committed chunk with no pending
+    /// edits gives the box its commit kept, and a chunk with pending edits is
+    /// worked out from them, and also from its committed edits where a
+    /// pending one removes a voxel, so the cost grows with the sub-grid's
+    /// chunks and with the edits of the chunks edited since the last commit.
     #[cfg(feature = "sub_grids")]
     pub(crate) fn solid_bounds_in(&self, grid: GridId) -> Option<(IVec3, IVec3)> {
         let pending = self.pending.lock().unwrap();
+        if pending.grid_keys(grid).next().is_none() {
+            return self.solid_bounds.lock().unwrap().get(&grid).copied();
+        }
         let committed = self.committed.read().unwrap();
         let mut around: Option<(IVec3, IVec3)> = None;
         let mut grow = |min: IVec3, max: IVec3| {
@@ -1392,10 +1413,7 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
             None => all,
         };
         #[cfg(feature = "sub_grids")]
-        let held_solid: Vec<(GridId, bool)> = taken
-            .sub_grid_ids()
-            .map(|grid| (grid, holds_solid(&buckets, grid)))
-            .collect();
+        let sub_grids: Vec<GridId> = taken.sub_grid_ids().collect();
         #[cfg(not(feature = "sub_grids"))]
         let _ = &flipped;
         let mut sets = Vec::new();
@@ -1472,13 +1490,22 @@ impl<C, I: Copy + PartialEq> VoxelEdits<C, I> {
                 origin,
             });
         }
+        // Each sub-grid committed keeps its new box, and one whose box came or
+        // went went from no solid to some, or back.
         #[cfg(feature = "sub_grids")]
-        flipped.extend(
-            held_solid
-                .into_iter()
-                .filter(|&(grid, before)| holds_solid(&buckets, grid) != before)
-                .map(|(grid, _)| grid),
-        );
+        {
+            let mut solid_bounds = self.solid_bounds.lock().unwrap();
+            for grid in sub_grids {
+                let held_solid = solid_bounds.contains_key(&grid);
+                match solids_around(&buckets, grid) {
+                    Some(around) => solid_bounds.insert(grid, around),
+                    None => solid_bounds.remove(&grid),
+                };
+                if solid_bounds.contains_key(&grid) != held_solid {
+                    flipped.push(grid);
+                }
+            }
+        }
         sets
     }
 
@@ -1722,13 +1749,6 @@ impl<I> CommittedEdits<'_, I> {
 }
 
 impl<I: Copy + PartialEq> CommittedEdits<'_, I> {
-    /// Whether `grid` holds a solid voxel. Its cost grows with `grid`'s
-    /// chunks holding edits before the first holding a solid.
-    #[cfg(all(feature = "sub_grids", feature = "light_propagation"))]
-    pub fn holds_solid(&self, grid: GridId) -> bool {
-        holds_solid(&self.0, grid)
-    }
-
     /// Whether `grid` has a committed edit in the box from `min` to `max`,
     /// both inclusive. A sub-grid's committed edits are its solids, since its
     /// commit removes a voxel set to one that isn't solid. Its cost grows
@@ -2271,6 +2291,30 @@ mod tests {
         // sequence before can't be worked out from them.
         assert_eq!(sets[0].voxels.len(), 3);
         assert_eq!((sets[0].seq, sets[0].replaced), (1, true));
+    }
+
+    #[cfg(feature = "sub_grids")]
+    #[test]
+    fn a_sub_grids_bounds_follow_its_commits_and_its_pending_edits_and_go_with_it() {
+        let edits = Edits::default();
+        let (a, b) = (GridId::new(1), GridId::new(2));
+        let (low, far) = (IVec3::new(-3, 2, 5), IVec3::new(70, 4, 1));
+        edits.set_in(a, low, WorldVoxel::Solid(1));
+        edits.set_in(a, far, WorldVoxel::Solid(1));
+        edits.set_in(b, IVec3::ONE, WorldVoxel::Solid(1));
+        edits.commit_all(&mut Vec::new());
+        assert_eq!(edits.solid_bounds_in(a), Some((low.min(far), low.max(far))));
+        assert_eq!(edits.solid_bounds_in(b), Some((IVec3::ONE, IVec3::ONE)));
+
+        // A pending removal shows at once, and the commit keeps it.
+        edits.set_in(a, far, WorldVoxel::Air);
+        assert_eq!(edits.solid_bounds_in(a), Some((low, low)));
+        edits.commit_all(&mut Vec::new());
+        assert_eq!(edits.solid_bounds_in(a), Some((low, low)));
+
+        edits.drop_grid(a);
+        assert_eq!(edits.solid_bounds_in(a), None);
+        assert_eq!(edits.solid_bounds_in(b), Some((IVec3::ONE, IVec3::ONE)));
     }
 
     #[cfg(feature = "sub_grids")]

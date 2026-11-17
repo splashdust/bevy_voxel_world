@@ -247,6 +247,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
                     color: chunk.light.color.clone(),
+                    borders: chunk.light.borders.clone(),
                     precision: chunk.light.precision,
                 });
                 chunk.edits = stamp;
@@ -265,6 +266,7 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     sky: ChunkLevels::Uniform(sky),
                     voxel: ChunkLevels::Uniform(0),
                     color: ChunkColor::White,
+                    borders: Default::default(),
                     precision: task.precision,
                 }),
                 faces: FaceHashes::default(),

@@ -325,11 +325,12 @@ pub(crate) fn count_colors(
     counts: &mut Vec<(u16, u32)>,
 ) {
     let lit = lit_voxels(&light.voxel, voxels, level);
-    let mut add = |packed: u16, count: u32| {
-        match counts.iter_mut().find(|(color, _)| *color == packed) {
-            Some((_, counted)) => *counted += count,
-            None => counts.push((packed, count)),
-        }
+    let mut add = |packed: u16, count: u32| match counts
+        .iter_mut()
+        .find(|(color, _)| *color == packed)
+    {
+        Some((_, counted)) => *counted += count,
+        None => counts.push((packed, count)),
     };
     match &light.color {
         ChunkColor::Mixed(_) => for_each_voxel(&lit, |x, y, z| {
@@ -882,6 +883,7 @@ mod tests {
             sky,
             voxel: ChunkLevels::Uniform(voxel),
             color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         }
     }

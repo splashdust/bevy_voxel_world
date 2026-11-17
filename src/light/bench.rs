@@ -350,6 +350,7 @@ impl SlotBox {
                 sky: ChunkLevels::Uniform(precision.top()),
                 voxel: ChunkLevels::Planes(kernel_box.planes.clone()),
                 color: Default::default(),
+                borders: Default::default(),
                 precision,
             }
         };
