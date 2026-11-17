@@ -99,6 +99,9 @@ use bevy::reflect::Reflect;
 /// The chunks the change's light reaches then relight on the task pool,
 /// starting at once rather than queuing behind chunk tasks, so a single voxel
 /// edit's light lands within 2 frames while streaming leaves the pool room.
+/// Near where chunks meet at an edge or a corner, the relight ripple reaches
+/// some of them only through the others, a frame for each step, so an edit
+/// there can take a frame longer, or two where its light has several colours.
 /// Landing relit light takes at most about 1 ms of the main thread per frame,
 /// so an edit whose light reaches many chunks lands over a few more frames.
 /// An edit where no light is, such as in a dark cave, relights nothing.
@@ -111,6 +114,11 @@ use bevy::reflect::Reflect;
 /// and a green emissive voxel light the voxels between them yellow, no
 /// brighter than either. Sky light has no colour of its own: it takes the
 /// colour of Bevy's ambient light, environment map and sun.
+///
+/// A world whose emissive materials are all white does no colour work: it
+/// solves, holds and shows its light as it would if light had no colour. Its
+/// chunk materials bind a one-texel placeholder for the colour texture, as
+/// they would for any binding the world doesn't use.
 ///
 /// In a world with colours other than white, a chunk whose voxel light is
 /// all one colour solves as a white chunk does and keeps one colour for all
@@ -126,6 +134,11 @@ use bevy::reflect::Reflect;
 ///   chunk's CPU memory also grows with the coarse chunks holding colour
 ///   slots, each keeping a copy of its colour slot so that `light_at` reads
 ///   its colours.
+/// - **GPU memory:** the most chunks at once whose faces see more than one
+///   light colour, each holding a colour slot: see
+///   [`slot_capacity`](Self::slot_capacity).
+/// - **Shader work:** the faces of chunks whose light isn't all white, which
+///   read a colour beside each level they blend.
 ///
 /// A coarse chunk solves once per light colour among its own emissive
 /// voxels, and shows no light colour from past its own voxels.
@@ -136,7 +149,8 @@ use bevy::reflect::Reflect;
 /// threads to run tasks on, relights run on the main thread within
 /// [`wasm_relight_budget`](Self::wasm_relight_budget) each frame, and at most
 /// one sky probe starts per frame, so a big edit costs time instead of a
-/// hitch. A single voxel edit's light still lands within 2 frames. A chunk
+/// hitch. A single voxel edit's light still lands as it does on native: see
+/// [Voxel edits](#voxel-edits). A chunk
 /// whose light box holds emissive voxels of two or more light colours
 /// solves once for each colour, so its relight uses the budget up faster,
 /// and a big edit among coloured light lands over more frames.
