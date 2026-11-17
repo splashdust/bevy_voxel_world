@@ -246,18 +246,23 @@ pub struct LandedRelights {
     /// Landings that changed the level of a voxel, of sky light or voxel
     /// light.
     pub changed_levels: u64,
-    /// Landings that left every voxel's levels as they were.
+    /// Landings that left every voxel's levels as they were but changed the
+    /// light colour of its voxel light.
+    pub changed_colors: u64,
+    /// Landings that left every voxel's levels and light colour as they were.
     pub changed_nothing: u64,
 }
 
 impl LandedRelights {
     /// Counts a landing that replaced the light `old` with `new`.
     fn count(&mut self, old: &ChunkLight, new: &ChunkLight) {
-        if old.precision == new.precision && old.sky == new.sky && old.voxel == new.voxel
+        if old.precision != new.precision || old.sky != new.sky || old.voxel != new.voxel
         {
-            self.changed_nothing += 1;
-        } else {
             self.changed_levels += 1;
+        } else if old.color != new.color {
+            self.changed_colors += 1;
+        } else {
+            self.changed_nothing += 1;
         }
     }
 }

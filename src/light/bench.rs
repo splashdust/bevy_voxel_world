@@ -402,6 +402,20 @@ pub struct LightStats {
     /// Chunks whose voxels were scanned for emissive voxels.
     pub emissive_scans: u64,
     pub solves: u64,
+    /// Runs of voxel light, each of one light colour, on light boxes holding
+    /// two or more light colours. A light box of one colour runs as in a white
+    /// world, uncounted.
+    pub color_runs: u64,
+    /// Reach runs: runs finding which light colours reach the chunk, on light
+    /// boxes holding four or more light colours.
+    pub reach_runs: u64,
+    /// Light colours whose runs reach runs skipped, as no light of theirs
+    /// reaches the chunk.
+    pub colors_skipped: u64,
+    /// Solves of voxel light that spread none, because no emissive voxel
+    /// around the chunk could light it, though some chunk around it held
+    /// emissive voxels.
+    pub voxel_boxes_culled: u64,
     /// Time spent solving in chunk tasks, summed over them, in milliseconds.
     pub solve_ms: f64,
     /// Time spent reading the world view before solving, summed over chunk
@@ -526,7 +540,11 @@ pub struct LightStats {
     /// view, or when it's found equal to the light there; light held for a
     /// chunk's new mesh lands when it's released.
     pub landed_changing_levels: u64,
-    /// Relight landings that left every voxel's levels as they were.
+    /// Relight landings that left every voxel's levels as they were but
+    /// changed the light colour of its voxel light.
+    pub landed_changing_colors: u64,
+    /// Relight landings that left every voxel's levels and light colour as
+    /// they were.
     pub landed_changing_nothing: u64,
 }
 
@@ -593,6 +611,10 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         full_writes: slots.full_writes,
         emissive_scans: counters.emissive_scans.load(Ordering::Relaxed),
         solves: counters.solves.load(Ordering::Relaxed),
+        color_runs: counters.color_runs.load(Ordering::Relaxed),
+        reach_runs: counters.reach_runs.load(Ordering::Relaxed),
+        colors_skipped: counters.colors_skipped.load(Ordering::Relaxed),
+        voxel_boxes_culled: counters.voxel_boxes_culled.load(Ordering::Relaxed),
         solve_ms: ms(&counters.solve_nanos),
         snapshot_ms: ms(&counters.snapshot_nanos),
         relights: counters.relights.load(Ordering::Relaxed),
@@ -641,6 +663,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         request_lookups: counters.requests.lookups.load(Ordering::Relaxed),
         walk_cache_bytes: settings.walks.lock().unwrap().bytes() as u64,
         landed_changing_levels: landed.changed_levels,
+        landed_changing_colors: landed.changed_colors,
         landed_changing_nothing: landed.changed_nothing,
     })
 }
@@ -657,7 +680,8 @@ pub struct FreshSolve {
 
 /// Solves every chunk and light entry in world `C`'s world view again, as a
 /// relight would, and compares the light each holds with the fresh solve's,
-/// voxel by voxel. In a world whose light has settled, a chunk that differs
+/// voxel by voxel: levels exactly, and light colours within a step of their
+/// packing. In a world whose light has settled, a chunk that differs
 /// holds light that some relight it needed never brought.
 ///
 /// A chunk whose emissive voxels were found under an older emissive list
@@ -694,8 +718,38 @@ pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
 }
 
 /// Whether `held` holds the same levels as `fresh` in every open voxel of
-/// `fresh`'s inputs.
+/// `fresh`'s inputs, and the same light colour within a step of its packing
+/// in every one of those with voxel light.
 fn same_voxels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
+    same_levels(held, fresh) && same_colors(held, fresh)
+}
+
+/// Whether `held` holds the light colour of `fresh`, each component within a
+/// step of the packing, in every open voxel where `fresh` has voxel light.
+fn same_colors(held: &ChunkLight, fresh: &ChunkLight) -> bool {
+    if held.color == fresh.color {
+        return true;
+    }
+    const STEP: f32 = 1.0 / 127.0 + 1e-5;
+    let occupancy = &fresh.inputs.occupancy;
+    (0..CHUNK).all(|z| {
+        (0..CHUNK).all(|y| {
+            (0..CHUNK).all(|x| {
+                if occupancy.is_solid(x, y, z) || fresh.voxel.at(x, y, z) == 0 {
+                    return true;
+                }
+                let (a, b) = (held.color.at(x, y, z), fresh.color.at(x, y, z));
+                (a.red - b.red).abs() <= STEP
+                    && (a.green - b.green).abs() <= STEP
+                    && (a.blue - b.blue).abs() <= STEP
+            })
+        })
+    })
+}
+
+/// Whether `held` holds the same levels as `fresh` in every open voxel of
+/// `fresh`'s inputs.
+fn same_levels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
     if held.precision != fresh.precision {
         return false;
     }

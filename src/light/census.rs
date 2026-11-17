@@ -222,32 +222,43 @@ fn visible_voxels(occupancy: &Occupancy) -> Vec<u32> {
 }
 
 /// Whether light changed between `old` and `new` at a voxel the chunk's own
-/// faces show.
+/// faces show: a level, or the light colour of voxel light.
 fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
+    let levels = old.sky != new.sky || old.voxel != new.voxel;
+    let colors = old.color != new.color;
+    if !levels && !colors {
+        return false;
+    }
     let visible = visible_voxels(&new.inputs.occupancy);
-    let kinds = [(&old.sky, &new.sky), (&old.voxel, &new.voxel)];
-    kinds
-        .into_iter()
-        .filter(|(old, new)| old != new)
-        .any(|(old, new)| {
-            visible.iter().enumerate().any(|(column, bits)| {
-                let (x, y) = (column % CHUNK, column / CHUNK);
-                let mut bits = *bits;
-                while bits != 0 {
-                    let z = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    if old.at(x, y, z) != new.at(x, y, z) {
-                        return true;
-                    }
-                }
-                false
-            })
-        })
+    visible.iter().enumerate().any(|(column, bits)| {
+        let (x, y) = (column % CHUNK, column / CHUNK);
+        let mut bits = *bits;
+        while bits != 0 {
+            let z = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if old.sky.at(x, y, z) != new.sky.at(x, y, z)
+                || old.voxel.at(x, y, z) != new.voxel.at(x, y, z)
+                || (colors && color_changed(old, new, x, y, z))
+            {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Whether the light colour of voxel light at the chunk's voxel `x`, `y`,
+/// `z` differs between `old` and `new`, where `new` has voxel light there.
+/// Without voxel light, no light colour shows.
+fn color_changed(old: &ChunkLight, new: &ChunkLight, x: usize, y: usize, z: usize) -> bool {
+    new.voxel.at(x, y, z) != 0
+        && old.color.packed_at(x, y, z) != new.color.packed_at(x, y, z)
 }
 
 /// Whether light changed between `old`, `None` for none, and `new` at an
 /// open voxel on `face` in front of a solid voxel of the neighbour across
-/// it, whose occupancy is `solid`.
+/// it, whose occupancy is `solid`: a level, or the light colour of voxel
+/// light.
 fn shell_change_shows(
     old: Option<&ChunkLight>,
     new: &ChunkLight,
@@ -269,7 +280,7 @@ fn shell_change_shows(
             kinds.iter().any(|kind| {
                 let before = old.map_or(0, |old| level(old, *kind, x, y, z));
                 before != level(new, *kind, x, y, z)
-            })
+            }) || old.is_some_and(|old| color_changed(old, new, x, y, z))
         })
     })
 }

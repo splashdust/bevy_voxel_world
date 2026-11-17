@@ -232,3 +232,87 @@ fn a_world_going_from_white_to_coloured_and_back_settles_on_the_reference() {
         matches_reference(&mut app, &format!("after change {index}"));
     }
 }
+
+#[test]
+fn a_recolours_landings_count_as_changing_light_colours_alone() {
+    use crate::light_bench::light_stats;
+
+    let mut app = settled(world(LinearRgba::RED));
+    let before = light_stats::<LampWorld>(app.world()).unwrap();
+    recolor(&mut app, LinearRgba::BLUE);
+    settle(&mut app, "light to settle after the recolour");
+    let after = light_stats::<LampWorld>(app.world()).unwrap();
+    assert_eq!(after.landed_changing_levels, before.landed_changing_levels);
+    assert!(
+        after.landed_changing_colors > before.landed_changing_colors,
+        "no landing changed a light colour"
+    );
+}
+
+#[test]
+fn the_fresh_solve_check_finds_a_chunk_holding_another_light_colour() {
+    use crate::light::color::{pack, ChunkColor};
+    use crate::light::solver::ChunkLight;
+    use crate::light::view::in_world;
+    use crate::light::LightSettings;
+    use crate::light_bench::fresh_solve_check;
+
+    let mut app = settled(world(LinearRgba::RED));
+    assert_eq!(fresh_solve_check::<LampWorld>(app.world()).stale, vec![]);
+    // The chunk at the origin is lit by the red west lamp alone.
+    let hold = |app: &mut App, color: LinearRgba| {
+        let settings = app.world().resource::<LightSettings<LampWorld>>();
+        let mut view = settings.view.write();
+        let chunk = view.chunks.get_mut(&in_world(IVec3::ZERO)).unwrap();
+        let light = &chunk.light;
+        chunk.light = Arc::new(ChunkLight {
+            inputs: light.inputs.clone(),
+            sky: light.sky.clone(),
+            voxel: light.voxel.clone(),
+            color: ChunkColor::One(pack(color)),
+            borders: light.borders.clone(),
+            precision: light.precision,
+        });
+    };
+    hold(&mut app, LinearRgba::rgb(1.0, 0.5, 0.0));
+    assert_eq!(
+        fresh_solve_check::<LampWorld>(app.world()).stale,
+        vec![(IVec3::ZERO, false)]
+    );
+    // A step of the packing away, it holds the same light colour.
+    hold(&mut app, LinearRgba::rgb(1.0, 0.004, 0.0));
+    assert_eq!(fresh_solve_check::<LampWorld>(app.world()).stale, vec![]);
+}
+
+#[test]
+fn a_recolour_counts_as_a_visible_change_of_light() {
+    use crate::light_bench::{change_counts, count_changes};
+
+    // A floor under the west lamp, so its light shows on faces.
+    let mut app = app(LampWorld {
+        scene: Arc::new(|position: IVec3| {
+            if position.y < 12 {
+                WorldVoxel::Solid(0)
+            } else {
+                scene(position)
+            }
+        }),
+        ..world(LinearRgba::RED)
+    });
+    count_changes::<LampWorld>(app.world_mut());
+    super::super::update_until(&mut app, "the world to settle", |app| {
+        super::sky_light::settled_but(app, None)
+    });
+    let before = change_counts::<LampWorld>(app.world()).unwrap();
+    recolor(&mut app, LinearRgba::BLUE);
+    settle(&mut app, "light to settle after the recolour");
+    let after = change_counts::<LampWorld>(app.world()).unwrap();
+    let visible = |counts: &crate::light_bench::ChangeCounts| {
+        counts.visible_from_arrival + counts.visible_from_column + counts.visible_from_other
+    };
+    assert!(
+        visible(&after) > visible(&before),
+        "the recolour changed no visible light"
+    );
+    assert!(after.visible_with_shells > before.visible_with_shells);
+}
