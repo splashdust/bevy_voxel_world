@@ -185,6 +185,14 @@ mod tests {
     }
 
     #[test]
+    fn the_default_voxel_falloff_prints_as_itself() {
+        assert_eq!(
+            curve_rust(&LightLook::default().voxel_falloff),
+            "LevelCurve::exponential_to_black(0.7)"
+        );
+    }
+
+    #[test]
     fn the_default_config_prints_as_its_default() {
         assert_eq!(
             light_rust(&LightPropagation::default()),

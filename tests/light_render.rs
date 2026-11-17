@@ -15,6 +15,9 @@
 //!   than one at the top level.
 //! - With sky light off, a sun with no shadow map leaves the lamp room as it
 //!   was with the shadow map.
+//! - With sky light off, under the default voxel falloff, the lamp's pool of
+//!   light on the lamp room's floor fades to black at its edge, where a
+//!   falloff whose level 1 isn't black ends it in a step.
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map, and still after a change to 256 levels at runtime.
@@ -556,6 +559,10 @@ const fn camera(position: [f32; 3], look_at: [f32; 3]) -> FixedCamera {
 
 const LAMP_ROOM_CAMERA: FixedCamera =
     camera([306.0, -30.0, -332.0], [320.5, -40.0, -319.5]);
+/// Looks along the lamp room's floor from the bright lamp out to where its
+/// pool of light ends, short of the room's west wall.
+const POOL_EDGE_CAMERA: FixedCamera =
+    camera([322.0, -27.0, -319.5], [307.0, -40.0, -319.5]);
 const POCKET_CAMERA: FixedCamera = camera([-324.5, 43.0, 124.0], [-316.0, 42.0, 132.0]);
 
 /// Looks under the slab sticking out of the mesa, at the mesa's shaded face.
@@ -738,7 +745,7 @@ fn curve_look(curve: LevelCurve) -> LightLook {
     }
 }
 
-const CHECKS: [Check; 23] = [
+const CHECKS: [Check; 25] = [
     settled_check(
         "a lamp declared below the top level still glows, scaled by its level",
         "lamp_room.png",
@@ -816,6 +823,27 @@ const CHECKS: [Check; 23] = [
         false,
         Some("lamp_room.png"),
         matches_earlier,
+    ),
+    settled_check(
+        "under the default voxel falloff, a pool fades to black at its edge",
+        "pool_edge.png",
+        false,
+        &POOL_EDGE_CAMERA,
+        true,
+        None,
+        pool_fades_out,
+    ),
+    look_check(
+        "under a falloff whose level 1 isn't black, a pool ends in a step",
+        "pool_edge_step.png",
+        false,
+        &POOL_EDGE_CAMERA,
+        None,
+        pool_ends_in_a_step,
+        || LightLook {
+            voxel_falloff: LevelCurve::exponential(0.7),
+            ..default()
+        },
     ),
     settled_check(
         "a sealed pocket with no light in reach is exactly black",
@@ -1852,6 +1880,87 @@ fn dim_lamp_glows(
     } else {
         Err(note)
     }
+}
+
+/// Samples of the lamp room's floor per voxel, along the line the pool edge
+/// checks read.
+const POOL_SAMPLES_PER_VOXEL: usize = 8;
+
+/// The linear brightness of the lamp room's floor along the line from beside
+/// the bright lamp west to near the wall, eight samples per voxel, read from
+/// the brightest channel of the pixels around each.
+fn pool_profile(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<Vec<f32>, String> {
+    let start = BRIGHT_LAMP_AT.x as f32 - 6.5;
+    let floor = LAMP_ROOM.min[1] as f32;
+    let z = BRIGHT_LAMP_AT.z as f32 + 0.5;
+    (0..12 * POOL_SAMPLES_PER_VOXEL)
+        .map(|sample| {
+            let x = start - sample as f32 / POOL_SAMPLES_PER_VOXEL as f32;
+            let srgb = brightness_at(image, camera, global, Vec3::new(x, floor, z))?;
+            Ok(Srgba::gamma_function(srgb as f32 / 255.0))
+        })
+        .collect()
+}
+
+/// How far the floor's brightness drops where the pool goes black, as a share
+/// of the brightness two voxels further in, with the samples' note.
+fn pool_edge_step(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<(f32, String), String> {
+    let profile = pool_profile(image, camera, global)?;
+    let black = profile
+        .iter()
+        .position(|brightness| *brightness == 0.0)
+        .ok_or("the pool reaches the end of the line")?;
+    let inside = 2 * POOL_SAMPLES_PER_VOXEL;
+    if black <= inside {
+        return Err(format!("the floor is black {black} samples from the lamp"));
+    }
+    let last = profile[black - 1];
+    let further_in = profile[black - 1 - inside];
+    if profile[black..].iter().any(|brightness| *brightness > 0.0) {
+        return Err("the floor lights again past the pool's edge".into());
+    }
+    let share = last / further_in;
+    Ok((
+        share,
+        format!(
+            "black from sample {black}; the last lit sample is {:.0}% of the floor \
+             two voxels further in",
+            share * 100.0
+        ),
+    ))
+}
+
+/// Whether the lamp room's floor fades smoothly into black at the edge of the
+/// bright lamp's pool: its last lit sample is far dimmer than the floor two
+/// voxels further in.
+fn pool_fades_out(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let (share, note) = pool_edge_step(image, camera, global)?;
+    if share <= 0.25 { Ok(note) } else { Err(note) }
+}
+
+/// Whether the lamp room's floor drops into black in a step at the edge of
+/// the bright lamp's pool, which shows [`pool_fades_out`] tells the two apart.
+fn pool_ends_in_a_step(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let (share, note) = pool_edge_step(image, camera, global)?;
+    if share > 0.25 { Ok(note) } else { Err(note) }
 }
 
 // --- The relight budget ------------------------------------------------------
