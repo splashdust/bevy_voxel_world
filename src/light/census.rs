@@ -250,7 +250,13 @@ fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
 /// Whether the light colour of voxel light at the chunk's voxel `x`, `y`,
 /// `z` differs between `old` and `new`, where `new` has voxel light there.
 /// Without voxel light, no light colour shows.
-fn color_changed(old: &ChunkLight, new: &ChunkLight, x: usize, y: usize, z: usize) -> bool {
+fn color_changed(
+    old: &ChunkLight,
+    new: &ChunkLight,
+    x: usize,
+    y: usize,
+    z: usize,
+) -> bool {
     new.voxel.at(x, y, z) != 0
         && old.color.packed_at(x, y, z) != new.color.packed_at(x, y, z)
 }

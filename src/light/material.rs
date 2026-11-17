@@ -183,8 +183,9 @@ use bevy::{
     mesh::MeshVertexBufferLayoutRef,
     pbr::{
         ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
-        MaterialExtensionPipeline, RenderMaterialInstances, SpecializedMaterialPipelineCache,
-        SpecializedPrepassMaterialPipelineCache, SpecializedShadowMaterialPipelineCache,
+        MaterialExtensionPipeline, RenderMaterialInstances,
+        SpecializedMaterialPipelineCache, SpecializedPrepassMaterialPipelineCache,
+        SpecializedShadowMaterialPipelineCache,
     },
     prelude::*,
     reflect::TypePath,
@@ -834,7 +835,9 @@ impl<C: VoxelWorldConfig> ColorBinding<C> {
 /// The materials of world `C` whose `LIGHT_COLOR` shader def first changed
 /// this frame.
 #[cfg(test)]
-pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(world: &World) -> &[UntypedAssetId] {
+pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(
+    world: &World,
+) -> &[UntypedAssetId] {
     &world.resource::<ColorBinding<C>>().first_flip
 }
 
@@ -902,12 +905,14 @@ fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
         return;
     };
     if !render_app.world().contains_resource::<FirstFlipMaterials>() {
-        render_app.init_resource::<FirstFlipMaterials>().add_systems(
-            Render,
-            wait_on_first_flip
-                .in_set(RenderSystems::Queue)
-                .after(RenderSystems::Specialize),
-        );
+        render_app
+            .init_resource::<FirstFlipMaterials>()
+            .add_systems(
+                Render,
+                wait_on_first_flip
+                    .in_set(RenderSystems::Queue)
+                    .after(RenderSystems::Specialize),
+            );
     }
     render_app.add_systems(ExtractSchedule, extract_first_flip::<C>);
 }

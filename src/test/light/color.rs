@@ -409,10 +409,9 @@ fn giving_a_white_lamp_a_colour_at_runtime_gains_light_color() {
     let mut app = settled(world);
     assert!(material_keys(&mut app).iter().all(|colored| !colored));
 
-    for (emissive, expected, color) in [
-        (colored, true, orange()),
-        (white, false, LinearRgba::WHITE),
-    ] {
+    for (emissive, expected, color) in
+        [(colored, true, orange()), (white, false, LinearRgba::WHITE)]
+    {
         app.world_mut()
             .run_system_once(move |mut world: ResMut<LampWorld>| {
                 world.emissive = emissive.clone();

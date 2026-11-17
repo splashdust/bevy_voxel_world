@@ -1764,7 +1764,10 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_GATES: [(&str, f64); 3] = [
     ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
-    ("main_thread_max_frame_ms", EDIT_MAIN_THREAD_GATE_US / 1000.0),
+    (
+        "main_thread_max_frame_ms",
+        EDIT_MAIN_THREAD_GATE_US / 1000.0,
+    ),
     ("stale_chunks", 0.0),
 ];
 
@@ -1800,8 +1803,8 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
         let (mut metrics, mut app) = scenario_caves::<1>("caves", &CAVE_GATES);
         metrics.extend(recolor_step::<1>(&mut app, "caves_first_flip", |world| {
             let [red, green, blue] = LAMP_COLORS[0];
-            world.emissive[0].1 = Emission::level(15.0)
-                .with_color(LinearRgba::rgb(red, green, blue));
+            world.emissive[0].1 =
+                Emission::level(15.0).with_color(LinearRgba::rgb(red, green, blue));
         }));
         drop(app);
         white.push(metrics);
@@ -1810,8 +1813,8 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
             scenario_caves::<3>("caves_3_colors", &COLORED_CAVE_GATES);
         metrics.extend(recolor_step::<3>(&mut app, "caves_recolor", |world| {
             let [red, green, blue] = LAMP_COLORS[3];
-            world.emissive[0].1 = Emission::level(15.0)
-                .with_color(LinearRgba::rgb(red, green, blue));
+            world.emissive[0].1 =
+                Emission::level(15.0).with_color(LinearRgba::rgb(red, green, blue));
         }));
         drop(app);
         three.push(metrics);
@@ -1838,9 +1841,7 @@ fn ratio_gate(metrics: &mut Metrics, white: &str, row: &str, name: &str, most: f
     metrics.insert(format!("{row}.{name}_to_white"), ratio);
     if ratio > most || ratio.is_nan() {
         eprintln!("{row}: {name} is {ratio:.3} of {white}'s, over {most}");
-        *metrics
-            .entry(format!("{row}.gate_failures"))
-            .or_default() += 1.0;
+        *metrics.entry(format!("{row}.gate_failures")).or_default() += 1.0;
     }
 }
 
