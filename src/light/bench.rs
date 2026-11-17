@@ -24,7 +24,7 @@ use super::route::LightRoute;
 use super::sky::ColumnAnswer;
 use super::slot::{border_plane, slot_bytes, write_shell};
 use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel, DirectSky};
-use super::solver::{ChunkLevels, ChunkLight};
+use super::solver::{relight, ChunkLevels, ChunkLight};
 use super::view::{in_world, Missing, Snapshot};
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
@@ -517,6 +517,13 @@ pub struct LightStats {
     pub request_lookups: u64,
     /// The bytes the cache of those walks' answers holds now.
     pub walk_cache_bytes: u64,
+    /// Relight landings that changed the level of a voxel, of sky light or
+    /// voxel light. A relight lands when its light is written into the world
+    /// view, or when it's found equal to the light there; light held for a
+    /// chunk's new mesh lands when it's released.
+    pub landed_changing_levels: u64,
+    /// Relight landings that left every voxel's levels as they were.
+    pub landed_changing_nothing: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -534,6 +541,10 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
     };
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
     let route = world.get_resource::<LightRoute<C>>();
+    let landed = world
+        .get_resource::<LightWork<C>>()
+        .map(|work| work.landed)
+        .unwrap_or_default();
     let slots = route.map(|route| route.counters).unwrap_or_default();
     let (entries, entry_bytes, air_positions) = {
         let view = settings.view.read();
@@ -624,7 +635,77 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         request_walks: counters.requests.walks.load(Ordering::Relaxed),
         request_lookups: counters.requests.lookups.load(Ordering::Relaxed),
         walk_cache_bytes: settings.walks.lock().unwrap().bytes() as u64,
+        landed_changing_levels: landed.changed_levels,
+        landed_changing_nothing: landed.changed_nothing,
     })
+}
+
+/// What [`fresh_solve_check`] found.
+#[derive(Clone, Debug, Default)]
+pub struct FreshSolve {
+    /// Chunks and light entries solved again.
+    pub checked: usize,
+    /// The positions of those whose light differs from a fresh solve's, on
+    /// their own grid, each with whether it's a light entry.
+    pub stale: Vec<(IVec3, bool)>,
+}
+
+/// Solves every chunk and light entry in world `C`'s world view again, as a
+/// relight would, and compares the light each holds with the fresh solve's,
+/// voxel by voxel. In a world whose light has settled, a chunk that differs
+/// holds light that some relight it needed never brought.
+///
+/// A chunk whose emissive voxels were found under an older emissive list
+/// counts as stale without a solve. The solves count in [`light_stats`] as
+/// the world's own, so read those first.
+pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
+    let Some(settings) = world.get_resource::<LightSettings<C>>() else {
+        return FreshSolve::default();
+    };
+    let task = &settings.task;
+    let held: Vec<_> = settings
+        .view
+        .read()
+        .chunks
+        .iter()
+        .map(|(key, chunk)| {
+            let current = chunk.emission == task.emission_generation;
+            (*key, chunk.is_entry(), current, chunk.light.clone())
+        })
+        .collect();
+    let mut found = FreshSolve {
+        checked: held.len(),
+        stale: Vec::new(),
+    };
+    for (key, entry, current, light) in held {
+        let fresh = current
+            .then(|| relight(task, &settings.view, key, None, None))
+            .flatten();
+        if !fresh.is_some_and(|fresh| same_voxels(&light, &fresh.light)) {
+            found.stale.push((key.position(), entry));
+        }
+    }
+    found
+}
+
+/// Whether `held` holds the same levels as `fresh` in every open voxel of
+/// `fresh`'s inputs.
+fn same_voxels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
+    if held.precision != fresh.precision {
+        return false;
+    }
+    let occupancy = &fresh.inputs.occupancy;
+    let same = |a: &ChunkLevels, b: &ChunkLevels| {
+        a == b
+            || (0..CHUNK).all(|z| {
+                (0..CHUNK).all(|y| {
+                    (0..CHUNK).all(|x| {
+                        occupancy.is_solid(x, y, z) || a.at(x, y, z) == b.at(x, y, z)
+                    })
+                })
+            })
+    };
+    same(&held.sky, &fresh.sky) && same(&held.voxel, &fresh.voxel)
 }
 
 /// Whether world `C` has no relight queued, running or waiting to land.
