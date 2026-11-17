@@ -42,9 +42,11 @@
 //! also print as ratio lines. What a player sees holds as absolute limits:
 //! a shown chunk's visible changes, counting a change of light colour, and
 //! the most main thread light takes in a frame. Every coloured row ends with
-//! the fresh-solve check, gated at no stale chunk. A coloured edit's last
-//! light change lands within 2 frames, or within white's frames for the
-//! same edit where those are more.
+//! the fresh-solve check, gated at no stale chunk. A coloured edit's frames
+//! to its last light change are gated at 2, or at white's frames for the
+//! same edit where those are more. White's own frames in `edits_lamps`
+//! only report, since light the relight ripple carries to chunks farther
+//! off takes a frame for each face it crosses: see `scenario_edits_lamps`.
 //!
 //! `caves` also runs two recolour steps, which report relights, frames to
 //! settle and the worst frame's main thread, and gate only `stale_chunks`:
@@ -2367,9 +2369,11 @@ fn repeats(runs: usize) -> usize {
 /// see `EditRun`. The world is built and edited `runs` times, and each
 /// edit's runs are summed up by `edit_medians`.
 ///
-/// Gate, checked here and reported as `gate_failures`: a single voxel edit's
-/// last light change lands within 2 frames, and light takes at most 1 ms of
-/// main thread in any frame. The bomb has no gate.
+/// Gate, checked here and reported as `gate_failures`: each of these single
+/// voxel edits' last light change lands within 2 frames, and light takes at
+/// most 1 ms of main thread in any frame. The 2 frames are a limit for
+/// these edits, not for every edit: see `scenario_edits_lamps`. The bomb has
+/// no gate.
 #[cfg(feature = "light_propagation")]
 fn scenario_edits_lit(runs: usize) -> Metrics {
     type Lit = LitBenchWorld<SINE>;

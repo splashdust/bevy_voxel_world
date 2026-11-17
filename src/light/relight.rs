@@ -60,8 +60,11 @@
 //! two frames, relights run on the main thread as they start, in the same
 //! order from the same queues, until this frame's relights have taken the
 //! world's `wasm_relight_budget`. Urgent relights go first there too, those
-//! of chunks holding edited voxels before the rest, so an edit's own light
-//! still lands within 2 frames. The rest wait for the next frame.
+//! of chunks holding edited voxels before the rest, so the light of the
+//! chunks holding an edit's voxels lands as soon as it does on native. The
+//! rest wait for the next frame. Light the relight ripple carries on to
+//! other chunks takes a frame more for each face it crosses, there as on
+//! native.
 //!
 //! Light entries, the light of hinted air beside loaded solids, relight like
 //! chunks. A relight that would go on into hinted air holding no light entry
@@ -623,8 +626,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// Marks the chunk at `key`, which holds edited voxels, for an
     /// urgent relight, as [`trigger_urgent`](Self::trigger_urgent) does. When
     /// relights run on the main thread, its relight starts before other
-    /// urgent ones, so its light lands within 2 frames however many chunks
-    /// the edit relights.
+    /// urgent ones, so its own light lands as soon as it would on the task
+    /// pool, however many chunks the edit relights. Chunks its relight
+    /// ripple reaches wait their turn in the budget.
     pub fn trigger_edited(&mut self, key: GridKey) {
         // Only a chunk with light leaves `edited` when its relight starts.
         if self.chunks.contains_key(&key) {
