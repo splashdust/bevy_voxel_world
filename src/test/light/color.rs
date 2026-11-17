@@ -365,3 +365,31 @@ fn turning_coloured_and_back_at_runtime_gains_and_loses_light_color() {
         assert!(keys.iter().all(|colored| *colored == expected));
     }
 }
+
+#[test]
+fn giving_a_white_lamp_a_colour_at_runtime_gains_light_color() {
+    let colored = vec![(ORANGE_LAMP, Emission::level(15.0).with_color(css::ORANGE))];
+    let white = vec![(ORANGE_LAMP, Emission::level(15.0))];
+    let mut world = lamps(vec![(MIDDLE, ORANGE_LAMP)]);
+    world.emissive = white.clone();
+    let mut app = settled(world);
+    assert!(material_keys(&mut app).iter().all(|colored| !colored));
+
+    for (emissive, expected, color) in [
+        (colored, true, orange()),
+        (white, false, LinearRgba::WHITE),
+    ] {
+        app.world_mut()
+            .run_system_once(move |mut world: ResMut<LampWorld>| {
+                world.emissive = emissive.clone();
+            })
+            .unwrap();
+        app.update();
+        let keys = material_keys(&mut app);
+        assert!(!keys.is_empty());
+        assert!(keys.iter().all(|colored| *colored == expected));
+        settle(&mut app, "the recolour");
+        let in_pool = light_at(&mut app, MIDDLE + IVec3::X * 2).unwrap();
+        assert!(close(in_pool.voxel_color, color), "{in_pool:?}");
+    }
+}

@@ -785,6 +785,11 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         if let (Some(table), Some(changed)) = (new_emission, recolored) {
             settings.emissive_materials = emissive;
             recolor(settings.as_mut(), &mut work, table, &changed);
+            // A white world given its first colour, or a coloured one made
+            // white, sets or clears its materials' `LIGHT_COLOR` def.
+            if let Some(route) = route.as_mut() {
+                route.set_light_colors(light_colors(&settings.task.emission));
+            }
         }
         return;
     }
