@@ -8,11 +8,17 @@
 //! neighbour and gives no neighbour anything to read. So **a coarse chunk's
 //! light never relights**: it changes only when the chunk task runs again,
 //! and a voxel edit outside the chunk and its padding doesn't reach it until
-//! then. It takes no part in the world view, the sky record or sky fill, and
-//! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) never
-//! waits on it. The one exception is a change of precision, which solves
-//! every coarse chunk again from its published voxels on the task pool, and
-//! which `light_is_settled` waits for.
+//! then. It takes no part in the world view, the sky record or sky fill.
+//!
+//! Two changes of settings solve coarse chunks again from their published
+//! voxels on the task pool, and
+//! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) waits
+//! for those solves. A change of precision solves every coarse chunk. A change
+//! to the emissive list solves the coarse chunks holding a material whose
+//! entry was added, dropped or given a new level. For that, each solve notes
+//! the solid materials of its cells, emissive or not, which costs a solve a
+//! little more for each material its cells hold. Old light shows until new
+//! light lands. No other change of settings reaches a coarse chunk.
 //!
 //! A cell is the data voxel at its middle. Where data voxels are finer than
 //! cells, a cell is open if any data voxel in it is open.
@@ -80,7 +86,7 @@ pub(crate) fn takes_coarse_path(key: ChunkKey, data_shape: UVec3) -> bool {
 }
 
 /// A coarse chunk's light, as its task worked it out.
-pub(crate) struct CoarseSolved {
+pub(crate) struct CoarseSolved<I> {
     /// The sky light and voxel light its tag holds without a slot: the one
     /// level per channel its faces see, or else the brightest level a tenth
     /// of them see.
@@ -90,6 +96,34 @@ pub(crate) struct CoarseSolved {
     /// The bytes of its slot, in a world showing its light, if its faces see
     /// more than one level or a lamp.
     pub bytes: Option<Box<[u8]>>,
+    /// The solid materials of the cells that can hold a lamp, emissive or
+    /// not, so a change to the emissive list finds the chunk.
+    pub materials: Box<[I]>,
+    /// The settings it solved under.
+    pub settings: Arc<LightTaskSettings<I>>,
+}
+
+/// Whether light solved under `old` differs from light solved under `new` in
+/// a coarse chunk holding `materials`: whether the entry of one of them in
+/// the emissive list was added, dropped or given a new level.
+pub(crate) fn emission_changed<I: Copy + PartialEq>(
+    materials: &[I],
+    old: &LightTaskSettings<I>,
+    new: &LightTaskSettings<I>,
+) -> bool {
+    if old.emission_generation == new.emission_generation {
+        return false;
+    }
+    let entry = |settings: &LightTaskSettings<I>, material: I| {
+        settings
+            .emission
+            .iter()
+            .find(|(emissive, _)| *emissive == material)
+            .map(|(_, level)| *level)
+    };
+    materials
+        .iter()
+        .any(|material| entry(old, *material) != entry(new, *material))
 }
 
 /// A coarse chunk task's part in solving light.
@@ -101,7 +135,7 @@ pub(crate) struct CoarseTask<I> {
 
 impl<I: Copy + PartialEq> CoarseTask<I> {
     /// Works out the light of the coarse `chunk` from its own cells.
-    pub fn solve(self, chunk: &ChunkData<I>) -> CoarseSolved {
+    pub fn solve(self, chunk: &ChunkData<I>) -> CoarseSolved<I> {
         let started = Instant::now();
         let settings = &self.settings;
         let width = 1u32 << chunk.key.lod_level;
@@ -145,23 +179,30 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
             levels,
             precision,
             bytes: (settings.routed && needs_slot).then_some(bytes),
+            materials: cells.materials.into_boxed_slice(),
+            settings: self.settings,
         }
     }
 }
 
-/// A coarse chunk's cells: which are open, and its emissive cells.
-struct Cells {
+/// A coarse chunk's cells: which are open, its emissive cells, and the
+/// materials of the cells that could be emissive.
+struct Cells<I> {
     /// A column along z per cell `x`, `y`, at `x + y × 34`, padding included.
     open: Vec<u64>,
     /// Each emissive cell, in padded cell coordinates, with its level.
     lamps: Vec<(UVec3, u8)>,
+    /// Each material of a solid cell, once. A chunk solid through its
+    /// padding holds none, since it lights no cell whatever its material.
+    materials: Vec<I>,
 }
 
-impl Cells {
-    fn of<I: Copy + PartialEq>(chunk: &ChunkData<I>, emission: &[(I, u8)]) -> Self {
+impl<I: Copy + PartialEq> Cells<I> {
+    fn of(chunk: &ChunkData<I>, emission: &[(I, u8)]) -> Self {
         let uniform = |open: bool| Self {
             open: vec![if open { ALL_CELLS } else { 0 }; SIDE * SIDE],
             lamps: Vec::new(),
+            materials: Vec::new(),
         };
         let voxels = match (&chunk.fill_type, &chunk.voxels) {
             (FillType::Empty, _) => return uniform(true),
@@ -183,6 +224,10 @@ impl Cells {
         };
         let mut open = vec![0; SIDE * SIDE];
         let mut lamps = Vec::new();
+        let mut materials = Vec::new();
+        // Neighbouring cells mostly hold the same material, so the last one
+        // and its level are kept to skip looking them up again.
+        let mut last: Option<(I, Option<u8>)> = None;
         for z in 0..SIDE {
             let rz = &ranges[2][z];
             for y in 0..SIDE {
@@ -202,17 +247,32 @@ impl Cells {
                     if is_open {
                         open[x + y * SIDE] |= 1 << z;
                     } else if let WorldVoxel::Solid(material) = middle {
-                        if let Some((_, level)) =
-                            emission.iter().find(|(emissive, _)| *emissive == material)
-                        {
-                            lamps
-                                .push((UVec3::new(x as u32, y as u32, z as u32), *level));
+                        let level = match last {
+                            Some((held, level)) if held == material => level,
+                            _ => {
+                                if !materials.contains(&material) {
+                                    materials.push(material);
+                                }
+                                let level = emission
+                                    .iter()
+                                    .find(|(emissive, _)| *emissive == material)
+                                    .map(|(_, level)| *level);
+                                last = Some((material, level));
+                                level
+                            }
+                        };
+                        if let Some(level) = level {
+                            lamps.push((UVec3::new(x as u32, y as u32, z as u32), level));
                         }
                     }
                 }
             }
         }
-        Self { open, lamps }
+        Self {
+            open,
+            lamps,
+            materials,
+        }
     }
 
     fn is_open(&self, x: usize, y: usize, z: usize) -> bool {

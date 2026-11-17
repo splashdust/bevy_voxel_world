@@ -75,7 +75,7 @@ impl Hold {
         self.released.store(true, Ordering::Release);
     }
 
-    fn wait(&self) {
+    pub fn wait(&self) {
         self.waited.fetch_add(1, Ordering::AcqRel);
         let deadline = Instant::now() + Duration::from_secs(20);
         while !self.released.load(Ordering::Acquire) && Instant::now() < deadline {

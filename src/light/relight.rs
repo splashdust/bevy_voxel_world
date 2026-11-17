@@ -95,7 +95,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use futures_lite::future;
 
 use super::census::{Cause, ChangeCensus};
-use super::coarse::CoarseSolved;
+use super::coarse::{emission_changed, CoarseSolved};
 use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
 use super::hinted::{self, changed_across_air, passes_into_air};
@@ -106,7 +106,7 @@ use super::probe::{face_neighbours, SkyProbes};
 use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
-use super::solver::{relight, ChunkLight, KeptLight, Solved};
+use super::solver::{relight, ChunkLight, KeptLight, LightTaskSettings, Solved};
 use super::view::{
     chunk_centre, in_world, world_position, AirInputs, LightView, ViewChunk, ENTRY,
 };
@@ -208,6 +208,18 @@ struct LandedLight {
     new_voxels: bool,
 }
 
+/// A coarse chunk being solved again on the task pool.
+type CoarseRunning<I> = (ChunkKey, Entity, Task<CoarseSolved<I>>);
+
+/// A coarse chunk whose light has landed.
+struct LandedCoarse<I> {
+    key: ChunkKey,
+    /// The levels its tag holds without a slot, as in a texel.
+    levels: LightLevels,
+    /// The solid materials its cells hold, as its solve noted them.
+    materials: Box<[I]>,
+}
+
 /// The light work of world `C` on the main thread: each chunk's light state,
 /// the queue of relights to start, the running relight tasks, and the results
 /// waiting to land.
@@ -216,7 +228,7 @@ struct LandedLight {
 /// chunk by its entity. Sky fill and hinted air are the world's alone, so
 /// what it notes for them holds the world's level-0 chunk positions.
 #[derive(Resource)]
-pub(crate) struct LightWork<C> {
+pub(crate) struct LightWork<C: VoxelWorldConfig> {
     chunks: HashMap<GridKey, LightChunk>,
     /// The grid key of each level-0 chunk with light, by entity.
     positions: HashMap<Entity, GridKey>,
@@ -246,16 +258,16 @@ pub(crate) struct LightWork<C> {
     /// that task started, so its mesh shows every edit before then.
     meshed: HashMap<Entity, u64>,
     /// The light coarse chunk tasks solved, waiting to land.
-    coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved)>,
-    /// The key of each coarse chunk whose light has landed, and the levels
-    /// its tag holds without a slot, as in a texel.
-    coarse: HashMap<Entity, (ChunkKey, LightLevels)>,
-    /// Coarse chunks whose light landed at another precision than the
+    coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved<C::MaterialIndex>)>,
+    /// Each coarse chunk whose light has landed.
+    coarse: HashMap<Entity, LandedCoarse<C::MaterialIndex>>,
+    /// Coarse chunks whose light landed under other settings than the
     /// world's, waiting to be solved again: see
-    /// [`solve_coarse_again`](Self::solve_coarse_again).
+    /// [`solve_coarse_again`](Self::solve_coarse_again) and
+    /// [`solve_coarse_holding`](Self::solve_coarse_holding).
     coarse_queue: Vec<(ChunkKey, Entity)>,
     /// Coarse chunks being solved again on the task pool.
-    coarse_running: Vec<(ChunkKey, Entity, Task<CoarseSolved>)>,
+    coarse_running: Vec<CoarseRunning<C::MaterialIndex>>,
     /// The version the next light to land gets.
     clock: u64,
     /// Main-thread time spent this frame, in nanoseconds.
@@ -287,7 +299,7 @@ pub(crate) struct LightWork<C> {
     _world: PhantomData<C>,
 }
 
-impl<C> Default for LightWork<C> {
+impl<C: VoxelWorldConfig> Default for LightWork<C> {
     fn default() -> Self {
         Self {
             chunks: HashMap::new(),
@@ -352,7 +364,12 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// Queues the light a chunk task solved for the chunk `entity` with
     /// `key`, to land with the chunk's voxels. It replaces any light a chunk
     /// task solved for the chunk that hasn't landed yet.
-    pub fn arrive(&mut self, key: GridKey, entity: Entity, solved: SolvedLight) {
+    pub fn arrive(
+        &mut self,
+        key: GridKey,
+        entity: Entity,
+        solved: SolvedLight<C::MaterialIndex>,
+    ) {
         match solved {
             SolvedLight::Level0(solved) => {
                 self.meshed.insert(entity, solved.edit_frame);
@@ -373,7 +390,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
     /// The levels the coarse chunk `entity`'s tag holds without a slot, as in
     /// a texel, once its light has landed.
     pub fn coarse_levels(&self, entity: Entity) -> Option<LightLevels> {
-        self.coarse.get(&entity).map(|(_, levels)| *levels)
+        self.coarse.get(&entity).map(|landed| landed.levels)
     }
 
     /// Queues every coarse chunk whose light has landed to be solved again
@@ -388,8 +405,34 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.coarse_queue = self
             .coarse
             .iter()
-            .map(|(entity, (key, _))| (*key, *entity))
+            .map(|(entity, landed)| (landed.key, *entity))
             .collect();
+    }
+
+    /// Queues every coarse chunk whose light has landed and which holds a
+    /// material whose entry in the emissive list differs between `old` and
+    /// `new`, to be solved again from its published voxels.
+    ///
+    /// Its old light shows until the new light lands. A coarse chunk whose
+    /// light is still to land, or which is being solved again, is checked as
+    /// it lands.
+    pub fn solve_coarse_holding(
+        &mut self,
+        old: &LightTaskSettings<C::MaterialIndex>,
+        new: &LightTaskSettings<C::MaterialIndex>,
+    ) {
+        let waiting: HashSet<Entity> = self
+            .coarse_queue
+            .iter()
+            .map(|(_, entity)| *entity)
+            .chain(self.coarse_running.iter().map(|(_, entity, _)| *entity))
+            .collect();
+        for (entity, landed) in &self.coarse {
+            if !waiting.contains(entity) && emission_changed(&landed.materials, old, new)
+            {
+                self.coarse_queue.push((landed.key, *entity));
+            }
+        }
     }
 
     /// Drops the light waiting to land for the coarse chunk `entity`, and
@@ -1628,14 +1671,24 @@ impl<C: VoxelWorldConfig> Relights<C> {
             }
             let (sky, voxel) = solved.levels;
             let levels = LightLevels::of_steps(sky, voxel, solved.precision);
-            work.coarse.insert(entity, (key, levels));
-            if solved.precision != settings.task.precision
+            // Solved before a change of precision, or of the emission of a
+            // material it holds.
+            let stale = solved.precision != settings.task.precision
+                || emission_changed(&solved.materials, &solved.settings, &settings.task);
+            work.coarse.insert(
+                entity,
+                LandedCoarse {
+                    key,
+                    levels,
+                    materials: solved.materials,
+                },
+            );
+            if stale
                 && !work
                     .coarse_queue
                     .iter()
                     .any(|(_, queued)| *queued == entity)
             {
-                // Solved before a change of precision.
                 work.coarse_queue.push((key, entity));
             }
             if let Some(route) = route.as_mut() {

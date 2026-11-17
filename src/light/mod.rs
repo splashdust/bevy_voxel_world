@@ -510,7 +510,7 @@ pub(crate) enum TaskLight<I> {
 }
 
 impl<I: Copy + PartialEq> TaskLight<I> {
-    pub fn solve(self, chunk: &crate::chunk::ChunkData<I>) -> SolvedLight {
+    pub fn solve(self, chunk: &crate::chunk::ChunkData<I>) -> SolvedLight<I> {
         match self {
             TaskLight::Level0(task) => SolvedLight::Level0(task.solve(chunk)),
             TaskLight::Kept(task) => SolvedLight::Kept(task.solve()),
@@ -524,10 +524,10 @@ impl<I: Copy + PartialEq> TaskLight<I> {
     clippy::large_enum_variant,
     reason = "one per chunk task, moved twice on its way to landing"
 )]
-pub(crate) enum SolvedLight {
+pub(crate) enum SolvedLight<I> {
     Level0(Solved),
     Kept(KeptLight),
-    Coarse(CoarseSolved),
+    Coarse(CoarseSolved<I>),
 }
 
 /// Reads world `C`'s light settings into a [`LightSettings`]. A world returning
@@ -915,6 +915,9 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         }
         work.solve_coarse_again();
     } else {
+        if emission_changed {
+            work.solve_coarse_holding(&old, &settings.task);
+        }
         relight_settings(
             settings,
             &mut work,

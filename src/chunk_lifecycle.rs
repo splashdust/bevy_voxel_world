@@ -1307,7 +1307,7 @@ pub(crate) struct Finished<C: VoxelWorldConfig> {
     pub user_bundle: Option<C::ChunkUserBundle>,
     /// The light the task solved, in a world with light propagation.
     #[cfg(feature = "light_propagation")]
-    pub solved_light: Option<crate::light::SolvedLight>,
+    pub solved_light: Option<crate::light::SolvedLight<C::MaterialIndex>>,
 }
 
 /// Publishes a finished chunk task: gives the chunk its mesh, lands its solved

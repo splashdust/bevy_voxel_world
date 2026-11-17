@@ -715,7 +715,7 @@ where
     pub light: Option<crate::light::TaskLight<I>>,
     /// The chunk's solved light, once `post_voxel` has run.
     #[cfg(feature = "light_propagation")]
-    pub solved_light: Option<crate::light::SolvedLight>,
+    pub solved_light: Option<crate::light::SolvedLight<I>>,
     _marker: PhantomData<C>,
 }
 

@@ -362,7 +362,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// Relights on change, like a change of reach: every chunk with a solid
     /// looks for its emissive voxels again in a relight task on the task
     /// pool, and its neighbours relight again where its emissive voxels
-    /// changed.
+    /// changed. A chunk above LOD level 0 holding a material whose entry was
+    /// added, dropped or given a new level is solved again on the task pool
+    /// too, and shows its old light until then.
     ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.
