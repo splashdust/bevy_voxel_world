@@ -167,6 +167,7 @@ pub(crate) fn mixing_weight(level: f32) -> f32 {
 
 /// [`mix_weighted`] of `lights`, each a light colour and its level on the 0
 /// to 15 scale. A light at level 0 doesn't count.
+#[cfg(any(test, feature = "sub_grids"))]
 pub(crate) fn mix(lights: impl IntoIterator<Item = (LinearRgba, f32)>) -> LinearRgba {
     mix_weighted(
         lights
