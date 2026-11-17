@@ -859,3 +859,293 @@ fn a_change_of_reach_shape_sky_or_sky_fill_leaves_coarse_chunks_as_they_are() {
         assert_eq!(light_at(&mut app, BY_LAMP), by_lamp);
     }
 }
+
+// --- Coloured light ----------------------------------------------------------
+
+/// A material emitting blue light.
+const BLUE_LAMP: u8 = 9;
+
+fn red(level: f32) -> Emission {
+    Emission::level(level).with_color(LinearRgba::RED)
+}
+
+fn blue(level: f32) -> Emission {
+    Emission::level(level).with_color(LinearRgba::BLUE)
+}
+
+/// [`slab_and_lamp`] with a block of blue lamps floating just above the slab,
+/// 40 voxels from the red ones, in [`ABOVE`] too.
+fn two_lamps(p: IVec3) -> WorldVoxel {
+    let blue =
+        (72..76).contains(&p.x) && (14..18).contains(&p.y) && (40..44).contains(&p.z);
+    if blue {
+        WorldVoxel::Solid(BLUE_LAMP)
+    } else {
+        slab_and_lamp(p)
+    }
+}
+
+/// Above the blue lamps of [`two_lamps`].
+const BY_BLUE: IVec3 = IVec3::new(74, 20, 42);
+
+fn two_colour_world() -> CoarseWorld {
+    CoarseWorld {
+        scene: Arc::new(two_lamps),
+        emissive: vec![(LAMP, red(15.0)), (BLUE_LAMP, blue(15.0))],
+        ..default()
+    }
+}
+
+/// Runs `app` until [`ABOVE`] shows its mesh and its light, and then as
+/// [`until_still`] does, so a busy machine's slow streaming can't end the
+/// wait before it shows.
+fn until_coarse_shown(app: &mut App) {
+    update_until(app, "the lamps' coarse chunk to show its light", |app| {
+        tag_of(app, ABOVE).is_some() && coarse_lit(app, &[BY_LAMP])
+    });
+    until_still(app);
+}
+
+fn color_at(app: &mut App, position: IVec3) -> LinearRgba {
+    light_at(app, position)
+        .unwrap_or_else(|| panic!("no light at {position}"))
+        .voxel_color
+}
+
+#[test]
+fn a_coarse_chunk_with_lamps_of_two_colours_reads_its_colours_cell_by_cell() {
+    let mut app = emission_app(two_colour_world());
+    until_coarse_shown(&mut app);
+    assert!(voxel_at(&mut app, BY_LAMP) > 0.0);
+    assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::RED);
+    assert!(voxel_at(&mut app, BY_BLUE) > 0.0);
+    assert_eq!(color_at(&mut app, BY_BLUE), LinearRgba::BLUE);
+    let tag = tag_of(&mut app, ABOVE).unwrap();
+    assert_eq!(tag & 0xF000_0000, HAS_SLOT | 1 << 29, "tag {tag:#x}");
+
+    // The slab's top cell under the blue lamps, a level-1 cell 2 voxels wide.
+    let in_slab = IVec3::new(74, 10, 42);
+    let above = light_at(&mut app, in_slab + IVec3::Y * 2).unwrap();
+    assert!(above.voxel > 0.0);
+    let solid = light_at(&mut app, in_slab).unwrap();
+    assert!(solid.voxel >= above.voxel);
+    assert_eq!(solid.voxel_color, LinearRgba::BLUE);
+    // A lamp's own cell reads its own colour.
+    assert_eq!(color_at(&mut app, IVec3::new(114, 22, 42)), LinearRgba::RED);
+}
+
+/// Ground below y = 8, a roof near the origin that shades a level-0 chunk,
+/// and in [`ABOVE`] a block of bright red lamps beside a wide field of dim
+/// blue ones, whose pool lights more of the ground than the red one does.
+fn red_beside_blue(p: IVec3) -> WorldVoxel {
+    let roof =
+        (8..16).contains(&p.x) && (12..14).contains(&p.y) && (8..16).contains(&p.z);
+    let red =
+        (100..104).contains(&p.x) && (8..10).contains(&p.y) && (28..32).contains(&p.z);
+    let blue = (64..92).contains(&p.x) && p.y == 8 && p.x % 4 == 0 && p.z % 4 == 0;
+    if red {
+        WorldVoxel::Solid(LAMP)
+    } else if blue {
+        WorldVoxel::Solid(BLUE_LAMP)
+    } else if roof || p.y < 8 {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+#[test]
+fn a_coarse_chunk_that_gives_its_slot_up_shows_the_colour_of_its_brightest_tenth() {
+    // One slot, which a nearer level-0 chunk takes.
+    let mut app = emission_app(CoarseWorld {
+        scene: Arc::new(red_beside_blue),
+        emissive: vec![(LAMP, red(15.0)), (BLUE_LAMP, blue(3.0))],
+        light: LightPropagation {
+            sky_fill: None,
+            slot_capacity: 1,
+            ..default()
+        },
+        ..default()
+    });
+    until_coarse_shown(&mut app);
+    let tag = tag_of(&mut app, ABOVE).unwrap();
+    assert_eq!(tag & HAS_SLOT, 0, "tag {tag:#x}");
+    let red_cut =
+        crate::light::color::tag_cut(crate::light::color::pack(LinearRgba::RED));
+    assert_eq!(
+        tag >> 16 & 0x3FFF,
+        red_cut,
+        "red, not blue or magenta: {tag:#x}"
+    );
+    assert!(tag >> 4 & 15 > 3, "brighter than the blue pool: {tag:#x}");
+    // Its tag's colour, in every cell.
+    let in_blue = IVec3::new(70, 8, 10);
+    assert!(voxel_at(&mut app, in_blue) > 0.0);
+    assert_eq!(color_at(&mut app, in_blue), LinearRgba::RED);
+}
+
+#[test]
+fn recolouring_a_lamp_solves_again_the_coarse_chunk_holding_it_alone() {
+    let mut app = emission_app(two_colour_world());
+    until_coarse_shown(&mut app);
+    let below = light_at(&mut app, SHAFT);
+    let far = light_at(&mut app, FAR_FROM_LAMP);
+    let solves = coarse_solves(&app);
+
+    let green = Emission::level(15.0).with_color(LinearRgba::GREEN);
+    set_emissive(&mut app, vec![(LAMP, green), (BLUE_LAMP, blue(15.0))]);
+    app.update();
+    assert!(
+        !light_is_settled(&mut app),
+        "the coarse solve is waited for"
+    );
+    update_until(&mut app, "the coarse chunk's new colour to land", |app| {
+        let color = color_at(app, BY_LAMP);
+        assert!(
+            color == LinearRgba::RED || color == LinearRgba::GREEN,
+            "old light shows until new light lands, read {color:?}"
+        );
+        color == LinearRgba::GREEN && light_is_settled(app)
+    });
+    for _ in 0..20 {
+        app.update();
+    }
+    assert_eq!(coarse_solves(&app), solves + 1);
+    assert_eq!(color_at(&mut app, BY_BLUE), LinearRgba::BLUE);
+    assert_eq!(light_at(&mut app, SHAFT), below);
+    assert_eq!(light_at(&mut app, FAR_FROM_LAMP), far);
+
+    // The same light colour once scaled.
+    let dim_green = Emission::level(15.0).with_color(LinearRgba::rgb(0.0, 0.5, 0.0));
+    set_emissive(&mut app, vec![(LAMP, dim_green), (BLUE_LAMP, blue(15.0))]);
+    for _ in 0..20 {
+        app.update();
+    }
+    assert!(light_is_settled(&mut app));
+    assert_eq!(coarse_solves(&app), solves + 1);
+}
+
+#[test]
+fn colouring_a_white_worlds_lamp_solves_again_the_coarse_chunk_holding_it() {
+    let mut app = emission_app(lamp_world(15.0));
+    until_coarse_shown(&mut app);
+    assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::WHITE);
+    let solves = coarse_solves(&app);
+
+    set_emissive(&mut app, vec![(LAMP, red(15.0))]);
+    update_until(&mut app, "the coarse chunk's colour to land", |app| {
+        color_at(app, BY_LAMP) == LinearRgba::RED && light_is_settled(app)
+    });
+    for _ in 0..20 {
+        app.update();
+    }
+    assert_eq!(coarse_solves(&app), solves + 1);
+}
+
+#[test]
+fn a_level_0_chunk_with_another_data_shape_shows_coloured_light() {
+    let lamp = |p: IVec3| {
+        if (14..18).contains(&p.x) && (8..12).contains(&p.y) && (14..18).contains(&p.z) {
+            WorldVoxel::Solid(LAMP)
+        } else {
+            roofed(p)
+        }
+    };
+    let mut app = emission_app(CoarseWorld {
+        scene: Arc::new(lamp),
+        data: 16,
+        emissive: vec![(LAMP, red(15.0))],
+        ..default()
+    });
+    until_still(&mut app);
+    let by_lamp = IVec3::new(16, 14, 16);
+    assert!(voxel_at(&mut app, by_lamp) > 0.0);
+    assert_eq!(color_at(&mut app, by_lamp), LinearRgba::RED);
+}
+
+/// The colour textures the world's route has made: 3D `R16Uint` images
+/// bigger than one texel.
+fn color_textures(app: &App) -> usize {
+    use bevy::render::render_resource::TextureFormat;
+    app.world()
+        .resource::<Assets<Image>>()
+        .iter()
+        .filter(|(_, image)| image.texture_descriptor.format == TextureFormat::R16Uint)
+        .filter(|(_, image)| image.texture_descriptor.size.width > 1)
+        .count()
+}
+
+#[test]
+fn a_white_lit_coarse_chunk_shows_white_and_makes_no_colour_texture() {
+    let mut app = emission_app(CoarseWorld {
+        emissive: vec![
+            (LAMP, Emission::level(15.0)),
+            (
+                BLUE_LAMP,
+                Emission::level(15.0).with_color(LinearRgba::BLUE),
+            ),
+        ],
+        ..lamp_world(15.0)
+    });
+    until_coarse_shown(&mut app);
+    let tag = tag_of(&mut app, ABOVE).unwrap();
+    assert_eq!(tag & 0xF000_0000, HAS_SLOT, "tag {tag:#x}");
+    assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::WHITE);
+    assert_eq!(color_textures(&app), 0);
+    let settings = app
+        .world()
+        .resource::<crate::light::LightSettings<CoarseWorld>>();
+    assert_eq!(settings.counters().color_runs.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_change_of_precision_replaces_the_colour_texture_coarse_chunks_use() {
+    let mut app = emission_app(two_colour_world());
+    until_coarse_shown(&mut app);
+    let color_texture = |app: &App| {
+        app.world()
+            .resource::<crate::light::route::LightRoute<CoarseWorld>>()
+            .color_texture()
+    };
+    let before = color_texture(&app).id();
+    assert_eq!(color_textures(&app), 1);
+
+    app.world_mut()
+        .resource_mut::<CoarseWorld>()
+        .light
+        .precision = LightPrecision::Steps256;
+    update_until(&mut app, "the colour texture to be replaced", |app| {
+        let now = color_texture(app);
+        now.id() != before
+            && now
+                != app
+                    .world()
+                    .resource::<crate::light::route::LightRoute<CoarseWorld>>()
+                    .color_placeholder
+            && light_is_settled(app)
+    });
+    let tag = tag_of(&mut app, ABOVE).unwrap();
+    assert_eq!(tag & 0xF000_0000, HAS_SLOT | 1 << 29, "tag {tag:#x}");
+    assert_eq!(color_at(&mut app, BY_BLUE), LinearRgba::BLUE);
+}
+
+#[test]
+fn coarse_copy_bytes_count_the_copies_of_colour_slots() {
+    let copies = |world: CoarseWorld| {
+        let mut app = emission_app(world);
+        until_coarse_shown(&mut app);
+        crate::light::bench::light_stats::<CoarseWorld>(app.world())
+            .unwrap()
+            .coarse_copy_bytes
+    };
+    let white = copies(CoarseWorld {
+        emissive: vec![
+            (LAMP, Emission::level(15.0)),
+            (BLUE_LAMP, Emission::level(15.0)),
+        ],
+        ..two_colour_world()
+    });
+    let colored = copies(two_colour_world());
+    // One coarse chunk holds a colour slot: 34³ texels of 2 bytes.
+    assert_eq!(colored, white + 34 * 34 * 34 * 2);
+}

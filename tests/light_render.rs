@@ -630,7 +630,10 @@ const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 3
 /// A camera in the colour room of chunk `x` along x, looking away from its
 /// lamp, so it sees only the lamp's pool.
 const fn pool_camera(x: f32) -> FixedCamera {
-    camera([x * 32.0 + 16.5, -566.0, 20.0], [x * 32.0 + 16.5, -571.0, 9.0])
+    camera(
+        [x * 32.0 + 16.5, -566.0, 20.0],
+        [x * 32.0 + 16.5, -571.0, 9.0],
+    )
 }
 
 const RED_POOL_CAMERA: FixedCamera = pool_camera(0.0);
@@ -639,7 +642,10 @@ const BLUE_POOL_CAMERA: FixedCamera = pool_camera(4.0);
 
 /// A camera in the colour room of chunk `x` along x, looking at its lamp.
 const fn lamp_camera(x: f32) -> FixedCamera {
-    camera([x * 32.0 + 16.5, -567.0, 10.0], [x * 32.0 + 16.5, -571.0, 22.5])
+    camera(
+        [x * 32.0 + 16.5, -567.0, 10.0],
+        [x * 32.0 + 16.5, -571.0, 22.5],
+    )
 }
 
 const GREEN_LAMP_CAMERA: FixedCamera = lamp_camera(2.0);
@@ -1485,9 +1491,13 @@ fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
     let mut app = App::new();
     app.insert_resource(ClearColor(clear))
         .add_plugins(plugins_without_window());
-    if arguments().iter().any(|argument| argument == "material=standard") {
+    if arguments()
+        .iter()
+        .any(|argument| argument == "material=standard")
+    {
         app.add_plugins(
-            VoxelWorldPlugin::with_config(world).with_material(StandardMaterial::default()),
+            VoxelWorldPlugin::with_config(world)
+                .with_material(StandardMaterial::default()),
         );
     } else {
         app.add_plugins(VoxelWorldPlugin::with_config(world));

@@ -168,7 +168,8 @@ fn add_custom_material_path_or_lit<C: VoxelWorldConfig, M: Material>(
         return;
     };
     let base = config.init_custom_materials().then(|| material.clone());
-    let handle = crate::light::material::add_lit_material_path::<C, M>(app, base, config, &light);
+    let handle =
+        crate::light::material::add_lit_material_path::<C, M>(app, base, config, &light);
     if let Some(handle) = handle {
         app.insert_resource(VoxelWorldMaterialHandle { handle });
     }

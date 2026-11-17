@@ -607,9 +607,17 @@ pub(crate) const COLOR_TEXEL_BYTES: usize = 2;
 /// Writes the packed light colour `packed` into the texel at `texel` of
 /// `bytes`, a colour slot or a colour shell plane.
 #[inline]
-fn put_color(bytes: &mut [u8], texel: usize, packed: u16) {
+pub(crate) fn put_color(bytes: &mut [u8], texel: usize, packed: u16) {
     let at = texel * COLOR_TEXEL_BYTES;
     bytes[at..at + COLOR_TEXEL_BYTES].copy_from_slice(&packed.to_le_bytes());
+}
+
+/// The packed light colour in the texel at `texel` of `bytes`, a colour
+/// slot.
+#[inline]
+pub(crate) fn color_texel_at(bytes: &[u8], texel: usize) -> u16 {
+    let at = texel * COLOR_TEXEL_BYTES;
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }
 
 /// The packed light colours a chunk's colour slot holds for its own voxels,

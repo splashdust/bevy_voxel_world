@@ -122,7 +122,13 @@ use bevy::reflect::Reflect;
 ///   colour. The colours around each chunk count, not how many the world
 ///   declares. See [`skip_unreached_colors`](Self::skip_unreached_colors).
 /// - **Memory:** the chunks that light of two or more colours reaches, each
-///   holding a light colour for every voxel, 64 KiB a chunk.
+///   holding a light colour for every voxel, 64 KiB a chunk. A coarse
+///   chunk's CPU memory also grows with the coarse chunks holding colour
+///   slots, each keeping a copy of its colour slot so that `light_at` reads
+///   its colours.
+///
+/// A coarse chunk solves once per light colour among its own emissive
+/// voxels, and shows no light colour from past its own voxels.
 ///
 /// # WASM
 ///

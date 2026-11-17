@@ -15,7 +15,8 @@
 //! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) waits
 //! for those solves. A change of precision solves every coarse chunk. A change
 //! to the emissive list solves the coarse chunks holding a material whose
-//! entry was added, dropped or given a new level. For that, each solve notes
+//! entry was added, dropped, or given a new level or a new scaled light
+//! colour, in a white world too. For that, each solve notes
 //! the solid materials of its cells, emissive or not, which costs a solve a
 //! little more for each material its cells hold. Old light shows until new
 //! light lands. No other change of settings reaches a coarse chunk.
@@ -39,6 +40,35 @@
 //! a chunk with a slot carries its LOD level in bits 24–27, which the shader
 //! divides the chunk's local positions by.
 //!
+//! # Light colour
+//!
+//! A coarse chunk with an emissive cell of a light colour other than white
+//! spreads voxel light once per light colour among its own emissive cells,
+//! white included, and mixes the runs cell by cell as level 0 does (see
+//! [`color`](super::color)). Materials of one colour share a run, so the
+//! cost grows with the light colours among its emissive cells. Since all of
+//! them are its own, every colour reaches it and none is skipped. A chunk
+//! whose emissive cells all give white solves as it would in a white world.
+//!
+//! It takes a colour slot when the cells its faces read for levels, and its
+//! emissive cells touching an open cell, see more than one light colour.
+//! The colour slot's shell holds its own padding cells' colours, with its
+//! edges and corners left at 0, and taking one takes a slot too. With a slot
+//! and one light colour seen, its entry holds that colour.
+//!
+//! # Why the fallback takes the brightest tenth's colour
+//!
+//! A coarse chunk with no slot shows the brightest voxel light level a tenth
+//! of the cells its faces read see, and the most common light colour among
+//! those cells at that level or brighter. A far chunk then shows the colour
+//! of the light that sets its level. Mixing the colours it holds by
+//! brightness would turn a red pool and a blue pool magenta, a colour no lamp
+//! gives. Counting every lit cell would let a large dim pool outvote the
+//! bright one that sets its level. Counting only the cells at exactly that
+//! level can pick out a thin ring at another pool's edge. At a level of 0 it
+//! shows white. A chunk that keeps its slot but finds no colour slot holds
+//! the same colour in its entry.
+//!
 //! # References
 //!
 //! - [Cubyz's lighting](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
@@ -56,16 +86,18 @@ use bevy::platform::collections::HashMap;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use super::color::EmissionTable;
+use super::color::{mix_weighted, mixing_weight, pack, unpack, EmissionTable, WHITE};
 use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::sky::{Columns, SkyRule, WALK_BUDGET};
 use super::slot::{
-    cell_index, put_lamp, put_texel, shell_cell, texel_at, texel_bytes, SLOT_TEXELS,
+    cell_index, put_color, put_lamp, put_texel, shell_cell, texel_at, texel_bytes, Seen,
+    COLOR_TEXEL_BYTES, SLOT_TEXELS,
 };
-use super::solver::{empty_planes, LightTaskSettings};
+use super::solver::{empty_planes, LightCounters, LightTaskSettings};
+
 use crate::chunk::{
     ChunkData, ChunkKey, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK_SIZE,
 };
@@ -97,6 +129,8 @@ pub(crate) struct CoarseSolved<I> {
     /// The bytes of its slot, in a world showing its light, if its faces see
     /// more than one level or a lamp.
     pub bytes: Option<Box<[u8]>>,
+    /// The light colour it shows.
+    pub color: CoarseColor,
     /// The solid materials of the cells that can hold a lamp, emissive or
     /// not, so a change to the emissive list finds the chunk.
     pub materials: Box<[I]>,
@@ -104,19 +138,42 @@ pub(crate) struct CoarseSolved<I> {
     pub settings: Arc<LightTaskSettings<I>>,
 }
 
+/// The light colour a coarse chunk shows, as packed light colours. All of it
+/// is white in a chunk whose emissive cells all give white.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CoarseColor {
+    /// The colour its tag holds without a slot: the most common light colour
+    /// among the cells its faces read at the voxel light level its tag holds
+    /// or brighter. White at a voxel light level of 0.
+    pub tag: u16,
+    /// The colour its entry holds with a slot and no colour slot: the one
+    /// light colour its faces see, or else `tag`'s.
+    pub entry: u16,
+    /// The bytes of its colour slot, in a world showing its light, if its
+    /// faces see more than one light colour.
+    pub bytes: Option<Box<[u8]>>,
+}
+
 /// Whether light solved under `old` differs from light solved under `new` in
 /// a coarse chunk holding `materials`: whether the entry of one of them in
-/// the emissive list was added, dropped or given a new level.
+/// the emissive list was added, dropped, or given a new level or a new
+/// scaled light colour.
 pub(crate) fn emission_changed<I: Copy + PartialEq>(
     materials: &[I],
     old: &LightTaskSettings<I>,
     new: &LightTaskSettings<I>,
 ) -> bool {
-    if old.emission_generation == new.emission_generation {
+    let same_list = old.generation == new.generation
+        && old.emission_generation == new.emission_generation
+        && old.color_generation == new.color_generation;
+    if same_list {
         return false;
     }
     let entry = |settings: &LightTaskSettings<I>, material: I| {
-        settings.emission.get(material).map(|emitter| emitter.level)
+        let emission = &settings.emission;
+        emission
+            .get(material)
+            .map(|emitter| (emitter.level, emission.color(emitter.material)))
     };
     materials
         .iter()
@@ -157,29 +214,77 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
             }
             _ => vec![0; SLOT_TEXELS],
         };
-        let voxel = if cells.lamps.is_empty() {
-            vec![0; SLOT_TEXELS]
+        let counters = &settings.counters;
+        let colors = cells.light_colors();
+        let (voxel, cell_colors) = if cells.lamps.is_empty() {
+            (vec![0; SLOT_TEXELS], None)
         } else {
             let scale =
                 LevelScale::coarse(settings.voxel_scale.reach(), width, precision);
-            spread(&cells.open, None, &cells.lamps, &scale, settings.shape)
+            if colors.is_empty() {
+                let voxel =
+                    spread(&cells.open, None, &cells.lamps, &scale, settings.shape);
+                (voxel, None)
+            } else {
+                let (voxel, cell_colors) =
+                    spread_colors(&cells, &colors, &scale, settings.shape, counters);
+                (voxel, Some(cell_colors))
+            }
         };
 
         let bytes = cells.slot_bytes(&sky, &voxel, precision);
-        let (levels, needs_slot) = cells.faces_see(&bytes, precision);
-        let counters = &settings.counters;
+        let seen = cells.faces_see(&bytes, precision, cell_colors.as_deref());
+        let color = match &cell_colors {
+            None => CoarseColor::default(),
+            Some(cell_colors) => CoarseColor {
+                tag: seen.fallback,
+                entry: match seen.color {
+                    Seen::One(color) => color,
+                    Seen::Mixed => seen.fallback,
+                    Seen::Nothing => WHITE,
+                },
+                bytes: (settings.routed && seen.color == Seen::Mixed)
+                    .then(|| cells.color_slot_bytes(cell_colors)),
+            },
+        };
         counters.coarse_solves.fetch_add(1, Ordering::Relaxed);
         counters
             .coarse_nanos
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         CoarseSolved {
-            levels,
+            levels: seen.levels,
             precision,
-            bytes: (settings.routed && needs_slot).then_some(bytes),
+            bytes: (settings.routed && seen.needs_slot).then_some(bytes),
+            color,
             materials: cells.materials.into_boxed_slice(),
             settings: self.settings,
         }
     }
+}
+
+/// An emissive cell of a coarse chunk.
+#[derive(Clone, Copy)]
+struct Lamp {
+    /// Where it is, in padded cell coordinates.
+    cell: UVec3,
+    /// Its whole level.
+    level: u8,
+    /// Its packed light colour.
+    color: u16,
+}
+
+/// What a coarse chunk's faces read from its cells.
+struct CoarseFacesSee {
+    /// The sky light and voxel light its tag holds without a slot.
+    levels: (u8, u8),
+    needs_slot: bool,
+    /// The packed light colours of the cells they read with voxel light, and
+    /// of its emissive cells touching an open cell, or [`Seen::Nothing`] in a
+    /// chunk whose emissive cells all give white.
+    color: Seen<u16>,
+    /// The light colour its tag holds without a slot: see
+    /// [`CoarseColor::tag`].
+    fallback: u16,
 }
 
 /// A coarse chunk's cells: which are open, its emissive cells, and the
@@ -187,8 +292,7 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
 struct Cells<I> {
     /// A column along z per cell `x`, `y`, at `x + y × 34`, padding included.
     open: Vec<u64>,
-    /// Each emissive cell, in padded cell coordinates, with its level.
-    lamps: Vec<(UVec3, u8)>,
+    lamps: Vec<Lamp>,
     /// Each material of a solid cell, once. A chunk solid through its
     /// padding holds none, since it lights no cell whatever its material.
     materials: Vec<I>,
@@ -223,8 +327,8 @@ impl<I: Copy + PartialEq> Cells<I> {
         let mut lamps = Vec::new();
         let mut materials = Vec::new();
         // Neighbouring cells mostly hold the same material, so the last one
-        // and its level are kept to skip looking them up again.
-        let mut last: Option<(I, Option<u8>)> = None;
+        // and what it gives off are kept to skip looking them up again.
+        let mut last: Option<(I, Option<(u8, u16)>)> = None;
         for z in 0..SIDE {
             let rz = &ranges[2][z];
             for y in 0..SIDE {
@@ -244,20 +348,25 @@ impl<I: Copy + PartialEq> Cells<I> {
                     if is_open {
                         open[x + y * SIDE] |= 1 << z;
                     } else if let WorldVoxel::Solid(material) = middle {
-                        let level = match last {
-                            Some((held, level)) if held == material => level,
+                        let emits = match last {
+                            Some((held, emits)) if held == material => emits,
                             _ => {
                                 if !materials.contains(&material) {
                                     materials.push(material);
                                 }
-                                let level =
-                                    emission.get(material).map(|emitter| emitter.level);
-                                last = Some((material, level));
-                                level
+                                let emits = emission.get(material).map(|emitter| {
+                                    (emitter.level, emission.color(emitter.material))
+                                });
+                                last = Some((material, emits));
+                                emits
                             }
                         };
-                        if let Some(level) = level {
-                            lamps.push((UVec3::new(x as u32, y as u32, z as u32), level));
+                        if let Some((level, color)) = emits {
+                            lamps.push(Lamp {
+                                cell: UVec3::new(x as u32, y as u32, z as u32),
+                                level,
+                                color,
+                            });
                         }
                     }
                 }
@@ -272,6 +381,40 @@ impl<I: Copy + PartialEq> Cells<I> {
 
     fn is_open(&self, x: usize, y: usize, z: usize) -> bool {
         self.open[x + y * SIDE] >> z & 1 == 1
+    }
+
+    /// The packed light colours of the emissive cells, each once, in order,
+    /// or none if they all give white.
+    fn light_colors(&self) -> Vec<u16> {
+        if self.lamps.iter().all(|lamp| lamp.color == WHITE) {
+            return Vec::new();
+        }
+        let mut colors: Vec<u16> = Vec::new();
+        for lamp in &self.lamps {
+            if !colors.contains(&lamp.color) {
+                colors.push(lamp.color);
+            }
+        }
+        colors.sort_unstable();
+        colors
+    }
+
+    /// The bytes of the chunk's colour slot, given `colors`, the packed light
+    /// colour of each cell's voxel light in slot order: those colours, each
+    /// emissive cell's own colour, and the shell's edges and corners left at
+    /// 0.
+    fn color_slot_bytes(&self, colors: &[u16]) -> Box<[u8]> {
+        let mut bytes = vec![0; SLOT_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
+        for (texel, color) in colors.iter().enumerate() {
+            if *color != WHITE {
+                put_color(&mut bytes, texel, *color);
+            }
+        }
+        for lamp in &self.lamps {
+            put_color(&mut bytes, cell_index(lamp.cell), lamp.color);
+        }
+        clear_shell_edges(&mut bytes, COLOR_TEXEL_BYTES);
+        bytes
     }
 
     /// The interior columns whose cell in the padding row above the chunk is
@@ -322,39 +465,28 @@ impl<I: Copy + PartialEq> Cells<I> {
         for (texel, (sky, voxel)) in sky.iter().zip(voxel).enumerate() {
             put_texel(&mut bytes, texel, *sky, *voxel, precision);
         }
-        for (cell, level) in &self.lamps {
-            put_lamp(&mut bytes, cell_index(*cell), *level, precision);
+        for lamp in &self.lamps {
+            put_lamp(&mut bytes, cell_index(lamp.cell), lamp.level, precision);
         }
-        let edge = |v: usize| v == 0 || v == SIDE - 1;
-        for y in 0..SIDE {
-            for x in 0..SIDE {
-                let zs: &[usize] = match (edge(x), edge(y)) {
-                    (true, true) => &[],
-                    (true, false) | (false, true) => &[0, SIDE - 1],
-                    (false, false) => continue,
-                };
-                let cell =
-                    |z: usize| cell_index(UVec3::new(x as u32, y as u32, z as u32));
-                let mut clear =
-                    |z: usize| bytes[cell(z) * wide..(cell(z) + 1) * wide].fill(0);
-                if zs.is_empty() {
-                    (0..SIDE).for_each(&mut clear);
-                } else {
-                    zs.iter().copied().for_each(&mut clear);
-                }
-            }
-        }
+        clear_shell_edges(&mut bytes, wide);
         bytes
     }
 
     /// What the chunk's faces read from `bytes`, a slot of `precision`'s
-    /// format: the sky and voxel light its tag holds without a slot, and
-    /// whether it needs one.
+    /// format, and from `colors`, the packed light colour of each cell's
+    /// voxel light in slot order, given in a chunk whose emissive cells don't
+    /// all give white.
     ///
     /// Faces read the open cells touching one of the chunk's own solid cells
     /// by a face, an edge or a corner, as at level 0, padding included. A
-    /// chunk with no such cell reads all its open cells.
-    fn faces_see(&self, bytes: &[u8], precision: LightPrecision) -> ((u8, u8), bool) {
+    /// chunk with no such cell reads all its open cells. A chunk whose faces
+    /// see more than one light colour needs a slot.
+    fn faces_see(
+        &self,
+        bytes: &[u8],
+        precision: LightPrecision,
+        colors: Option<&[u16]>,
+    ) -> CoarseFacesSee {
         let interior = ALL_CELLS & !1 & !(1 << (SIDE - 1));
         let solid = |x: usize, y: usize| -> u64 {
             if (1..=CHUNK).contains(&x) && (1..=CHUNK).contains(&y) {
@@ -366,6 +498,9 @@ impl<I: Copy + PartialEq> Cells<I> {
         };
         let mut sky = [0u32; 256];
         let mut voxel = [0u32; 256];
+        let mut color = Seen::Nothing;
+        // How many cells of each light colour are at each voxel light level.
+        let mut by_color: Vec<(u16, Box<[u32; 256]>)> = Vec::new();
         let mut count = |cells: &dyn Fn(usize, usize) -> u64| {
             let mut any = false;
             for y in 0..SIDE {
@@ -379,6 +514,17 @@ impl<I: Copy + PartialEq> Cells<I> {
                         sky[sky_level as usize] += 1;
                         voxel[voxel_level as usize] += 1;
                         any = true;
+                        let Some(colors) = colors.filter(|_| voxel_level > 0) else {
+                            continue;
+                        };
+                        let packed = colors[cell];
+                        color = color.join(Seen::One(packed));
+                        let at = by_color.iter().position(|(held, _)| *held == packed);
+                        let at = at.unwrap_or_else(|| {
+                            by_color.push((packed, Box::new([0; 256])));
+                            by_color.len() - 1
+                        });
+                        by_color[at].1[voxel_level as usize] += 1;
                     }
                 }
             }
@@ -411,7 +557,8 @@ impl<I: Copy + PartialEq> Cells<I> {
                 }
             });
         }
-        let lamp = self.lamps.iter().any(|(cell, _)| {
+        let touches_open = |lamp: &&Lamp| {
+            let cell = lamp.cell;
             let (x, y, z) = (cell.x as usize, cell.y as usize, cell.z as usize);
             let inside = |v: usize| (1..=CHUNK).contains(&v);
             if !(inside(x) && inside(y) && inside(z)) {
@@ -421,12 +568,131 @@ impl<I: Copy + PartialEq> Cells<I> {
             (y - 1..=y + 1).any(|ny| {
                 (x - 1..=x + 1).any(|nx| self.open[nx + ny * SIDE] & around != 0)
             })
-        });
+        };
+        let mut lamp = false;
+        for touching in self.lamps.iter().filter(touches_open) {
+            lamp = true;
+            if colors.is_none() {
+                break;
+            }
+            color = color.join(Seen::One(touching.color));
+        }
         let levels =
             |counts: &[u32; 256]| counts.iter().filter(|count| **count > 0).count();
-        let needs_slot = lamp || levels(&sky) > 1 || levels(&voxel) > 1;
-        ((brightest_tenth(&sky), brightest_tenth(&voxel)), needs_slot)
+        let needs_slot =
+            lamp || levels(&sky) > 1 || levels(&voxel) > 1 || color == Seen::Mixed;
+        let tenth = brightest_tenth(&voxel);
+        // The most common colour at the tag's voxel light level or brighter,
+        // the lowest packed colour on a tie. At level 0 no cell counts.
+        let fallback = by_color
+            .iter()
+            .map(|(packed, counts)| {
+                let count: u32 = counts[tenth as usize..].iter().sum();
+                (count, std::cmp::Reverse(*packed))
+            })
+            .filter(|(count, _)| *count > 0 && tenth > 0)
+            .max()
+            .map_or(WHITE, |(_, packed)| packed.0);
+        CoarseFacesSee {
+            levels: (brightest_tenth(&sky), tenth),
+            needs_slot,
+            color,
+            fallback,
+        }
     }
+}
+
+/// Sets the shell's edges and corners in `bytes`, a slot or a colour slot of
+/// `wide` bytes a texel, to 0.
+fn clear_shell_edges(bytes: &mut [u8], wide: usize) {
+    let edge = |v: usize| v == 0 || v == SIDE - 1;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let zs: &[usize] = match (edge(x), edge(y)) {
+                (true, true) => &[],
+                (true, false) | (false, true) => &[0, SIDE - 1],
+                (false, false) => continue,
+            };
+            let cell = |z: usize| cell_index(UVec3::new(x as u32, y as u32, z as u32));
+            let mut clear =
+                |z: usize| bytes[cell(z) * wide..(cell(z) + 1) * wide].fill(0);
+            if zs.is_empty() {
+                (0..SIDE).for_each(&mut clear);
+            } else {
+                zs.iter().copied().for_each(&mut clear);
+            }
+        }
+    }
+}
+
+/// Spreads voxel light through the chunk's open cells once per light colour
+/// in `colors`, each run from that colour's emissive cells alone, as at
+/// level 0. Returns each cell's level, the highest of the runs', and the
+/// packed light colour of its voxel light, both in slot order, padding
+/// included.
+///
+/// A cell one run lights takes that run's colour, and one that more light
+/// takes their colours at their levels, mixed by [`mix_weighted`]. A cell no
+/// run lights holds white. The cost grows with the light colours in
+/// `colors`.
+fn spread_colors<I>(
+    cells: &Cells<I>,
+    colors: &[u16],
+    scale: &LevelScale,
+    shape: LightShape,
+    counters: &LightCounters,
+) -> (Vec<u8>, Vec<u16>) {
+    let runs: Vec<Vec<u8>> = colors
+        .iter()
+        .map(|color| {
+            let lamps: Vec<Lamp> = cells
+                .lamps
+                .iter()
+                .filter(|lamp| lamp.color == *color)
+                .copied()
+                .collect();
+            spread(&cells.open, None, &lamps, scale, shape)
+        })
+        .collect();
+    if runs.len() > 1 {
+        counters
+            .color_runs
+            .fetch_add(runs.len() as u64, Ordering::Relaxed);
+    }
+    let precision = scale.precision();
+    let weights: Vec<f32> = (0..=precision.top())
+        .map(|steps| mixing_weight(precision.level_of(steps)))
+        .collect();
+    let unpacked: Vec<LinearRgba> = colors.iter().map(|color| unpack(*color)).collect();
+    let mut levels = vec![0; SLOT_TEXELS];
+    let mut packed = vec![WHITE; SLOT_TEXELS];
+    for texel in 0..SLOT_TEXELS {
+        let (mut top, mut lit, mut only) = (0, 0, 0);
+        for (run, run_levels) in runs.iter().enumerate() {
+            if run_levels[texel] > 0 {
+                top = top.max(run_levels[texel]);
+                lit += 1;
+                only = run;
+            }
+        }
+        if lit == 0 {
+            continue;
+        }
+        levels[texel] = top;
+        packed[texel] = if lit == 1 {
+            colors[only]
+        } else {
+            pack(mix_weighted(
+                runs.iter()
+                    .zip(&unpacked)
+                    .filter(|(run_levels, _)| run_levels[texel] > 0)
+                    .map(|(run_levels, color)| {
+                        (*color, weights[run_levels[texel] as usize])
+                    }),
+            ))
+        };
+    }
+    (levels, packed)
 }
 
 /// The brightest level that, with every brighter one, makes up at least a
@@ -555,7 +821,7 @@ thread_local! {
 fn spread(
     open: &[u64],
     lit: Option<&[u64]>,
-    lamps: &[(UVec3, u8)],
+    lamps: &[Lamp],
     scale: &LevelScale,
     shape: LightShape,
 ) -> Vec<u8> {
@@ -602,7 +868,7 @@ fn run<R: Row>(
     cached: &'static LocalKey<RefCell<Vec<LightBox<R>>>>,
     open: &[u64],
     lit: Option<&[u64]>,
-    lamps: &[(UVec3, u8)],
+    lamps: &[Lamp],
     scale: &LevelScale,
     shape: LightShape,
 ) -> (Box<[Plane]>, Box<super::kernel::ShellLevels>) {
@@ -639,12 +905,12 @@ fn run<R: Row>(
         }
         let mut seeds: Vec<Seed> = lamps
             .iter()
-            .filter_map(|(cell, level)| {
+            .filter_map(|lamp| {
                 Some(Seed {
-                    x: (cell.x as usize + offset) as u8,
-                    y: (cell.y as usize + offset) as u8,
-                    z: (cell.z as usize + offset) as u8,
-                    start: scale.start(scale.precision().of_whole(*level))?,
+                    x: (lamp.cell.x as usize + offset) as u8,
+                    y: (lamp.cell.y as usize + offset) as u8,
+                    z: (lamp.cell.z as usize + offset) as u8,
+                    start: scale.start(scale.precision().of_whole(lamp.level))?,
                 })
             })
             .collect();

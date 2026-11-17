@@ -273,7 +273,10 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
     /// entry, walk the column above the voxel on request: see [`request`].
     ///
     /// A level-0 chunk and a light entry read the light colour they hold, and
-    /// an emissive voxel its own. Everything else reads white.
+    /// an emissive voxel its own. A coarse chunk reads its cell's colour in
+    /// the copy of its colour slot, or else its entry's colour with a slot,
+    /// or its tag's without one, and a solid cell takes its brightest
+    /// neighbour's colour with its levels. Everything else reads white.
     #[allow(clippy::too_many_arguments)]
     pub fn light_at(
         &self,
@@ -726,6 +729,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         .as_ref()
         .and_then(|table| settings.task.emission.recolored(table));
     let emission_changed = new_emission.is_some() && recolored.is_none();
+    // Coarse chunks have no recolour relight, so any change solves them again.
+    let emission_differs = new_emission.is_some();
     // Sky reach changes nothing with sky light off.
     let sky_reach_changed =
         config.sky_reach != applied.sky_reach && config.sky != Sky::Off;
@@ -784,12 +789,14 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     if !relights {
         if let (Some(table), Some(changed)) = (new_emission, recolored) {
             settings.emissive_materials = emissive;
+            let old = settings.task.clone();
             recolor(settings.as_mut(), &mut work, table, &changed);
             // A white world given its first colour, or a coloured one made
             // white, sets or clears its materials' `LIGHT_COLOR` def.
             if let Some(route) = route.as_mut() {
                 route.set_light_colors(light_colors(&settings.task.emission));
             }
+            work.solve_coarse_holding(&old, &settings.task);
         }
         return;
     }
@@ -956,9 +963,10 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         }
         work.solve_coarse_again();
     } else {
-        if emission_changed {
+        if emission_differs {
             work.solve_coarse_holding(&old, &settings.task);
         }
+
         relight_settings(
             settings,
             &mut work,

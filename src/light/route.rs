@@ -123,7 +123,12 @@
 //! When it gives way to a nearer chunk it drops the copy and shows the
 //! brightest level a tenth of its faces see, and it takes no slot again until
 //! its chunk task runs again, since a coarse chunk that a camera nears is
-//! split into finer chunks anyway.
+//! split into finer chunks anyway. Its light colour, and its colour slot when
+//! it needs one, come from its chunk task too: see
+//! [`coarse`](super::coarse). It keeps a copy of its colour slot's bytes
+//! beside its slot's, and gives its colour slot up whenever it gives its slot
+//! up. A coarse chunk whose colour slot goes to a nearer chunk keeps its
+//! slot, and takes no colour slot again until its chunk task runs again.
 //!
 //! The render world writes queued bytes into the slot's part of the texture
 //! during the frame they were extracted with, so the mesh, the tag and the
@@ -178,8 +183,8 @@ use bevy::render::{
 };
 use std::hash::BuildHasher;
 
-use super::coarse::takes_coarse_path;
-use super::color::{color_slot_entry, tag_cut, MAX_COLOR_SLOTS, WHITE};
+use super::coarse::{takes_coarse_path, CoarseColor};
+use super::color::{color_slot_entry, tag_cut, unpack, MAX_COLOR_SLOTS, WHITE};
 use super::config::{LightPrecision, LightPropagation};
 use super::faces::Face;
 use super::fill::{cell_level, CellFill, FillCells, CELL};
@@ -188,11 +193,11 @@ use super::kernel::Plane;
 use super::levels::LightLevels;
 use super::slot::{
     across, across_voxels, border_colors, border_plane, border_sees, border_voxels,
-    cell_index, color_slot_bytes, colors_seen, convert_texels, count_colors, most_common,
-    most_common_open, open_colors_seen, open_voxels, open_voxels_see, own_colors_seen,
-    shell_cell, slot_bytes, texel_at, texel_bytes, texel_levels, texture_format,
-    touching_open, write_shell, FacesSee, Seen, ShellPlane, COLOR_TEXEL_BYTES,
-    PLANE_TEXELS,
+    cell_index, color_slot_bytes, color_texel_at, colors_seen, convert_texels,
+    count_colors, most_common, most_common_open, open_colors_seen, open_voxels,
+    open_voxels_see, own_colors_seen, shell_cell, slot_bytes, texel_at, texel_bytes,
+    texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen, ShellPlane,
+    COLOR_TEXEL_BYTES, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -290,10 +295,9 @@ enum RouteId {
     Key(GridKey),
 }
 
-/// A level-0 chunk holding a colour slot, as the colour slots' pool names
-/// it.
+/// A chunk holding a colour slot, as the colour slots' pool names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ColorHolder(RouteId);
+struct ColorHolder(Tagged);
 
 /// A chunk whose tag the route sets: a level-0 chunk or a coarse one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -348,6 +352,11 @@ struct CoarseChunk {
     /// a slot.
     bytes: Option<Box<[u8]>>,
     slot: Option<u32>,
+    /// The light colour it shows: see [`CoarseColor`]. Its colour slot's
+    /// bytes are kept until it's shown, and as a copy while it holds a colour
+    /// slot.
+    color: CoarseColor,
+    color_slot: Option<u32>,
     tag: u32,
 }
 
@@ -361,6 +370,8 @@ impl CoarseChunk {
             levels,
             bytes: None,
             slot: None,
+            color: CoarseColor::default(),
+            color_slot: None,
             tag: 0,
         }
     }
@@ -815,12 +826,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 precision.convert(chunk.levels.1, old),
             );
             chunk.slot = None;
+            chunk.color_slot = None;
             chunk.bytes = chunk
                 .bytes
                 .take()
                 .map(|bytes| convert_texels(&bytes, old, precision));
             let (sky, voxel) = chunk.levels;
-            self.retag(Tagged::Coarse(entity), Shows::Levels(sky, voxel, WHITE));
+            let color = chunk.color.tag;
+            self.retag(Tagged::Coarse(entity), Shows::Levels(sky, voxel, color));
             self.settle_coarse(entity);
         }
     }
@@ -1189,6 +1202,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             if let Some(slot) = chunk.slot {
                 self.free_slot(slot);
             }
+            if let Some(slot) = chunk.color_slot {
+                self.color_slots.give_back(slot);
+            }
             #[cfg(feature = "sub_grids")]
             if let (true, Some(mapping)) = (chunk.shown, self.tag_map.as_mut()) {
                 mapping.shown.coarse_gone(chunk.key, entity);
@@ -1220,7 +1236,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// Takes the light that landed for the coarse chunk `entity` with `key`:
     /// the sky and voxel light its tag holds without a slot, and its slot's
-    /// bytes if it needs one, both of `precision`.
+    /// bytes if it needs one, both of `precision`, and the light colour it
+    /// shows.
     pub fn coarse_landed(
         &mut self,
         entity: Entity,
@@ -1228,6 +1245,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         levels: (u8, u8),
         precision: LightPrecision,
         bytes: Option<Box<[u8]>>,
+        color: CoarseColor,
     ) {
         let to = self.precision;
         let levels = (
@@ -1239,32 +1257,44 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let chunk = self.coarse.get_mut(&entity).unwrap();
         chunk.levels = levels;
         chunk.bytes = bytes;
+        chunk.color = color;
         self.settle_coarse(entity);
     }
 
     /// The light of the slot of the coarse chunk `entity` at `cell`, in
-    /// padded cell coordinates, while it holds a slot.
+    /// padded cell coordinates, while it holds a slot. Its light colour is
+    /// its colour slot's at `cell`, or its entry's without a colour slot.
     pub fn coarse_cell(&self, entity: Entity, cell: UVec3) -> Option<LightLevels> {
         let chunk = self.coarse.get(&entity)?;
         chunk.slot?;
-        let (sky, voxel) =
-            texel_at(chunk.bytes.as_ref()?, cell_index(cell), self.precision);
-        Some(texel_levels(sky, voxel, self.precision))
+        let texel = cell_index(cell);
+        let (sky, voxel) = texel_at(chunk.bytes.as_ref()?, texel, self.precision);
+        let color = match (chunk.color_slot, &chunk.color.bytes) {
+            (Some(_), Some(bytes)) => color_texel_at(bytes, texel),
+            _ => chunk.color.entry,
+        };
+        Some(texel_levels(sky, voxel, self.precision).with_voxel_color(unpack(color)))
     }
 
-    /// The bytes coarse chunks keep as copies of their slots.
+    /// The bytes coarse chunks keep as copies of their slots and colour
+    /// slots.
     pub fn coarse_copy_bytes(&self) -> usize {
-        self.coarse
+        let slot = self
+            .coarse
             .values()
             .filter(|chunk| chunk.slot.is_some())
-            .filter_map(|chunk| chunk.bytes.as_ref())
-            .map(|bytes| bytes.len())
-            .sum()
+            .filter_map(|chunk| chunk.bytes.as_ref());
+        let color_slot = self
+            .coarse
+            .values()
+            .filter(|chunk| chunk.color_slot.is_some())
+            .filter_map(|chunk| chunk.color.bytes.as_ref());
+        slot.chain(color_slot).map(|bytes| bytes.len()).sum()
     }
 
-    /// Brings the shown coarse chunk `entity`'s slot and tag in line with its
-    /// light. One with bytes takes a slot if it can, and otherwise drops them
-    /// and shows its levels.
+    /// Brings the shown coarse chunk `entity`'s slot, colour slot and tag in
+    /// line with its light. One with bytes takes a slot if it can, and
+    /// otherwise drops them and shows its levels and its tag's colour.
     fn settle_coarse(&mut self, entity: Entity) {
         let Some(chunk) = self.coarse.get(&entity) else {
             return;
@@ -1296,14 +1326,60 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                     .expect("a chunk taking a slot has bytes");
                 self.uploads.insert(slot, Upload::Full(bytes));
                 self.counters.full_writes += 1;
-                Shows::Slot(slot, WHITE)
+                Shows::Slot(slot, self.settle_coarse_color(entity))
             }
             None => {
                 chunk.bytes = None;
-                Shows::Levels(chunk.levels.0, chunk.levels.1, WHITE)
+                let shows =
+                    Shows::Levels(chunk.levels.0, chunk.levels.1, chunk.color.tag);
+                self.free_coarse_color_slot(entity);
+                shows
             }
         };
         self.retag(Tagged::Coarse(entity), shows);
+    }
+
+    /// Brings the colour slot of the shown coarse chunk `entity`, which holds
+    /// a slot, in line with its light, and returns the entry its slot holds.
+    ///
+    /// One with colour slot bytes takes a colour slot if it can, and its
+    /// entry names it. Otherwise it drops them, and its entry holds
+    /// [`CoarseColor::entry`].
+    fn settle_coarse_color(&mut self, entity: Entity) -> u16 {
+        let chunk = &self.coarse[&entity];
+        if chunk.color.bytes.is_none() {
+            self.free_coarse_color_slot(entity);
+            return self.coarse[&entity].color.entry;
+        }
+        let slot = match chunk.color_slot {
+            Some(slot) => Some(slot),
+            None => {
+                let near = self.distance_to(chunk.key.centre());
+                self.take_color_slot(Tagged::Coarse(entity), near)
+            }
+        };
+        let chunk = self.coarse.get_mut(&entity).unwrap();
+        chunk.color_slot = slot;
+        let Some(slot) = slot else {
+            chunk.color.bytes = None;
+            return chunk.color.entry;
+        };
+        let bytes = chunk.color.bytes.clone().expect("checked above");
+        self.color_uploads.insert(slot, Upload::Full(bytes));
+        color_slot_entry(slot)
+    }
+
+    /// Gives back the colour slot of the coarse chunk `entity`, if it holds
+    /// one, and drops its colour slot's bytes.
+    fn free_coarse_color_slot(&mut self, entity: Entity) {
+        let Some(chunk) = self.coarse.get_mut(&entity) else {
+            return;
+        };
+        chunk.color.bytes = None;
+        if let Some(slot) = chunk.color_slot.take() {
+            self.color_slots.give_back(slot);
+            self.counters.color_given_back += 1;
+        }
     }
 
     /// How many chunks need a slot and have none.
@@ -1461,16 +1537,18 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let chunk = &self.chunks[&id];
         let (slot, whole) = match chunk.color_slot {
             Some(slot) => (slot, face.is_none()),
-            None => match self.take_color_slot(id, self.distance(chunk.key)) {
-                Some(slot) => {
-                    self.chunks.get_mut(&id).unwrap().color_slot = Some(slot);
-                    (slot, true)
+            None => {
+                match self.take_color_slot(Tagged::Chunk(id), self.distance(chunk.key)) {
+                    Some(slot) => {
+                        self.chunks.get_mut(&id).unwrap().color_slot = Some(slot);
+                        (slot, true)
+                    }
+                    None => {
+                        self.color_starved.insert(id);
+                        return self.shown_color(id, light, sees, None);
+                    }
                 }
-                None => {
-                    self.color_starved.insert(id);
-                    return self.shown_color(id, light, sees, None);
-                }
-            },
+            }
         };
         match face {
             Some(face) if !whole => self.write_color_plane(id, slot, face),
@@ -1821,11 +1899,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         );
     }
 
-    /// A colour slot for the level-0 chunk `id`, `near` from the cameras: a
-    /// free one, one that growing the colour texture makes, or one taken
-    /// from the holder farthest from the cameras if it's farther than this
-    /// chunk.
-    fn take_color_slot(&mut self, id: RouteId, near: f32) -> Option<u32> {
+    /// A colour slot for `chunk`, `near` from the cameras: a free one, one
+    /// that growing the colour texture makes, or one taken from the holder
+    /// farthest from the cameras if it's farther than this chunk.
+    fn take_color_slot(&mut self, chunk: Tagged, near: f32) -> Option<u32> {
         if !self.color_slots.has_free() {
             if let Some(slots) = self.color_growth() {
                 self.color_texture_slots = slots;
@@ -1837,7 +1914,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         // The pool asks the route about holders while it hands out a slot,
         // so it's moved out of the route meanwhile.
         let mut slots = std::mem::replace(&mut self.color_slots, SlotPool::growing());
-        let slot = slots.take(ColorHolder(id), near, self);
+        let slot = slots.take(ColorHolder(chunk), near, self);
         self.color_slots = slots;
         let slot = slot?;
         self.counters.color_allocations += 1;
@@ -2241,9 +2318,10 @@ impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
     }
 
     /// A level-0 chunk shows its most common levels and waits for a slot to
-    /// come free. A coarse chunk drops its copy of its slot's bytes and shows
-    /// the brightest level a tenth of its faces see, and takes no slot again
-    /// until its chunk task runs again.
+    /// come free. A coarse chunk drops its copies of its slot's and its
+    /// colour slot's bytes, gives its colour slot up, and shows the brightest
+    /// level a tenth of its faces see with its tag's colour. It takes neither
+    /// slot again until its chunk task runs again.
     fn gave_way(&mut self, holder: Tagged) {
         self.counters.evictions += 1;
         match holder {
@@ -2252,7 +2330,9 @@ impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
                 chunk.slot = None;
                 chunk.bytes = None;
                 let (sky, voxel) = chunk.levels;
-                self.retag(holder, Shows::Levels(sky, voxel, WHITE));
+                let color = chunk.color.tag;
+                self.free_coarse_color_slot(entity);
+                self.retag(holder, Shows::Levels(sky, voxel, color));
             }
             Tagged::Chunk(id) => {
                 let shows = self.most_common_shows(id);
@@ -2272,15 +2352,30 @@ impl<C: VoxelWorldConfig> Holders<ColorHolder> for LightRoute<C> {
     const SLOTS: &'static str = "colour slots";
     const WITHOUT_SLOT: &'static str = "show their most common light colour";
 
-    fn distance(&self, ColorHolder(id): ColorHolder) -> f32 {
-        self.distance(self.chunks[&id].key)
+    fn distance(&self, ColorHolder(holder): ColorHolder) -> f32 {
+        Holders::<Tagged>::distance(self, holder)
     }
 
-    /// The chunk keeps its slot, and its entry shows the most common light
-    /// colour among the voxels its faces read. It waits for a colour slot
-    /// to come free.
-    fn gave_way(&mut self, ColorHolder(id): ColorHolder) {
+    /// The chunk keeps its slot. A level-0 chunk's entry shows the most
+    /// common light colour among the voxels its faces read, and it waits for
+    /// a colour slot to come free. A coarse chunk drops its copy of its
+    /// colour slot's bytes, its entry shows [`CoarseColor::entry`], and it
+    /// takes no colour slot again until its chunk task runs again.
+    fn gave_way(&mut self, ColorHolder(holder): ColorHolder) {
         self.counters.color_evictions += 1;
+        let id = match holder {
+            Tagged::Chunk(id) => id,
+            Tagged::Coarse(entity) => {
+                let chunk = self.coarse.get_mut(&entity).unwrap();
+                chunk.color_slot = None;
+                chunk.color.bytes = None;
+                if let Some(slot) = chunk.slot {
+                    let entry = chunk.color.entry;
+                    self.retag(holder, Shows::Slot(slot, entry));
+                }
+                return;
+            }
+        };
         let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.color_slot = None;
         chunk.color_shell = [None; 6];
@@ -2873,7 +2968,14 @@ mod tests {
         let coarse = Entity::from_raw_u32(1).unwrap();
         let key = ChunkKey::new(IVec3::ZERO, 2);
         let bytes = vec![0; SLOT_SIDE.pow(3) as usize].into_boxed_slice();
-        route.coarse_landed(coarse, key, (15, 0), LightPrecision::Steps16, Some(bytes));
+        route.coarse_landed(
+            coarse,
+            key,
+            (15, 0),
+            LightPrecision::Steps16,
+            Some(bytes),
+            default(),
+        );
         let coarse_tag = route.show(coarse, GridKey::world(key), true);
         assert_eq!(coarse_tag & HAS_SLOT, HAS_SLOT);
         assert_eq!(coarse_tag >> LOD_SHIFT & 0xF, 2);
@@ -2902,7 +3004,14 @@ mod tests {
         }
 
         // The coarse chunk gives its slot back, and its tag changes.
-        route.coarse_landed(coarse, key, (9, 0), LightPrecision::Steps16, None);
+        route.coarse_landed(
+            coarse,
+            key,
+            (9, 0),
+            LightPrecision::Steps16,
+            None,
+            default(),
+        );
         route.upkeep_tag_map(&[body], &Hinting::none(), &mut images);
         let flat = tag_levels(9, 0, LightPrecision::Steps16);
         let map = route.tag_map().unwrap();

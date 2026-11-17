@@ -470,7 +470,8 @@ pub struct LightStats {
     pub coarse_solve_ms: f64,
     /// Voxel lookups coarse chunks' walks made.
     pub coarse_lookups: u64,
-    /// The bytes coarse chunks keep now as copies of their slots.
+    /// The bytes coarse chunks keep now as copies of their slots and colour
+    /// slots.
     pub coarse_copy_bytes: u64,
     /// Solves that seeded sky fill.
     pub fill_seeded: u64,
