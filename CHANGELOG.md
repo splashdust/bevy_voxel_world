@@ -22,6 +22,30 @@ When a dislodged fragment is detected, a `FragmentDislodged<C>` message is sent,
 
 When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to automatically turn dislodged fragments into sub-grids.
 
+### Light colour
+
+Voxel light can now take a colour. An emissive material declares one with `Emission::with_color`, and where light of several colours meets, the colours mix. A world whose emissive materials are all white does no colour work.
+
+What a coloured world costs more grows with the light colours within light reach of each chunk (solving), the chunks where colours mix (memory), the most chunks at once whose faces see more than one colour (GPU memory) and the faces of chunks whose light isn't all white (shader work). The "Light colour" section of `LightPropagation`'s docs has the details, and its WASM section now also covers how many of WebGL2's textures a lit chunk material takes, and how to keep a world's light white on WASM.
+
+#### Added
+
+- `Emission::with_color`, which gives an emissive material's light a colour. The level alone still sets how bright the light is and how far it reaches.
+- `LightLevels::voxel_color`, the colour of the voxel light that `light_at` reads.
+- `LightLook::tinted_glow`, off by default, which tints an emissive voxel's own faces by its light colour.
+- `LightPropagation::skip_unreached_colors`, on by default, which skips solving the light colours whose light can't reach a chunk. It never changes the light.
+- `LevelCurve::exponential_to_black`, an exponential curve that reaches black at level 1.
+- The `LIGHT_COLOR` shader def, which a custom shader can test. The crate's materials add it while a world has a light colour other than white.
+
+#### Changed
+
+- The default `voxel_falloff` is `LevelCurve::exponential_to_black(0.7)`, so the last few voxels of every pool of voxel light are dimmer and fade out at its edge, white light's too. Set `voxel_falloff` to `LevelCurve::exponential(0.7)` for the old look.
+- A change to `emissive_materials` now solves again the coarse chunks holding a changed material, in a white world too. Before, a coarse chunk kept its old light until its chunk task ran again.
+
+#### Breaking
+
+- The shader's `LightLevels`: its levels changed from `vec3` to `f32`, and it gained `voxel_color` and `own_voxel_color`. See [Migrating from 0.19.3](#migrating-from-0193).
+
 ### Examples
 
 - `sub_grids`: A walkthrough of sub-grids on a few pillars and rods, which can be cut, built on, and stamped back into the world.
@@ -33,6 +57,8 @@ When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to au
 - `multiplayer_loopback` updated for brevity, and now also shows how sub-grid edits may be sent over network. Need the `sub_grids` feature.
 
 - `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
+
+- `light_tuning` has a Chamber place lit by coloured lamps and crystals, with panel rows for light colour, `tinted_glow` and `skip_unreached_colors`. Its `audit` mode counts light colour changes, and a new `shots <dir>` mode saves pictures of the places coloured light shows.
 
 ### Other changes
 
@@ -72,9 +98,9 @@ A lit world's vertex shaders now also output `world_grid_position`, the centroid
 out.world_grid_position = out.world_position.xyz;
 ```
 
-#### 3. `LightPropagation` has a new field
+#### 3. `LightPropagation` and `LightLook` have new fields
 
-With `sub_grids` and `light_propagation` both on, `LightPropagation` gains `sub_grid_sky`. A `LightPropagation` written out in full needs it, or `..default()`:
+`LightPropagation` gains `skip_unreached_colors`, and with `sub_grids` also `sub_grid_sky`. `LightLook` gains `tinted_glow`. A `LightPropagation` or `LightLook` written out in full needs them, or `..default()`:
 
 ```rust
 // now
@@ -82,6 +108,18 @@ LightPropagation {
     sky_reach: 15,
     ..default()
 }
+```
+
+#### 4. The shader's `LightLevels` holds levels as `f32`, and light colours
+
+A custom shader that builds a `LightLevels` or reads its levels as `vec3` must change. `voxel` and `own_voxel` are now `f32`, and `LightLevels` gains `voxel_color` and `own_voxel_color`, each with its brightest component 1, and white without `LIGHT_COLOR`. The shader's `voxel_falloff` takes and returns an `f32`.
+
+```wesl
+// 0.19.3: a vec3 of three equal levels
+let around = voxel_falloff(levels.voxel);
+
+// now: an f32 level, times its light colour
+let around = voxel_falloff(levels.voxel) * levels.voxel_color;
 ```
 
 ## 0.19.3

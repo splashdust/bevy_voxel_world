@@ -308,7 +308,9 @@ fn a_recolour_counts_as_a_visible_change_of_light() {
     settle(&mut app, "light to settle after the recolour");
     let after = change_counts::<LampWorld>(app.world()).unwrap();
     let visible = |counts: &crate::light_bench::ChangeCounts| {
-        counts.visible_from_arrival + counts.visible_from_column + counts.visible_from_other
+        counts.visible_from_arrival
+            + counts.visible_from_column
+            + counts.visible_from_other
     };
     assert!(
         visible(&after) > visible(&before),

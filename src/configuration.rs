@@ -367,13 +367,18 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// again on the task pool too, and shows its old light until then.
     ///
     /// Each [`Emission`] can give its light a colour. A change of colour alone
-    /// changes no level, so it relights only the chunks whose light box, the
-    /// chunk and the 26 around it, holds an emissive voxel of a recoloured
-    /// material, nearest the camera first, with old light shown until new
-    /// light lands. Materials whose colours are the same once scaled give the
-    /// same light, so a change between them relights nothing. A world declaring more
-    /// than 8,192 emissive materials warns once, and gives each one past that
-    /// the colour of the earlier one nearest it.
+    /// changes no level, so it relights only the chunks that hold an emissive
+    /// voxel of a recoloured material, or have one in the 26 chunks around
+    /// them, nearest the camera first, with old light shown until new light
+    /// lands. Materials whose colours are the same once scaled give the same
+    /// light, so a change between them relights nothing. A world declaring
+    /// more than 8,192 emissive materials warns once, and gives each one past
+    /// that the colour of the earlier one nearest it.
+    ///
+    /// The first time a running world's emissive materials go from all white
+    /// to holding another colour, or back, its chunk shaders compile for the
+    /// other case, and that frame waits for them. Later changes wait on
+    /// nothing.
     ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.

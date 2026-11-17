@@ -17,8 +17,9 @@
 //! Gated metrics are listed in `gate`; a scenario's own thresholds are
 //! checked as it runs and reported as its `gate_failures`.
 //!
-//! The edit scenarios, `edits_lit` on the sine terrain and `edits_lamps`
-//! beside the lamp world's lamps, count an edit's frames to its last light
+//! The edit scenarios, `edits_lit` on the sine terrain, `edits_lamps`
+//! beside the lamp world's lamps and `vehicle_lit`'s paced edits on a
+//! sub-grid, count an edit's frames to its last light
 //! change: the last frame in which a relight landed that changed a voxel's
 //! level or light colour. Light can settle later, on relights that change
 //! nothing, and frames to settle are reported beside them. Each edit's
@@ -50,6 +51,17 @@
 //! `caves_recolor`, a lamp material of the settled three-colour row taking
 //! another light colour, and `caves_first_flip`, the settled white row's
 //! lamp material taking a light colour, the world's first.
+//!
+//! `vehicle_lit` runs a coloured row too, `vehicle_lit_3_colors`, interleaved
+//! with it, in which every lamp, the hull's included, takes one of three
+//! light colours. It holds every gate `vehicle_lit` holds, with its paced
+//! edits' frames gated by the rule for coloured edits above.
+//!
+//! `stream_in_lod_lamps` and `stream_in_lod_colored` stream
+//! `stream_in_lod`'s world with a lamp on one in 32 surface voxels, white
+//! and in three light colours, until its light settles. They only report; the cost of a coarse
+//! chunk's solve, `coarse_solve_us_per_chunk`, is read by hand, and the
+//! coloured row's against the white row's in a ratio line.
 //!
 //! Background load on a desktop drifts by more than the gates over minutes, so
 //! comparisons alternate the two builds instead of reusing an old recording:
@@ -336,15 +348,20 @@ impl<const LIT: bool, const COLORS: usize> VoxelWorldConfig for LampWorld<LIT, C
 /// default light settings. Its scenarios report what light costs on the gated
 /// worlds, against `light-baseline`'s runs of them, and gate nothing yet.
 ///
-/// With `LAMPS`, the material `LAMP` glows at level 15. The terrain holds
-/// none of it, so only voxels a scenario sets with it are lamps.
+/// With `LAMPS`, the lamp materials of `lamp_emission(COLORS)` glow at level
+/// 15: `LAMP` alone when `COLORS` is 1. The terrain holds none of them, so
+/// only voxels a scenario sets with them are lamps.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
-struct LitBenchWorld<const TERRAIN: u8, const LAMPS: bool = false>;
+struct LitBenchWorld<
+    const TERRAIN: u8,
+    const LAMPS: bool = false,
+    const COLORS: usize = 1,
+>;
 
 #[cfg(feature = "light_propagation")]
-impl<const TERRAIN: u8, const LAMPS: bool> VoxelWorldConfig
-    for LitBenchWorld<TERRAIN, LAMPS>
+impl<const TERRAIN: u8, const LAMPS: bool, const COLORS: usize> VoxelWorldConfig
+    for LitBenchWorld<TERRAIN, LAMPS, COLORS>
 {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
@@ -371,7 +388,7 @@ impl<const TERRAIN: u8, const LAMPS: bool> VoxelWorldConfig
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
         if LAMPS {
-            vec![(LAMP, Emission::level(15.0))]
+            lamp_emission(COLORS)
         } else {
             Vec::new()
         }
@@ -563,15 +580,28 @@ impl VoxelWorldConfig for SettingsWorld {
 /// levels of detail, lit with the default light settings, with fill hints
 /// for the rock below and the air above it when `HINTED`. Its scenarios
 /// report what coarse chunks' light costs, and gate nothing yet.
+///
+/// With `LAMPS` above 0, one in `LOD_LAMP_EVERY` surface voxels is a lamp:
+/// white when `LAMPS` is 1, or with more, taking one of that many light
+/// colours, as `lamp_material` picks. A surface voxel is a solid voxel with
+/// air above it, found from the voxels themselves, so the lamps follow
+/// whatever the terrain holds.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
-struct LodWorld<const HINTED: bool>;
+struct LodWorld<const HINTED: bool, const LAMPS: usize = 0>;
+
+/// How many of `LodWorld`'s surface voxels hold one lamp, picked by a hash of
+/// their position.
+#[cfg(feature = "light_propagation")]
+const LOD_LAMP_EVERY: u32 = 32;
 
 #[cfg(feature = "light_propagation")]
 const LOD_SPAWNING_DISTANCE: u32 = 48;
 
 #[cfg(feature = "light_propagation")]
-impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
+impl<const HINTED: bool, const LAMPS: usize> VoxelWorldConfig
+    for LodWorld<HINTED, LAMPS>
+{
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
@@ -588,7 +618,27 @@ impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
     }
 
     fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
-        SineWorld::default().voxel_lookup_delegate()
+        let terrain = SineWorld::default().voxel_lookup_delegate();
+        if LAMPS == 0 {
+            return terrain;
+        }
+        Box::new(move |position, lod, previous| {
+            let mut terrain = terrain(position, lod, previous);
+            Box::new(move |pos: IVec3, previous| {
+                let voxel = terrain(pos, previous);
+                let hash = (pos.x as u32).wrapping_mul(73_856_093)
+                    ^ (pos.y as u32).wrapping_mul(19_349_663)
+                    ^ (pos.z as u32).wrapping_mul(83_492_791);
+                let lamp = matches!(voxel, WorldVoxel::Solid(_))
+                    && hash.is_multiple_of(LOD_LAMP_EVERY)
+                    && terrain(pos + IVec3::Y, None) == WorldVoxel::Air;
+                if lamp {
+                    WorldVoxel::Solid(lamp_material(pos, LAMPS))
+                } else {
+                    voxel
+                }
+            })
+        })
     }
 
     fn chunk_lod(
@@ -621,6 +671,14 @@ impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
 
     fn light_propagation(&self) -> Option<LightPropagation> {
         Some(LightPropagation::default())
+    }
+
+    fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
+        if LAMPS == 0 {
+            Vec::new()
+        } else {
+            lamp_emission(LAMPS)
+        }
     }
 }
 
@@ -1597,18 +1655,53 @@ fn scenario_stream_in_lit<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
 fn scenario_stream_in_lod<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,
 ) -> Metrics {
-    use bevy_voxel_world::light_bench::light_stats;
-
     let mut app = build_app(C::default());
     let result = stream_in::<C>(&mut app);
+    lod_metrics::<C>(prefix, &mut app, &result)
+}
+
+/// How long `stream_in_lod_lamps` and `stream_in_lod_colored` let their
+/// world stream before calling its light unsettled.
+#[cfg(feature = "light_propagation")]
+const LOD_LAMPS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `scenario_stream_in_lod` on a world with lamps, streaming until its light
+/// settles, as `caves` streams, so every coarse chunk's solve counts. A
+/// world whose chunks hold lamps solves them more slowly than the lifecycle
+/// goes quiet, so `stream_in` would stop with most coarse chunks unsolved.
+/// Reports as `scenario_stream_in_lod` does, with `settled_ms`, the time
+/// until light settled, and `capped`, whether `LOD_LAMPS_CAP` ended the
+/// stream first. Only reports.
+#[cfg(feature = "light_propagation")]
+fn scenario_stream_in_lod_lamps<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
+    prefix: &str,
+) -> Metrics {
+    let mut app = build_app(C::default());
+    let streamed = stream_in_settled::<C>(&mut app, LOD_LAMPS_CAP, |_| {});
+    if streamed.capped {
+        eprintln!("{prefix}: light didn't settle");
+    }
+    let mut metrics = lod_metrics::<C>(prefix, &mut app, &streamed.stream);
+    metrics.insert(format!("{prefix}.settled_ms"), streamed.settled_ms);
+    metrics.insert(format!("{prefix}.capped"), streamed.capped as u8 as f64);
+    metrics
+}
+
+/// What `scenario_stream_in_lod` reports of world `C` in `app` under
+/// `prefix`, once `result`'s stream is done.
+#[cfg(feature = "light_propagation")]
+fn lod_metrics<C: VoxelWorldConfig>(
+    prefix: &str,
+    app: &mut App,
+    result: &StreamIn,
+) -> Metrics {
+    use bevy_voxel_world::light_bench::light_stats;
+
     let stats = light_stats::<C>(app.world()).expect("a lit world");
     let coarse = stats.coarse_solves.max(1) as f64;
     let mut metrics = Metrics::new();
     metrics.insert(format!("{prefix}.time_ms"), result.time_ms);
-    metrics.insert(
-        format!("{prefix}.chunks"),
-        chunk_count::<C>(&mut app) as f64,
-    );
+    metrics.insert(format!("{prefix}.chunks"), chunk_count::<C>(app) as f64);
     metrics.insert(format!("{prefix}.solves"), stats.solves as f64);
     metrics.insert(
         format!("{prefix}.coarse_solves"),
@@ -1671,7 +1764,10 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_GATES: [(&str, f64); 3] = [
     ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
-    ("main_thread_max_frame_ms", EDIT_MAIN_THREAD_GATE_US / 1000.0),
+    (
+        "main_thread_max_frame_ms",
+        EDIT_MAIN_THREAD_GATE_US / 1000.0,
+    ),
     ("stale_chunks", 0.0),
 ];
 
@@ -1707,8 +1803,8 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
         let (mut metrics, mut app) = scenario_caves::<1>("caves", &CAVE_GATES);
         metrics.extend(recolor_step::<1>(&mut app, "caves_first_flip", |world| {
             let [red, green, blue] = LAMP_COLORS[0];
-            world.emissive[0].1 = Emission::level(15.0)
-                .with_color(LinearRgba::rgb(red, green, blue));
+            world.emissive[0].1 =
+                Emission::level(15.0).with_color(LinearRgba::rgb(red, green, blue));
         }));
         drop(app);
         white.push(metrics);
@@ -1717,8 +1813,8 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
             scenario_caves::<3>("caves_3_colors", &COLORED_CAVE_GATES);
         metrics.extend(recolor_step::<3>(&mut app, "caves_recolor", |world| {
             let [red, green, blue] = LAMP_COLORS[3];
-            world.emissive[0].1 = Emission::level(15.0)
-                .with_color(LinearRgba::rgb(red, green, blue));
+            world.emissive[0].1 =
+                Emission::level(15.0).with_color(LinearRgba::rgb(red, green, blue));
         }));
         drop(app);
         three.push(metrics);
@@ -1745,9 +1841,7 @@ fn ratio_gate(metrics: &mut Metrics, white: &str, row: &str, name: &str, most: f
     metrics.insert(format!("{row}.{name}_to_white"), ratio);
     if ratio > most || ratio.is_nan() {
         eprintln!("{row}: {name} is {ratio:.3} of {white}'s, over {most}");
-        *metrics
-            .entry(format!("{row}.gate_failures"))
-            .or_default() += 1.0;
+        *metrics.entry(format!("{row}.gate_failures")).or_default() += 1.0;
     }
 }
 
@@ -3418,13 +3512,13 @@ fn record_hull_publishes<C: VoxelWorldConfig>(
 }
 
 /// Spawns a sub-grid at `transform` and builds the vehicle hull in it, with
-/// lamp voxels of the material `lamp` when given. Returns the sub-grid's
+/// lamp voxels of the materials `lamp` gives when given. Returns the sub-grid's
 /// entity and what the hull holds. The hull commits in the next frame.
 #[cfg(feature = "sub_grids")]
 fn spawn_hull<C: VoxelWorldConfig<MaterialIndex = u8>>(
     app: &mut App,
     transform: Transform,
-    lamp: Option<u8>,
+    lamp: Option<fn(IVec3) -> u8>,
 ) -> (Entity, vehicle_hull::Hull) {
     use bevy::ecs::system::RunSystemOnce;
     app.world_mut()
@@ -3497,7 +3591,7 @@ fn add_vehicle<C: VoxelWorldConfig>(app: &mut App) {
 }
 
 /// Builds the vehicle hull in a new sub-grid at the start of its flight,
-/// with lamp voxels of the material `lamp` when given, and runs frames until
+/// with lamp voxels of the materials `lamp` gives when given, and runs frames until
 /// its chunks are Ready. Reports its solid voxels and Ready chunks under
 /// `prefix`, and returns the sub-grid's entity.
 ///
@@ -3507,7 +3601,7 @@ fn add_vehicle<C: VoxelWorldConfig>(app: &mut App) {
 fn build_vehicle<C: VoxelWorldConfig<MaterialIndex = u8>>(
     app: &mut App,
     prefix: &str,
-    lamp: Option<u8>,
+    lamp: Option<fn(IVec3) -> u8>,
     metrics: &mut Metrics,
 ) -> Entity {
     let (hull, built) = spawn_hull::<C>(app, vehicle_pose(false, 0), lamp);
@@ -3770,6 +3864,9 @@ struct LightFrame {
     sub_grid_relights: u64,
     /// Sub-grid chunks solved in their chunk tasks.
     sub_grid_chunk_solves: u64,
+    /// Whether a relight landed that changed a voxel's level or light
+    /// colour, in the frame or in any frame of a span.
+    changed: bool,
     /// Main thread spent landing light and starting relights, in
     /// microseconds: in a frame, or the most in any frame of a span.
     main_thread_us: f64,
@@ -3857,6 +3954,8 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
             relights: now.relights - last.relights,
             sub_grid_relights: now.sub_grid_relights - last.sub_grid_relights,
             sub_grid_chunk_solves: now.sub_grid_chunk_solves - last.sub_grid_chunk_solves,
+            changed: now.landed_changing_levels > last.landed_changing_levels
+                || now.landed_changing_colors > last.landed_changing_colors,
             main_thread_us: (now.main_thread_ms - last.main_thread_ms) * 1000.0,
             tag_entries: tag_map.entries,
             tag_entries_written: tag_map.entries_written - last_tag_map.entries_written,
@@ -3908,6 +4007,7 @@ impl<C: VoxelWorldConfig> LightWatch<C> {
                 .iter()
                 .map(|frame| frame.sub_grid_chunk_solves)
                 .sum(),
+            changed: frames.iter().any(|frame| frame.changed),
             main_thread_us: frames
                 .iter()
                 .map(|frame| frame.main_thread_us)
@@ -4063,10 +4163,11 @@ impl<C: VoxelWorldConfig> BurstWatch for LightWatch<C> {
 ///
 /// The sites are on the envelope's top and the cabin's floor, in the middle
 /// of a chunk and against chunk faces. Each dig leaves the wall under it
-/// closed, so the hull stays enclosed.
+/// closed, so the hull stays enclosed. `lamp` gives the hull's lamps their
+/// materials, as `vehicle_hull::build` was given it.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-fn paced_hull_edits() -> Vec<(IVec3, WorldVoxel<u8>)> {
-    let lamp = Some(LAMP);
+fn paced_hull_edits(lamp: fn(IVec3) -> u8) -> Vec<(IVec3, WorldVoxel<u8>)> {
+    let lamp = Some(lamp);
     let first_solid_down = |from: IVec3| {
         (0..=from.y)
             .map(|down| from - IVec3::Y * down)
@@ -4096,49 +4197,117 @@ fn paced_hull_edits() -> Vec<(IVec3, WorldVoxel<u8>)> {
     edits
 }
 
-/// The vehicle hull with lamps in its cabin, in the lit sine world: built
-/// by voxel edits with its light and tag map settled before timing starts
-/// (see `settle_tag_map`), it hovers
-/// for `VEHICLE_HOVER_FRAMES`, then flies and tumbles as in `vehicle`. Still
-/// tumbling, it takes `paced_hull_edits` one at a time with frames paced
-/// at 60 a second, as `edits_lit` does, and then an edit every frame as in
+/// One run of a `vehicle_lit` row: its metrics, and each paced edit's
+/// light, which the row gates once its runs are summed up.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+struct VehicleLitRun {
+    metrics: Metrics,
+    edits: Vec<EditRun>,
+}
+
+/// `vehicle_lit` with white lamps, and `vehicle_lit_3_colors`, where every
+/// lamp, the hull's included, takes one of three light colours by a hash of
+/// its position. The two rows run interleaved `runs` times so background
+/// load weighs on each alike, and each row's runs are summed up as
+/// `run_repeatedly` sums a scenario's runs. Each runs and gates as
+/// `vehicle_lit_run` says.
+///
+/// The paced edits gate on their runs summed up by `edit_medians`, reported
+/// as `put_edits` reports them under `{row}.paced`: a white edit's last
+/// light change lands within `EDIT_FRAMES_GATE` frames, and a coloured
+/// edit's within `EDIT_FRAMES_GATE` or white's frames for the same edit,
+/// where those are more. In both, light takes at most 1 ms of main thread in
+/// any frame. Each edit that misses counts once in its row's
+/// `gate_failures`.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn scenario_vehicle_lit_rows(runs: usize) -> Metrics {
+    let mut white = Vec::new();
+    let mut three = Vec::new();
+    for _ in 0..runs {
+        white.push(vehicle_lit_run::<1>("vehicle_lit"));
+        three.push(vehicle_lit_run::<3>("vehicle_lit_3_colors"));
+    }
+    let mut metrics = Metrics::new();
+    let white = put_vehicle_lit("vehicle_lit", &white, None, &mut metrics);
+    let limits: Vec<u32> = white
+        .iter()
+        .map(|edit| edit.frames.max(EDIT_FRAMES_GATE))
+        .collect();
+    put_vehicle_lit("vehicle_lit_3_colors", &three, Some(&limits), &mut metrics);
+    metrics
+}
+
+/// Puts the summary of a `vehicle_lit` row's `runs` into `metrics` under
+/// `prefix`: their metrics summed up as `run_repeatedly` sums them up, and
+/// the paced edits as `put_edits` puts them, gated by `frame_limits`, each
+/// edit's own limit, or by `EDIT_FRAMES_GATE` when not given. Returns each
+/// paced edit's runs summed up by `edit_medians`.
+#[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
+fn put_vehicle_lit(
+    prefix: &str,
+    runs: &[VehicleLitRun],
+    frame_limits: Option<&[u32]>,
+    metrics: &mut Metrics,
+) -> Vec<EditRun> {
+    let samples: Vec<Metrics> = runs.iter().map(|run| run.metrics.clone()).collect();
+    metrics.extend(summarise(&samples));
+    let edits: Vec<Vec<EditRun>> = runs.iter().map(|run| run.edits.clone()).collect();
+    let edits = edit_medians(&edits);
+    let limits = frame_limits.map_or_else(
+        || vec![EDIT_FRAMES_GATE; edits.len()],
+        |limits| limits.to_vec(),
+    );
+    let missed = put_edits(&format!("{prefix}.paced"), &edits, Some(&limits), metrics);
+    *metrics
+        .entry(format!("{prefix}.gate_failures"))
+        .or_default() += missed as f64;
+    edits
+}
+
+/// One run of a `vehicle_lit` row under `prefix`. The vehicle hull with lamps
+/// in its cabin, in the lit sine world, its lamps white, or with `COLORS`
+/// above 1, each taking one of that many light colours, as `lamp_material`
+/// picks. Built by voxel edits with its light and tag map settled before
+/// timing starts (see `settle_tag_map`), it hovers for
+/// `VEHICLE_HOVER_FRAMES`, then flies and tumbles as in `vehicle`. Still
+/// tumbling, it takes `paced_hull_edits` one at a time with frames paced at
+/// 60 a second, as `edits_lit` does, and then an edit every frame as in
 /// `vehicle`.
 ///
 /// Reports frame metrics for each phase, and for each phase with no edits
 /// the sub-grid solves and relights it started and the most main thread
-/// light took in a frame. For the paced edits, each one's frames to land,
-/// counted from the edit's frame until light is settled, its frames and
-/// time to publish, counting the edit's frame, and the most main thread
-/// light took in any of its frames. For the edits every frame, what
-/// `edit_vehicle_every_frame` reports, and the relights and most main
-/// thread in a frame from the phase's start until light settled. For every
-/// phase, what `LightWatch::report_tag_map` reports: the tag map's entries,
-/// entries written per frame, full rewrites, upkeep per frame, and the slots
-/// world chunks of air around the hull hold.
+/// light took in a frame. For the paced edits, their frames and time to
+/// publish, counting the edit's frame; their light is returned as
+/// `EditRun`s, counting frames to the last light change, as `run_edit`
+/// does. For the edits every frame, what `edit_vehicle_every_frame`
+/// reports, and the relights and most main thread in a frame from the
+/// phase's start until light settled. For every phase, what
+/// `LightWatch::report_tag_map` reports: the tag map's entries, entries
+/// written per frame, full rewrites, upkeep per frame, and the slots world
+/// chunks of air around the hull hold.
 ///
 /// Gate, checked here and reported as `gate_failures`: no sub-grid solve or
-/// relight starts while the hull hovers, flies or tumbles with no edit, no
-/// tag map entry is written while it hovers, and each paced edit lands
-/// within 2 frames with at most 1 ms of main thread relighting in any
-/// frame. Each solve, relight and entry written, and each edit missing its
-/// gate, counts once. While the hull tumbles, its entries written per frame
-/// and the air chunks' slots stay within `VEHICLE_TAG_MAP_GATES`, each one
-/// over counting once. The edits every frame have no gate, and no timing
-/// has a threshold.
+/// relight starts while the hull hovers, flies or tumbles with no edit, and
+/// no tag map entry is written while it hovers. Each solve, relight and
+/// entry written counts once. While the hull tumbles, its entries written
+/// per frame and the air chunks' slots stay within `VEHICLE_TAG_MAP_GATES`,
+/// each one over counting once. The paced edits gate once the row's runs
+/// are summed up: see `scenario_vehicle_lit_rows`. The edits every frame
+/// have no gate, and no timing has a threshold.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-fn scenario_vehicle_lit() -> Metrics {
-    type Lit = LitBenchWorld<SINE, true>;
-    let prefix = "vehicle_lit";
-    let mut app = build_app(Lit::default());
-    add_vehicle::<Lit>(&mut app);
-    stream_in::<Lit>(&mut app);
-    settle_light::<Lit>(&mut app);
+fn vehicle_lit_run<const COLORS: usize>(prefix: &str) -> VehicleLitRun {
+    type Lit<const N: usize> = LitBenchWorld<SINE, true, N>;
+    let lamp: fn(IVec3) -> u8 = |position| lamp_material(position, COLORS);
+    let mut app = build_app(Lit::<COLORS>::default());
+    add_vehicle::<Lit<COLORS>>(&mut app);
+    stream_in::<Lit<COLORS>>(&mut app);
+    settle_light::<Lit<COLORS>>(&mut app);
 
     let mut metrics = Metrics::new();
-    let hull = build_vehicle::<Lit>(&mut app, prefix, Some(LAMP), &mut metrics);
-    settle_light::<Lit>(&mut app);
-    settle_tag_map::<Lit>(&mut app);
-    let mut watch = LightWatch::<Lit>::new(&app);
+    let hull = build_vehicle::<Lit<COLORS>>(&mut app, prefix, Some(lamp), &mut metrics);
+    settle_light::<Lit<COLORS>>(&mut app);
+    settle_tag_map::<Lit<COLORS>>(&mut app);
+    let mut watch = LightWatch::<Lit<COLORS>>::new(&app);
 
     let mut still = 0;
     for (name, motion, frames) in [
@@ -4175,13 +4344,12 @@ fn scenario_vehicle_lit() -> Metrics {
         hull: Some(hull),
         chunks: Vec::new(),
     };
-    let mut state = SystemState::<VoxelWorld<Lit>>::new(app.world_mut());
-    let edits = paced_hull_edits();
+    let mut state = SystemState::<VoxelWorld<Lit<COLORS>>>::new(app.world_mut());
+    let edits = paced_hull_edits(lamp);
     let mut times = Vec::new();
-    let mut frames_to_land = Vec::new();
+    let mut runs = Vec::new();
     let mut frames_to_publish = Vec::new();
     let mut times_to_publish = Vec::new();
-    let mut worst_us = Vec::new();
     let mut unpublished = 0;
     for (position, voxel) in &edits {
         let mut voxel_world = state.get_mut(app.world_mut()).unwrap();
@@ -4193,7 +4361,8 @@ fn scenario_vehicle_lit() -> Metrics {
         let set_at = Instant::now();
         let first = watch.frames.len();
         let chunk = vehicle_hull::chunk_of(*position);
-        let mut landed = None;
+        let mut changed = 0;
+        let mut settled = None;
         let mut published = None;
         for frame in 1..=MAX_FRAMES {
             let start = Instant::now();
@@ -4214,17 +4383,38 @@ fn scenario_vehicle_lit() -> Metrics {
                     published = Some((frame, set_at.elapsed().as_secs_f64() * 1000.0));
                 }
             }
-            if landed.is_none() && watch.frames.last().unwrap().settled {
-                landed = Some(frame - 1);
+            let last = watch.frames.last().unwrap();
+            if settled.is_none() && last.changed {
+                changed = frame - 1;
             }
-            if landed.is_some() && published.is_some() {
+            if settled.is_none() && last.settled {
+                settled = Some(frame - 1);
+            }
+            if settled.is_some() && published.is_some() {
                 break;
             }
             std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
         }
         // A frame's rest, as a game's frame would give the edit's frame.
         std::thread::sleep(PACED_FRAME);
-        frames_to_land.push(landed.map_or(f64::INFINITY, |frames| frames as f64));
+        let work = watch.sum(first, watch.frames.len());
+        runs.push(match settled {
+            Some(settled) => EditRun {
+                frames: changed,
+                settled,
+                main_thread_us: work.main_thread_us,
+                relights: work.relights,
+            },
+            None => {
+                eprintln!("{prefix}: a paced edit's light didn't settle");
+                EditRun {
+                    frames: MAX_FRAMES,
+                    settled: MAX_FRAMES,
+                    main_thread_us: work.main_thread_us,
+                    relights: work.relights,
+                }
+            }
+        });
         match published {
             Some((frames, ms)) => {
                 frames_to_publish.push(frames as f64);
@@ -4232,36 +4422,10 @@ fn scenario_vehicle_lit() -> Metrics {
             }
             None => unpublished += 1,
         }
-        worst_us.push(watch.sum(first, watch.frames.len()).main_thread_us);
-    }
-    let missed = frames_to_land
-        .iter()
-        .zip(&worst_us)
-        .filter(|(frames, worst)| {
-            **frames > EDIT_FRAMES_GATE as f64 || **worst > EDIT_MAIN_THREAD_GATE_US
-        })
-        .count();
-    if missed > 0 {
-        eprintln!(
-            "{prefix}: {missed} of {} paced edits missed the gate \
-             (frames {frames_to_land:?}, main thread µs {worst_us:?})",
-            edits.len()
-        );
     }
     let paced = format!("{prefix}.paced");
     frame_metrics(&paced, &times, &mut metrics);
     let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
-    metrics.insert(format!("{paced}.edits"), edits.len() as f64);
-    metrics.insert(format!("{paced}.max_frames_to_land"), max(&frames_to_land));
-    metrics.insert(
-        format!("{paced}.p50_frames_to_land"),
-        percentile(&frames_to_land, 0.5),
-    );
-    metrics.insert(format!("{paced}.max_main_thread_us"), max(&worst_us));
-    metrics.insert(
-        format!("{paced}.p50_main_thread_us"),
-        percentile(&worst_us, 0.5),
-    );
     metrics.insert(format!("{paced}.unpublished_edits"), unpublished as f64);
     if frames_to_publish.is_empty() {
         frames_to_publish.push(f64::INFINITY);
@@ -4286,7 +4450,7 @@ fn scenario_vehicle_lit() -> Metrics {
     watch.report_tag_map(prefix, "paced", &mut metrics);
 
     watch.start("edited");
-    edit_vehicle_every_frame::<Lit>(
+    edit_vehicle_every_frame::<Lit<COLORS>>(
         &mut app,
         hull,
         &format!("{prefix}.edited"),
@@ -4299,9 +4463,12 @@ fn scenario_vehicle_lit() -> Metrics {
 
     metrics.insert(
         format!("{prefix}.gate_failures"),
-        (still as usize + missed + hovered as usize + over.len()) as f64,
+        (still as usize + hovered as usize + over.len()) as f64,
     );
-    metrics
+    VehicleLitRun {
+        metrics,
+        edits: runs,
+    }
 }
 
 /// Frames `lift_burst`'s pieces move between their lift and their stamp.
@@ -5042,6 +5209,14 @@ fn run_all(only: Option<&str>) -> Metrics {
         scenario_stream_in_lod::<LodWorld<true>>("stream_in_lod_hinted")
     });
     #[cfg(feature = "light_propagation")]
+    step("stream_in_lod_lamps", RUNS, &|| {
+        scenario_stream_in_lod_lamps::<LodWorld<false, 1>>("stream_in_lod_lamps")
+    });
+    #[cfg(feature = "light_propagation")]
+    step("stream_in_lod_colored", RUNS, &|| {
+        scenario_stream_in_lod_lamps::<LodWorld<false, 3>>("stream_in_lod_colored")
+    });
+    #[cfg(feature = "light_propagation")]
     // Its white and coloured rows run their own repeats, interleaved.
     step("caves", 1, &|| scenario_cave_rows(repeats(CAVE_RUNS)));
     #[cfg(feature = "light_propagation")]
@@ -5064,7 +5239,11 @@ fn run_all(only: Option<&str>) -> Metrics {
     #[cfg(feature = "sub_grids")]
     step("lift_burst", RUNS, &scenario_lift_burst);
     #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-    step("vehicle_lit", RUNS, &scenario_vehicle_lit);
+    // Its white and coloured rows run their own repeats, interleaved, to
+    // sum each paced edit up over runs: see `edit_medians`.
+    step("vehicle_lit", 1, &|| {
+        scenario_vehicle_lit_rows(repeats(RUNS))
+    });
     #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
     step("lift_burst_lit", RUNS, &scenario_lift_burst_lit);
     metrics
@@ -5092,6 +5271,9 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_lit")
         || key.starts_with("stream_in_flat_lit")
         || key.starts_with("stream_in_islands")
+        // Read by hand, unlike `stream_in_lod` itself.
+        || key.starts_with("stream_in_lod_lamps")
+        || key.starts_with("stream_in_lod_colored")
         || key.starts_with("edits_lit")
         // With `edits_lamps_3_colors` and `edits_lamps_8_colors`, whose
         // ratios to white gate in the bench, as `gate_failures`.
@@ -5220,7 +5402,11 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
 ///
 /// A side lacking either metric prints `-`, so a ratio between scenarios only
 /// the after build runs still shows. A pair neither side has prints nothing.
-const RATIO_LINES: [(&str, &str); 8] = [
+const RATIO_LINES: [(&str, &str); 9] = [
+    (
+        "stream_in_lod_colored.coarse_solve_us_per_chunk",
+        "stream_in_lod_lamps.coarse_solve_us_per_chunk",
+    ),
     (
         "caves_3_colors.solves_per_arrival",
         "caves.solves_per_arrival",
