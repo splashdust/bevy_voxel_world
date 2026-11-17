@@ -676,6 +676,9 @@ pub struct FreshSolve {
     /// The positions of those whose light differs from a fresh solve's, on
     /// their own grid, each with whether it's a light entry.
     pub stale: Vec<(IVec3, bool)>,
+    /// Of those, how many hold the fresh solve's levels and differ only in
+    /// light colour.
+    pub colors_only: usize,
 }
 
 /// Solves every chunk and light entry in world `C`'s world view again, as a
@@ -705,23 +708,24 @@ pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
     let mut found = FreshSolve {
         checked: held.len(),
         stale: Vec::new(),
+        colors_only: 0,
     };
     for (key, entry, current, light) in held {
         let fresh = current
             .then(|| relight(task, &settings.view, key, None, None))
             .flatten();
-        if !fresh.is_some_and(|fresh| same_voxels(&light, &fresh.light)) {
+        let Some(fresh) = fresh else {
             found.stale.push((key.position(), entry));
+            continue;
+        };
+        if !same_levels(&light, &fresh.light) {
+            found.stale.push((key.position(), entry));
+        } else if !same_colors(&light, &fresh.light) {
+            found.stale.push((key.position(), entry));
+            found.colors_only += 1;
         }
     }
     found
-}
-
-/// Whether `held` holds the same levels as `fresh` in every open voxel of
-/// `fresh`'s inputs, and the same light colour within a step of its packing
-/// in every one of those with voxel light.
-fn same_voxels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
-    same_levels(held, fresh) && same_colors(held, fresh)
 }
 
 /// Whether `held` holds the light colour of `fresh`, each component within a

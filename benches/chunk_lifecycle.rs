@@ -20,14 +20,36 @@
 //! The edit scenarios, `edits_lit` on the sine terrain and `edits_lamps`
 //! beside the lamp world's lamps, count an edit's frames to its last light
 //! change: the last frame in which a relight landed that changed a voxel's
-//! level. Light can settle later, on relights that change nothing, and
-//! frames to settle are reported beside them. Each edit's frames are the
-//! median over the scenario's runs, and its main thread the worst run.
+//! level or light colour. Light can settle later, on relights that change
+//! nothing, and frames to settle are reported beside them. Each edit's
+//! frames are the median over the scenario's runs, and its main thread the
+//! worst run.
 //!
 //! `caves` and `edits_lamps` end with the fresh-solve check: every chunk and
 //! light entry is solved again from the world view and compared, voxel by
-//! voxel, with the light it holds. Those that differ are reported as
-//! `stale_chunks`, and listed on stderr.
+//! voxel, with the light it holds, levels exactly and light colours within a
+//! step of their packing. Those that differ are reported as `stale_chunks`,
+//! and listed on stderr.
+//!
+//! Each of the two also runs coloured rows, interleaved with its white row
+//! in the same run: `caves_3_colors` and `caves_8_colors`, and
+//! `edits_lamps_3_colors` and `edits_lamps_8_colors`, in which each lamp
+//! takes one of three or eight light colours by a hash of its position.
+//! Their counts of work hold as ratios to white's, of the medians over the
+//! runs, checked in the bench and reported as `gate_failures`: solves per
+//! arrival in `caves`, mean relights per edit in `edits_lamps`. Those ratios
+//! also print as ratio lines. What a player sees holds as absolute limits:
+//! a shown chunk's visible changes, counting a change of light colour, and
+//! the most main thread light takes in a frame. Every coloured row ends with
+//! the fresh-solve check, gated at no stale chunk. A coloured edit's last
+//! light change lands within 2 frames, or within white's frames for the
+//! same edit where those are more.
+//!
+//! `caves` also runs two recolour steps, which report relights, frames to
+//! settle and the worst frame's main thread, and gate only `stale_chunks`:
+//! `caves_recolor`, a lamp material of the settled three-colour row taking
+//! another light colour, and `caves_first_flip`, the settled white row's
+//! lamp material taking a light colour, the world's first.
 //!
 //! Background load on a desktop drifts by more than the gates over minutes, so
 //! comparisons alternate the two builds instead of reusing an old recording:
@@ -208,17 +230,65 @@ impl<const TERRAIN: u8, const IN_VIEW: bool> VoxelWorldConfig
 }
 
 /// The sine terrain with a lamp on one in 64 surface voxels, lit with the
-/// default light settings when `LIT`. Its scenarios report what solving light
-/// in chunk tasks costs, against the same world unlit, and gate nothing.
+/// default light settings when `LIT`. Its lamps are white, or with `COLORS`
+/// above 1, each takes one of that many light colours: see `lamp_material`.
+/// Its `stream_in` scenarios report what solving light in chunk tasks costs,
+/// against the same world unlit, and gate nothing.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
-struct LampWorld<const LIT: bool>;
+struct LampWorld<const LIT: bool, const COLORS: usize = 1>;
 
+/// The material of white lamps, and of the first light colour's lamps.
 #[cfg(feature = "light_propagation")]
 const LAMP: u8 = 2;
 
+/// The light colours of coloured rows' lamps. Three colours take the first
+/// three.
 #[cfg(feature = "light_propagation")]
-impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
+const LAMP_COLORS: [[f32; 3]; 8] = [
+    [1.0, 0.5, 0.15],
+    [1.0, 0.15, 0.1],
+    [0.2, 1.0, 0.25],
+    [0.25, 0.35, 1.0],
+    [0.1, 0.85, 0.8],
+    [0.7, 0.2, 1.0],
+    [1.0, 0.9, 0.3],
+    [1.0, 0.45, 0.75],
+];
+
+/// The material of a lamp at `position` in a world of `colors` light
+/// colours: `LAMP` in a white world, else `LAMP` plus one of `colors`, picked
+/// by a hash of the lamp's position.
+#[cfg(feature = "light_propagation")]
+fn lamp_material(position: IVec3, colors: usize) -> u8 {
+    if colors <= 1 {
+        return LAMP;
+    }
+    let hash = (position.x as u32).wrapping_mul(73_856_093)
+        ^ (position.y as u32).wrapping_mul(19_349_663)
+        ^ (position.z as u32).wrapping_mul(83_492_791);
+    LAMP + ((hash >> 7) as usize % colors) as u8
+}
+
+/// The emissive materials of a world of `colors` light colours, each lamp
+/// material at level 15: one white lamp material, or one per light colour.
+#[cfg(feature = "light_propagation")]
+fn lamp_emission(colors: usize) -> Vec<(u8, Emission)> {
+    if colors <= 1 {
+        return vec![(LAMP, Emission::level(15.0))];
+    }
+    LAMP_COLORS[..colors]
+        .iter()
+        .enumerate()
+        .map(|(index, [red, green, blue])| {
+            let color = LinearRgba::rgb(*red, *green, *blue);
+            (LAMP + index as u8, Emission::level(15.0).with_color(color))
+        })
+        .collect()
+}
+
+#[cfg(feature = "light_propagation")]
+impl<const LIT: bool, const COLORS: usize> VoxelWorldConfig for LampWorld<LIT, COLORS> {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
@@ -243,7 +313,7 @@ impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
                 let hash = (pos.x.wrapping_mul(73_856_093)
                     ^ pos.z.wrapping_mul(19_349_663)) as u32;
                 if pos.y == height - 1 && hash.is_multiple_of(64) {
-                    WorldVoxel::Solid(LAMP)
+                    WorldVoxel::Solid(lamp_material(pos, COLORS))
                 } else if pos.y < height {
                     WorldVoxel::Solid(if pos.y < height - 3 { 1 } else { 0 })
                 } else {
@@ -258,7 +328,7 @@ impl<const LIT: bool> VoxelWorldConfig for LampWorld<LIT> {
     }
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
-        vec![(LAMP, Emission::level(15.0))]
+        lamp_emission(COLORS)
     }
 }
 
@@ -558,9 +628,24 @@ impl<const HINTED: bool> VoxelWorldConfig for LodWorld<HINTED> {
 /// default light settings: caves, shafts and a deep cavern under hills, with
 /// emissive voxels on one in 32 exposed floors and on the floors of its torch
 /// columns. Its voxels are read from [`cave_table`].
+///
+/// Its emissive voxels are white lamps, or with `COLORS` above 1, each takes
+/// one of that many light colours: see `lamp_material`. A scenario changes
+/// their light colours through `emissive`.
 #[cfg(feature = "light_propagation")]
-#[derive(Resource, Clone, Default)]
-struct CaveWorld;
+#[derive(Resource, Clone)]
+struct CaveWorld<const COLORS: usize = 1> {
+    emissive: Vec<(u8, Emission)>,
+}
+
+#[cfg(feature = "light_propagation")]
+impl<const COLORS: usize> Default for CaveWorld<COLORS> {
+    fn default() -> Self {
+        Self {
+            emissive: lamp_emission(COLORS),
+        }
+    }
+}
 
 /// Where `caves` starts its camera: at the foot of the reference scene's
 /// deep shaft, in the deep cavern, looking at the shaft.
@@ -596,7 +681,7 @@ fn cave_table() -> Arc<SceneTable> {
 }
 
 #[cfg(feature = "light_propagation")]
-impl VoxelWorldConfig for CaveWorld {
+impl<const COLORS: usize> VoxelWorldConfig for CaveWorld<COLORS> {
     type MaterialIndex = u8;
     type ChunkUserBundle = ();
 
@@ -620,7 +705,7 @@ impl VoxelWorldConfig for CaveWorld {
                 if table.open(pos) {
                     WorldVoxel::Air
                 } else if table.emissive(pos) {
-                    WorldVoxel::Solid(LAMP)
+                    WorldVoxel::Solid(lamp_material(pos, COLORS))
                 } else {
                     WorldVoxel::Solid(1)
                 }
@@ -633,7 +718,7 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
-        vec![(LAMP, Emission::level(15.0))]
+        self.emissive.clone()
     }
 }
 
@@ -1579,6 +1664,149 @@ const CAVE_SOLVE_US: f64 = f64::INFINITY;
 #[cfg(feature = "light_propagation")]
 const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 
+/// The thresholds of the coloured `caves` rows: what a player sees holds as
+/// absolute limits, a shown chunk's visible changes, counting a change of
+/// light colour, and the most main thread light takes in a frame. Their
+/// solves per arrival hold against white's in `COLORED_CAVE_RATIO_GATES`.
+#[cfg(feature = "light_propagation")]
+const COLORED_CAVE_GATES: [(&str, f64); 3] = [
+    ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
+    ("main_thread_max_frame_ms", EDIT_MAIN_THREAD_GATE_US / 1000.0),
+    ("stale_chunks", 0.0),
+];
+
+/// The most each coloured `caves` row's solves per arrival may be, as a
+/// ratio to white's in the same bench run, by row.
+#[cfg(feature = "light_propagation")]
+const COLORED_CAVE_RATIO_GATES: [(&str, f64); 2] =
+    [("caves_3_colors", 1.2), ("caves_8_colors", 1.3)];
+
+/// `caves` in white, in three light colours and in eight, interleaved `runs`
+/// times so background load weighs on each alike, with the recolour steps.
+/// Each row's runs are summed up as `run_repeatedly` sums a scenario's runs.
+///
+/// - `caves`: white lamps, gated by `CAVE_GATES`.
+/// - `caves_3_colors` and `caves_8_colors`: each lamp takes one of three or
+///   eight light colours by a hash of its position. Gated by
+///   `COLORED_CAVE_GATES`, and their solves per arrival by
+///   `COLORED_CAVE_RATIO_GATES`, as a ratio of their medians to white's,
+///   reported as `solves_per_arrival_to_white`.
+/// - `caves_recolor`: once the three-colour row settles, its first lamp
+///   material takes another light colour.
+/// - `caves_first_flip`: once the white row settles, its lamp material takes
+///   a light colour, the world's first.
+///
+/// The recolour steps report as `recolor_step` does, and gate only
+/// `stale_chunks`.
+#[cfg(feature = "light_propagation")]
+fn scenario_cave_rows(runs: usize) -> Metrics {
+    let mut white = Vec::new();
+    let mut three = Vec::new();
+    let mut eight = Vec::new();
+    for _ in 0..runs {
+        let (mut metrics, mut app) = scenario_caves::<1>("caves", &CAVE_GATES);
+        metrics.extend(recolor_step::<1>(&mut app, "caves_first_flip", |world| {
+            let [red, green, blue] = LAMP_COLORS[0];
+            world.emissive[0].1 = Emission::level(15.0)
+                .with_color(LinearRgba::rgb(red, green, blue));
+        }));
+        drop(app);
+        white.push(metrics);
+
+        let (mut metrics, mut app) =
+            scenario_caves::<3>("caves_3_colors", &COLORED_CAVE_GATES);
+        metrics.extend(recolor_step::<3>(&mut app, "caves_recolor", |world| {
+            let [red, green, blue] = LAMP_COLORS[3];
+            world.emissive[0].1 = Emission::level(15.0)
+                .with_color(LinearRgba::rgb(red, green, blue));
+        }));
+        drop(app);
+        three.push(metrics);
+
+        let (metrics, _) = scenario_caves::<8>("caves_8_colors", &COLORED_CAVE_GATES);
+        eight.push(metrics);
+    }
+    let mut metrics = Metrics::new();
+    for samples in [white, three, eight] {
+        metrics.extend(summarise(&samples));
+    }
+    for (row, most) in COLORED_CAVE_RATIO_GATES {
+        ratio_gate(&mut metrics, "caves", row, "solves_per_arrival", most);
+    }
+    metrics
+}
+
+/// Puts the ratio of `row`'s metric `name` to `white`'s into `metrics` as
+/// `{row}.{name}_to_white`, and counts a failure in `row`'s `gate_failures`
+/// where it's over `most`.
+#[cfg(feature = "light_propagation")]
+fn ratio_gate(metrics: &mut Metrics, white: &str, row: &str, name: &str, most: f64) {
+    let ratio = metrics[&format!("{row}.{name}")] / metrics[&format!("{white}.{name}")];
+    metrics.insert(format!("{row}.{name}_to_white"), ratio);
+    if ratio > most || ratio.is_nan() {
+        eprintln!("{row}: {name} is {ratio:.3} of {white}'s, over {most}");
+        *metrics
+            .entry(format!("{row}.gate_failures"))
+            .or_default() += 1.0;
+    }
+}
+
+/// Changes world `C`'s light colours with `change` once its light has
+/// settled, as a game's system would through the config resource, and runs
+/// paced frames until light settles again. Reports under `prefix`:
+///
+/// - `relights`: relights started;
+/// - `frames_to_settle`: frames from the change's frame until light settled;
+/// - `max_main_thread_us`: the most main thread light took in one frame;
+/// - `landed_changing_colors`: relight landings that changed light colours
+///   but no level;
+/// - `stale_chunks`: the fresh-solve check once light settled.
+///
+/// Only `stale_chunks` gates, reported as `gate_failures`.
+#[cfg(feature = "light_propagation")]
+fn recolor_step<const COLORS: usize>(
+    app: &mut App,
+    prefix: &str,
+    change: impl FnOnce(&mut CaveWorld<COLORS>),
+) -> Metrics {
+    use bevy_voxel_world::light_bench::{fresh_solve_check, light_stats};
+    let stats = |app: &App| light_stats::<CaveWorld<COLORS>>(app.world()).unwrap();
+    let before = stats(app);
+    change(&mut app.world_mut().resource_mut::<CaveWorld<COLORS>>());
+    let mut frames = 0;
+    let mut worst_us: f64 = 0.0;
+    loop {
+        let start = Instant::now();
+        let main = stats(app).main_thread_ms;
+        app.update();
+        worst_us = worst_us.max((stats(app).main_thread_ms - main) * 1000.0);
+        if light_is_settled::<CaveWorld<COLORS>>(app) {
+            break;
+        }
+        frames += 1;
+        assert!(frames < MAX_FRAMES, "{prefix}: light didn't settle");
+        std::thread::sleep(PACED_FRAME.saturating_sub(start.elapsed()));
+    }
+    let after = stats(app);
+    let fresh = fresh_solve_check::<CaveWorld<COLORS>>(app.world());
+    report_stale(prefix, &fresh);
+
+    let mut metrics = Metrics::new();
+    let mut put = |name: &str, value: f64| {
+        metrics.insert(format!("{prefix}.{name}"), value);
+    };
+    put("relights", (after.relights - before.relights) as f64);
+    put("frames_to_settle", frames as f64);
+    put("max_main_thread_us", worst_us);
+    put(
+        "landed_changing_colors",
+        (after.landed_changing_colors - before.landed_changing_colors) as f64,
+    );
+    put("stale_chunks", fresh.stale.len() as f64);
+    put("gate_failures", (!fresh.stale.is_empty()) as u8 as f64);
+    metrics
+}
+
 /// A stream into the reference scene's caves at the default light settings,
 /// sky reach 30 with round spread, ending once light is settled. Reports how
 /// often light changes after chunks first show it, and why:
@@ -1588,9 +1816,10 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 /// - `changed_batches_per_arrival`: frames after a chunk's arrival in which
 ///   its light changed, per arrival;
 /// - `visible_per_shown`: frames after a chunk's arrival in which a relight
-///   changed light its own faces show, per chunk with any such voxel, as the
-///   probes counted them; `visible_with_shells_per_shown` also counts frames
-///   in which only light in front of its faces from a neighbour changed;
+///   changed light its own faces show, a level or a light colour, per chunk
+///   with any such voxel, as the probes counted them;
+///   `visible_with_shells_per_shown` also counts frames in which only light
+///   in front of its faces from a neighbour changed;
 /// - `visible_from_*_per_shown`: the frames of either, by cause: a
 ///   neighbour arriving, a column found out by sky probes, a shell filling
 ///   in in front of the chunk's solid voxels, and anything else. A frame
@@ -1598,34 +1827,36 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 ///
 /// It also reports what the solves cost in chunk tasks, emissive scan
 /// included, the slots and memory light took at their peak, and relight
-/// landings by whether they changed a voxel's level.
+/// landings by whether they changed a voxel's level, only its light colour,
+/// or nothing.
 ///
 /// It ends with the fresh-solve check, reported as `stale_chunks`: the
 /// chunks and light entries whose light differs from a fresh solve of the
 /// settled world.
 ///
-/// Thresholds, checked here and reported as `gate_failures`, are in
-/// `CAVE_GATES`.
+/// Thresholds, checked here and reported under `prefix` as `gate_failures`,
+/// are in `gates`. Returns the metrics and the settled app.
 #[cfg(feature = "light_propagation")]
-fn scenario_caves() -> Metrics {
+fn scenario_caves<const COLORS: usize>(
+    prefix: &str,
+    gates: &[(&str, f64)],
+) -> (Metrics, App) {
     use bevy_voxel_world::light_bench::{
         change_counts, count_changes, fresh_solve_check, light_stats,
     };
 
-    type World = CaveWorld;
-    let prefix = "caves";
     cave_table();
-    let mut app = build_app(CaveWorld);
+    let mut app = build_app(CaveWorld::<COLORS>::default());
     app.insert_resource(CAVE_CAMERA);
-    count_changes::<World>(app.world_mut());
-    let result = stream_in_settled::<World>(&mut app, CAVE_CAP, |_| {});
-    let stats = light_stats::<World>(app.world()).expect("a lit world");
-    let counts = change_counts::<World>(app.world()).expect("counted");
+    count_changes::<CaveWorld<COLORS>>(app.world_mut());
+    let result = stream_in_settled::<CaveWorld<COLORS>>(&mut app, CAVE_CAP, |_| {});
+    let stats = light_stats::<CaveWorld<COLORS>>(app.world()).expect("a lit world");
+    let counts = change_counts::<CaveWorld<COLORS>>(app.world()).expect("counted");
     for _ in 0..IDLE_LIGHT_FRAMES {
         app.update();
     }
-    let idle = light_stats::<World>(app.world()).expect("a lit world");
-    let fresh = fresh_solve_check::<World>(app.world());
+    let idle = light_stats::<CaveWorld<COLORS>>(app.world()).expect("a lit world");
+    let fresh = fresh_solve_check::<CaveWorld<COLORS>>(app.world());
     report_stale(prefix, &fresh);
 
     let mut metrics = Metrics::new();
@@ -1636,6 +1867,10 @@ fn scenario_caves() -> Metrics {
     put(
         "landed_changing_levels",
         stats.landed_changing_levels as f64,
+    );
+    put(
+        "landed_changing_colors",
+        stats.landed_changing_colors as f64,
     );
     put(
         "landed_changing_nothing",
@@ -1690,6 +1925,11 @@ fn scenario_caves() -> Metrics {
         counts.visible_from_other as f64 / shown,
     );
     put("emissive_scans", stats.emissive_scans as f64);
+    put("color_runs", stats.color_runs as f64);
+    put("reach_runs", stats.reach_runs as f64);
+    put("colors_skipped", stats.colors_skipped as f64);
+    put("voxel_boxes_culled", stats.voxel_boxes_culled as f64);
+    put("color_allocations", stats.color_allocations as f64);
     put(
         "pool_solve_us_per_chunk",
         stats.solve_ms * 1000.0 / stats.solves.max(1) as f64,
@@ -1729,7 +1969,7 @@ fn scenario_caves() -> Metrics {
     put("record_kib", stats.record_bytes as f64 / 1024.0);
     frame_metrics(prefix, &result.stream.frame_times, &mut metrics);
 
-    let failures: Vec<String> = CAVE_GATES
+    let failures: Vec<String> = gates
         .iter()
         .filter(|(name, most)| metrics[&format!("{prefix}.{name}")] > *most)
         .map(|(name, most)| format!("{name} > {most}"))
@@ -1744,7 +1984,7 @@ fn scenario_caves() -> Metrics {
         format!("{prefix}.gate_failures"),
         (failures.len() + result.capped as usize) as f64,
     );
-    metrics
+    (metrics, app)
 }
 
 /// How many frames `lod_scale` times at rest.
@@ -1869,7 +2109,8 @@ fn sine_height(x: i32, z: i32) -> i32 {
 #[derive(Clone, Copy, Debug)]
 struct EditRun {
     /// The frame of the edit's last light change: the last frame in which a
-    /// relight landed that changed a voxel's level. 0 if none did.
+    /// relight landed that changed a voxel's level or light colour. 0 if none
+    /// did.
     frames: u32,
     /// The frame light settled in.
     settled: u32,
@@ -1910,7 +2151,9 @@ fn run_edit<C: VoxelWorldConfig<MaterialIndex = u8>>(
         run.main_thread_us = run
             .main_thread_us
             .max((after.main_thread_ms - before.main_thread_ms) * 1000.0);
-        if after.landed_changing_levels > before.landed_changing_levels {
+        if after.landed_changing_levels > before.landed_changing_levels
+            || after.landed_changing_colors > before.landed_changing_colors
+        {
             run.frames = run.settled;
         }
         if light_is_settled::<C>(app) {
@@ -1948,13 +2191,13 @@ fn edit_medians(runs: &[Vec<EditRun>]) -> Vec<EditRun> {
 
 /// Puts the summary of an edit scenario's `edits` into `metrics` under
 /// `prefix`, and returns how many missed the gate: frames over
-/// `EDIT_FRAMES_GATE`, if `frames_gated`, or main thread over
+/// `frame_limits`, each edit's own limit, if given, or main thread over
 /// `EDIT_MAIN_THREAD_GATE_US`.
 #[cfg(feature = "light_propagation")]
 fn put_edits(
     prefix: &str,
     edits: &[EditRun],
-    frames_gated: bool,
+    frame_limits: Option<&[u32]>,
     metrics: &mut Metrics,
 ) -> usize {
     let frames: Vec<f64> = edits.iter().map(|e| e.frames as f64).collect();
@@ -1980,8 +2223,9 @@ fn put_edits(
     );
     let failures = edits
         .iter()
-        .filter(|e| {
-            (frames_gated && e.frames > EDIT_FRAMES_GATE)
+        .enumerate()
+        .filter(|(index, e)| {
+            frame_limits.is_some_and(|limits| e.frames > limits[*index])
                 || e.main_thread_us > EDIT_MAIN_THREAD_GATE_US
         })
         .count();
@@ -2001,9 +2245,10 @@ fn report_stale(prefix: &str, fresh: &bevy_voxel_world::light_bench::FreshSolve)
     if !fresh.stale.is_empty() {
         eprintln!(
             "{prefix}: {} of {} chunks and light entries differ from a fresh solve, \
-             as (position, light entry): {:?}",
+             {} in light colour only, as (position, light entry): {:?}",
             fresh.stale.len(),
             fresh.checked,
+            fresh.colors_only,
             fresh.stale
         );
     }
@@ -2090,7 +2335,12 @@ fn scenario_edits_lit(runs: usize) -> Metrics {
     let (singles, bombs) = edits.split_at(singles);
 
     let mut metrics = Metrics::new();
-    let failures = put_edits(prefix, singles, true, &mut metrics);
+    let failures = put_edits(
+        prefix,
+        singles,
+        Some(&vec![EDIT_FRAMES_GATE; singles.len()]),
+        &mut metrics,
+    );
     metrics.insert(format!("{prefix}.gate_failures"), failures as f64);
     for (name, edit) in [("bomb", bombs[0]), ("bomb_undo", bombs[1])] {
         metrics.insert(
@@ -2114,6 +2364,14 @@ fn scenario_edits_lit(runs: usize) -> Metrics {
 #[cfg(feature = "light_propagation")]
 const LAMP_EDITS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// The most each coloured `edits_lamps` row's mean relights per edit may be,
+/// as a ratio to white's in the same bench run, by row.
+#[cfg(feature = "light_propagation")]
+const COLORED_EDIT_RATIO_GATES: [(&str, f64); 2] = [
+    ("edits_lamps_3_colors", 1.3),
+    ("edits_lamps_8_colors", 1.75),
+];
+
 /// `edits_lit` on the lamp world, `LampWorld`, with each edit beside one of
 /// its lamps so it relights voxel light: a block placed on the ground beside
 /// the lamp, the lamp replaced by plain ground, and each undone, at six
@@ -2121,18 +2379,99 @@ const LAMP_EDITS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 /// Reports as `edits_lit` does, and ends each run with the fresh-solve
 /// check, reported as `stale_chunks`, the most of any run.
 ///
-/// Gate, checked here and reported as `gate_failures`: light takes at most
-/// 1 ms of main thread in any frame, the stream settles, and no chunk is
-/// stale. Frames only report: an edit directly relights only the chunks
-/// within `FILL_RUN_REACH` voxels of it, so the light of a chunk farther off
-/// that still holds the edit in its light box arrives a face neighbour a
-/// frame.
+/// It runs in three rows, interleaved `runs` times so background load weighs
+/// on each alike: `edits_lamps` with white lamps, and `edits_lamps_3_colors`
+/// and `edits_lamps_8_colors`, where each lamp takes one of three or eight
+/// light colours by a hash of its position.
+///
+/// Gate, checked here and reported as each row's `gate_failures`: light
+/// takes at most 1 ms of main thread in any frame, the stream settles, and no
+/// chunk is stale. White's frames only report: an edit directly relights only
+/// the chunks within `FILL_RUN_REACH` voxels of it, so the light of a chunk
+/// farther off that still holds the edit in its light box arrives a face
+/// neighbour a frame. A coloured edit's last light change lands within
+/// `EDIT_FRAMES_GATE` frames, or within white's frames for the same edit
+/// where those are more. A coloured row's mean relights per edit hold
+/// against white's in `COLORED_EDIT_RATIO_GATES`, as a ratio of their
+/// medians, reported as `mean_relights_to_white`.
 #[cfg(feature = "light_propagation")]
 fn scenario_edits_lamps(runs: usize) -> Metrics {
-    use bevy_voxel_world::light_bench::fresh_solve_check;
+    let mut white = Vec::new();
+    let mut three = Vec::new();
+    let mut eight = Vec::new();
+    for _ in 0..runs {
+        white.push(edits_lamps_run::<1>("edits_lamps"));
+        three.push(edits_lamps_run::<3>("edits_lamps_3_colors"));
+        eight.push(edits_lamps_run::<8>("edits_lamps_8_colors"));
+    }
+    let mut metrics = Metrics::new();
+    let white = put_lamp_edits("edits_lamps", &white, None, &mut metrics);
+    let limits: Vec<u32> = white
+        .iter()
+        .map(|edit| edit.frames.max(EDIT_FRAMES_GATE))
+        .collect();
+    put_lamp_edits("edits_lamps_3_colors", &three, Some(&limits), &mut metrics);
+    put_lamp_edits("edits_lamps_8_colors", &eight, Some(&limits), &mut metrics);
+    for (row, most) in COLORED_EDIT_RATIO_GATES {
+        ratio_gate(&mut metrics, "edits_lamps", row, "mean_relights", most);
+    }
+    metrics
+}
 
-    type Lit = LampWorld<true>;
-    let prefix = "edits_lamps";
+/// One run of an `edits_lamps` row.
+#[cfg(feature = "light_propagation")]
+struct LampEditsRun {
+    edits: Vec<EditRun>,
+    /// Whether the stream's light didn't settle within `LAMP_EDITS_CAP`.
+    capped: bool,
+    /// Chunks and light entries the fresh-solve check found stale.
+    stale: usize,
+    /// The stream's runs of voxel light per light colour, and its reach
+    /// runs.
+    color_runs: u64,
+    reach_runs: u64,
+}
+
+/// Puts the summary of an `edits_lamps` row's `runs` into `metrics` under
+/// `prefix`, gating frames by `frame_limits` as `put_edits` does. Returns
+/// each edit's runs summed up by `edit_medians`.
+#[cfg(feature = "light_propagation")]
+fn put_lamp_edits(
+    prefix: &str,
+    runs: &[LampEditsRun],
+    frame_limits: Option<&[u32]>,
+    metrics: &mut Metrics,
+) -> Vec<EditRun> {
+    let edits: Vec<Vec<EditRun>> = runs.iter().map(|run| run.edits.clone()).collect();
+    let edits = edit_medians(&edits);
+    let failures = put_edits(prefix, &edits, frame_limits, metrics);
+    let capped = runs.iter().any(|run| run.capped);
+    let stale = runs.iter().map(|run| run.stale).max().unwrap_or(0);
+    if capped {
+        eprintln!("{prefix}: the lamp world's light didn't settle");
+    }
+    let median = |field: fn(&LampEditsRun) -> u64| {
+        let values: Vec<f64> = runs.iter().map(|run| field(run) as f64).collect();
+        percentile(&values, 0.5)
+    };
+    metrics.insert(format!("{prefix}.color_runs"), median(|run| run.color_runs));
+    metrics.insert(format!("{prefix}.reach_runs"), median(|run| run.reach_runs));
+    metrics.insert(format!("{prefix}.capped"), capped as u8 as f64);
+    metrics.insert(format!("{prefix}.stale_chunks"), stale as f64);
+    metrics.insert(
+        format!("{prefix}.gate_failures"),
+        (failures + capped as usize + (stale > 0) as usize) as f64,
+    );
+    edits
+}
+
+/// Streams the lamp world of `COLORS` light colours until its light settles,
+/// makes the `edits_lamps` edits, and ends with the fresh-solve check.
+#[cfg(feature = "light_propagation")]
+fn edits_lamps_run<const COLORS: usize>(prefix: &str) -> LampEditsRun {
+    use bevy_voxel_world::light_bench::{fresh_solve_check, light_stats};
+
+    type Lit<const N: usize> = LampWorld<true, N>;
     let is_lamp = |x: i32, z: i32| {
         let hash = (x.wrapping_mul(73_856_093) ^ z.wrapping_mul(19_349_663)) as u32;
         hash.is_multiple_of(64)
@@ -2151,40 +2490,25 @@ fn scenario_edits_lamps(runs: usize) -> Metrics {
         sites.push(vec![(beside, WorldVoxel::Solid(0))]);
         sites.push(vec![(beside, WorldVoxel::Air)]);
         sites.push(vec![(lamp, WorldVoxel::Solid(0))]);
-        sites.push(vec![(lamp, WorldVoxel::Solid(LAMP))]);
+        sites.push(vec![(lamp, WorldVoxel::Solid(lamp_material(lamp, COLORS)))]);
     }
 
-    let mut capped = false;
-    let mut stale = 0;
-    let runs: Vec<Vec<EditRun>> = (0..runs)
-        .map(|_| {
-            let mut app = build_app(Lit::default());
-            let streamed = stream_in_settled::<Lit>(&mut app, LAMP_EDITS_CAP, |_| {});
-            capped |= streamed.capped;
-            let edits = sites
-                .iter()
-                .map(|edit| run_edit::<Lit>(&mut app, edit))
-                .collect();
-            let fresh = fresh_solve_check::<Lit>(app.world());
-            report_stale(prefix, &fresh);
-            stale = stale.max(fresh.stale.len());
-            edits
-        })
+    let mut app = build_app(Lit::<COLORS>::default());
+    let streamed = stream_in_settled::<Lit<COLORS>>(&mut app, LAMP_EDITS_CAP, |_| {});
+    let stats = light_stats::<Lit<COLORS>>(app.world()).expect("a lit world");
+    let edits = sites
+        .iter()
+        .map(|edit| run_edit::<Lit<COLORS>>(&mut app, edit))
         .collect();
-    let edits = edit_medians(&runs);
-
-    let mut metrics = Metrics::new();
-    let failures = put_edits(prefix, &edits, false, &mut metrics);
-    if capped {
-        eprintln!("{prefix}: the lamp world's light didn't settle");
+    let fresh = fresh_solve_check::<Lit<COLORS>>(app.world());
+    report_stale(prefix, &fresh);
+    LampEditsRun {
+        edits,
+        capped: streamed.capped,
+        stale: fresh.stale.len(),
+        color_runs: stats.color_runs,
+        reach_runs: stats.reach_runs,
     }
-    metrics.insert(format!("{prefix}.capped"), capped as u8 as f64);
-    metrics.insert(format!("{prefix}.stale_chunks"), stale as f64);
-    metrics.insert(
-        format!("{prefix}.gate_failures"),
-        (failures + capped as usize + (stale > 0) as usize) as f64,
-    );
-    metrics
 }
 
 /// Changes of light settings on the lit sine terrain once its light is at
@@ -4542,7 +4866,12 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
 /// a promise broken in fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
-    combine(&samples, |key, values| {
+    summarise(&samples)
+}
+
+/// Repeated runs' `samples` summed up as `run_repeatedly` sums them up.
+fn summarise(samples: &[Metrics]) -> Metrics {
+    combine(samples, |key, values| {
         match key.rsplit('.').next().unwrap() {
             "time_ms" | "near_time_ms" | "settled_ms" | "relit_ms" => {
                 percentile(values, 0.0)
@@ -4713,14 +5042,16 @@ fn run_all(only: Option<&str>) -> Metrics {
         scenario_stream_in_lod::<LodWorld<true>>("stream_in_lod_hinted")
     });
     #[cfg(feature = "light_propagation")]
-    step("caves", CAVE_RUNS, &scenario_caves);
+    // Its white and coloured rows run their own repeats, interleaved.
+    step("caves", 1, &|| scenario_cave_rows(repeats(CAVE_RUNS)));
     #[cfg(feature = "light_propagation")]
     if only.is_some_and(|only| only.split(',').any(|s| s == "lod_scale")) {
         step("lod_scale", 1, &scenario_lod_scale);
     }
     #[cfg(feature = "light_propagation")]
     // The edit scenarios run their own repeats, to sum each edit up over
-    // runs: see `edit_medians`.
+    // runs: see `edit_medians`. `edits_lamps` interleaves its white and
+    // coloured rows.
     step("edits_lit", 1, &|| scenario_edits_lit(repeats(RUNS)));
     #[cfg(feature = "light_propagation")]
     step("edits_lamps", 1, &|| scenario_edits_lamps(repeats(RUNS)));
@@ -4762,8 +5093,13 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_flat_lit")
         || key.starts_with("stream_in_islands")
         || key.starts_with("edits_lit")
+        // With `edits_lamps_3_colors` and `edits_lamps_8_colors`, whose
+        // ratios to white gate in the bench, as `gate_failures`.
         || key.starts_with("edits_lamps")
         || key.starts_with("settings_lit")
+        // With `caves_3_colors` and `caves_8_colors`, whose ratios to white
+        // gate in the bench, as `gate_failures`, and the recolour steps
+        // `caves_recolor` and `caves_first_flip`.
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
         || key.starts_with("fragments")
@@ -4884,7 +5220,23 @@ fn compare(before: &Metrics, after: &Metrics) -> bool {
 ///
 /// A side lacking either metric prints `-`, so a ratio between scenarios only
 /// the after build runs still shows. A pair neither side has prints nothing.
-const RATIO_LINES: [(&str, &str); 4] = [
+const RATIO_LINES: [(&str, &str); 8] = [
+    (
+        "caves_3_colors.solves_per_arrival",
+        "caves.solves_per_arrival",
+    ),
+    (
+        "caves_8_colors.solves_per_arrival",
+        "caves.solves_per_arrival",
+    ),
+    (
+        "edits_lamps_3_colors.mean_relights",
+        "edits_lamps.mean_relights",
+    ),
+    (
+        "edits_lamps_8_colors.mean_relights",
+        "edits_lamps.mean_relights",
+    ),
     (
         "fragments.digs.p50_ms",
         "fragments.digs_not_opted_in.p50_ms",
