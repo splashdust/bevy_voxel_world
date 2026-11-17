@@ -803,10 +803,12 @@ pub struct LightLook {
     ///
     /// Where light of several colours meets, the colours mix in the
     /// proportions of the default curve, whatever this curve is, so changing
-    /// it never relights.
+    /// it never relights. A curve whose level 1 isn't black, such as
+    /// [`LevelCurve::linear`], ends each pool of light in a faint step.
     ///
     /// Shows on the next frame, for one uniform write. Defaults to
-    /// `0.7^(15 - level)`, with level 0 exactly black.
+    /// [`LevelCurve::exponential_to_black(0.7)`](LevelCurve::exponential_to_black),
+    /// with levels 0 and 1 exactly black.
     pub voxel_falloff: LevelCurve,
     /// Where Bevy's directional lights shine.
     ///
@@ -842,7 +844,7 @@ impl Default for LightLook {
         Self {
             smoothing: LightSmoothing::default(),
             sky_falloff: LevelCurve::default(),
-            voxel_falloff: LevelCurve::default(),
+            voxel_falloff: LevelCurve::exponential_to_black(0.7),
             sun: SunGate::default(),
             voxel_brightness: 1000.0,
             emissive_glow: 6.0,
@@ -916,6 +918,9 @@ pub struct LevelCurve {
 
 impl Default for LevelCurve {
     /// `0.7^(15 - level)`, so each level is 70% as bright as the one above it.
+    /// It's the default [`sky_falloff`](LightLook::sky_falloff). The default
+    /// [`voxel_falloff`](LightLook::voxel_falloff) is
+    /// [`exponential_to_black(0.7)`](Self::exponential_to_black).
     fn default() -> Self {
         Self::exponential(0.7)
     }
@@ -930,6 +935,26 @@ impl LevelCurve {
         // this way `exponential(0.7) == exponential(0.7)` wherever each is
         // built.
         Self::from_fn(|level| (level..15).fold(1.0, |brightness, _| brightness * base))
+    }
+
+    /// `(base^(15 - level) - base^14) / (1 - base^14)`: as
+    /// [`exponential`](Self::exponential), shifted and scaled so level 1 is black
+    /// and level 15 is 1. A pool of light then fades out at its edge instead of
+    /// ending in a faint step. At a `base` of 1 it's linear, from black at
+    /// level 1 to 1 at level 15.
+    pub fn exponential_to_black(base: f32) -> Self {
+        let exponential = Self::exponential(base);
+        let floor = exponential.brightness[1];
+        if 1.0 - floor <= f32::EPSILON {
+            return Self::from_fn(|level| level.saturating_sub(1) as f32 / 14.0);
+        }
+        Self::from_fn(|level| {
+            if level == 0 {
+                0.0
+            } else {
+                (exponential.brightness[level as usize] - floor) / (1.0 - floor)
+            }
+        })
     }
 
     /// `(level / 15)^gamma`, so level 15 is 1. `gamma(2.2)` spreads the levels

@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn colours_mix_by_the_fixed_curve_whatever_the_voxel_falloff() {
-        use crate::prelude::LevelCurve;
+        use crate::prelude::{LevelCurve, LightLook};
         let lights = [
             (LinearRgba::rgb(1.0, 0.2, 0.0), 13.0),
             (LinearRgba::rgb(0.0, 0.4, 1.0), 9.0),
@@ -623,7 +623,9 @@ mod tests {
             LinearRgba::rgb(red / brightest, green / brightest, blue / brightest)
         };
         let expected = max_by(&weight);
+        let default_falloff = LightLook::default().voxel_falloff;
         for falloff in [
+            default_falloff.clone(),
             LevelCurve::default(),
             LevelCurve::linear(),
             LevelCurve::exponential(0.5),
@@ -631,7 +633,7 @@ mod tests {
             let mixed = mix(lights);
             assert!(close(mixed, expected, 1e-6), "under {falloff:?}: {mixed:?}");
             let look = max_by(&|level| falloff.at(level));
-            if falloff != LevelCurve::default() {
+            if falloff != default_falloff {
                 assert!(!close(look, expected, 0.01), "{falloff:?} mixes alike");
             }
         }
