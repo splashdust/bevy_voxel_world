@@ -582,22 +582,68 @@ pub(crate) fn border_plane(
     precision: LightPrecision,
 ) -> Box<ShellPlane> {
     let mut plane = vec![0; PLANE_TEXELS * texel_bytes(precision)].into_boxed_slice();
-    let occupancy = &light.inputs.occupancy;
     let from = light.precision;
-    for v in 0..CHUNK {
-        for u in 0..CHUNK {
-            let (x, y, z) = face.voxel(u, v);
-            if !occupancy.is_solid(x, y, z) {
-                let sky = precision.convert(light.sky.at(x, y, z), from);
-                let voxel = precision.convert(light.voxel.at(x, y, z), from);
-                put_texel(&mut plane, u + v * CHUNK, sky, voxel, precision);
-            }
-        }
-    }
+    for_border_voxels(light, face, false, |texel, x, y, z| {
+        let sky = precision.convert(light.sky.at(x, y, z), from);
+        let voxel = precision.convert(light.voxel.at(x, y, z), from);
+        put_texel(&mut plane, texel, sky, voxel, precision);
+    });
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
         put_lamp(&mut plane, u + v * CHUNK, lamp.level(), precision);
     });
     plane
+}
+
+/// Calls `visit` with each open voxel of the chunk lit by `light` on `face`,
+/// as the texel of its shell plane and its x, y and z, or only with those
+/// holding voxel light if `lit`.
+///
+/// It reads the chunk's voxels a column along z at a time: one column per
+/// border voxel on the faces across z, and 32 border voxels per column on
+/// the others.
+fn for_border_voxels(
+    light: &ChunkLight,
+    face: Face,
+    lit: bool,
+    mut visit: impl FnMut(usize, usize, usize, usize),
+) {
+    let side = if face as usize & 1 == 1 { CHUNK - 1 } else { 0 };
+    let lit_in = |column: usize| match &light.voxel {
+        _ if !lit => !0,
+        ChunkLevels::Uniform(0) => 0,
+        ChunkLevels::Uniform(_) => !0,
+        ChunkLevels::Planes(planes) => {
+            planes.iter().fold(0, |lit, plane| lit | plane[column])
+        }
+    };
+    let occupancy = &light.inputs.occupancy;
+    let mut column = |x: usize, y: usize, on_face: u32| {
+        let mut voxels = on_face & !occupancy.solid_column(x, y);
+        if voxels != 0 {
+            voxels &= lit_in(x + y * CHUNK);
+        }
+        while voxels != 0 {
+            let z = voxels.trailing_zeros() as usize;
+            voxels &= voxels - 1;
+            let (u, v) = match face {
+                Face::NegX | Face::PosX => (y, z),
+                Face::NegY | Face::PosY => (x, z),
+                Face::NegZ | Face::PosZ => (x, y),
+            };
+            visit(u + v * CHUNK, x, y, z);
+        }
+    };
+    match face {
+        Face::NegX | Face::PosX => (0..CHUNK).for_each(|y| column(side, y, !0)),
+        Face::NegY | Face::PosY => (0..CHUNK).for_each(|x| column(x, side, !0)),
+        Face::NegZ | Face::PosZ => {
+            for y in 0..CHUNK {
+                for x in 0..CHUNK {
+                    column(x, y, 1 << side);
+                }
+            }
+        }
+    }
 }
 
 /// How many bytes a texel of a colour slot has: one packed light colour, in
@@ -658,16 +704,10 @@ pub(crate) fn border_colors(
     lamp_color: impl Fn(u16) -> u16,
 ) -> Box<ShellPlane> {
     let mut plane = vec![0; PLANE_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
-    let occupancy = &light.inputs.occupancy;
     if !matches!(light.voxel, ChunkLevels::Uniform(0)) {
-        for v in 0..CHUNK {
-            for u in 0..CHUNK {
-                let (x, y, z) = face.voxel(u, v);
-                if !occupancy.is_solid(x, y, z) && light.voxel.at(x, y, z) > 0 {
-                    put_color(&mut plane, u + v * CHUNK, light.color.packed_at(x, y, z));
-                }
-            }
-        }
+        for_border_voxels(light, face, true, |texel, x, y, z| {
+            put_color(&mut plane, texel, light.color.packed_at(x, y, z));
+        });
     }
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
         put_color(&mut plane, u + v * CHUNK, lamp_color(lamp.material()));
@@ -1006,6 +1046,97 @@ mod tests {
         for (bit, plane) in planes.iter_mut().enumerate() {
             let column = &mut plane[x + y * CHUNK];
             *column = *column & !(1 << z) | ((level >> bit & 1) as u32) << z;
+        }
+    }
+
+    /// A number for the voxel at `x`, `y`, `z` that looks random.
+    fn scatter(x: usize, y: usize, z: usize) -> u32 {
+        let h = (x as u32).wrapping_mul(0x8da6_b343)
+            ^ (y as u32).wrapping_mul(0xd816_3841)
+            ^ (z as u32).wrapping_mul(0xcb1a_b31f);
+        h ^ h >> 13
+    }
+
+    /// A chunk of scattered solids, with lamps on two of its faces, whose
+    /// open voxels hold scattered levels of sky light and voxel light, and
+    /// scattered light colours.
+    fn scattered() -> ChunkLight {
+        let lamps = [(0, 3, 4), (5, 6, 31)];
+        let mut occupancy = Occupancy::Open;
+        let (mut sky, mut voxel) = (planes_of(0), planes_of(0));
+        let mut colors = vec![0; CHUNK * CHUNK * CHUNK];
+        for (x, y, z) in (0..CHUNK).flat_map(|z| {
+            (0..CHUNK).flat_map(move |y| (0..CHUNK).map(move |x| (x, y, z)))
+        }) {
+            let h = scatter(x, y, z);
+            if h.is_multiple_of(3) || lamps.contains(&(x, y, z)) {
+                occupancy.set(x, y, z, true);
+                continue;
+            }
+            set_level(&mut sky, (x, y, z), (h >> 4) as u8 & 15);
+            let level = (h >> 8) as u8 & 15;
+            set_level(&mut voxel, (x, y, z), level);
+            if level > 0 {
+                colors[crate::light::color::voxel_index(x, y, z)] = (h >> 12) as u16 | 1;
+            }
+        }
+        occupancy.normalize();
+        let emissive: Vec<EmissiveVoxel> = lamps
+            .iter()
+            .enumerate()
+            .map(|(material, &(x, y, z))| {
+                let emitter = crate::light::color::Emitter {
+                    level: 12,
+                    material: material as u16,
+                };
+                EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter)
+            })
+            .collect();
+        ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: emissive.into(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Planes(sky),
+            voxel: ChunkLevels::Planes(voxel),
+            color: ChunkColor::Mixed(colors.into()),
+            borders: Default::default(),
+            precision: LightPrecision::Steps16,
+        }
+    }
+
+    #[test]
+    fn border_planes_hold_the_light_and_colours_of_each_border_voxel() {
+        let light = scattered();
+        let lamp_color = |material: u16| 0x7000 + material;
+        for face in Face::ALL {
+            let plane = border_plane(&light, face, LightPrecision::Steps16);
+            let colors = border_colors(&light, face, lamp_color);
+            for v in 0..CHUNK {
+                for u in 0..CHUNK {
+                    let (x, y, z) = face.voxel(u, v);
+                    let texel = u + v * CHUNK;
+                    let lamp = light.inputs.emissive.iter().find(|lamp| {
+                        (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize)
+                            == (x, y, z)
+                    });
+                    let h = scatter(x, y, z);
+                    let (levels, color) = if let Some(lamp) = lamp {
+                        (12 | 15 << 4, lamp_color(lamp.material()))
+                    } else if light.inputs.occupancy.is_solid(x, y, z) {
+                        (0, 0)
+                    } else {
+                        let voxel = (h >> 8) & 15;
+                        let color = if voxel > 0 { (h >> 12) as u16 | 1 } else { 0 };
+                        ((h >> 4 & 15 | voxel << 4) as u8, color)
+                    };
+                    let at = format!("{face:?} at {x}, {y}, {z}");
+                    assert_eq!(plane[texel], levels, "{at}");
+                    assert_eq!(color_texel_at(&colors, texel), color, "{at}");
+                }
+            }
         }
     }
 
