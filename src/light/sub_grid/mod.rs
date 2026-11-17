@@ -10,6 +10,11 @@
 //! shape. No world solve reads them, since a world solve finds the chunks
 //! around it by the world's keys.
 //!
+//! A sub-grid chunk's voxel light has light colours as a world chunk's
+//! does: its solve runs once per light colour whose light reaches it, and
+//! mixes them. Its faces and `grid(g).light_at` mix the world's light with
+//! it by the same rule. Its enclosure is sky light, which has no colour.
+//!
 //! # Inputs from the commit
 //!
 //! A commit writes the occupancy and emissive voxels of each sub-grid chunk
@@ -46,15 +51,18 @@
 //! all retire with it. Switching `sub_grid_sky`
 //! relights every sub-grid chunk with an open voxel, and no world chunk. A
 //! settings relight relights the sub-grid's chunks too, nearest a camera
-//! first, placed by each sub-grid's last pose. Nothing else solves a
-//! sub-grid's light again: moving or turning a sub-grid, world edits and
-//! changes of the world's light start nothing. A sub-grid chunk that
+//! first, placed by each sub-grid's last pose. A change of an emissive
+//! material's light colour relights, in the same way, only the sub-grid
+//! chunks whose solve box holds an emissive voxel of that material. Nothing
+//! else solves a sub-grid's light again: moving or turning a sub-grid, world
+//! edits and changes of the world's light start nothing. A sub-grid chunk that
 //! despawns, as every chunk of a despawned sub-grid and a chunk gone all air
 //! do, drops its light.
 //!
 //! # Cost
 //!
-//! A sub-grid chunk's solve grows with reach, as a world chunk's does. An
+//! A sub-grid chunk's solve grows with reach and with the light colours
+//! whose light reaches it, as a world chunk's does. An
 //! edit's cost grows with the sub-grid chunks within reach of the voxels it
 //! changed, and a burst of lifts with the chunks lifted. On the main thread,
 //! an edit updates the light inputs of each sub-grid chunk it changed from
@@ -88,7 +96,7 @@ pub(crate) mod handover;
 pub(crate) mod line_record;
 pub(crate) mod tag_map;
 
-use super::color::{ChunkColor, EmissionTable};
+use super::color::{unpack, ChunkColor, EmissionTable};
 use super::config::SubGridSky;
 use super::edit::{reach_of, within_reach, within_reach_of_box};
 use super::faces::FaceHashes;
@@ -449,8 +457,9 @@ fn inputs_updated<I: Copy + PartialEq>(
 impl<C: VoxelWorldConfig> LightSettings<C> {
     /// The light the voxel at `position` of the sub-grid `grid` holds of its
     /// own, from its chunk's light in the world view: a solid voxel holds no
-    /// light, except an emissive one, which holds its level. `None` where the
-    /// sub-grid has no chunk.
+    /// light, except an emissive one, which holds its level and its light
+    /// colour. An open voxel's voxel light has the light colour its chunk
+    /// holds for it. `None` where the sub-grid has no chunk.
     pub fn own_light_at(&self, grid: GridId, position: IVec3) -> Option<LightLevels> {
         let chunk = chunk_containing(position);
         let light = self
@@ -464,17 +473,17 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         let inputs = &light.inputs;
         if inputs.occupancy.is_solid(x, y, z) {
-            let level = inputs
+            let emitter = inputs
                 .emissive
                 .iter()
-                .find(|emitter| emitter.at() == (x as u8, y as u8, z as u8))
-                .map_or(0, |emitter| emitter.level());
-            return Some(LightLevels::new(0, level));
+                .find(|emitter| emitter.at() == (x as u8, y as u8, z as u8));
+            return Some(match emitter {
+                Some(emitter) => LightLevels::new(0, emitter.level()).with_voxel_color(
+                    unpack(self.task.emission.color(emitter.material())),
+                ),
+                None => LightLevels::new(0, 0),
+            });
         }
-        Some(LightLevels::of_steps(
-            light.sky.at(x, y, z),
-            light.voxel.at(x, y, z),
-            light.precision,
-        ))
+        Some(light.open_levels_at(x, y, z))
     }
 }

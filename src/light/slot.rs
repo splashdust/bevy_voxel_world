@@ -872,6 +872,25 @@ pub(crate) fn most_common_open(light: &ChunkLight) -> (u8, u8) {
     (level(&light.sky), level(&light.voxel))
 }
 
+/// The most common packed light colour among the open voxels of the chunk
+/// lit by `light` whose voxel light is at `level`, a step of the light's
+/// precision. White where none is.
+///
+/// Its cost grows with the chunk's open voxels.
+#[cfg(feature = "sub_grids")]
+pub(crate) fn most_common_open_color(light: &ChunkLight, level: u8) -> u16 {
+    use super::color::WHITE;
+    let Some(open) = open_voxels(&light.inputs.occupancy) else {
+        return WHITE;
+    };
+    let mut counts = Vec::new();
+    count_colors(light, &open, Some(level), &mut counts);
+    counts
+        .into_iter()
+        .max_by_key(|(color, count)| (*count, std::cmp::Reverse(*color)))
+        .map_or(WHITE, |(color, _)| color)
+}
+
 /// The most common level of `levels`, steps of `precision`, among the voxels
 /// set in `voxels`. With no voxels, levels held as planes give 0.
 fn most_common_over(

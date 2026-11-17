@@ -35,7 +35,8 @@
 //! among them, counting only those at the voxel light level its tag shows
 //! when it has no slot. Its cost grows with the chunk's voxels, and only
 //! chunks of a world whose emissive list holds a colour other than white
-//! pay it. Sub-grids' chunks show white.
+//! pay it. A sub-grid's chunks show the colour of their own voxel light by
+//! the same rule.
 //!
 //! - **A tag with a slot** sets bit 29 when the chunk shows a light colour
 //!   other than white, and keeps bit 28 clear. Its colour is in its entry.
@@ -602,13 +603,6 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.light_colors = colors.map(Box::from);
     }
 
-    /// Whether the level-0 chunk at `key` reads light colours: it's a world
-    /// chunk, and the world's emission table holds a light colour other than
-    /// white.
-    fn reads_colors(&self, key: GridKey) -> bool {
-        self.light_colors.is_some() && key.is_world()
-    }
-
     /// Whether the world's emission table holds a light colour other than
     /// white, so its materials carry the `LIGHT_COLOR` shader def.
     pub fn is_colored(&self) -> bool {
@@ -1018,7 +1012,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .is_some_and(|old| Arc::ptr_eq(&old.inputs, &light.inputs))
         });
         self.add_chunk(id, key);
-        let colored = self.reads_colors(key);
+        let colored = self.is_colored();
         let mut own = own;
         if colored {
             own.color = own_colors_seen(&light, |material| self.lamp_color(material));
@@ -1136,7 +1130,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// entry at `key` read across their faces in line with its new `light`,
     /// and their shells and tags with it.
     fn neighbours_follow(&mut self, key: GridKey, light: &Arc<ChunkLight>) {
-        let colored = self.reads_colors(key);
+        let colored = self.is_colored();
         for face in Face::ALL {
             let Some(&neighbour) = self.at.get(&(key + face.offset())) else {
                 continue;
@@ -1606,7 +1600,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 });
             }
         }
-        if self.reads_colors(chunk.key) {
+        if self.is_colored() {
             sees.color = self.kept_colors_seen(chunk.key, &light);
         }
         Some((light, sees))
@@ -1646,7 +1640,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         } else {
             (light.clone(), most_common(light))
         };
-        let color = if self.reads_colors(chunk.key) && levels.1 > 0 {
+        let color = if self.is_colored() && levels.1 > 0 {
             match self.placed_light(id) {
                 Some((_, sees)) => self.shown_color(id, &light, &sees, Some(levels.1)),
                 None => WHITE,
@@ -2177,9 +2171,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// The tag the screen shows at the level-0 world chunk position
     /// `position`: the level-0 chunk's there, or else the finest coarse
     /// chunk's covering it. Hinted air that `hinting` holds shows the most
-    /// common level among its light entry's open voxels, or else its column
-    /// answer from `columns`, or `nothing_known` until that lands. Anywhere
-    /// else it's `nothing_known`.
+    /// common level among its light entry's open voxels, in the most common
+    /// light colour among those at that voxel light level, or else its
+    /// column answer from `columns`, or `nothing_known` until that lands.
+    /// Anywhere else it's `nothing_known`, which is white.
     #[cfg(feature = "sub_grids")]
     fn tag_at(
         &self,
@@ -2216,7 +2211,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let Some(light) = self.entries.get(&in_world(position)) {
             let (sky, voxel) = most_common_open(light);
             let from = light.precision;
-            return tag_levels(to.convert(sky, from), to.convert(voxel, from), to);
+            let color = if self.is_colored() && voxel > 0 {
+                super::slot::most_common_open_color(light, voxel)
+            } else {
+                WHITE
+            };
+            return tag_levels(to.convert(sky, from), to.convert(voxel, from), to)
+                | tag_cut(color) << COLOR_SHIFT;
         }
         let dark = tag_levels(0, 0, to);
         if !hinting.sky {

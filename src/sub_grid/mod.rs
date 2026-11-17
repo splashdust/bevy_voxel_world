@@ -119,7 +119,8 @@
 //! relight ripple that light calls for isn't waited for: it starts as the
 //! handover lands, and lands later, as after any edit. So a lit handover
 //! lasts as long as its slowest relight, which grows with the world's light
-//! reach.
+//! reach and with the light colours that relight runs: one for each colour
+//! of emissive voxel whose light reaches its chunk.
 //!
 //! A held chunk's state turns Ready when its task finishes, before its
 //! result publishes, so a game waits for `ChunkPublished` rather than for
@@ -847,9 +848,10 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
     /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) does.
     /// In a sub-grid, it reads the world's light at the world voxel holding
     /// the voxel's centre, placed by [`pose`](Self::pose), with the
-    /// sub-grid's own voxel light, from its emissive voxels, taking the
-    /// brighter of the two. A lamp on a sub-grid lights only the sub-grid:
-    /// the world's light never shows it.
+    /// sub-grid's own voxel light, from its emissive voxels: the brighter of
+    /// the two levels, and their colours mixed as light of several colours
+    /// mixes anywhere. A lamp on a sub-grid lights only the sub-grid: the
+    /// world's light never shows it.
     ///
     /// Under [`SubGridSky::Enclosed`](crate::prelude::SubGridSky::Enclosed),
     /// the sub-grid's enclosure caps the world's light at an open voxel: its
@@ -905,21 +907,18 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         } else {
             world.voxel
         };
-        // A sub-grid's own voxel light is white, so it takes the colour of
-        // the world's light only where that's the brighter.
-        let voxel = world_voxel.max(own.voxel);
+        let voxel_color = crate::light::color::mix([
+            (world.voxel_color, world_voxel),
+            (own.voxel_color, own.voxel),
+        ]);
         Some(crate::light::LightLevels {
             sky: if capped {
                 world.sky.min(own.sky)
             } else {
                 world.sky
             },
-            voxel,
-            voxel_color: if voxel > 0.0 && world_voxel >= own.voxel {
-                world.voxel_color
-            } else {
-                LinearRgba::WHITE
-            },
+            voxel: world_voxel.max(own.voxel),
+            voxel_color,
         })
     }
 }

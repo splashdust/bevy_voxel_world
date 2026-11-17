@@ -673,11 +673,9 @@ fn solve<I>(
         ),
         None => (ChunkLevels::Uniform(0), FaceHashes::uniform(0)),
     };
-    // A sub-grid's own voxel light stays white.
-    let colors =
-        (settings.emission.is_colored() && key.is_world()).then_some(&settings.emission);
+    let colors = settings.emission.is_colored().then_some(&settings.emission);
     let (voxel, voxel_faces, color, borders) = if colors.is_some() {
-        solve_voxel_colors(
+        let (voxel, faces, color, borders) = solve_voxel_colors(
             &snapshot.neighbours,
             snapshot.missing,
             &settings.voxel_scale,
@@ -685,7 +683,15 @@ fn solve<I>(
             &settings.emission,
             settings.skip_unreached_colors,
             &settings.counters,
-        )
+        );
+        // Only arrivals read border levels, and a sub-grid's chunk has none:
+        // an edit relights every chunk of its grid whose light can change.
+        let borders = if key.is_world() {
+            borders
+        } else {
+            BorderLevels::default()
+        };
+        (voxel, faces, color, borders)
     } else {
         let (voxel, faces) = solve_voxel(
             &snapshot.neighbours,

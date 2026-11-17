@@ -34,7 +34,8 @@
 //! together, a relit chunk with no new mesh included. It doesn't wait for
 //! the relight ripple that light calls for, which starts as it lands and
 //! lands later, as after any edit. So a lit handover lasts as long as its
-//! slowest relight, which grows with reach. A relight superseded by a later
+//! slowest relight, which grows with reach and with the light colours that
+//! relight runs. A relight superseded by a later
 //! edit counts once it has solved, as a superseded task does. See the light
 //! module's `handover` module.
 //!
