@@ -39,9 +39,7 @@
 //! frames and milliseconds each change took to settle, at 60 frames a second.
 //! With `audit`, it renders offscreen, sets each setting that relights to its
 //! extremes, and prints how much of the view from the place the panel names
-//! for it changes, listing the settings that barely show there. With
-//! `shots` and a directory, it renders offscreen and saves pictures of the
-//! places coloured light shows.
+//! for it changes, listing the settings that barely show there.
 
 use std::sync::Arc;
 
@@ -68,8 +66,6 @@ mod panel;
 mod rust;
 mod scene;
 mod settings;
-#[cfg(not(target_arch = "wasm32"))]
-mod shots;
 
 use panel::PanelPlugin;
 use scene::{
@@ -146,11 +142,6 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().nth(1).as_deref() == Some("audit") {
         return audit::audit();
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if std::env::args().nth(1).as_deref() == Some("shots") {
-        let directory = std::env::args().nth(2).unwrap_or_else(|| "shots".into());
-        return shots::shoot(directory.into());
     }
     #[cfg(target_arch = "wasm32")]
     let plugins = DefaultPlugins.set(WindowPlugin {

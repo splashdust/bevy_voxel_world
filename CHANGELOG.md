@@ -58,7 +58,7 @@ What a coloured world costs more grows with the light colours within light reach
 
 - `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
 
-- `light_tuning` has a Chamber place lit by coloured lamps and crystals, with panel rows for light colour, `tinted_glow` and `skip_unreached_colors`. Its `audit` mode counts light colour changes, and a new `shots <dir>` mode saves pictures of the places coloured light shows.
+- `light_tuning` has a Chamber place lit by coloured lamps and crystals, with panel rows for light colour, `tinted_glow` and `skip_unreached_colors`. Its `audit` mode counts light colour changes.
 
 ### Other changes
 
