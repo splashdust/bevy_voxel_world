@@ -227,11 +227,12 @@ mod with_feature {
         assert_eq!(look.emissive_glow, 6.0);
         assert_eq!(look.ao, LightAo::IndirectLight);
         assert_eq!(look.minimum_brightness, 0.0);
-        for curve in [&look.sky_falloff, &look.voxel_falloff] {
-            assert_eq!(curve.brightness[15], 1.0);
-            assert!((curve.brightness[14] - 0.7).abs() < 1e-6);
-            assert!((curve.brightness[13] - 0.49).abs() < 1e-6);
-        }
+        assert_eq!(look.sky_falloff.brightness[15], 1.0);
+        assert!((look.sky_falloff.brightness[14] - 0.7).abs() < 1e-6);
+        assert!((look.sky_falloff.brightness[13] - 0.49).abs() < 1e-6);
+        assert_eq!(look.voxel_falloff, LevelCurve::exponential_to_black(0.7));
+        assert_eq!(look.voxel_falloff.brightness[1], 0.0);
+        assert_eq!(look.voxel_falloff.brightness[15], 1.0);
 
         assert_eq!(
             OpenFill::default(),

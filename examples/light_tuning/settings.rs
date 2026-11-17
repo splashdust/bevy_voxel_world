@@ -296,8 +296,12 @@ const SKY_LABELS: [&str; 10] = [
 
 /// The level curves the curve settings pick from, each with the Rust that
 /// makes it.
-pub fn curves() -> [(&'static str, LevelCurve); 5] {
+pub fn curves() -> [(&'static str, LevelCurve); 6] {
     [
+        (
+            "LevelCurve::exponential_to_black(0.7)",
+            LevelCurve::exponential_to_black(0.7),
+        ),
         ("LevelCurve::exponential(0.6)", LevelCurve::exponential(0.6)),
         ("LevelCurve::exponential(0.7)", LevelCurve::exponential(0.7)),
         ("LevelCurve::exponential(0.8)", LevelCurve::exponential(0.8)),
@@ -306,7 +310,8 @@ pub fn curves() -> [(&'static str, LevelCurve); 5] {
     ]
 }
 
-const CURVE_LABELS: [&str; 5] = [
+const CURVE_LABELS: [&str; 6] = [
+    "x 0.7, to black",
     "x 0.6 per level",
     "x 0.7 per level",
     "x 0.8 per level",
@@ -331,8 +336,9 @@ fn curve(index: usize) -> LevelCurve {
     curves()[index].1.clone()
 }
 
-const SUN_LABELS: [&str; 6] = [
+const SUN_LABELS: [&str; 7] = [
     "Direct sky only",
+    "By level, x 0.7 to black",
     "By level, x 0.6",
     "By level, x 0.7",
     "By level, x 0.8",
@@ -703,7 +709,9 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             rust: "look.voxel_falloff",
             tab: Tab::Lamps,
             applies: Applies::Instant,
-            about: "How quickly voxel light dims from one level to the next.",
+            about: "How quickly voxel light dims from one level to the next. \
+                    To black fades each lamp's pool out at its edge; the others \
+                    end it in a faint step.",
             place: Place::Cave,
             control: Control::Choice {
                 options: &CURVE_LABELS,
