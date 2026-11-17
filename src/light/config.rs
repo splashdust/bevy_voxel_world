@@ -1034,8 +1034,9 @@ impl LevelCurve {
     /// light at the entity's voxel with
     /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and
     /// scale the entity's colour by `sky_falloff.at(levels.sky)` for the
-    /// ambient light it gets and `voxel_falloff.at(levels.voxel)` times
-    /// `voxel_brightness` for voxel light, using the world's [`LightLook`].
+    /// ambient light it gets, and by `voxel_falloff.at(levels.voxel)` times
+    /// `voxel_brightness` times `levels.voxel_color` for voxel light, using the
+    /// world's [`LightLook`].
     pub fn at(&self, level: f32) -> f32 {
         if level.is_nan() || level <= 0.0 {
             return 0.0;
