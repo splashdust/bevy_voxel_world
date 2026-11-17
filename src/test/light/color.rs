@@ -15,6 +15,7 @@ use bevy::render::render_resource::AsBindGroup;
 
 use super::super::{chunk_materials, update_until, DefaultVoxelMaterial};
 use crate::light::color::ChunkColor;
+use crate::light::material::first_flip_materials;
 use crate::light::route::LightRoute;
 use crate::light::LightSettings;
 use crate::prelude::*;
@@ -363,6 +364,39 @@ fn turning_coloured_and_back_at_runtime_gains_and_loses_light_color() {
         let keys = material_keys(&mut app);
         assert!(!keys.is_empty());
         assert!(keys.iter().all(|colored| *colored == expected));
+    }
+}
+
+#[test]
+fn only_a_running_worlds_first_flip_waits_on_pipelines() {
+    let mut world = lamps(vec![(MIDDLE, ORANGE_LAMP)]);
+    let colored = world.emissive.clone();
+    let white = vec![(ORANGE_LAMP, Emission::level(15.0))];
+    world.emissive = white.clone();
+    let mut app = settled(world);
+    assert!(first_flip_materials::<LampWorld>(app.world()).is_empty());
+
+    let mut waits = Vec::new();
+    for emissive in [colored.clone(), white, colored] {
+        app.world_mut()
+            .run_system_once(move |mut world: ResMut<LampWorld>| {
+                world.emissive = emissive.clone();
+            })
+            .unwrap();
+        app.update();
+        waits.push(first_flip_materials::<LampWorld>(app.world()).len());
+        app.update();
+        waits.push(first_flip_materials::<LampWorld>(app.world()).len());
+    }
+    assert_eq!(waits, [1, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn a_world_coloured_at_startup_waits_on_no_pipelines() {
+    let mut app = app(lamps(vec![(MIDDLE, ORANGE_LAMP)]));
+    for _ in 0..10 {
+        app.update();
+        assert!(first_flip_materials::<LampWorld>(app.world()).is_empty());
     }
 }
 

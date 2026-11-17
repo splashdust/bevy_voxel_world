@@ -43,6 +43,18 @@
 //! the colour texture. Without it, the shader's colours are white, and a
 //! white world's shader does no colour work at all.
 //!
+//! A running world's emission table can gain its first colour other than
+//! white, or lose its last, which changes the def and so the material's key.
+//! Bevy then takes the world's chunks out of their bins for the main pass,
+//! the prepass and shadows, and draws them again only once their pipelines
+//! for the new key have compiled. Where Bevy compiles pipelines in the
+//! background, as on native Linux and Windows, the chunks would vanish for
+//! the frames that takes. So in the frame the def first changes, the render
+//! world waits for those pipelines, as Bevy's upscaling waits for its own,
+//! and the frame takes longer instead. Bevy keeps both variants compiled, so
+//! later changes wait on nothing. A world coloured at startup has the def
+//! before its first chunk draws, so only a later change waits.
+//!
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
 //! extension alone, so the extension passes on the wrapped material's. It
 //! takes the opaque render method from the wrapped material, so the extension
@@ -167,16 +179,22 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 
 use bevy::{
-    asset::{uuid_handle, AssetEventSystems},
+    asset::{uuid_handle, AssetEventSystems, UntypedAssetId},
     mesh::MeshVertexBufferLayoutRef,
     pbr::{
         ExtendedMaterial, MaterialExtension, MaterialExtensionKey,
-        MaterialExtensionPipeline,
+        MaterialExtensionPipeline, RenderMaterialInstances, SpecializedMaterialPipelineCache,
+        SpecializedPrepassMaterialPipelineCache, SpecializedShadowMaterialPipelineCache,
     },
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    render::{
+        render_resource::{
+            AsBindGroup, CachedRenderPipelineId, PipelineCache, RenderPipelineDescriptor,
+            ShaderType, SpecializedMeshPipelineError,
+        },
+        sync_world::MainEntity,
+        Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
     },
     shader::{Shader, ShaderDefVal, ShaderRef},
 };
@@ -531,6 +549,7 @@ where
     #[cfg(feature = "sub_grids")]
     app.insert_resource(tag_map);
     route::add_render_systems::<C>(app);
+    add_first_flip_wait::<C>(app);
 
     // A hand-added material is wrapped by `wrap_hand_added_material`, not
     // followed: the wrapped handle names one world's copy only.
@@ -792,6 +811,11 @@ where
 struct ColorBinding<C> {
     bound: AssetId<Image>,
     light_color: bool,
+    /// Whether the def has changed since the world started.
+    flipped: bool,
+    /// The materials whose def first changed this frame, whose new pipelines
+    /// the render world waits on.
+    first_flip: Vec<UntypedAssetId>,
     _world: PhantomData<C>,
 }
 
@@ -800,9 +824,18 @@ impl<C: VoxelWorldConfig> ColorBinding<C> {
         Self {
             bound: route.color_texture().id(),
             light_color: route.is_colored(),
+            flipped: false,
+            first_flip: Vec::new(),
             _world: PhantomData,
         }
     }
+}
+
+/// The materials of world `C` whose `LIGHT_COLOR` shader def first changed
+/// this frame.
+#[cfg(test)]
+pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(world: &World) -> &[UntypedAssetId] {
+    &world.resource::<ColorBinding<C>>().first_flip
 }
 
 /// Gives world `C`'s materials its colour texture in place of the one they
@@ -823,12 +856,15 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
     <VoxelWorldMaterial<M> as AsBindGroup>::Data:
         PartialEq + Eq + std::hash::Hash + Clone,
 {
+    binding.first_flip.clear();
     let texture = route.color_texture();
     let light_color = route.is_colored();
     if texture.id() == binding.bound && light_color == binding.light_color {
         return;
     }
     let old = std::mem::replace(&mut binding.bound, texture.id());
+    let first_flip = light_color != binding.light_color && !binding.flipped;
+    binding.flipped |= light_color != binding.light_color;
     binding.light_color = light_color;
     // Each world has its own placeholder and colour texture, so the materials
     // binding the old texture are this world's: its material, and any earlier
@@ -844,10 +880,94 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
         .collect();
     for id in ours {
         if let Some(mut material) = materials.get_mut(id) {
+            if first_flip && material.extension.light_color != light_color {
+                binding.first_flip.push(id.untyped());
+            }
             material.extension.light_colors = texture.clone();
             material.extension.light_color = light_color;
         }
     }
+}
+
+/// The materials whose `LIGHT_COLOR` shader def first changed this frame, in
+/// the render world, from every lit world.
+#[derive(Resource, Default)]
+struct FirstFlipMaterials(Vec<UntypedAssetId>);
+
+/// Sets up the render world to wait on the new pipelines of world `C`'s
+/// chunks in the frame its `LIGHT_COLOR` shader def first changes.
+fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    if !render_app.world().contains_resource::<FirstFlipMaterials>() {
+        render_app.init_resource::<FirstFlipMaterials>().add_systems(
+            Render,
+            wait_on_first_flip
+                .in_set(RenderSystems::Queue)
+                .after(RenderSystems::Specialize),
+        );
+    }
+    render_app.add_systems(ExtractSchedule, extract_first_flip::<C>);
+}
+
+/// Takes the materials of world `C` whose def first changed this frame.
+fn extract_first_flip<C: VoxelWorldConfig>(
+    binding: Extract<Option<Res<ColorBinding<C>>>>,
+    mut flipped: ResMut<FirstFlipMaterials>,
+) {
+    if let Some(binding) = binding.as_ref() {
+        flipped.0.extend(binding.first_flip.iter().copied());
+    }
+}
+
+/// Waits for the pipelines of the main pass, the prepass and shadows that
+/// draw the chunks of a material whose def first changed this frame.
+///
+/// It runs after Bevy specializes the chunks for their new key, and takes
+/// the pipeline ids from Bevy's caches of specialized pipelines, for every
+/// view.
+///
+/// On macOS and WASM Bevy compiles a pipeline in the frame it's queued, so
+/// the wait changes nothing there, and macOS showed no frame without the
+/// chunks even with the wait left out. The gap it closes comes from Bevy
+/// compiling pipelines in the background on native Linux and Windows.
+fn wait_on_first_flip(
+    mut flipped: ResMut<FirstFlipMaterials>,
+    instances: Res<RenderMaterialInstances>,
+    main_pass: Res<SpecializedMaterialPipelineCache>,
+    prepass: Res<SpecializedPrepassMaterialPipelineCache>,
+    shadows: Res<SpecializedShadowMaterialPipelineCache>,
+    mut pipelines: ResMut<PipelineCache>,
+) {
+    if flipped.0.is_empty() {
+        return;
+    }
+    let flipped_material = |entity: &MainEntity| {
+        instances
+            .instances
+            .get(entity)
+            .is_some_and(|instance| flipped.0.contains(&instance.asset_id))
+    };
+    let main_pass = main_pass.values().flat_map(|view| view.iter());
+    let prepass = prepass
+        .values()
+        .flat_map(|view| view.iter().map(|(entity, (_, id, _))| (entity, id)));
+    let shadows = shadows
+        .values()
+        .flat_map(|view| view.iter().map(|(entity, (id, _, _))| (entity, id)));
+    let mut waits: Vec<CachedRenderPipelineId> = main_pass
+        .chain(prepass)
+        .chain(shadows)
+        .filter(|(entity, _)| flipped_material(entity))
+        .map(|(_, id)| *id)
+        .collect();
+    waits.sort_unstable_by_key(|id| id.id());
+    waits.dedup();
+    for id in waits {
+        pipelines.block_on_render_pipeline(id);
+    }
+    flipped.0.clear();
 }
 
 /// What world `C`'s materials bind as its tag map: its placeholder until the
