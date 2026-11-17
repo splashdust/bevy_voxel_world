@@ -505,6 +505,8 @@ pub struct LightStats {
     pub air_positions: u64,
     /// The most slots chunks held at once.
     pub peak_slots: u64,
+    /// Colour slots given to chunks, counting late ones and evictions.
+    pub color_allocations: u64,
     /// Chunks needing a slot that have none now.
     pub starved: u64,
     /// What level-0 chunks' light keeps on the CPU now: sky light's and voxel
@@ -630,6 +632,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         entry_bytes,
         air_positions,
         peak_slots: slots.peak_held,
+        color_allocations: slots.color_allocations,
         starved: route.map_or(0, |route| route.starved_count() as u64),
         light_bytes,
         mixed_chunks,
