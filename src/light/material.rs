@@ -840,7 +840,9 @@ mod tests {
         assert_eq!(uniform.voxel_falloff[0].x, 0.0);
         assert_eq!(uniform.sun_falloff[0].x, 0.0);
         assert_eq!(uniform.voxel_falloff[3].w, 1.0);
-        assert!((uniform.voxel_falloff[3].z - 0.7).abs() < 1e-6);
+        assert!((uniform.sky_falloff[3].z - 0.7).abs() < 1e-6);
+        // (0.7 - 0.7^14) / (1 - 0.7^14).
+        assert!((uniform.voxel_falloff[3].z - 0.697_951).abs() < 1e-6);
     }
 
     #[test]
