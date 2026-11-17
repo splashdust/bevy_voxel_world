@@ -99,6 +99,27 @@ use bevy::reflect::Reflect;
 /// so an edit whose light reaches many chunks lands over a few more frames.
 /// An edit where no light is, such as in a dark cave, relights nothing.
 ///
+/// # Light colour
+///
+/// An emissive material's light can take a colour, with
+/// [`Emission::with_color`]. Where light of several colours reaches a voxel,
+/// each of its red, green and blue takes the brightest of them, so a red
+/// and a green emissive voxel light the voxels between them yellow, no
+/// brighter than either. Sky light has no colour of its own: it takes the
+/// colour of Bevy's ambient light, environment map and sun.
+///
+/// In a world with colours other than white, a chunk whose voxel light is
+/// all one colour solves as a white chunk does and keeps one colour for all
+/// its voxels. Where light of two or more colours reaches a chunk, it costs
+/// more, and each cost grows with:
+///
+/// - **Solving:** the light colours among the emissive voxels within voxel
+///   reach of the chunk, since its voxel light is solved once for each
+///   colour. The colours around each chunk count, not how many the world
+///   declares.
+/// - **Memory:** the chunks that light of two or more colours reaches, each
+///   holding a light colour for every voxel, 64 KiB a chunk.
+///
 /// # WASM
 ///
 /// Light runs in the browser on WebGL2, with no compute shaders. With no
@@ -775,6 +796,10 @@ pub struct LightLook {
     pub sky_falloff: LevelCurve,
     /// The brightness of each voxel light level, as a share of
     /// `voxel_brightness`.
+    ///
+    /// Where light of several colours meets, the colours mix in the
+    /// proportions of the default curve, whatever this curve is, so changing
+    /// it never relights.
     ///
     /// Shows on the next frame, for one uniform write. Defaults to
     /// `0.7^(15 - level)`, with level 0 exactly black.

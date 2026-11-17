@@ -2038,7 +2038,7 @@ fn with_fill_cells(light: &Arc<ChunkLight>, fill: &CellFill) -> Arc<ChunkLight> 
         inputs: light.inputs.clone(),
         sky: ChunkLevels::Planes(planes.into_boxed_slice()),
         voxel: light.voxel.clone(),
-        color: light.color,
+        color: light.color.clone(),
         precision,
     })
 }

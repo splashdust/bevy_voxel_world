@@ -541,15 +541,24 @@ fn a_change_of_precision_replaces_the_colour_texture() {
 
 #[test]
 fn a_chunk_whose_faces_see_several_colours_shows_the_most_common() {
-    // Until colours mix, light of two colours solves white, so the open
-    // voxels lit around both lamps are white and outnumber the orange lamp.
-    let mut app = app(with_colors(ground(vec![
-        (IVec3::new(10, 1, 16), ORANGE_LAMP),
-        (IVec3::new(22, 1, 16), LAMP),
-    ])));
+    // A dim blue lamp mixes its colour into the few voxels it lights, far
+    // from the orange lamp, whose pool is orange everywhere else.
+    let orange = IVec3::new(8, 1, 16);
+    let blue = IVec3::new(24, 1, 16);
+    let mut world = with_colors(ground(vec![(orange, ORANGE_LAMP), (blue, DIM_BLUE_LAMP)]));
+    world.emissive.push((
+        DIM_BLUE_LAMP,
+        Emission::level(4.0).with_color(bevy::color::palettes::css::BLUE),
+    ));
+    let mut app = app(world);
     run_until_shown(&mut app, &[IVec3::ZERO]);
+    let pure = packed_at(&mut app, orange + IVec3::Y);
+    assert_ne!(packed_at(&mut app, blue + IVec3::Y), pure);
     let tag = tag_of(&mut app, IVec3::ZERO).unwrap();
-    assert_eq!(tag & !0xFF_FFFF, HAS_SLOT, "tag {tag:#x}");
+    assert_eq!(tag & !0xFF_FFFF, HAS_SLOT | COLORED, "tag {tag:#x}");
     let route = app.world().resource::<LightRoute<LampWorld>>();
-    assert_eq!(route.queued_entry(tag & 0xFF_FFFF), None);
+    assert_eq!(route.queued_entry(tag & 0xFF_FFFF), Some(pure));
 }
+
+/// A material emitting blue light at level 4.
+const DIM_BLUE_LAMP: u8 = 7;

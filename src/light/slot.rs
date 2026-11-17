@@ -24,6 +24,7 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
+use super::color::ChunkColor;
 use super::config::LightPrecision;
 use super::faces::Face;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
@@ -234,7 +235,7 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
 /// voxels, and each of its emissive voxels touching an open voxel, whose
 /// material index `lamp_color` gives the packed colour of.
 ///
-/// Its cost grows with the chunk's columns.
+/// Its cost grows with the chunk's columns, and with its voxels where light of several colours reaches it.
 pub(crate) fn own_colors_seen(
     light: &ChunkLight,
     lamp_color: impl Fn(u16) -> u16,
@@ -288,10 +289,28 @@ fn lamps_seen(
 /// `voxels`, of the chunk lit by `light`. A voxel with no voxel light has no
 /// colour, so it adds none.
 pub(crate) fn colors_seen(light: &ChunkLight, voxels: &Plane) -> Seen<u16> {
-    if lit_count(&light.voxel, voxels, None) == 0 {
-        Seen::Nothing
-    } else {
-        Seen::One(light.color.packed())
+    let lit = lit_voxels(&light.voxel, voxels, None);
+    let mut seen = Seen::Nothing;
+    for_each_voxel(&lit, |x, y, z| {
+        seen = seen.join(Seen::One(light.color.packed_at(x, y, z)));
+        // A chunk held in one colour has it at every lit voxel.
+        !matches!(light.color, ChunkColor::Mixed(_)) || seen == Seen::Mixed
+    });
+    seen
+}
+
+/// Calls `visit` with each voxel set in `voxels`, as x, y and z, until it
+/// returns true.
+fn for_each_voxel(voxels: &Plane, mut visit: impl FnMut(usize, usize, usize) -> bool) {
+    for (column, &these) in voxels.iter().enumerate() {
+        let mut these = these;
+        while these != 0 {
+            let z = these.trailing_zeros() as usize;
+            these &= these - 1;
+            if visit(column % CHUNK, column / CHUNK, z) {
+                return;
+            }
+        }
     }
 }
 
@@ -305,34 +324,46 @@ pub(crate) fn count_colors(
     level: Option<u8>,
     counts: &mut Vec<(u16, u32)>,
 ) {
-    let count = lit_count(&light.voxel, voxels, level);
-    if count == 0 {
-        return;
-    }
-    let packed = light.color.packed();
-    match counts.iter_mut().find(|(color, _)| *color == packed) {
-        Some((_, counted)) => *counted += count,
-        None => counts.push((packed, count)),
+    let lit = lit_voxels(&light.voxel, voxels, level);
+    let mut add = |packed: u16, count: u32| {
+        match counts.iter_mut().find(|(color, _)| *color == packed) {
+            Some((_, counted)) => *counted += count,
+            None => counts.push((packed, count)),
+        }
+    };
+    match &light.color {
+        ChunkColor::Mixed(_) => for_each_voxel(&lit, |x, y, z| {
+            add(light.color.packed_at(x, y, z), 1);
+            false
+        }),
+        held => {
+            let count: u32 = lit.iter().map(|column| column.count_ones()).sum();
+            if count > 0 {
+                add(held.packed_at(0, 0, 0), count);
+            }
+        }
     }
 }
 
-/// How many of the voxels set in `voxels` hold voxel light in `levels`: any
-/// level above 0, or only `level` if it's given.
-fn lit_count(levels: &ChunkLevels, voxels: &Plane, level: Option<u8>) -> u32 {
+/// The voxels set in `voxels` that hold voxel light in `levels`: any level
+/// above 0, or only `level` if it's given, as columns along z like a
+/// [`Plane`].
+fn lit_voxels(levels: &ChunkLevels, voxels: &Plane, level: Option<u8>) -> Box<Plane> {
+    let mut lit: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
     if level == Some(0) {
-        return 0;
+        return lit;
     }
     match levels {
         ChunkLevels::Uniform(held) => {
-            if *held == 0 || level.is_some_and(|level| level != *held) {
-                0
-            } else {
-                voxels.iter().map(|column| column.count_ones()).sum()
+            if *held != 0 && level.is_none_or(|level| level == *held) {
+                lit.copy_from_slice(voxels);
             }
         }
-        ChunkLevels::Planes(planes) => (0..CHUNK * CHUNK)
-            .filter(|column| voxels[*column] != 0)
-            .map(|column| {
+        ChunkLevels::Planes(planes) => {
+            for (column, lit) in lit.iter_mut().enumerate() {
+                if voxels[column] == 0 {
+                    continue;
+                }
                 let at = match level {
                     None => planes.iter().fold(0, |lit, plane| lit | plane[column]),
                     Some(level) => {
@@ -345,10 +376,11 @@ fn lit_count(levels: &ChunkLevels, voxels: &Plane, level: Option<u8>) -> u32 {
                         })
                     }
                 };
-                (at & voxels[column]).count_ones()
-            })
-            .sum(),
+                *lit = at & voxels[column];
+            }
+        }
     }
+    lit
 }
 
 /// The open voxels of a chunk touching one of its `solid` voxels by a face,

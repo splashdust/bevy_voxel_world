@@ -208,6 +208,31 @@ struct LandedLight {
     new_voxels: bool,
 }
 
+/// Relight landings by what they changed. A relight lands when its light is
+/// written into the world view, or when it's found equal to the light there
+/// and thrown away. Light held for a chunk's new mesh counts when it's
+/// released.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LandedRelights {
+    /// Landings that changed the level of a voxel, of sky light or voxel
+    /// light.
+    pub changed_levels: u64,
+    /// Landings that left every voxel's levels as they were.
+    pub changed_nothing: u64,
+}
+
+impl LandedRelights {
+    /// Counts a landing that replaced the light `old` with `new`.
+    fn count(&mut self, old: &ChunkLight, new: &ChunkLight) {
+        if old.precision == new.precision && old.sky == new.sky && old.voxel == new.voxel
+        {
+            self.changed_nothing += 1;
+        } else {
+            self.changed_levels += 1;
+        }
+    }
+}
+
 /// The light work of world `C` on the main thread: each chunk's light state,
 /// the queue of relights to start, the running relight tasks, and the results
 /// waiting to land.
@@ -275,6 +300,8 @@ pub(crate) struct LightWork<C> {
     fresh: HashSet<GridKey>,
     /// Counts of changes to shown light, once a bench turns them on.
     pub census: Option<ChangeCensus>,
+    /// Relight landings by what they changed.
+    pub landed: LandedRelights,
     /// Chunks holding voxels edited since their last relight started. When
     /// relights run on the main thread, theirs start first.
     edited: HashSet<GridKey>,
@@ -313,6 +340,7 @@ impl<C> Default for LightWork<C> {
             hinted_touched: Vec::new(),
             fresh: HashSet::new(),
             census: None,
+            landed: LandedRelights::default(),
             edited: HashSet::new(),
             relight_time: Duration::ZERO,
             #[cfg(feature = "sub_grids")]
@@ -921,6 +949,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     let fresh = self.fresh.remove(&key);
                     if solved.rescanned.is_none() && chunk.light.same_light(&solved.light)
                     {
+                        self.landed.changed_nothing += 1;
                         // The light already there is the light these seeds
                         // give.
                         if chunk.solved_from_seeds().is_some() {
@@ -950,6 +979,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                         .fill_seeds
                         .map(|hash| (Arc::downgrade(&solved.light), hash));
                     let old = std::mem::replace(&mut chunk.light, solved.light);
+                    self.landed.count(&old, &chunk.light);
                     if self.census.is_some() && chunk.entity != ENTRY {
                         replaced = Some(old);
                     }
@@ -1132,6 +1162,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         };
         let (urgent, cause) = (landing.urgent, landing.cause);
         if same {
+            self.landed.changed_nothing += 1;
             self.held.remove(&key);
         } else {
             self.held.insert(key, landing);
@@ -1169,6 +1200,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 chunk.emission = solved.emission;
                 read.emissive != solved.light.inputs.emissive
             });
+            self.landed.count(&chunk.light, &solved.light);
             chunk.light = solved.light.clone();
             chunk.version = self.clock;
             self.clock += 1;
@@ -1756,7 +1788,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             inputs: Arc::new(light.inputs.with_columns(answer)),
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
-                            color: light.color,
+                            color: light.color.clone(),
                             precision: light.precision,
                         });
                     }
@@ -2083,7 +2115,7 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         inputs: chunk.light.inputs.clone(),
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
-        color: light.color,
+        color: light.color.clone(),
         precision: light.precision,
     });
 }
