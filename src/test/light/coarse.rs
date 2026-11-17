@@ -896,6 +896,16 @@ fn two_colour_world() -> CoarseWorld {
     }
 }
 
+/// Runs `app` until [`ABOVE`] shows its mesh and its light, and then as
+/// [`until_still`] does, so a busy machine's slow streaming can't end the
+/// wait before it shows.
+fn until_coarse_shown(app: &mut App) {
+    update_until(app, "the lamps' coarse chunk to show its light", |app| {
+        tag_of(app, ABOVE).is_some() && coarse_lit(app, &[BY_LAMP])
+    });
+    until_still(app);
+}
+
 fn color_at(app: &mut App, position: IVec3) -> LinearRgba {
     light_at(app, position)
         .unwrap_or_else(|| panic!("no light at {position}"))
@@ -905,7 +915,7 @@ fn color_at(app: &mut App, position: IVec3) -> LinearRgba {
 #[test]
 fn a_coarse_chunk_with_lamps_of_two_colours_reads_its_colours_cell_by_cell() {
     let mut app = emission_app(two_colour_world());
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     assert!(voxel_at(&mut app, BY_LAMP) > 0.0);
     assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::RED);
     assert!(voxel_at(&mut app, BY_BLUE) > 0.0);
@@ -957,7 +967,7 @@ fn a_coarse_chunk_that_gives_its_slot_up_shows_the_colour_of_its_brightest_tenth
         },
         ..default()
     });
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     let tag = tag_of(&mut app, ABOVE).unwrap();
     assert_eq!(tag & HAS_SLOT, 0, "tag {tag:#x}");
     let red_cut =
@@ -977,7 +987,7 @@ fn a_coarse_chunk_that_gives_its_slot_up_shows_the_colour_of_its_brightest_tenth
 #[test]
 fn recolouring_a_lamp_solves_again_the_coarse_chunk_holding_it_alone() {
     let mut app = emission_app(two_colour_world());
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     let below = light_at(&mut app, SHAFT);
     let far = light_at(&mut app, FAR_FROM_LAMP);
     let solves = coarse_solves(&app);
@@ -1018,7 +1028,7 @@ fn recolouring_a_lamp_solves_again_the_coarse_chunk_holding_it_alone() {
 #[test]
 fn colouring_a_white_worlds_lamp_solves_again_the_coarse_chunk_holding_it() {
     let mut app = emission_app(lamp_world(15.0));
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::WHITE);
     let solves = coarse_solves(&app);
 
@@ -1077,7 +1087,7 @@ fn a_white_lit_coarse_chunk_shows_white_and_makes_no_colour_texture() {
         ],
         ..lamp_world(15.0)
     });
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     let tag = tag_of(&mut app, ABOVE).unwrap();
     assert_eq!(tag & 0xF000_0000, HAS_SLOT, "tag {tag:#x}");
     assert_eq!(color_at(&mut app, BY_LAMP), LinearRgba::WHITE);
@@ -1091,7 +1101,7 @@ fn a_white_lit_coarse_chunk_shows_white_and_makes_no_colour_texture() {
 #[test]
 fn a_change_of_precision_replaces_the_colour_texture_coarse_chunks_use() {
     let mut app = emission_app(two_colour_world());
-    until_still(&mut app);
+    until_coarse_shown(&mut app);
     let color_texture = |app: &App| {
         app.world()
             .resource::<crate::light::route::LightRoute<CoarseWorld>>()
@@ -1123,7 +1133,7 @@ fn a_change_of_precision_replaces_the_colour_texture_coarse_chunks_use() {
 fn coarse_copy_bytes_count_the_copies_of_colour_slots() {
     let copies = |world: CoarseWorld| {
         let mut app = emission_app(world);
-        until_still(&mut app);
+        until_coarse_shown(&mut app);
         crate::light::bench::light_stats::<CoarseWorld>(app.world())
             .unwrap()
             .coarse_copy_bytes

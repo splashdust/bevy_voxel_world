@@ -838,7 +838,8 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
         .filter(|(_, material)| {
             let bound = material.extension.light_colors.id();
             let ours = bound == old || bound == texture.id();
-            ours && (bound != texture.id() || material.extension.light_color != light_color)
+            ours && (bound != texture.id()
+                || material.extension.light_color != light_color)
         })
         .map(|(id, _)| id)
         .collect();
