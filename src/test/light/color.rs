@@ -303,7 +303,7 @@ fn a_world_coloured_at_startup_keys_its_material_with_light_color_before_a_chunk
     let mut app = app(lamps(vec![(MIDDLE, ORANGE_LAMP)]));
     app.update();
     let materials = app.world().resource::<Assets<LitMaterial>>();
-    assert!(materials.len() > 0);
+    assert!(!materials.is_empty());
     assert!(materials
         .iter()
         .all(|(_, material)| material.extension.bind_group_data().light_color));
