@@ -208,7 +208,7 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
     let mut app = settled(floor_with_lamp(LightLook::default()));
     assert_eq!(chunk_look(&mut app).voxel_brightness, 1000.0);
 
-    let changes: [fn(&mut LightLook); 10] = [
+    let changes: [fn(&mut LightLook); 11] = [
         |look| look.smoothing = LightSmoothing::Stepped,
         |look| look.sky_falloff = LevelCurve::linear(),
         |look| look.voxel_falloff = LevelCurve::gamma(2.2),
