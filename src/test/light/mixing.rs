@@ -188,15 +188,16 @@ pub(super) fn around_origin() -> Vec<IVec3> {
         .collect()
 }
 
-/// The chunks around the origin whose whole light box is loaded.
+/// The spawned chunks whose whole light box is loaded.
 pub(super) fn boxed(app: &mut App) -> Vec<IVec3> {
     let spawned: Vec<IVec3> = chunk_keys::<LampWorld>(app)
         .into_iter()
         .filter(|key| key.lod_level == 0)
         .map(|key| key.position)
         .collect();
-    around_origin()
-        .into_iter()
+    spawned
+        .iter()
+        .copied()
         .filter(|chunk| {
             around_origin()
                 .iter()
@@ -210,21 +211,32 @@ pub(super) fn close(a: [f32; 3], b: [f32; 3], within: f32) -> bool {
 }
 
 /// Streams `scene` under each reach, shape and precision until it settles,
-/// then holds it against the reference with [`assert_on_the_reference`].
+/// then holds it against the reference with [`assert_on_the_reference`]. It
+/// streams far enough that every chunk around the origin has its whole light
+/// box loaded, so the corners of the origin's light box are checked too.
 fn settles_on_the_reference(scene: fn(u8) -> Scene) {
     for reach in [14, 16] {
         for shape in [LightShape::Round, LightShape::Diamond] {
             for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
                 let scene = scene(reach);
-                let mut app = settled(scene.world(reach, shape, precision));
+                let mut app = settled(LampWorld {
+                    spawning_distance: 4,
+                    ..scene.world(reach, shape, precision)
+                });
+                let checked = boxed(&mut app);
+                let unchecked: Vec<IVec3> = around_origin()
+                    .into_iter()
+                    .filter(|chunk| !checked.contains(chunk))
+                    .collect();
+                assert!(unchecked.is_empty(), "unchecked: {unchecked:?}");
                 assert_on_the_reference(&mut app, &scene, reach, shape, precision);
             }
         }
     }
 }
 
-/// Fails unless every voxel of each chunk around the origin whose light box
-/// is loaded reads the reference light of `scene`: levels exactly, light
+/// Fails unless every voxel of each chunk whose light box is loaded reads
+/// the reference light of `scene`: levels exactly, light
 /// colours within a step of the packing.
 pub(super) fn assert_on_the_reference(
     app: &mut App,
