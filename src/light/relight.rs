@@ -20,6 +20,13 @@
 //! every face at the same times as before can't light the neighbours any
 //! differently, so the ripple stops there.
 //!
+//! Where light of several light colours reaches a chunk, both the face hashes
+//! and the arrival comparison look at each light colour's light on its own:
+//! see [`faces`](super::faces). A solve reads only the voxels in its light
+//! box, never its neighbours' light, so these checks only ever skip work: a
+//! check may relight a chunk whose light then doesn't change, but must never
+//! skip one whose light would.
+//!
 //! Relights are tasks of their own. They never change a chunk's
 //! `ChunkState` and never re-mesh it, so a relit chunk stays Ready and
 //! visible. Each chunk has a light state beside its chunk state: clean, dirty
@@ -96,6 +103,7 @@ use futures_lite::future;
 
 use super::census::{Cause, ChangeCensus};
 use super::coarse::CoarseSolved;
+use super::color::EmissionTable;
 use super::faces::{could_reach_sooner, Face};
 use super::fill::open_cells;
 use super::hinted::{self, changed_across_air, passes_into_air};
@@ -844,7 +852,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
 
     /// Lands one result: writes its light into the world view and triggers
     /// the relights it calls for. `scales` are the levels of voxel light and,
-    /// with sky light on, of sky light.
+    /// with sky light on, of sky light. `colors` is the world's emissive list
+    /// where it holds a light colour other than white.
     ///
     /// Returns the chunk's light if it changed, with the bytes of its slot,
     /// for the shader.
@@ -865,6 +874,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         landing: Landing,
         view: &LightView,
         scales: (&LevelScale, Option<&LevelScale>),
+        colors: Option<&EmissionTable<C::MaterialIndex>>,
         ready: bool,
         generation: u64,
     ) -> Option<LandedLight> {
@@ -919,7 +929,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     // A light entry's first solve changes no inputs a
                     // neighbour reads, so it ripples nowhere.
                     let fresh = self.fresh.remove(&key);
-                    if solved.rescanned.is_none() && chunk.light.same_light(&solved.light)
+                    if solved.rescanned.is_none()
+                        && chunk.light.same_light_and_borders(&solved.light)
                     {
                         // The light already there is the light these seeds
                         // give.
@@ -1012,6 +1023,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                                 face.opposite(),
                                 scales.0,
                                 scales.1,
+                                colors,
                             ) {
                                 triggers.push(key);
                             }
@@ -1021,6 +1033,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                                 face,
                                 scales.0,
                                 scales.1,
+                                colors,
                             )
                         };
                         let rippled = old
@@ -1128,7 +1141,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             }
             chunk.faces = landing.solved.faces;
             landing.solved.rescanned.is_none()
-                && chunk.light.same_light(&landing.solved.light)
+                && chunk.light.same_light_and_borders(&landing.solved.light)
         };
         let (urgent, cause) = (landing.urgent, landing.cause);
         if same {
@@ -1686,6 +1699,11 @@ impl<C: VoxelWorldConfig> Relights<C> {
         }
 
         let scales = (&settings.task.voxel_scale, settings.task.sky_scale.as_ref());
+        let colors = settings
+            .task
+            .emission
+            .is_colored()
+            .then_some(&settings.task.emission);
         let generation = settings.task.generation;
         let budget = LANDING_BUDGET.saturating_sub(Duration::from_nanos(work.edit_nanos));
         let mut record = probes.is_some().then(|| settings.record.lock().unwrap());
@@ -1757,6 +1775,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             sky: light.sky.clone(),
                             voxel: light.voxel.clone(),
                             color: light.color.clone(),
+                            borders: light.borders.clone(),
                             precision: light.precision,
                         });
                     }
@@ -1774,8 +1793,14 @@ impl<C: VoxelWorldConfig> Relights<C> {
                         &settings.view,
                     );
                 }
-                let landed =
-                    work.land(landing, &settings.view, scales, ready(entity), generation);
+                let landed = work.land(
+                    landing,
+                    &settings.view,
+                    scales,
+                    colors,
+                    ready(entity),
+                    generation,
+                );
                 if let Some(probes) = probes.as_mut() {
                     for position in probes.take_relights() {
                         work.trigger_column(in_world(position));
@@ -2084,6 +2109,7 @@ fn rebase(landing: &mut Landing, view: &LightView) {
         sky: light.sky.clone(),
         voxel: light.voxel.clone(),
         color: light.color.clone(),
+        borders: light.borders.clone(),
         precision: light.precision,
     });
 }

@@ -17,9 +17,9 @@ use crate::light::LightSettings;
 use crate::light_bench::light_stats;
 use crate::prelude::*;
 
-const RED_LAMP: u8 = 6;
-const GREEN_LAMP: u8 = 7;
-const BLUE_LAMP: u8 = 8;
+pub(super) const RED_LAMP: u8 = 6;
+pub(super) const GREEN_LAMP: u8 = 7;
+pub(super) const BLUE_LAMP: u8 = 8;
 
 /// The declared level and light colour of each emissive material: white
 /// lamps at 15 and 8, and a red, a green and a blue lamp at 15.
@@ -33,9 +33,9 @@ const EMISSION: [(u8, f32, LinearRgba); 5] = [
 
 /// How far a light colour read back may be from the reference's: a step of
 /// its packing.
-const STEP: f32 = 1.0 / 127.0 + 1e-5;
+pub(super) const STEP: f32 = 1.0 / 127.0 + 1e-5;
 
-fn emissive() -> Vec<(u8, Emission)> {
+pub(super) fn emissive() -> Vec<(u8, Emission)> {
     EMISSION
         .iter()
         .map(|(material, level, color)| {
@@ -44,22 +44,35 @@ fn emissive() -> Vec<(u8, Emission)> {
         .collect()
 }
 
-/// Lamps in air, with stone wherever `wall` holds.
+/// Lamps in air, with stone wherever `wall` holds, and voxels `edits` sets
+/// over them.
 #[derive(Clone)]
-struct Scene {
-    lamps: Vec<(IVec3, u8)>,
-    wall: fn(IVec3) -> bool,
+pub(super) struct Scene {
+    pub lamps: Vec<(IVec3, u8)>,
+    pub wall: fn(IVec3) -> bool,
+    pub edits: Vec<(IVec3, WorldVoxel)>,
 }
 
 impl Scene {
-    fn in_air(lamps: Vec<(IVec3, u8)>) -> Self {
+    pub fn in_air(lamps: Vec<(IVec3, u8)>) -> Self {
         Self {
             lamps,
             wall: |_| false,
+            edits: Vec::new(),
         }
     }
 
-    fn voxel_at(&self, position: IVec3) -> WorldVoxel {
+    /// This scene with `edits` set over it.
+    pub fn edited(&self, edits: &[(IVec3, WorldVoxel)]) -> Self {
+        let mut scene = self.clone();
+        scene.edits.extend_from_slice(edits);
+        scene
+    }
+
+    pub fn voxel_at(&self, position: IVec3) -> WorldVoxel {
+        if let Some((_, voxel)) = self.edits.iter().rev().find(|(p, _)| *p == position) {
+            return *voxel;
+        }
         match self.lamps.iter().find(|(lamp, _)| *lamp == position) {
             Some((_, material)) => WorldVoxel::Solid(*material),
             None if (self.wall)(position) => WorldVoxel::Solid(STONE),
@@ -67,7 +80,7 @@ impl Scene {
         }
     }
 
-    fn world(
+    pub fn world(
         &self,
         reach: u8,
         shape: LightShape,
@@ -88,7 +101,7 @@ impl Scene {
 
     /// The reference light, in a box reaching past the lamps far enough to
     /// hold every voxel their light reaches.
-    fn reference(
+    pub fn reference(
         &self,
         reach: u8,
         shape: LightShape,
@@ -119,14 +132,14 @@ impl Scene {
     }
 }
 
-fn two_colours_meeting(_reach: u8) -> Scene {
+pub(super) fn two_colours_meeting(_reach: u8) -> Scene {
     Scene::in_air(vec![
         (IVec3::new(8, 16, 16), RED_LAMP),
         (IVec3::new(30, 18, 16), GREEN_LAMP),
     ])
 }
 
-fn three_primaries_meeting(_reach: u8) -> Scene {
+pub(super) fn three_primaries_meeting(_reach: u8) -> Scene {
     Scene::in_air(vec![
         (IVec3::new(6, 10, 16), RED_LAMP),
         (IVec3::new(26, 10, 16), GREEN_LAMP),
@@ -134,7 +147,7 @@ fn three_primaries_meeting(_reach: u8) -> Scene {
     ])
 }
 
-fn a_white_pool_ending_inside_a_red_one(_reach: u8) -> Scene {
+pub(super) fn a_white_pool_ending_inside_a_red_one(_reach: u8) -> Scene {
     Scene::in_air(vec![
         (IVec3::new(16, 16, 16), RED_LAMP),
         (IVec3::new(21, 16, 16), DIM_LAMP),
@@ -143,13 +156,14 @@ fn a_white_pool_ending_inside_a_red_one(_reach: u8) -> Scene {
 
 /// A red lamp west of a wall filling the plane x = -1, and a green lamp east
 /// of it, in the chunk at the origin, whose light box holds both.
-fn a_colour_walls_keep_from_a_chunk(_reach: u8) -> Scene {
+pub(super) fn a_colour_walls_keep_from_a_chunk(_reach: u8) -> Scene {
     Scene {
         lamps: vec![
             (IVec3::new(-6, 16, 16), RED_LAMP),
             (IVec3::new(10, 16, 16), GREEN_LAMP),
         ],
         wall: |position| position.x == -1,
+        edits: Vec::new(),
     }
 }
 
@@ -157,7 +171,7 @@ fn a_colour_walls_keep_from_a_chunk(_reach: u8) -> Scene {
 const AT_LEVEL_1: IVec3 = IVec3::new(16, 16, 16);
 
 /// A red and a green lamp `reach` either side of [`AT_LEVEL_1`].
-fn every_colour_at_level_1(reach: u8) -> Scene {
+pub(super) fn every_colour_at_level_1(reach: u8) -> Scene {
     let reach = reach as i32;
     Scene::in_air(vec![
         (AT_LEVEL_1 - IVec3::X * reach, RED_LAMP),
@@ -166,7 +180,7 @@ fn every_colour_at_level_1(reach: u8) -> Scene {
 }
 
 /// The chunks around the origin, where the camera is.
-fn around_origin() -> Vec<IVec3> {
+pub(super) fn around_origin() -> Vec<IVec3> {
     (-1..=1)
         .flat_map(|z| {
             (-1..=1).flat_map(move |y| (-1..=1).map(move |x| IVec3::new(x, y, z)))
@@ -175,7 +189,7 @@ fn around_origin() -> Vec<IVec3> {
 }
 
 /// The chunks around the origin whose whole light box is loaded.
-fn boxed(app: &mut App) -> Vec<IVec3> {
+pub(super) fn boxed(app: &mut App) -> Vec<IVec3> {
     let spawned: Vec<IVec3> = chunk_keys::<LampWorld>(app)
         .into_iter()
         .filter(|key| key.lod_level == 0)
@@ -191,47 +205,57 @@ fn boxed(app: &mut App) -> Vec<IVec3> {
         .collect()
 }
 
-fn close(a: [f32; 3], b: [f32; 3], within: f32) -> bool {
+pub(super) fn close(a: [f32; 3], b: [f32; 3], within: f32) -> bool {
     a.iter().zip(b).all(|(a, b)| (a - b).abs() <= within)
 }
 
 /// Streams `scene` under each reach, shape and precision until it settles,
-/// then holds every voxel of each chunk around the origin whose light box is
-/// loaded against the reference: levels exactly, light colours within a step
-/// of the packing.
+/// then holds it against the reference with [`assert_on_the_reference`].
 fn settles_on_the_reference(scene: fn(u8) -> Scene) {
     for reach in [14, 16] {
         for shape in [LightShape::Round, LightShape::Diamond] {
             for precision in [LightPrecision::Steps16, LightPrecision::Steps256] {
                 let scene = scene(reach);
                 let mut app = settled(scene.world(reach, shape, precision));
-                let reference = scene.reference(reach, shape, precision);
-                let checked = boxed(&mut app);
-                assert!(checked.contains(&IVec3::ZERO));
-                let mut lit = 0;
-                for chunk in checked {
-                    let light = chunk_light(&mut app, chunk).expect("the chunk's light");
-                    for (p, levels) in light {
-                        let (level, color) = if reference.holds(p) {
-                            (reference.read(reference.voxel_at(p)), reference.color_at(p))
-                        } else {
-                            (0.0, [1.0; 3])
-                        };
-                        let at =
-                            format!("at {p}, reach {reach}, {shape:?}, {precision:?}");
-                        assert!(
-                            (levels.voxel - level).abs() < 1e-4,
-                            "{levels:?} {at}: {level}"
-                        );
-                        let read = levels.voxel_color.to_f32_array_no_alpha();
-                        assert!(close(read, color, STEP), "{read:?} {at}: {color:?}");
-                        lit += (level > 0.0) as usize;
-                    }
-                }
-                assert!(lit > 1000, "only {lit} voxels lit");
+                assert_on_the_reference(&mut app, &scene, reach, shape, precision);
             }
         }
     }
+}
+
+/// Fails unless every voxel of each chunk around the origin whose light box
+/// is loaded reads the reference light of `scene`: levels exactly, light
+/// colours within a step of the packing.
+pub(super) fn assert_on_the_reference(
+    app: &mut App,
+    scene: &Scene,
+    reach: u8,
+    shape: LightShape,
+    precision: LightPrecision,
+) {
+    let reference = scene.reference(reach, shape, precision);
+    let checked = boxed(app);
+    assert!(checked.contains(&IVec3::ZERO));
+    let mut lit = 0;
+    for chunk in checked {
+        let light = chunk_light(app, chunk).expect("the chunk's light");
+        for (p, levels) in light {
+            let (level, color) = if reference.holds(p) {
+                (reference.read(reference.voxel_at(p)), reference.color_at(p))
+            } else {
+                (0.0, [1.0; 3])
+            };
+            let at = format!("at {p}, reach {reach}, {shape:?}, {precision:?}");
+            assert!(
+                (levels.voxel - level).abs() < 1e-4,
+                "{levels:?} {at}: {level}"
+            );
+            let read = levels.voxel_color.to_f32_array_no_alpha();
+            assert!(close(read, color, STEP), "{read:?} {at}: {color:?}");
+            lit += (level > 0.0) as usize;
+        }
+    }
+    assert!(lit > 1000, "only {lit} voxels lit");
 }
 
 #[test]

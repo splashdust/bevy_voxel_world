@@ -231,6 +231,16 @@ impl ChunkColor {
             ChunkColor::Mixed(packed) => unpack(packed[voxel_index(x, y, z)]),
         }
     }
+
+    /// The packed light colour of the chunk's open voxel `x`, `y`, `z`:
+    /// [`WHITE`] where it has no voxel light in the mixed form.
+    pub fn packed_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        match self {
+            ChunkColor::White => WHITE,
+            ChunkColor::One(packed) => *packed,
+            ChunkColor::Mixed(packed) => packed[voxel_index(x, y, z)],
+        }
+    }
 }
 
 /// Where the chunk's voxel `x`, `y`, `z` is in [`ChunkColor::Mixed`].
