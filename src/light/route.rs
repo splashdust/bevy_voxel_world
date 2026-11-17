@@ -277,6 +277,9 @@ pub(crate) struct SlotCounters {
     pub color_evictions: u64,
     /// The most colour slots held at once.
     pub color_peak_held: u64,
+    /// Times the colour texture grew after the render world had it, so its
+    /// colours were copied into the new one on the GPU.
+    pub color_growth_copies: u64,
 }
 
 /// What the render world writes into a slot.
@@ -2654,6 +2657,8 @@ fn extract_uploads<C: VoxelWorldConfig>(
                         uploads.copy_from = images.get(old).map(|old| {
                             (old.texture.clone(), old.texture_descriptor.size)
                         });
+                        route.counters.color_growth_copies +=
+                            uploads.copy_from.is_some() as u64;
                     }
                     Some(_) => {}
                     None => {

@@ -51,7 +51,10 @@
 //!   - where a red and a green lamp's pools meet on grey stone, each pixel's
 //!     brightest channel matches the same room lit by two white lamps, so
 //!     mixing never darkens;
-//!   - those rooms' chunks take colour slots.
+//!   - those rooms' chunks take colour slots, and the colour texture grows
+//!     to hold them at least once after the GPU has it, so the pictures
+//!     read colours it copied into the grown texture. On WebGL2, wgpu
+//!     copies a 3D texture one layer at a time.
 //! - In a world whose colour rooms' lamps are white until it has settled,
 //!   with sky light off, giving the lamps their colours draws every chunk in
 //!   the red room's picture, which holds no pixel of the blue clear colour,
@@ -1641,7 +1644,8 @@ fn spawn_plate(mut voxel_world: VoxelWorld<CaveWorld>, mut spawned: Local<bool>)
 
 /// Once every check has judged its picture, checks that chunks took a colour
 /// slot at least once for each colour room and the red and green mixing
-/// room, so that the colour checks read light colours from colour slots.
+/// room, so that the colour checks read light colours from colour slots, and
+/// that the colour texture grew by copying at least once.
 /// Only the chunks near the camera are loaded, so each room's chunk takes
 /// one as the camera reaches it.
 fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
@@ -1650,14 +1654,22 @@ fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
         return;
     }
     *done = true;
-    let taken = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world)
-        .map_or(0, |stats| stats.color_allocations);
+    let stats = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world);
+    let taken = stats.as_ref().map_or(0, |stats| stats.color_allocations);
     let wanted = COLOR_ROOMS.len() as u64 + 1;
     let name = "the colour rooms and the mixing room take colour slots";
     if taken >= wanted {
         report!("PASS {name}: {taken} taken");
     } else {
         report!("FAIL {name}: {taken} taken, of {wanted}");
+        world.resource_mut::<CheckPlan>().failed = true;
+    }
+    let copies = stats.map_or(0, |stats| stats.color_growth_copies);
+    let name = "the colour texture grows by copying its colours on the GPU";
+    if copies > 0 {
+        report!("PASS {name}: {copies} times");
+    } else {
+        report!("FAIL {name}: it never did, so the colour checks didn't cover it");
         world.resource_mut::<CheckPlan>().failed = true;
     }
 }
