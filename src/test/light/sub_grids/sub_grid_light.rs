@@ -11,7 +11,7 @@ use crate::test::light::voxel_light::{app, LampWorld, LAMP, STONE};
 
 /// Runs `f` on the voxel world in a system of its own, whose commands apply
 /// when it returns.
-fn run<T: 'static>(
+pub(super) fn run<T: 'static>(
     app: &mut App,
     mut f: impl FnMut(&mut VoxelWorld<LampWorld>) -> T + Send + Sync + 'static,
 ) -> T {
@@ -23,7 +23,7 @@ fn run<T: 'static>(
 }
 
 /// Spawns a sub-grid at `transform` holding each of `voxels`.
-fn spawn_holding(
+pub(super) fn spawn_holding(
     app: &mut App,
     transform: Transform,
     voxels: &[(IVec3, WorldVoxel)],
@@ -41,7 +41,7 @@ fn spawn_holding(
 
 /// What `grid(Grid::SubGrid(entity)).light_at` reads at each of
 /// `positions`, in one system.
-fn grid_light(
+pub(super) fn grid_light(
     app: &mut App,
     entity: Entity,
     positions: Vec<IVec3>,
@@ -53,7 +53,7 @@ fn grid_light(
 }
 
 /// The voxels of the box from `min` to `max`, exclusive.
-fn voxels_in(min: IVec3, max: IVec3) -> Vec<IVec3> {
+pub(super) fn voxels_in(min: IVec3, max: IVec3) -> Vec<IVec3> {
     (min.z..max.z)
         .flat_map(|z| {
             (min.y..max.y)
@@ -64,7 +64,7 @@ fn voxels_in(min: IVec3, max: IVec3) -> Vec<IVec3> {
 
 /// The reference voxel light of a lamp at `lamp` alone in air, at the
 /// world's default reach and the round shape.
-fn lone_lamp(lamp: IVec3) -> Reference {
+pub(super) fn lone_lamp(lamp: IVec3) -> Reference {
     Reference::voxel_light(
         lamp - 31,
         lamp + 32,

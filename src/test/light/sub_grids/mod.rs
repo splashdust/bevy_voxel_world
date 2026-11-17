@@ -5,6 +5,7 @@ mod air_slots;
 mod enclosure;
 mod handover_light;
 mod hinted_tag_map;
+mod sub_grid_colors;
 mod sub_grid_edits;
 mod sub_grid_light;
 mod sub_grid_tags;

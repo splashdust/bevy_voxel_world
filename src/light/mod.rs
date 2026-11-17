@@ -987,9 +987,9 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
 /// The recolour relight, for a change to the emissive list that changed the
 /// light colours of the material indices `changed` and nothing else: the
 /// world's chunk tasks and relights solve with `table` from now on, and every
-/// world chunk and light entry whose light box holds an emissive voxel of a
-/// changed material is marked for a relight with the settings relights. Old
-/// light shows until new light lands.
+/// chunk and light entry whose light box holds an emissive voxel of a changed
+/// material is marked for a relight with the settings relights, a sub-grid's
+/// chunks included. Old light shows until new light lands.
 ///
 /// No level moves, so nothing ripples, and no other chunk's light can
 /// change. The chunks are found from each chunk's note of its emissive
@@ -1034,13 +1034,14 @@ fn recolor<C: VoxelWorldConfig>(
     }
 }
 
-/// The world's chunks and light entries whose light box, the chunk and the
-/// 26 around it, holds an emissive voxel of a material index in
-/// `materials`, as the chunks' notes of their emissive materials tell.
+/// The chunks and light entries whose light box, the chunk and the 26
+/// around it in its grid, holds an emissive voxel of a material index in
+/// `materials`, as the chunks' notes of their emissive materials tell. A
+/// sub-grid's chunks count as the world's do.
 fn holding_materials(view: &LightView, materials: &[u16]) -> Vec<GridKey> {
     let view = view.read();
     let mut holding = HashSet::new();
-    let holders = view.world_chunks().filter(|(_, chunk)| {
+    let holders = view.chunks.iter().filter(|(_, chunk)| {
         chunk
             .light
             .inputs
@@ -1049,13 +1050,16 @@ fn holding_materials(view: &LightView, materials: &[u16]) -> Vec<GridKey> {
             .iter()
             .any(|material| materials.contains(material))
     });
-    for (position, _) in holders {
+    for (key, _) in holders {
         for z in -1..=1 {
             for y in -1..=1 {
                 for x in -1..=1 {
-                    let around = position + IVec3::new(x, y, z);
-                    if view.contains_key(&around) {
-                        holding.insert(in_world(around));
+                    let around = GridKey::level_0(
+                        key.grid(),
+                        key.position() + IVec3::new(x, y, z),
+                    );
+                    if view.chunks.contains_key(&around) {
+                        holding.insert(around);
                     }
                 }
             }

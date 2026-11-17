@@ -136,7 +136,10 @@ use bevy::reflect::Reflect;
 /// threads to run tasks on, relights run on the main thread within
 /// [`wasm_relight_budget`](Self::wasm_relight_budget) each frame, and at most
 /// one sky probe starts per frame, so a big edit costs time instead of a
-/// hitch. A single voxel edit's light still lands within 2 frames.
+/// hitch. A single voxel edit's light still lands within 2 frames. A chunk
+/// whose light box holds emissive voxels of two or more light colours
+/// solves once for each colour, so its relight uses the budget up faster,
+/// and a big edit among coloured light lands over more frames.
 ///
 /// A WASM application should choose a [`sky_reach`](Self::sky_reach) of 16,
 /// the last before the rows the solver spreads light along go from one
@@ -144,6 +147,40 @@ use bevy::reflect::Reflect;
 /// doesn't set any default: the defaults are chosen for native. The light
 /// texture is clamped to what the device holds, which on WebGL2 is at least
 /// 343 slots: see [`slot_capacity`](Self::slot_capacity).
+///
+/// WebGL2 allows a pipeline 16 textures, and the crate's bindings take three
+/// of them in every chunk material with the `sub_grids` feature: the light
+/// texture, the tag map and the colour texture. Without it they take two,
+/// with no tag map. Each is bound from the start, as a placeholder until
+/// the world needs it, whatever the world's light colours. The rest are
+/// shared by the material's own textures, six for `StandardMaterial`
+/// whether or not they're set, and the camera's, such as shadow maps, the
+/// tonemapping lookup table and an environment map. So what's left for a
+/// game's textures depends on its material and its camera. A pipeline over
+/// the limit fails to build, and Bevy's default render error handler then
+/// quits the app.
+///
+/// Light colour works on WebGL2 too. To keep a world's light white there,
+/// return white emissions from
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials)
+/// under `cfg(target_arch = "wasm32")`:
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use bevy_voxel_world::prelude::*;
+/// # #[derive(Resource, Clone, Default)]
+/// # struct MyWorld;
+/// # impl VoxelWorldConfig for MyWorld {
+/// #     type MaterialIndex = u8;
+/// #     type ChunkUserBundle = ();
+/// fn emissive_materials(&self) -> Vec<(u8, Emission)> {
+///     let torch = Emission::level(15.0);
+///     #[cfg(not(target_arch = "wasm32"))]
+///     let torch = torch.with_color(LinearRgba::rgb(1.0, 0.6, 0.2));
+///     vec![(3, torch)]
+/// }
+/// # }
+/// ```
 ///
 /// # Showing light
 ///
@@ -1034,8 +1071,9 @@ impl LevelCurve {
     /// light at the entity's voxel with
     /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and
     /// scale the entity's colour by `sky_falloff.at(levels.sky)` for the
-    /// ambient light it gets and `voxel_falloff.at(levels.voxel)` times
-    /// `voxel_brightness` for voxel light, using the world's [`LightLook`].
+    /// ambient light it gets, and by `voxel_falloff.at(levels.voxel)` times
+    /// `voxel_brightness` times `levels.voxel_color` for voxel light, using the
+    /// world's [`LightLook`].
     pub fn at(&self, level: f32) -> f32 {
         if level.is_nan() || level <= 0.0 {
             return 0.0;

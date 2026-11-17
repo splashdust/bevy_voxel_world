@@ -12,8 +12,9 @@
 //! else the tag of the coarse chunk covering the position, whose LOD bits
 //! say how wide its cells are. Hinted air holds levels: see [Hinted
 //! air](#hinted-air). Any other position with no chunk showing a tag, such
-//! as one past the spawning distance, holds sky 15 and voxel 0, as open sky
-//! with no lamps does.
+//! as one past the spawning distance, holds sky 15 and voxel 0 in white, as
+//! open sky with no lamps does. Tags carry their chunk's light colour, so
+//! the map's entries do too.
 //!
 //! **Slots near a sub-grid.** While the map holds a position, the route
 //! keeps the level-0 world chunk there, a chunk of air with no mesh
@@ -58,7 +59,8 @@
 //!
 //! A position of hinted air within the spawning distance of a camera holds
 //! the most common level among the open voxels of its light entry, if it
-//! has one. Otherwise it holds what `light_at` reads at its middle voxel
+//! has one, with the most common light colour among those at that voxel
+//! light level. Otherwise it holds what `light_at` reads at its middle voxel
 //! with sky fill left out: sky 15 if the column above that voxel is open
 //! and 0 if not, and voxel 0, or sky 0 with sky light off. The column is
 //! walked in a task under

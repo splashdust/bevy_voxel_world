@@ -12,12 +12,14 @@
 //! The bar at the bottom moves the camera to the places each setting shows
 //! best, as do the keys 1 to 9: the meadow, a cave whose wide hall sky fill
 //! reaches down from its mouth, a step darker at each chunk, with lanterns
-//! along its walls, and a deep chamber behind a narrow passage that only
-//! crystals light; the ground under a floating island, an arch the sun stops
+//! along its walls, and a deep chamber behind a narrow passage, lit by red,
+//! green and blue crystals whose pools mix where they meet, around a tilted
+//! plinth with a lantern of its own; the ground under a floating island, an arch the sun stops
 //! at, a house lit through its door and windows, a well sky light falls
 //! straight down, the whole world from above, and a hollow cabin hanging
 //! tilted in the sky beside the island, seen through its door. The cabin is
-//! a sub-grid, whose inside the Sub-grid sky setting darkens or lights. The
+//! a sub-grid, whose inside the Sub-grid sky setting darkens or lights, as is
+//! the plinth, whose faces lie off the world's grid. The
 //! bar lights the place the camera is at, and underlines the one the hovered
 //! setting shows best from. The right mouse button orbits the camera, the
 //! middle one pans it and the wheel zooms. H hides the panel.
@@ -25,7 +27,8 @@
 //! The ball walking in and out of the cave isn't a chunk, so propagated light
 //! doesn't shade it. It dims itself from `VoxelWorld::light_at` at its
 //! position, through the look's `LevelCurve::at`, so it goes dark in the cave
-//! as the rock around it does instead of standing out fully lit.
+//! as the rock around it does instead of standing out fully lit, and takes
+//! the colour of the lanterns' light as it passes them.
 //!
 //! Run with `cargo run --release --example light_tuning --features light_propagation,sub_grids`.
 //! On WASM the world starts with a sky reach of 16, as a WASM application
@@ -36,7 +39,9 @@
 //! frames and milliseconds each change took to settle, at 60 frames a second.
 //! With `audit`, it renders offscreen, sets each setting that relights to its
 //! extremes, and prints how much of the view from the place the panel names
-//! for it changes, listing the settings that barely show there.
+//! for it changes, listing the settings that barely show there. With
+//! `shots` and a directory, it renders offscreen and saves pictures of the
+//! places coloured light shows.
 
 use std::sync::Arc;
 
@@ -63,9 +68,13 @@ mod panel;
 mod rust;
 mod scene;
 mod settings;
+#[cfg(not(target_arch = "wasm32"))]
+mod shots;
 
 use panel::PanelPlugin;
-use scene::{spawn_cabin, texture_indices, Place, Scene, TEXTURE, TILE_COUNT};
+use scene::{
+    spawn_cabin, spawn_plinth, texture_indices, Place, Scene, TEXTURE, TILE_COUNT,
+};
 use settings::Tuning;
 
 /// The world, whose light settings are the values being tuned.
@@ -138,6 +147,11 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("audit") {
         return audit::audit();
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::args().nth(1).as_deref() == Some("shots") {
+        let directory = std::env::args().nth(2).unwrap_or_else(|| "shots".into());
+        return shots::shoot(directory.into());
+    }
     #[cfg(target_arch = "wasm32")]
     let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -154,7 +168,7 @@ fn main() {
         .add_plugins(PanelPlugin)
         .insert_resource(ClearColor(SKY))
         .init_resource::<WalkerScene>()
-        .add_systems(Startup, (setup, spawn_cabin))
+        .add_systems(Startup, (setup, spawn_cabin, spawn_plinth))
         .add_systems(Update, (walk, dim_walker, follow_ambient).chain())
         .run();
 }
@@ -337,8 +351,9 @@ fn walk(
 
 /// Dims the ball the way voxels are dimmed: Bevy's ambient light and sun by
 /// the sky falloff at its sky light level, and voxel light added through its
-/// emissive colour, from the voxel falloff at its voxel light level. With
-/// these, the ball goes dark where the rock around it does.
+/// emissive colour, from the voxel falloff at its voxel light level, in the
+/// light colour there. With these, the ball goes dark where the rock around
+/// it does, and takes the colour of the light it stands in.
 fn dim_walker(
     voxel_world: VoxelWorld<TuningWorld>,
     world: Res<TuningWorld>,
@@ -356,8 +371,13 @@ fn dim_walker(
         };
         let shade = look.sky_falloff.at(levels.sky).max(look.minimum_brightness);
         let glow = look.voxel_falloff.at(levels.voxel) * look.voxel_brightness;
+        let light = levels.voxel_color * glow;
         material.base_color = (WALKER_COLOUR * shade).into();
-        material.emissive = WALKER_COLOUR * glow;
+        material.emissive = LinearRgba::rgb(
+            WALKER_COLOUR.red * light.red,
+            WALKER_COLOUR.green * light.green,
+            WALKER_COLOUR.blue * light.blue,
+        );
     }
 }
 

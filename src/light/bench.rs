@@ -522,6 +522,9 @@ pub struct LightStats {
     pub peak_slots: u64,
     /// Colour slots given to chunks, counting late ones and evictions.
     pub color_allocations: u64,
+    /// Times the colour texture grew after the GPU had it, copying its
+    /// colours into the new one there.
+    pub color_growth_copies: u64,
     /// Chunks needing a slot that have none now.
     pub starved: u64,
     /// What level-0 chunks' light keeps on the CPU now: sky light's and voxel
@@ -656,6 +659,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         air_positions,
         peak_slots: slots.peak_held,
         color_allocations: slots.color_allocations,
+        color_growth_copies: slots.color_growth_copies,
         starved: route.map_or(0, |route| route.starved_count() as u64),
         light_bytes,
         mixed_chunks,

@@ -51,12 +51,21 @@
 //!   - where a red and a green lamp's pools meet on grey stone, each pixel's
 //!     brightest channel matches the same room lit by two white lamps, so
 //!     mixing never darkens;
-//!   - those rooms' chunks take colour slots.
+//!   - those rooms' chunks take colour slots, and the colour texture grows
+//!     to hold them at least once after the GPU has it, so the pictures
+//!     read colours it copied into the grown texture. On WebGL2, wgpu
+//!     copies a 3D texture one layer at a time.
 //! - In a world whose colour rooms' lamps are white until it has settled,
 //!   with sky light off, giving the lamps their colours draws every chunk in
 //!   the red room's picture, which holds no pixel of the blue clear colour,
 //!   in the frame they change and in each frame after it. The red lamp's pool
 //!   then settles to exactly 0 green and blue.
+//! - With the `sub_grids` feature, in a world coloured from startup with sky
+//!   light off, a tilted plate of a sub-grid hangs over the floor of a room
+//!   that spans a boundary between two of the world's chunks, lit by a red
+//!   lamp on one side of the boundary and a green lamp on the other. Along
+//!   the plate's top face, which lies off the world's grid, the colour turns
+//!   from red to green with no step anywhere, the chunk boundary included.
 //!
 //! The lamp room's checks run with sky light off because the room spans a
 //! chunk boundary with more open columns than a chunk's walk can settle, so
@@ -65,12 +74,17 @@
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there. `check-sky-off`, `check-sky-on`,
 //! `check-sky-openness`, `check-fill-paths`, `check-fill-openness`,
-//! `check-color` and `check-first-flip` each run one part of the checks.
+//! `check-color`, `check-first-flip` and, with `sub_grids`, `check-sub-grid`
+//! each run one part of the checks. The sub-grid check runs with
+//!
+//! ```text
+//! cargo test --release --features light_propagation,sub_grids --test light_render -- check-sub-grid
+//! ```
 //!
 //! In the browser, `check` can't start processes of its own, so each part
 //! runs from its own page load: `?check-sky-off`, `?check-sky-on`,
 //! `?check-sky-openness`, `?check-fill-paths`, `?check-fill-openness`,
-//! `?check-color` and `?check-first-flip`. Each
+//! `?check-color`, `?check-first-flip` and `?check-sub-grid`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -97,14 +111,16 @@ use bevy::{
     camera::RenderTarget,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     light::CascadeShadowConfigBuilder,
-    prelude::*,
     pbr::{
         SpecializedMaterialPipelineCache, SpecializedPrepassMaterialPipelineCache,
         SpecializedShadowMaterialPipelineCache,
     },
     platform::collections::HashSet,
+    prelude::*,
     render::{
-        render_resource::{CachedPipelineState, PipelineCache, TextureFormat, TextureUsages},
+        render_resource::{
+            CachedPipelineState, PipelineCache, TextureFormat, TextureUsages,
+        },
         view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
         Render, RenderApp, RenderSystems,
     },
@@ -247,6 +263,23 @@ const MIX_ROOMS: [(IVec3, [u8; 2]); 2] = [
 /// enough that their pools overlap across the floor.
 const MIX_LAMPS: [IVec3; 2] = [IVec3::new(10, 4, 16), IVec3::new(22, 4, 16)];
 
+/// The sub-grid room, sealed in the rock beside the mixing rooms, built as
+/// they are but two chunks long along x, so that it spans the boundary
+/// between its chunk and the chunk east of it. Its voxels are given from its
+/// chunk's minimum corner.
+const SUB_GRID_ROOM_CHUNK: IVec3 = IVec3::new(12, -18, 0);
+const SUB_GRID_ROOM: Bounds = Bounds::new([8, 4, 1], [56, 24, 31]);
+/// The sub-grid room's lamps on its floor, a red one west of the chunk
+/// boundary at x = 32 and a green one east of it, close enough that their
+/// pools meet across it.
+const SUB_GRID_LAMPS: [(IVec3, u8); 2] = [
+    (IVec3::new(23, 4, 16), RED_LAMP),
+    (IVec3::new(39, 4, 16), GREEN_LAMP),
+];
+/// The size of the plate of stone the sub-grid check hangs in the sub-grid
+/// room, in voxels.
+const PLATE: IVec3 = IVec3::new(16, 1, 6);
+
 const PLATEAUS: [Plateau; 4] = [
     Plateau {
         x: -319.5,
@@ -366,6 +399,13 @@ impl Scene {
                 return WorldVoxel::Air;
             }
         }
+        let local = position - SUB_GRID_ROOM_CHUNK * 32;
+        if let Some((_, lamp)) = SUB_GRID_LAMPS.iter().find(|(at, _)| *at == local) {
+            return WorldVoxel::Solid(*lamp);
+        }
+        if SUB_GRID_ROOM.contains(local.x, local.y, local.z) {
+            return WorldVoxel::Air;
+        }
         for (chunk, lamps) in MIX_ROOMS {
             let local = position - chunk * 32;
             if let Some(at) = MIX_LAMPS.iter().position(|lamp| *lamp == local) {
@@ -440,6 +480,9 @@ struct CaveWorld {
     /// For the check of the first flip: the colour rooms' lamps are white
     /// until the check gives them their colours.
     white_lamps: bool,
+    /// For the check of sub-grid faces: a sub-grid's plate hangs in the
+    /// sub-grid room, at [`plate_pose`].
+    check_sub_grid: bool,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -456,6 +499,7 @@ impl Default for CaveWorld {
             check_fill: None,
             check_color: false,
             white_lamps: false,
+            check_sub_grid: false,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -583,7 +627,10 @@ impl VoxelWorldConfig for CaveWorld {
         ];
         if self.check_color && self.white_lamps {
             let lamp = Emission::level(15.0);
-            emissive.extend([RED_LAMP, GREEN_LAMP, BLUE_LAMP, WHITE_LAMP].map(|lamp_at| (lamp_at, lamp)));
+            emissive.extend(
+                [RED_LAMP, GREEN_LAMP, BLUE_LAMP, WHITE_LAMP]
+                    .map(|lamp_at| (lamp_at, lamp)),
+            );
         } else if self.check_color {
             let lamp = Emission::level(15.0);
             emissive.extend([
@@ -654,11 +701,31 @@ const WHITE_LAMP_CAMERA: FixedCamera = lamp_camera(6.0);
 /// A camera in the mixing room of chunk `x` along x, looking down at the
 /// floor between its lamps.
 const fn mix_camera(x: f32) -> FixedCamera {
-    camera([x * 32.0 + 16.0, -563.0, 9.0], [x * 32.0 + 16.0, -572.0, 16.5])
+    camera(
+        [x * 32.0 + 16.0, -563.0, 9.0],
+        [x * 32.0 + 16.0, -572.0, 16.5],
+    )
 }
 
 const MIX_CAMERA: FixedCamera = mix_camera(8.0);
 const WHITE_MIX_CAMERA: FixedCamera = mix_camera(10.0);
+
+/// Where the sub-grid check's plate hangs: its middle over the chunk
+/// boundary of the sub-grid room, eight voxels over its floor, tilted about
+/// x and z so that its faces lie off the world's grid.
+fn plate_pose() -> Transform {
+    let middle = (SUB_GRID_ROOM_CHUNK * 32).as_vec3() + Vec3::new(31.0, 12.0, 16.0);
+    let rotation = Quat::from_rotation_z(0.25) * Quat::from_rotation_x(0.2);
+    Transform::from_translation(middle - rotation * (PLATE.as_vec3() / 2.0))
+        .with_rotation(rotation)
+}
+
+/// Looks down at the plate's top face from high up at the sub-grid room's end
+/// nearest z = 0.
+const SUB_GRID_CAMERA: FixedCamera = camera(
+    [12.0 * 32.0 + 31.0, -18.0 * 32.0 + 23.0, 2.0],
+    [12.0 * 32.0 + 31.0, -18.0 * 32.0 + 12.0, 16.0],
+);
 
 fn transform_of(camera: &FixedCamera) -> Transform {
     Transform::from_translation(camera.position).looking_at(camera.look_at, Vec3::Y)
@@ -696,12 +763,13 @@ fn main() {
         }
         Some("check-color") => check_color_part(),
         Some("check-first-flip") => check_first_flip_part(),
+        Some("check-sub-grid") => check_sub_grid_part(),
         Some("budget") => budget(),
         Some(other) => {
             eprintln!(
                 "unknown argument {other:?}: expected check, check-sky-off, check-sky-on, \
                  check-sky-openness, check-fill-paths, check-fill-openness, check-color, \
-                 check-first-flip or budget"
+                 check-first-flip, check-sub-grid or budget"
             );
             std::process::exit(2);
         }
@@ -1227,6 +1295,18 @@ const FIRST_FLIP_CHECKS: [Check; 2] = [
     ),
 ];
 
+/// The check of sub-grid faces, in a world coloured from startup with sky
+/// light off.
+const SUB_GRID_CHECKS: [Check; 1] = [settled_check(
+    "a tilted sub-grid over coloured world light blends colour off the grid with no seam",
+    "sub_grid_faces.png",
+    false,
+    &SUB_GRID_CAMERA,
+    true,
+    None,
+    plate_blends_without_a_seam,
+)];
+
 /// The checks run with sky fill on under sky openness.
 const OPENNESS_CHECKS: [Check; 1] = [settled_check(
     "a sealed pocket under sky openness is exactly black",
@@ -1339,12 +1419,9 @@ fn follow_renderer_ready(
             .values()
             .flat_map(|view| view.values().map(|(id, _, _)| id.id())),
     );
-    let compiled = pipelines
-        .pipelines()
-        .enumerate()
-        .all(|(id, pipeline)| {
-            materials.contains(&id) || matches!(pipeline.state, CachedPipelineState::Ok(_))
-        });
+    let compiled = pipelines.pipelines().enumerate().all(|(id, pipeline)| {
+        materials.contains(&id) || matches!(pipeline.state, CachedPipelineState::Ok(_))
+    });
     ready.0.store(compiled, Ordering::Relaxed);
 }
 
@@ -1388,8 +1465,8 @@ struct CheckPlan {
 fn check() {
     error!(
         "in the browser, run ?check-sky-off, ?check-sky-on, ?check-sky-openness, \
-         ?check-fill-paths, ?check-fill-openness, ?check-color and ?check-first-flip, \
-         each in a page load"
+         ?check-fill-paths, ?check-fill-openness, ?check-color, ?check-first-flip and \
+         ?check-sub-grid, each in a page load"
     );
 }
 
@@ -1399,7 +1476,7 @@ fn check() {
 #[cfg(not(target_arch = "wasm32"))]
 fn check() {
     let mut failed = false;
-    for sky in [
+    let mut parts = vec![
         "sky-off",
         "sky-on",
         "sky-openness",
@@ -1407,7 +1484,11 @@ fn check() {
         "fill-openness",
         "color",
         "first-flip",
-    ] {
+    ];
+    if cfg!(feature = "sub_grids") {
+        parts.push("sub-grid");
+    }
+    for sky in parts {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
             .args(std::env::args().skip(2))
@@ -1480,8 +1561,28 @@ fn check_first_flip_part() {
     );
 }
 
+/// Runs the check of sub-grid faces, in a world coloured from startup with
+/// sky light off. Without the `sub_grids` feature it fails, since the world
+/// can't hold a sub-grid.
+fn check_sub_grid_part() {
+    if !cfg!(feature = "sub_grids") {
+        report!("FAIL check-sub-grid needs the sub_grids feature");
+        std::process::exit(1);
+    }
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            check_sub_grid: true,
+            ..default()
+        },
+        SUB_GRID_CHECKS.iter().collect(),
+    );
+}
+
 fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
     let check_color = world.check_color;
+    let check_sub_grid = world.check_sub_grid;
     let white_lamps = world.white_lamps;
     let clear = if world.check_color {
         Color::srgb(0.0, 0.0, 1.0)
@@ -1515,15 +1616,36 @@ fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
     app.sub_app_mut(RenderApp)
         .insert_resource(renderer_ready)
         .add_systems(Render, follow_renderer_ready.in_set(RenderSystems::Cleanup));
-    if check_color && !white_lamps {
+    // The sub-grid check's camera never reaches the colour rooms.
+    if check_color && !white_lamps && !check_sub_grid {
         app.add_systems(Update, colour_rooms_take_colour_slots.before(run_checks));
+    }
+    #[cfg(feature = "sub_grids")]
+    if check_sub_grid {
+        app.add_systems(Update, spawn_plate.before(run_checks));
     }
     app.run();
 }
 
+/// Spawns the sub-grid check's plate of stone at [`plate_pose`], once.
+#[cfg(feature = "sub_grids")]
+fn spawn_plate(mut voxel_world: VoxelWorld<CaveWorld>, mut spawned: Local<bool>) {
+    if std::mem::replace(&mut *spawned, true) {
+        return;
+    }
+    let plate = voxel_world.spawn_sub_grid(plate_pose());
+    let mut grid = voxel_world.grid_mut(Grid::SubGrid(plate)).unwrap();
+    for x in 0..PLATE.x {
+        for z in 0..PLATE.z {
+            grid.set_voxel(IVec3::new(x, 0, z), WorldVoxel::Solid(STONE));
+        }
+    }
+}
+
 /// Once every check has judged its picture, checks that chunks took a colour
 /// slot at least once for each colour room and the red and green mixing
-/// room, so that the colour checks read light colours from colour slots.
+/// room, so that the colour checks read light colours from colour slots, and
+/// that the colour texture grew by copying at least once.
 /// Only the chunks near the camera are loaded, so each room's chunk takes
 /// one as the camera reaches it.
 fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
@@ -1532,14 +1654,22 @@ fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
         return;
     }
     *done = true;
-    let taken = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world)
-        .map_or(0, |stats| stats.color_allocations);
+    let stats = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world);
+    let taken = stats.as_ref().map_or(0, |stats| stats.color_allocations);
     let wanted = COLOR_ROOMS.len() as u64 + 1;
     let name = "the colour rooms and the mixing room take colour slots";
     if taken >= wanted {
         report!("PASS {name}: {taken} taken");
     } else {
         report!("FAIL {name}: {taken} taken, of {wanted}");
+        world.resource_mut::<CheckPlan>().failed = true;
+    }
+    let copies = stats.map_or(0, |stats| stats.color_growth_copies);
+    let name = "the colour texture grows by copying its colours on the GPU";
+    if copies > 0 {
+        report!("PASS {name}: {copies} times");
+    } else {
+        report!("FAIL {name}: it never did, so the colour checks didn't cover it");
         world.resource_mut::<CheckPlan>().failed = true;
     }
 }
@@ -1683,7 +1813,7 @@ fn run_checks(
         || chunks.is_empty()
         || chunks
             .iter()
-            .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready));
+            .any(|chunk| chunk_status(&voxel_world, chunk) != Some(ChunkStatus::Ready));
     if unready {
         plan.last_unready_frame = frame;
     }
@@ -1790,6 +1920,17 @@ fn run_checks(
             plan.next += 1;
         },
     );
+}
+
+/// Where `chunk` is in the chunk lifecycle, in its own grid.
+fn chunk_status(
+    voxel_world: &VoxelWorld<CaveWorld>,
+    chunk: &Chunk<CaveWorld>,
+) -> Option<ChunkStatus> {
+    #[cfg(feature = "sub_grids")]
+    return voxel_world.grid(chunk.grid())?.chunk_state(chunk.key());
+    #[cfg(not(feature = "sub_grids"))]
+    voxel_world.chunk_state(chunk.key())
 }
 
 /// Whether `image` matches the earlier check's picture, within one step of
@@ -2131,6 +2272,97 @@ fn mixing_never_darkens(
     }
 }
 
+/// Samples of the plate's top face per voxel, along the line
+/// [`plate_blends_without_a_seam`] reads.
+const PLATE_SAMPLES_PER_VOXEL: usize = 8;
+
+/// The largest step in hue between two samples next to each other along the
+/// plate that passes as smooth. Hue turns fastest where the two lamps' light
+/// is equally bright, halfway between them, a little under this.
+const PLATE_SEAM: f32 = 0.08;
+
+/// Whether the top face of the sub-grid check's plate turns from red to green
+/// along its length with no seam. It reads the hue as green's share of red
+/// and green, along the middle of the face from end to end, and wants:
+///
+/// - below 0.25 at the red end and above 0.75 at the green end;
+/// - no step between samples next to each other above [`PLATE_SEAM`];
+/// - the step across the boundary between the world's chunks at most twice
+///   the largest step within a voxel on either side of it, so a seam there
+///   shows even where it's smaller than the steepest smooth step.
+///
+/// The plate's stone is grey, so its pixels' hue is the light's. The plate is
+/// dimly lit, so its pixels' channels are small and hue moves in uneven
+/// steps from sample to sample, many of them 0, which the window of a voxel
+/// either side evens out.
+fn plate_blends_without_a_seam(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pose = plate_pose();
+    let samples = PLATE.x as usize * PLATE_SAMPLES_PER_VOXEL;
+    let mut hues = Vec::with_capacity(samples);
+    let mut chunks = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let along = (sample as f32 + 0.5) / PLATE_SAMPLES_PER_VOXEL as f32;
+        let point = pose.transform_point(Vec3::new(along, 1.0, PLATE.z as f32 / 2.0));
+        let at = camera
+            .world_to_viewport(global, point)
+            .map_err(|error| format!("{point} isn't in view: {error:?}"))?;
+        let (x, y) = (at.x as usize, at.y as usize);
+        if x >= WIDTH as usize || y >= HEIGHT as usize {
+            return Err(format!("{point} is outside the picture"));
+        }
+        let index = (y * WIDTH as usize + x) * 4;
+        let (red, green) = (data[index] as f32, data[index + 1] as f32);
+        if red + green == 0.0 {
+            return Err(format!("the plate is black at sample {sample}"));
+        }
+        hues.push(green / (red + green));
+        chunks.push((point.x / 32.0).floor() as i32);
+    }
+    let steps: Vec<f32> = hues
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .collect();
+    let (most, at) = steps.iter().enumerate().fold((0.0, 0), |most, (at, step)| {
+        if *step > most.0 {
+            (*step, at)
+        } else {
+            most
+        }
+    });
+    let boundary = chunks
+        .windows(2)
+        .position(|pair| pair[0] != pair[1])
+        .filter(|at| {
+            *at >= PLATE_SAMPLES_PER_VOXEL && *at + PLATE_SAMPLES_PER_VOXEL < steps.len()
+        })
+        .ok_or("the plate doesn't cross a chunk boundary")?;
+    let across = steps[boundary];
+    let beside = steps
+        [boundary - PLATE_SAMPLES_PER_VOXEL..=boundary + PLATE_SAMPLES_PER_VOXEL]
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != PLATE_SAMPLES_PER_VOXEL)
+        .fold(0.0f32, |most, (_, step)| most.max(*step));
+    let (first, last) = (hues[0], hues[samples - 1]);
+    let note = format!(
+        "hue {first:.2} at the red end, {last:.2} at the green end; at most {most:.3} \
+         between samples, after sample {at} of {samples}; {across:.3} across the chunk \
+         boundary after sample {boundary}, at most {beside:.3} within a voxel of it"
+    );
+    if first < 0.25 && last > 0.75 && most <= PLATE_SEAM && across <= 2.0 * beside + 0.005
+    {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
 /// The channels of the pixel where the middle of the top face of the green
 /// colour room's lamp shows.
 fn green_lamp_top(
@@ -2320,7 +2552,11 @@ fn pool_fades_out(
     _: Option<&Image>,
 ) -> Result<String, String> {
     let (share, note) = pool_edge_step(image, camera, global)?;
-    if share <= 0.25 { Ok(note) } else { Err(note) }
+    if share <= 0.25 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
 }
 
 /// Whether the lamp room's floor drops into black in a step at the edge of
@@ -2332,7 +2568,11 @@ fn pool_ends_in_a_step(
     _: Option<&Image>,
 ) -> Result<String, String> {
     let (share, note) = pool_edge_step(image, camera, global)?;
-    if share > 0.25 { Ok(note) } else { Err(note) }
+    if share > 0.25 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
 }
 
 // --- The relight budget ------------------------------------------------------

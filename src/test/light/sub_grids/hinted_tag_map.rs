@@ -8,10 +8,12 @@ use std::sync::Arc;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
+use crate::light::color::{pack, tag_cut};
 use crate::light::route::LightRoute;
 use crate::light::LightSettings;
 use crate::prelude::*;
 use crate::test::light::edits::settle;
+use crate::test::light::mixing::{emissive, RED_LAMP};
 use crate::test::light::sky_light::sky_light;
 use crate::test::light::voxel_light::{app, light_at, LampWorld, STONE};
 use crate::test::update_until;
@@ -159,21 +161,17 @@ fn hinted_air_answers_its_column_once_the_answer_lands() {
     assert_eq!(answer(&app, OPEN), Some(OPEN_SKY));
 }
 
-#[test]
-fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
-    let mut app = island_app();
-    assert!(holds_entry(&app, BELOW_ISLAND));
-    spawn_body(&mut app, BELOW_ISLAND);
-    app.update();
-
-    // How many voxels of the entry, all open, read each pair of levels
-    // through `light_at`.
+/// The most common sky light level and voxel light level that `light_at`
+/// reads among the voxels of the chunk position `chunk`, and how many pairs
+/// of levels it reads.
+fn most_common_levels(app: &mut App, chunk: IVec3) -> ((u32, u32), usize) {
+    // How many voxels read each pair of levels.
     let read = app
         .world_mut()
-        .run_system_once(|voxel_world: VoxelWorld<LampWorld>| {
+        .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
             let mut counts: HashMap<(u32, u32), usize> = HashMap::new();
             for local in crate::test::light::voxel_light::origin_voxels() {
-                let levels = voxel_world.light_at(BELOW_ISLAND * 32 + local).unwrap();
+                let levels = voxel_world.light_at(chunk * 32 + local).unwrap();
                 *counts
                     .entry((levels.sky as u32, levels.voxel as u32))
                     .or_default() += 1;
@@ -192,11 +190,60 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
             .unwrap()
             .0
     };
-    let (sky, voxel) = (most_common(|l| l.0), most_common(|l| l.1));
+    ((most_common(|l| l.0), most_common(|l| l.1)), read.len())
+}
+
+#[test]
+fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
+    let mut app = island_app();
+    assert!(holds_entry(&app, BELOW_ISLAND));
+    spawn_body(&mut app, BELOW_ISLAND);
+    app.update();
+
+    let ((sky, voxel), pairs) = most_common_levels(&mut app, BELOW_ISLAND);
     // Sky light reaches in under the island's edges, so the entry isn't one
     // level throughout.
-    assert!(read.len() > 1, "{read:?}");
+    assert!(pairs > 1, "{pairs}");
     assert_eq!(answer(&app, BELOW_ISLAND), Some(sky | voxel << 4));
+}
+
+/// [`islands`] with a red lamp in every voxel of the underside of the
+/// island at [`ISLAND`].
+fn red_underside(p: IVec3) -> WorldVoxel {
+    let chunk = p.div_euclid(IVec3::splat(32));
+    if chunk == ISLAND && p.y == 64 {
+        WorldVoxel::Solid(RED_LAMP)
+    } else {
+        islands(p)
+    }
+}
+
+#[test]
+fn hinted_air_holding_a_light_entry_answers_its_most_common_colour() {
+    let mut app = app(LampWorld {
+        scene: Arc::new(red_underside),
+        emissive: emissive(),
+        // Every voxel of the entry under the island is then within reach.
+        light: Some(LightPropagation {
+            voxel_reach: 32,
+            ..sky_light(Sky::default(), 30)
+        }),
+        ..island_world()
+    });
+    settle(&mut app, "the island to stream in");
+    assert!(holds_entry(&app, BELOW_ISLAND));
+    spawn_body(&mut app, BELOW_ISLAND);
+    spawn_body(&mut app, FAR_UNDER);
+    app.update();
+
+    let ((sky, voxel), _) = most_common_levels(&mut app, BELOW_ISLAND);
+    assert!(voxel > 0, "the red lamps light most of the entry");
+    let red = tag_cut(pack(LinearRgba::RED)) << 16;
+    assert_ne!(red, 0);
+    assert_eq!(answer(&app, BELOW_ISLAND), Some(sky | voxel << 4 | red));
+    // Nothing is known of the hinted air beyond the spawning distance, so it
+    // answers open sky in white.
+    assert_eq!(answer(&app, FAR_UNDER), Some(OPEN_SKY));
 }
 
 #[test]
