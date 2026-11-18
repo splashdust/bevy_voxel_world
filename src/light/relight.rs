@@ -121,6 +121,7 @@ use super::probe::{face_neighbours, SkyProbes};
 use super::route::LightRoute;
 use super::sky::{padding_row, ColumnAnswer};
 use super::slot::FacesSee;
+use super::slot::OwnColors;
 use super::solver::{
     neighbour_index, relight, ChunkLight, KeptLight, LightTaskSettings, Neighbourhood,
     Solved,
@@ -231,6 +232,7 @@ struct LandedLight {
     light: Arc<ChunkLight>,
     own: FacesSee,
     bytes: Option<Box<[u8]>>,
+    own_colors: Option<OwnColors>,
     /// Whether it came from a chunk task, whose voxels may be new.
     new_voxels: bool,
 }
@@ -1041,6 +1043,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             light: solved.light.clone(),
             own: solved.own,
             bytes: solved.bytes.take(),
+            own_colors: solved.own_colors.take(),
             new_voxels: source == Source::ChunkTask,
         };
         let mut triggers = Vec::new();
@@ -1354,6 +1357,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             light: solved.light,
             own: solved.own,
             bytes: solved.bytes.take(),
+            own_colors: solved.own_colors.take(),
             new_voxels: true,
         })
     }
@@ -1857,6 +1861,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                     landed.light,
                     landed.own,
                     landed.bytes,
+                    landed.own_colors,
                     landed.new_voxels,
                 );
             }
@@ -1867,7 +1872,15 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 chunk.entity == entity && Arc::ptr_eq(&chunk.light, &kept.light)
             });
             if let (true, Some(route)) = (current, route.as_mut()) {
-                route.light_landed(key, entity, kept.light, kept.own, kept.bytes, true);
+                route.light_landed(
+                    key,
+                    entity,
+                    kept.light,
+                    kept.own,
+                    kept.bytes,
+                    kept.own_colors,
+                    true,
+                );
             }
         }
 
@@ -1995,6 +2008,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                             landed.light,
                             landed.own,
                             landed.bytes,
+                            landed.own_colors,
                             landed.new_voxels,
                         );
                     }

@@ -242,6 +242,34 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
     }
 }
 
+/// What a solve in a coloured world works out about the light colours of its
+/// chunk's own voxels, so that landing its light doesn't.
+pub(crate) struct OwnColors {
+    /// The light colours its faces read from its own voxels: see
+    /// [`own_colors_seen`].
+    pub seen: Seen<u16>,
+    /// Its colour slot's bytes, with the shell at 0, when its own voxels see
+    /// more than one light colour: see [`color_slot_bytes`].
+    pub bytes: Option<Box<[u8]>>,
+}
+
+impl OwnColors {
+    /// What the chunk lit by `light` reads of its own light colours, where
+    /// `colors` gives the packed light colour of each emissive material
+    /// index.
+    pub fn of(light: &ChunkLight, colors: &[u16]) -> Self {
+        let lamp_color = |material: u16| {
+            colors
+                .get(material as usize)
+                .copied()
+                .unwrap_or(super::color::WHITE)
+        };
+        let seen = own_colors_seen(light, lamp_color);
+        let bytes = (seen == Seen::Mixed).then(|| color_slot_bytes(light, lamp_color));
+        Self { seen, bytes }
+    }
+}
+
 /// The packed light colours a chunk's faces read from its own voxels, given
 /// its `light`: the voxel light of its open voxels touching one of its solid
 /// voxels, and each of its emissive voxels touching an open voxel, whose

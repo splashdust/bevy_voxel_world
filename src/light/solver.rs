@@ -85,7 +85,7 @@ use super::inputs::{EmissiveVoxel, LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
-use super::slot::{own_faces_see, slot_bytes, FacesSee};
+use super::slot::{own_faces_see, slot_bytes, FacesSee, OwnColors};
 use super::view::{world_position, LightView, Missing, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::grid::{GridId, GridKey};
@@ -412,6 +412,9 @@ pub(crate) struct Solved {
     /// The bytes of the chunk's slot, in a world showing its light, for a
     /// chunk whose own voxels already call for a slot.
     pub bytes: Option<Box<[u8]>>,
+    /// In a coloured world showing its light, the light colours of the
+    /// chunk's own voxels.
+    pub own_colors: Option<OwnColors>,
     /// What a chunk task found out about the chunk's columns, with sky light
     /// on. A relight finds nothing.
     pub sky: Option<SkyFound>,
@@ -540,6 +543,9 @@ pub(crate) struct KeptLight {
     /// The bytes of the chunk's slot, for a chunk whose own voxels call for
     /// one.
     pub bytes: Option<Box<[u8]>>,
+    /// In a coloured world showing its light, the light colours of the
+    /// chunk's own voxels.
+    pub own_colors: Option<OwnColors>,
     pub edit_frame: u64,
 }
 
@@ -551,10 +557,12 @@ impl<I> KeptTask<I> {
             FacesSee::default()
         };
         let bytes = own.needs_slot().then(|| slot_bytes(&self.light));
+        let own_colors = own_colors(&self.settings, &self.light);
         KeptLight {
             light: self.light,
             own,
             bytes,
+            own_colors,
             edit_frame: self.edit_frame,
         }
     }
@@ -764,6 +772,7 @@ fn solve<I>(
         FacesSee::default()
     };
     let bytes = own.needs_slot().then(|| slot_bytes(&light));
+    let own_colors = own_colors(settings, &light);
     Solved {
         light,
         faces,
@@ -771,6 +780,7 @@ fn solve<I>(
         reaches,
         own,
         bytes,
+        own_colors,
         sky: None,
         own_edits: 0,
         edit_frame: 0,
@@ -781,6 +791,16 @@ fn solve<I>(
         fill_seeds,
         read: Box::new(snapshot.neighbours),
     }
+}
+
+/// The light colours of the own voxels of the chunk lit by `light`, in a
+/// coloured world showing its light.
+fn own_colors<I>(
+    settings: &LightTaskSettings<I>,
+    light: &ChunkLight,
+) -> Option<OwnColors> {
+    (settings.routed && settings.emission.is_colored())
+        .then(|| OwnColors::of(light, settings.emission.colors()))
 }
 
 thread_local! {

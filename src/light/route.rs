@@ -200,8 +200,8 @@ use super::slot::{
     cell_index, color_slot_bytes, color_texel_at, colors_seen, convert_texels,
     count_colors, most_common, most_common_open, open_colors_seen, open_voxels,
     open_voxels_see, own_colors_seen, shell_cell, slot_bytes, texel_at, texel_bytes,
-    texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen, ShellPlane,
-    COLOR_TEXEL_BYTES, PLANE_TEXELS,
+    texel_levels, texture_format, touching_open, write_shell, FacesSee, OwnColors, Seen,
+    ShellPlane, COLOR_TEXEL_BYTES, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -334,6 +334,9 @@ struct RouteChunk {
     own: FacesSee,
     /// The bytes its last solve made of its own voxels, until they're placed.
     bytes: Option<Box<[u8]>>,
+    /// The colour slot bytes its last solve made of its own voxels, until
+    /// they're placed.
+    color_bytes: Option<Box<[u8]>>,
     /// What its faces read across each face, by [`Face`].
     across: [FacesSee; 6],
     slot: Option<u32>,
@@ -813,6 +816,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             chunk.color_slot = None;
             chunk.color_shell = [None; 6];
             chunk.bytes = None;
+            chunk.color_bytes = None;
             if starved && chunk.placed() {
                 self.starved.insert(id);
             }
@@ -993,10 +997,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         light: Arc<ChunkLight>,
         own: FacesSee,
         bytes: Option<Box<[u8]>>,
+        own_colors: Option<OwnColors>,
         new_voxels: bool,
     ) {
         let id = RouteId::Entity(entity);
-        self.landed(id, key, light, own, bytes, new_voxels);
+        self.landed(id, key, light, own, bytes, own_colors, new_voxels);
     }
 
     /// Takes the light that landed for the level-0 chunk `id` at `key`, as
@@ -1008,6 +1013,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         light: Arc<ChunkLight>,
         own: FacesSee,
         bytes: Option<Box<[u8]>>,
+        own_colors: Option<OwnColors>,
         new_voxels: bool,
     ) {
         // A voxel edit gives a chunk new inputs without a chunk task.
@@ -1020,13 +1026,26 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.add_chunk(id, key);
         let colored = self.is_colored();
         let mut own = own;
+        let mut color_bytes = None;
         if colored {
-            own.color = own_colors_seen(&light, |material| self.lamp_color(material));
+            // The solve worked them out unless the world wasn't coloured
+            // when it started.
+            match own_colors {
+                Some(colors) => {
+                    own.color = colors.seen;
+                    color_bytes = colors.bytes;
+                }
+                None => {
+                    own.color =
+                        own_colors_seen(&light, |material| self.lamp_color(material));
+                }
+            }
         }
         let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.light = Some(light.clone());
         chunk.own = own;
         chunk.bytes = bytes;
+        chunk.color_bytes = color_bytes;
         #[cfg(not(feature = "sub_grids"))]
         self.at.insert(key, id);
         #[cfg(feature = "sub_grids")]
@@ -1099,6 +1118,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let chunk = self.chunks.get_mut(&id).unwrap();
         let slot = chunk.slot.take();
         chunk.bytes = None;
+        chunk.color_bytes = None;
         if let Some(slot) = slot {
             self.free_slot(slot);
         }
@@ -1503,6 +1523,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             self.flat_shows(id, &sees, &light)
         };
         let chunk = self.chunks.get_mut(&id).unwrap();
+        // Placed light reads its colour slot bytes, if it needed them, as it
+        // settles.
+        chunk.color_bytes = None;
         if chunk.slot.is_none() {
             chunk.bytes = None;
             if self.free_color_slot(id) {
@@ -1860,8 +1883,16 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// voxels.
     fn write_color_full(&mut self, id: RouteId, slot: u32, light: &ChunkLight) {
         let key = self.chunks[&id].key;
+        let mut bytes = self
+            .chunks
+            .get_mut(&id)
+            .unwrap()
+            .color_bytes
+            .take()
+            .unwrap_or_else(|| {
+                color_slot_bytes(light, |material| self.lamp_color(material))
+            });
         let lamp_color = |material| self.lamp_color(material);
-        let mut bytes = color_slot_bytes(light, lamp_color);
         let mut shell = [None; 6];
         for face in Face::ALL {
             if let Some(neighbour) = self.neighbour_light(key, face) {
@@ -2409,6 +2440,7 @@ impl RouteChunk {
             light: None,
             own: FacesSee::default(),
             bytes: None,
+            color_bytes: None,
             across: [FacesSee::default(); 6],
             slot: None,
             shell: [None; 6],
@@ -2889,7 +2921,7 @@ mod tests {
     #[cfg(feature = "sub_grids")]
     use crate::grid::GridId;
     use crate::light::color::{pack, ChunkColor};
-    use crate::light::inputs::{LightInputs, Occupancy};
+    use crate::light::inputs::{EmissiveVoxel, LightInputs, Occupancy};
     use crate::light::kernel::Plane;
     use crate::light::sky::ColumnAnswer;
     use crate::light::slot::own_faces_see;
@@ -2941,11 +2973,11 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let world = in_world(IVec3::ZERO);
         let entity = Entity::from_raw_u32(1).unwrap();
-        route.light_landed(world, entity, light.clone(), own, None, true);
+        route.light_landed(world, entity, light.clone(), own, None, None, true);
         // A chunk with no entity, far from the world chunk.
         let far = in_world(IVec3::new(5, 0, 0));
         let id = RouteId::Key(far);
-        route.landed(id, far, light.clone(), own, None, true);
+        route.landed(id, far, light.clone(), own, None, None, true);
         assert_eq!(route.slots.held(), 0);
 
         route.keep(id, far, true);
@@ -3096,7 +3128,7 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let holder = Entity::from_raw_u32(1).unwrap();
         let near = in_world(IVec3::ZERO);
-        route.light_landed(near, holder, light, own, None, true);
+        route.light_landed(near, holder, light, own, None, None, true);
         assert_ne!(route.show(holder, near, false) & HAS_SLOT, 0);
         // An air chunk with no mesh, farther from the camera than the holder.
         let air = Entity::from_raw_u32(2).unwrap();
@@ -3107,6 +3139,7 @@ mod tests {
             air,
             air_light.clone(),
             own_faces_see(&air_light),
+            None,
             None,
             true,
         );
@@ -3140,7 +3173,7 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let holder = Entity::from_raw_u32(1).unwrap();
         let far = in_world(IVec3::new(5, 0, 0));
-        route.light_landed(far, holder, light, own, None, true);
+        route.light_landed(far, holder, light, own, None, None, true);
         assert_ne!(route.show(holder, far, false) & HAS_SLOT, 0);
         let air = Entity::from_raw_u32(2).unwrap();
         let near = in_world(IVec3::X);
@@ -3150,6 +3183,7 @@ mod tests {
             air,
             air_light.clone(),
             own_faces_see(&air_light),
+            None,
             None,
             true,
         );
@@ -3193,7 +3227,7 @@ mod tests {
         assert!(!own.needs_slot());
         let entity = Entity::from_raw_u32(1).unwrap();
         let key = in_world(IVec3::X);
-        route.light_landed(key, entity, light, own, None, true);
+        route.light_landed(key, entity, light, own, None, None, true);
         let flat = route.show(entity, key, false);
         assert_eq!(flat, tag_levels(9, 0, LightPrecision::Steps16));
 
@@ -3298,10 +3332,51 @@ mod tests {
             .collect();
         for (i, entity) in entities.iter().enumerate().rev() {
             let key = in_world(IVec3::new(2 * i as i32, 0, 0));
-            route.light_landed(key, *entity, light.clone(), own, None, true);
+            route.light_landed(key, *entity, light.clone(), own, None, None, true);
             route.show(*entity, key, false);
         }
         (route, entities)
+    }
+
+    #[test]
+    fn light_colours_worked_out_by_the_solve_place_as_those_worked_out_on_landing() {
+        let colors = [pack(LinearRgba::BLUE)];
+        let (light, own) = light_seeing_two_colors();
+        // Its solid voxel is a lamp of the list's one material.
+        let emitter = crate::light::color::Emitter {
+            level: 12,
+            material: 0,
+        };
+        let inputs = LightInputs {
+            occupancy: light.inputs.occupancy.clone(),
+            emissive: vec![EmissiveVoxel::new(16, 16, 16, emitter)].into(),
+            columns: ColumnAnswer::none(),
+            ring: false,
+        };
+        let light = Arc::new(ChunkLight {
+            inputs: Arc::new(inputs),
+            sky: light.sky.clone(),
+            voxel: light.voxel.clone(),
+            color: light.color.clone(),
+            borders: light.borders.clone(),
+            precision: light.precision,
+        });
+        let own = FacesSee { lamp: true, ..own };
+        let placed = |own_colors: Option<OwnColors>| {
+            let mut route = route();
+            route.set_light_colors(Some(&colors));
+            let entity = Entity::from_raw_u32(1).unwrap();
+            let key = in_world(IVec3::ZERO);
+            route.light_landed(key, entity, light.clone(), own, None, own_colors, true);
+            route.show(entity, key, false);
+            let (entry, tag) = entry_of(&route, entity);
+            let slot = u32::from(entry & 0x3FFF);
+            let bytes = route.queued_color_upload(slot).map(<[u8]>::to_vec);
+            (tag, entry, bytes)
+        };
+        let on_landing = placed(None);
+        assert!(on_landing.2.is_some(), "the chunk takes a colour slot");
+        assert_eq!(placed(Some(OwnColors::of(&light, &colors))), on_landing);
     }
 
     /// The entry the slot of the chunk `entity` holds, and its tag.
@@ -3360,7 +3435,7 @@ mod tests {
         for x in [20, 22] {
             let entity = Entity::from_raw_u32(100 + x).unwrap();
             let key = in_world(IVec3::new(x as i32, 0, 0));
-            route.light_landed(key, entity, light.clone(), own, None, true);
+            route.light_landed(key, entity, light.clone(), own, None, None, true);
             route.show(entity, key, false);
             assert_eq!(entry_of(&route, entity).0 >> 14, 3);
         }
