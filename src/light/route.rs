@@ -104,11 +104,35 @@
 //!
 //! A solve, in a chunk task or a relight task, turns the solver's bit planes
 //! into a slot's bytes for a chunk whose own voxels already call for a slot.
-//! When the light lands on the main thread, a chunk showing its mesh gets its
-//! slot, its shell and its tag, and the bytes are queued. A chunk whose mesh
-//! isn't shown yet keeps them until it is. A chunk that needed no slot takes
-//! one later if a neighbour's plane stops matching its levels, and one whose
+//! In a coloured world it also works out the light colours its own voxels
+//! show, and its colour slot's bytes when they show more than one. When the
+//! light lands on the main thread, a chunk showing its mesh gets its slot,
+//! its shell and its tag, and the bytes are queued. A chunk whose mesh isn't
+//! shown yet keeps them until it is. A chunk that needed no slot takes one
+//! later if a neighbour's plane stops matching its levels, and one whose
 //! faces come to see one level gives its slot back.
+//!
+//! Landing light writes a slot whole, and makes the six neighbours write the
+//! plane in front of it. So that neither builds a plane from voxels on the
+//! main thread again and again:
+//!
+//! - **The solve builds its chunk's border planes**, on each face, with
+//!   their hashes, and its border colours in a coloured world: see
+//!   [`ChunkBorders`]. A neighbour following the landing compares the hash
+//!   with its shell's and takes the plane only if it differs. Light that
+//!   lands without them, such as a light entry's, has its planes built on
+//!   the main thread as before.
+//! - **A slot keeps the planes in its shell**, each with the neighbour light
+//!   it came from, held weakly. Landed light never changes, so while a
+//!   neighbour holds the same light, writing the slot whole again copies the
+//!   plane it kept. The copies cost a slot's six planes of CPU memory, and
+//!   the colour slot's six as well; a chunk drops them with its slot, and
+//!   its colour planes with its colour slot or a change of light colours.
+//! - **A neighbour reads nothing again across a face that didn't change.**
+//!   When light lands on the same voxels as the light before it, with the
+//!   same border plane hashes on a face (and the same border colours in a
+//!   coloured world), what the neighbour there reads across it is what it
+//!   read before, so [`across`] isn't worked out again.
 //!
 //! The texture is made when the first chunk takes a slot, so a world whose
 //! chunks all see one level holds none. Which slots are free, and which
@@ -271,6 +295,9 @@ pub(crate) struct SlotCounters {
     pub planes_built: u64,
     /// Colour shell planes built on the main thread from a neighbour's light.
     pub color_planes_built: u64,
+    /// Times a chunk's faces were read across one face again, after its
+    /// neighbour there landed light: see [`across`].
+    pub faces_read: u64,
     /// The most slots held at once.
     pub peak_held: u64,
     /// Colour slots given to chunks, counting late ones and evictions.
@@ -356,6 +383,9 @@ struct RouteChunk {
     /// Each colour shell plane last built for the colour slot, by [`Face`],
     /// with the light it was built from.
     color_planes: [Option<BuiltPlane>; 6],
+    /// The hashes of the border planes its light last landed with, if its
+    /// solve built them.
+    border_hashes: Option<BorderHashes>,
     tag: u32,
 }
 
@@ -381,6 +411,40 @@ impl BuiltPlane {
     /// Whether it was built from `light`.
     fn is_from(&self, light: &Arc<ChunkLight>) -> bool {
         std::ptr::eq(self.from.as_ptr(), Arc::as_ptr(light))
+    }
+}
+
+/// The hashes of a chunk's border planes, as [`ChunkBorders`] holds them.
+struct BorderHashes {
+    precision: LightPrecision,
+    levels: [u64; 6],
+    colors: Option<[u64; 6]>,
+}
+
+impl BorderHashes {
+    fn of(borders: &ChunkBorders) -> Self {
+        Self {
+            precision: borders.precision,
+            levels: borders.levels.each_ref().map(|plane| plane.hash),
+            colors: borders
+                .colors
+                .as_ref()
+                .map(|colors| colors.each_ref().map(|plane| plane.hash)),
+        }
+    }
+
+    /// Whether `now` holds what these hashes held on `face`, in a world
+    /// that's `colored` or not: its levels, and its light colours if it's
+    /// coloured. Both must have been built for a world as coloured as it is
+    /// now.
+    fn same_on(&self, now: &BorderHashes, face: Face, colored: bool) -> bool {
+        let face = face as usize;
+        let colors = match (self.colors, now.colors) {
+            (Some(before), Some(now)) => colored && before[face] == now[face],
+            (None, None) => !colored,
+            _ => false,
+        };
+        self.precision == now.precision && self.levels[face] == now.levels[face] && colors
     }
 }
 
@@ -1087,11 +1151,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 }
             }
         }
+        let hashes = borders.as_ref().map(BorderHashes::of);
         let chunk = self.chunks.get_mut(&id).unwrap();
+        // The faces whose neighbours read what they read before: the same
+        // voxels, with the same border planes.
+        let unchanged = match (&chunk.border_hashes, &hashes) {
+            (Some(before), Some(now)) if !first => {
+                Face::ALL.map(|face| before.same_on(now, face, colored))
+            }
+            _ => [false; 6],
+        };
         chunk.light = Some(light.clone());
         chunk.own = own;
         chunk.bytes = bytes;
         chunk.color_bytes = color_bytes;
+        chunk.border_hashes = hashes;
         #[cfg(not(feature = "sub_grids"))]
         self.at.insert(key, id);
         #[cfg(feature = "sub_grids")]
@@ -1111,7 +1185,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
         self.settle(id, None);
         self.following = borders.map(|borders| (light.clone(), borders));
-        self.neighbours_follow(key, &light);
+        self.neighbours_follow(key, &light, unchanged);
         self.following = None;
     }
 
@@ -1189,7 +1263,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.entries.insert(key, light.clone());
         #[cfg(feature = "sub_grids")]
         self.tag_map_touch(key);
-        self.neighbours_follow(key, &light);
+        self.neighbours_follow(key, &light, [false; 6]);
     }
 
     /// Forgets the light entry at `key`. The shells beside it keep its
@@ -1203,8 +1277,15 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// Brings what the face neighbours on its grid of the chunk or light
     /// entry at `key` read across their faces in line with its new `light`,
-    /// and their shells and tags with it.
-    fn neighbours_follow(&mut self, key: GridKey, light: &Arc<ChunkLight>) {
+    /// and their shells and tags with it. The neighbours across the faces
+    /// set in `unchanged` read nothing new there, since the voxels and the
+    /// border planes on those faces are what they read before.
+    fn neighbours_follow(
+        &mut self,
+        key: GridKey,
+        light: &Arc<ChunkLight>,
+        unchanged: [bool; 6],
+    ) {
         let colored = self.is_colored();
         for face in Face::ALL {
             let Some(&neighbour) = self.at.get(&(key + face.offset())) else {
@@ -1217,6 +1298,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             let Some(neighbour_light) = &chunk.light else {
                 continue;
             };
+            if unchanged[face as usize] {
+                self.settle(neighbour, Some(back));
+                continue;
+            }
+            self.counters.faces_read += 1;
             chunk.across[back as usize] = across(
                 &neighbour_light.inputs,
                 back,
@@ -2588,6 +2674,7 @@ impl RouteChunk {
             color_slot: None,
             color_shell: [None; 6],
             color_planes: Default::default(),
+            border_hashes: None,
             tag: 0,
         }
     }
@@ -3260,6 +3347,86 @@ mod tests {
         route.light_landed(in_world(IVec3::ZERO), origin, open, own, slot, true);
         assert_eq!(route.counters.planes_built, built);
         assert_eq!(route.counters.plane_writes, writes + 1);
+    }
+
+    /// `light` with its levels and colours, on the same inputs, with voxel
+    /// light at `voxel` everywhere.
+    fn relit(light: &ChunkLight, voxel: u8) -> Arc<ChunkLight> {
+        Arc::new(ChunkLight {
+            inputs: light.inputs.clone(),
+            sky: light.sky.clone(),
+            voxel: ChunkLevels::Uniform(voxel),
+            color: light.color.clone(),
+            borders: light.borders.clone(),
+            precision: light.precision,
+        })
+    }
+
+    /// Lands `light` for the chunk `entity` at `key` with the border planes
+    /// its solve would build.
+    fn land_with_borders(
+        route: &mut LightRoute<DefaultWorld>,
+        key: GridKey,
+        entity: Entity,
+        light: Arc<ChunkLight>,
+    ) {
+        let own = own_faces_see(&light);
+        let slot = SlotParts {
+            borders: Some(ChunkBorders::of(&light, None)),
+            ..default()
+        };
+        route.light_landed(key, entity, light, own, slot, true);
+    }
+
+    /// The light of a chunk whose voxels at x = 0 and x = 31 below y = 16
+    /// are solid, under full sky light.
+    fn walled_light() -> Arc<ChunkLight> {
+        let precision = LightPropagation::default().precision;
+        let mut occupancy = Occupancy::Open;
+        for x in [0, 31] {
+            for y in 0..16 {
+                for z in 0..32 {
+                    occupancy.set(x, y, z, true);
+                }
+            }
+        }
+        occupancy.normalize();
+        Arc::new(ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Default::default(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Uniform(precision.top()),
+            voxel: ChunkLevels::Uniform(0),
+            color: Default::default(),
+            borders: Default::default(),
+            precision,
+        })
+    }
+
+    #[test]
+    fn a_landing_on_the_same_voxels_reads_again_only_across_faces_whose_border_changed() {
+        let light = walled_light();
+        let (mut route, [origin, _]) = two_shown(&(light.clone(), own_faces_see(&light)));
+        let key = in_world(IVec3::ZERO);
+        land_with_borders(&mut route, key, origin, relit(&light, 0));
+        let reads = route.counters.faces_read;
+
+        // The same voxels and border: the neighbour's faces read nothing new.
+        land_with_borders(&mut route, key, origin, relit(&light, 0));
+        assert_eq!(route.counters.faces_read, reads);
+
+        // A new border: the neighbour reads it.
+        land_with_borders(&mut route, key, origin, relit(&light, 3));
+        assert_eq!(route.counters.faces_read, reads + 1);
+        let beside = &route.chunks[&RouteId::Entity(Entity::from_raw_u32(2).unwrap())];
+        assert_eq!(beside.across[Face::NegX as usize].voxel, Seen::One(3));
+
+        // New voxels with the same border: it reads them.
+        land_with_borders(&mut route, key, origin, relit(&walled_light(), 3));
+        assert_eq!(route.counters.faces_read, reads + 2);
     }
 
     #[test]
