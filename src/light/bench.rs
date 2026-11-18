@@ -487,6 +487,11 @@ pub struct LightStats {
     /// The bytes coarse chunks keep now as copies of their slots and colour
     /// slots.
     pub coarse_copy_bytes: u64,
+    /// The bytes level-0 chunks keep now as copies of their shell planes.
+    pub shell_copy_bytes: u64,
+    /// Shell planes and colour shell planes built on the main thread from a
+    /// neighbour's light, rather than taken from a solve or a copy.
+    pub planes_built: u64,
     /// Solves that seeded sky fill.
     pub fill_seeded: u64,
     /// Time solves spent seeding sky fill, in milliseconds.
@@ -610,6 +615,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         late_allocations: slots.late_allocations,
         slots_given_back: slots.given_back,
         evictions: slots.evictions,
+        planes_built: slots.planes_built + slots.color_planes_built,
         plane_writes: slots.plane_writes,
         full_writes: slots.full_writes,
         emissive_scans: counters.emissive_scans.load(Ordering::Relaxed),
@@ -643,6 +649,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         coarse_solve_ms: ms(&counters.coarse_nanos),
         coarse_lookups: counters.coarse_lookups.load(Ordering::Relaxed),
         coarse_copy_bytes: route.map_or(0, |route| route.coarse_copy_bytes() as u64),
+        shell_copy_bytes: route.map_or(0, |route| route.shell_copy_bytes() as u64),
         fill_seeded: counters.fill_seeded.load(Ordering::Relaxed),
         fill_seed_ms: ms(&counters.fill_seed_nanos),
         fill_relights: counters.fill_relights.load(Ordering::Relaxed),

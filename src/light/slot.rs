@@ -242,6 +242,17 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
     }
 }
 
+/// What a solve works out for its chunk's slot off the main thread, for
+/// landing to place.
+#[derive(Default)]
+pub(crate) struct SlotParts {
+    /// The bytes of the slot, with the shell at 0, for a chunk whose own
+    /// voxels call for a slot: see [`slot_bytes`].
+    pub bytes: Option<Box<[u8]>>,
+    /// In a coloured world, the light colours of the chunk's own voxels.
+    pub own_colors: Option<OwnColors>,
+}
+
 /// What a solve in a coloured world works out about the light colours of its
 /// chunk's own voxels, so that landing its light doesn't.
 pub(crate) struct OwnColors {

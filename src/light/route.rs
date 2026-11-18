@@ -200,8 +200,8 @@ use super::slot::{
     cell_index, color_slot_bytes, color_texel_at, colors_seen, convert_texels,
     count_colors, most_common, most_common_open, open_colors_seen, open_voxels,
     open_voxels_see, own_colors_seen, shell_cell, slot_bytes, texel_at, texel_bytes,
-    texel_levels, texture_format, touching_open, write_shell, FacesSee, OwnColors, Seen,
-    ShellPlane, COLOR_TEXEL_BYTES, PLANE_TEXELS,
+    texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen, ShellPlane,
+    SlotParts, COLOR_TEXEL_BYTES, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -1041,12 +1041,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         entity: Entity,
         light: Arc<ChunkLight>,
         own: FacesSee,
-        bytes: Option<Box<[u8]>>,
-        own_colors: Option<OwnColors>,
+        slot: SlotParts,
         new_voxels: bool,
     ) {
         let id = RouteId::Entity(entity);
-        self.landed(id, key, light, own, bytes, own_colors, new_voxels);
+        self.landed(id, key, light, own, slot, new_voxels);
     }
 
     /// Takes the light that landed for the level-0 chunk `id` at `key`, as
@@ -1057,10 +1056,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         key: GridKey,
         light: Arc<ChunkLight>,
         own: FacesSee,
-        bytes: Option<Box<[u8]>>,
-        own_colors: Option<OwnColors>,
+        slot: SlotParts,
         new_voxels: bool,
     ) {
+        let SlotParts { bytes, own_colors } = slot;
         // A voxel edit gives a chunk new inputs without a chunk task.
         let first = !self.chunks.get(&id).is_some_and(|chunk| {
             chunk
@@ -3042,7 +3041,7 @@ mod tests {
     use crate::light::inputs::{EmissiveVoxel, LightInputs, Occupancy};
     use crate::light::kernel::Plane;
     use crate::light::sky::ColumnAnswer;
-    use crate::light::slot::own_faces_see;
+    use crate::light::slot::{own_faces_see, OwnColors};
     use crate::light::slot_pool::texture_shape;
     use crate::light::view::in_world;
 
@@ -3116,7 +3115,14 @@ mod tests {
         let entities = [1, 2].map(|i| Entity::from_raw_u32(i).unwrap());
         for (entity, x) in entities.iter().zip([0, 1]) {
             let key = in_world(IVec3::new(x, 0, 0));
-            route.light_landed(key, *entity, light.0.clone(), light.1, None, None, true);
+            route.light_landed(
+                key,
+                *entity,
+                light.0.clone(),
+                light.1,
+                SlotParts::default(),
+                true,
+            );
             route.show(*entity, key, false);
         }
         (route, entities)
@@ -3131,7 +3137,14 @@ mod tests {
 
         // The origin's faces come to see one level, so it gives its slot up.
         let (open, own) = open_sky_light();
-        route.light_landed(in_world(IVec3::ZERO), origin, open, own, None, None, true);
+        route.light_landed(
+            in_world(IVec3::ZERO),
+            origin,
+            open,
+            own,
+            SlotParts::default(),
+            true,
+        );
         assert_eq!(route.chunks[&RouteId::Entity(origin)].slot, None);
         assert_eq!(route.shell_copy_bytes(), plane);
 
@@ -3148,13 +3161,27 @@ mod tests {
         // keeps the plane facing its unchanged neighbour, and the neighbour
         // builds the plane facing the origin's new light.
         let (light, own) = light_needing_a_slot();
-        route.light_landed(in_world(IVec3::ZERO), origin, light, own, None, None, true);
+        route.light_landed(
+            in_world(IVec3::ZERO),
+            origin,
+            light,
+            own,
+            SlotParts::default(),
+            true,
+        );
         assert_eq!(route.counters.planes_built, built + 1);
 
         // The neighbour's light lands again: its whole write keeps the plane
         // it just built, and the origin builds the one facing it.
         let (light, own) = light_needing_a_slot();
-        route.light_landed(in_world(IVec3::X), beside, light, own, None, None, true);
+        route.light_landed(
+            in_world(IVec3::X),
+            beside,
+            light,
+            own,
+            SlotParts::default(),
+            true,
+        );
         assert_eq!(route.counters.planes_built, built + 2);
     }
 
@@ -3164,11 +3191,18 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let world = in_world(IVec3::ZERO);
         let entity = Entity::from_raw_u32(1).unwrap();
-        route.light_landed(world, entity, light.clone(), own, None, None, true);
+        route.light_landed(
+            world,
+            entity,
+            light.clone(),
+            own,
+            SlotParts::default(),
+            true,
+        );
         // A chunk with no entity, far from the world chunk.
         let far = in_world(IVec3::new(5, 0, 0));
         let id = RouteId::Key(far);
-        route.landed(id, far, light.clone(), own, None, None, true);
+        route.landed(id, far, light.clone(), own, SlotParts::default(), true);
         assert_eq!(route.slots.held(), 0);
 
         route.keep(id, far, true);
@@ -3319,7 +3353,7 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let holder = Entity::from_raw_u32(1).unwrap();
         let near = in_world(IVec3::ZERO);
-        route.light_landed(near, holder, light, own, None, None, true);
+        route.light_landed(near, holder, light, own, SlotParts::default(), true);
         assert_ne!(route.show(holder, near, false) & HAS_SLOT, 0);
         // An air chunk with no mesh, farther from the camera than the holder.
         let air = Entity::from_raw_u32(2).unwrap();
@@ -3330,8 +3364,7 @@ mod tests {
             air,
             air_light.clone(),
             own_faces_see(&air_light),
-            None,
-            None,
+            SlotParts::default(),
             true,
         );
         let body = body_in(IVec3::new(3, 0, 0));
@@ -3364,7 +3397,7 @@ mod tests {
         let (light, own) = light_needing_a_slot();
         let holder = Entity::from_raw_u32(1).unwrap();
         let far = in_world(IVec3::new(5, 0, 0));
-        route.light_landed(far, holder, light, own, None, None, true);
+        route.light_landed(far, holder, light, own, SlotParts::default(), true);
         assert_ne!(route.show(holder, far, false) & HAS_SLOT, 0);
         let air = Entity::from_raw_u32(2).unwrap();
         let near = in_world(IVec3::X);
@@ -3374,8 +3407,7 @@ mod tests {
             air,
             air_light.clone(),
             own_faces_see(&air_light),
-            None,
-            None,
+            SlotParts::default(),
             true,
         );
 
@@ -3418,7 +3450,7 @@ mod tests {
         assert!(!own.needs_slot());
         let entity = Entity::from_raw_u32(1).unwrap();
         let key = in_world(IVec3::X);
-        route.light_landed(key, entity, light, own, None, None, true);
+        route.light_landed(key, entity, light, own, SlotParts::default(), true);
         let flat = route.show(entity, key, false);
         assert_eq!(flat, tag_levels(9, 0, LightPrecision::Steps16));
 
@@ -3523,7 +3555,14 @@ mod tests {
             .collect();
         for (i, entity) in entities.iter().enumerate().rev() {
             let key = in_world(IVec3::new(2 * i as i32, 0, 0));
-            route.light_landed(key, *entity, light.clone(), own, None, None, true);
+            route.light_landed(
+                key,
+                *entity,
+                light.clone(),
+                own,
+                SlotParts::default(),
+                true,
+            );
             route.show(*entity, key, false);
         }
         (route, entities)
@@ -3538,7 +3577,7 @@ mod tests {
         let keys = [IVec3::ZERO, IVec3::X].map(in_world);
         for (entity, key) in entities.iter().zip(keys) {
             let (light, own) = light_seeing_two_colors();
-            route.light_landed(key, *entity, light, own, None, None, true);
+            route.light_landed(key, *entity, light, own, SlotParts::default(), true);
             route.show(*entity, key, false);
         }
         let built = route.counters.color_planes_built;
@@ -3546,13 +3585,13 @@ mod tests {
         // The origin's whole write keeps the colour plane facing its
         // unchanged neighbour; the neighbour builds the one facing the origin.
         let (light, own) = light_seeing_two_colors();
-        route.light_landed(keys[0], entities[0], light, own, None, None, true);
+        route.light_landed(keys[0], entities[0], light, own, SlotParts::default(), true);
         assert_eq!(route.counters.color_planes_built, built + 1);
 
         // Colour planes hold emissive voxels' colours from the list.
         route.set_light_colors(Some(&[pack(LinearRgba::BLUE)]));
         let (light, own) = light_seeing_two_colors();
-        route.light_landed(keys[0], entities[0], light, own, None, None, true);
+        route.light_landed(keys[0], entities[0], light, own, SlotParts::default(), true);
         assert_eq!(route.counters.color_planes_built, built + 3);
     }
 
@@ -3585,7 +3624,17 @@ mod tests {
             route.set_light_colors(Some(&colors));
             let entity = Entity::from_raw_u32(1).unwrap();
             let key = in_world(IVec3::ZERO);
-            route.light_landed(key, entity, light.clone(), own, None, own_colors, true);
+            route.light_landed(
+                key,
+                entity,
+                light.clone(),
+                own,
+                SlotParts {
+                    bytes: None,
+                    own_colors,
+                },
+                true,
+            );
             route.show(entity, key, false);
             let (entry, tag) = entry_of(&route, entity);
             let slot = u32::from(entry & 0x3FFF);
@@ -3653,7 +3702,14 @@ mod tests {
         for x in [20, 22] {
             let entity = Entity::from_raw_u32(100 + x).unwrap();
             let key = in_world(IVec3::new(x as i32, 0, 0));
-            route.light_landed(key, entity, light.clone(), own, None, None, true);
+            route.light_landed(
+                key,
+                entity,
+                light.clone(),
+                own,
+                SlotParts::default(),
+                true,
+            );
             route.show(entity, key, false);
             assert_eq!(entry_of(&route, entity).0 >> 14, 3);
         }

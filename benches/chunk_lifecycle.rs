@@ -2183,6 +2183,11 @@ fn scenario_lod_scale() -> Metrics {
         stats.coarse_copy_bytes as f64 / (1024.0 * 1024.0),
     );
     put(
+        "shell_copy_mib",
+        stats.shell_copy_bytes as f64 / (1024.0 * 1024.0),
+    );
+    put("main_planes_built", stats.planes_built as f64);
+    put(
         "cpu_light_mib",
         stats.light_bytes as f64 / (1024.0 * 1024.0),
     );

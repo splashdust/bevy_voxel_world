@@ -85,7 +85,7 @@ use super::inputs::{EmissiveVoxel, LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
-use super::slot::{own_faces_see, slot_bytes, FacesSee, OwnColors};
+use super::slot::{own_faces_see, slot_bytes, FacesSee, OwnColors, SlotParts};
 use super::view::{world_position, LightView, Missing, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::grid::{GridId, GridKey};
@@ -409,12 +409,9 @@ pub(crate) struct Solved {
     /// In a world showing its light, what the chunk's faces read from its
     /// own voxels.
     pub own: FacesSee,
-    /// The bytes of the chunk's slot, in a world showing its light, for a
-    /// chunk whose own voxels already call for a slot.
-    pub bytes: Option<Box<[u8]>>,
-    /// In a coloured world showing its light, the light colours of the
-    /// chunk's own voxels.
-    pub own_colors: Option<OwnColors>,
+    /// In a world showing its light, what the solve worked out for the
+    /// chunk's slot.
+    pub slot: SlotParts,
     /// What a chunk task found out about the chunk's columns, with sky light
     /// on. A relight finds nothing.
     pub sky: Option<SkyFound>,
@@ -540,12 +537,8 @@ pub(crate) struct KeptLight {
     /// In a world showing its light, what the chunk's faces read from its
     /// own voxels.
     pub own: FacesSee,
-    /// The bytes of the chunk's slot, for a chunk whose own voxels call for
-    /// one.
-    pub bytes: Option<Box<[u8]>>,
-    /// In a coloured world showing its light, the light colours of the
-    /// chunk's own voxels.
-    pub own_colors: Option<OwnColors>,
+    /// What the task worked out for the chunk's slot.
+    pub slot: SlotParts,
     pub edit_frame: u64,
 }
 
@@ -556,13 +549,11 @@ impl<I> KeptTask<I> {
         } else {
             FacesSee::default()
         };
-        let bytes = own.needs_slot().then(|| slot_bytes(&self.light));
-        let own_colors = own_colors(&self.settings, &self.light);
+        let slot = slot_parts(&self.settings, &self.light, &own);
         KeptLight {
             light: self.light,
             own,
-            bytes,
-            own_colors,
+            slot,
             edit_frame: self.edit_frame,
         }
     }
@@ -771,16 +762,14 @@ fn solve<I>(
     } else {
         FacesSee::default()
     };
-    let bytes = own.needs_slot().then(|| slot_bytes(&light));
-    let own_colors = own_colors(settings, &light);
+    let slot = slot_parts(settings, &light, &own);
     Solved {
         light,
         faces,
         seen,
         reaches,
         own,
-        bytes,
-        own_colors,
+        slot,
         sky: None,
         own_edits: 0,
         edit_frame: 0,
@@ -793,14 +782,25 @@ fn solve<I>(
     }
 }
 
-/// The light colours of the own voxels of the chunk lit by `light`, in a
-/// coloured world showing its light.
-fn own_colors<I>(
+/// What a solve works out for the slot of the chunk lit by `light`, whose
+/// own voxels read `own`, in a world showing its light: nothing in any other
+/// world.
+fn slot_parts<I>(
     settings: &LightTaskSettings<I>,
     light: &ChunkLight,
-) -> Option<OwnColors> {
-    (settings.routed && settings.emission.is_colored())
-        .then(|| OwnColors::of(light, settings.emission.colors()))
+    own: &FacesSee,
+) -> SlotParts {
+    if !settings.routed {
+        return SlotParts::default();
+    }
+    let colors = settings
+        .emission
+        .is_colored()
+        .then(|| settings.emission.colors());
+    SlotParts {
+        bytes: own.needs_slot().then(|| slot_bytes(light)),
+        own_colors: colors.map(|colors| OwnColors::of(light, colors)),
+    }
 }
 
 thread_local! {
