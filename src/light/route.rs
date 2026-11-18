@@ -171,7 +171,6 @@ use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::system::EntityCommands;
 use bevy::mesh::MeshTag;
 use bevy::platform::collections::{HashMap, HashSet};
-use bevy::platform::hash::FixedHasher;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::{
@@ -185,7 +184,6 @@ use bevy::render::{
     texture::GpuImage,
     ExtractSchedule, MainWorld, Render, RenderApp, RenderSystems,
 };
-use std::hash::BuildHasher;
 
 use super::coarse::{takes_coarse_path, CoarseColor};
 use super::color::{color_slot_entry, tag_cut, unpack, MAX_COLOR_SLOTS, WHITE};
@@ -200,8 +198,8 @@ use super::slot::{
     cell_index, color_slot_bytes, color_texel_at, colors_seen, convert_texels,
     count_colors, most_common, most_common_open, open_colors_seen, open_voxels,
     open_voxels_see, own_colors_seen, shell_cell, slot_bytes, texel_at, texel_bytes,
-    texel_levels, texture_format, touching_open, write_shell, FacesSee, Seen, ShellPlane,
-    SlotParts, COLOR_TEXEL_BYTES, PLANE_TEXELS,
+    texel_levels, texture_format, touching_open, write_shell, BorderPlane, ChunkBorders,
+    FacesSee, Seen, ShellPlane, SlotParts, COLOR_TEXEL_BYTES, PLANE_TEXELS,
 };
 use super::slot_pool::{Holders, SlotPool};
 use super::solver::{ChunkLevels, ChunkLight};
@@ -361,8 +359,7 @@ struct RouteChunk {
     tag: u32,
 }
 
-/// A shell plane, its hash, and the light of the neighbour it was built
-/// from.
+/// A shell plane in a slot, with the light of the neighbour it came from.
 ///
 /// A neighbour's light never changes once it has landed: new light lands as
 /// a new `ChunkLight`. So while the neighbour still holds the same light, the
@@ -370,17 +367,14 @@ struct RouteChunk {
 /// place in memory can't be taken by newer light while it's held.
 struct BuiltPlane {
     from: Weak<ChunkLight>,
-    plane: Box<ShellPlane>,
-    hash: u64,
+    plane: BorderPlane,
 }
 
 impl BuiltPlane {
-    fn new(from: &Arc<ChunkLight>, plane: Box<ShellPlane>) -> Self {
-        let hash = FixedHasher.hash_one(&plane[..]);
+    fn new(from: &Arc<ChunkLight>, plane: BorderPlane) -> Self {
         Self {
             from: Arc::downgrade(from),
             plane,
-            hash,
         }
     }
 
@@ -496,6 +490,9 @@ pub(crate) struct LightRoute<C> {
     /// yet.
     unlit_sky: u8,
     pub counters: SlotCounters,
+    /// While the face neighbours of a chunk whose light just landed follow
+    /// it: that light, and the border planes its solve built.
+    following: Option<(Arc<ChunkLight>, ChunkBorders)>,
     /// The cells of the world's sky fill field, which a kept chunk of air
     /// with no solid in its padding shows where they're brighter than its
     /// own light.
@@ -608,6 +605,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             poses: HashMap::default(),
             unlit_sky: sky,
             counters: SlotCounters::default(),
+            following: None,
             fill_cells: FillCells::default(),
             #[cfg(feature = "sub_grids")]
             tag_map: None,
@@ -1059,7 +1057,11 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         slot: SlotParts,
         new_voxels: bool,
     ) {
-        let SlotParts { bytes, own_colors } = slot;
+        let SlotParts {
+            bytes,
+            own_colors,
+            borders,
+        } = slot;
         // A voxel edit gives a chunk new inputs without a chunk task.
         let first = !self.chunks.get(&id).is_some_and(|chunk| {
             chunk
@@ -1108,7 +1110,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             self.chunks.get_mut(&id).unwrap().across = across;
         }
         self.settle(id, None);
+        self.following = borders.map(|borders| (light.clone(), borders));
         self.neighbours_follow(key, &light);
+        self.following = None;
     }
 
     /// Makes the level-0 chunk `id` at `key` place its light while `kept`,
@@ -1348,7 +1352,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .values()
             .flat_map(|chunk| chunk.planes.iter().chain(&chunk.color_planes))
             .flatten()
-            .map(|built| built.plane.len())
+            .map(|built| built.plane.plane.len())
             .sum()
     }
 
@@ -1910,10 +1914,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .is_some_and(|built| built.is_from(&neighbour))
             {
                 let plane = border_plane(&neighbour, face.opposite(), precision);
-                *built = Some(BuiltPlane::new(&neighbour, plane));
+                *built = Some(BuiltPlane::new(&neighbour, BorderPlane::new(plane)));
                 self.counters.planes_built += 1;
             }
-            let built = built.as_ref().unwrap();
+            let built = &built.as_ref().unwrap().plane;
             write_shell(&mut bytes, face, Some(&built.plane), texel_bytes(precision));
             shell[face as usize] = Some(built.hash);
         }
@@ -1929,20 +1933,23 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
-        let precision = self.precision;
-        let chunk = self.chunks.get_mut(&id).unwrap();
-        let built = &mut chunk.planes[face as usize];
-        if built
+        if self.chunks[&id].planes[face as usize]
             .as_ref()
             .is_some_and(|built| built.is_from(&neighbour))
         {
             return;
         }
-        let plane = border_plane(&neighbour, face.opposite(), precision);
-        self.counters.planes_built += 1;
-        let new = BuiltPlane::new(&neighbour, plane.clone());
-        let hash = Some(new.hash);
-        *built = Some(new);
+        let precision = self.precision;
+        let given = self
+            .following_borders(&neighbour)
+            .map(|borders| borders.levels[face.opposite() as usize].clone());
+        let plane = given.unwrap_or_else(|| {
+            self.counters.planes_built += 1;
+            BorderPlane::new(border_plane(&neighbour, face.opposite(), precision))
+        });
+        let hash = Some(plane.hash);
+        let chunk = self.chunks.get_mut(&id).unwrap();
+        chunk.planes[face as usize] = Some(BuiltPlane::new(&neighbour, plane.clone()));
         let shell = &mut chunk.shell[face as usize];
         if *shell == hash {
             return;
@@ -1953,8 +1960,8 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             &mut self.uploads,
             slot,
             face,
-            plane,
-            texel_bytes(self.precision),
+            Box::from(&plane.plane[..]),
+            texel_bytes(precision),
         );
     }
 
@@ -1996,10 +2003,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 .is_some_and(|built| built.is_from(&neighbour))
             {
                 let plane = border_colors(&neighbour, face.opposite(), lamp_color);
-                *built = Some(BuiltPlane::new(&neighbour, plane));
+                *built = Some(BuiltPlane::new(&neighbour, BorderPlane::new(plane)));
                 self.counters.color_planes_built += 1;
             }
-            let built = built.as_ref().unwrap();
+            let built = &built.as_ref().unwrap().plane;
             write_shell(&mut bytes, face, Some(&built.plane), COLOR_TEXEL_BYTES);
             shell[face as usize] = Some(built.hash);
         }
@@ -2020,14 +2027,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         {
             return;
         }
-        let plane = border_colors(&neighbour, face.opposite(), |material| {
-            self.lamp_color(material)
+        let given = self
+            .following_borders(&neighbour)
+            .and_then(|borders| borders.colors.as_ref())
+            .map(|colors| colors[face.opposite() as usize].clone());
+        let plane = given.unwrap_or_else(|| {
+            self.counters.color_planes_built += 1;
+            let plane = border_colors(&neighbour, face.opposite(), |material| {
+                self.lamp_color(material)
+            });
+            BorderPlane::new(plane)
         });
-        self.counters.color_planes_built += 1;
-        let new = BuiltPlane::new(&neighbour, plane.clone());
-        let hash = Some(new.hash);
+        let hash = Some(plane.hash);
         let chunk = self.chunks.get_mut(&id).unwrap();
-        chunk.color_planes[face as usize] = Some(new);
+        chunk.color_planes[face as usize] =
+            Some(BuiltPlane::new(&neighbour, plane.clone()));
         let shell = &mut chunk.color_shell[face as usize];
         if *shell == hash {
             return;
@@ -2037,9 +2051,20 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             &mut self.color_uploads,
             slot,
             face,
-            plane,
+            Box::from(&plane.plane[..]),
             COLOR_TEXEL_BYTES,
         );
+    }
+
+    /// The border planes of `light`, if it's the light whose neighbours are
+    /// following it and its solve built them at the route's precision.
+    fn following_borders(&self, light: &Arc<ChunkLight>) -> Option<&ChunkBorders> {
+        self.following
+            .as_ref()
+            .filter(|(following, borders)| {
+                Arc::ptr_eq(following, light) && borders.precision == self.precision
+            })
+            .map(|(_, borders)| borders)
     }
 
     /// A colour slot for `chunk`, `near` from the cameras: a free one, one
@@ -3185,6 +3210,58 @@ mod tests {
         assert_eq!(route.counters.planes_built, built + 2);
     }
 
+    /// The shell plane on `face` of the slot `slot`, from the bytes queued
+    /// for the whole slot.
+    fn queued_shell(route: &LightRoute<DefaultWorld>, slot: u32, face: Face) -> Vec<u8> {
+        let bytes = route
+            .queued_upload(slot)
+            .expect("the slot's bytes are queued");
+        let wide = texel_bytes(route.precision);
+        let mut plane = vec![0; PLANE_TEXELS * wide];
+        for v in 0..32 {
+            for u in 0..32 {
+                let from = cell_index(shell_cell(face, u, v)) * wide;
+                let to = (u + v * 32) * wide;
+                plane[to..to + wide].copy_from_slice(&bytes[from..from + wide]);
+            }
+        }
+        plane
+    }
+
+    #[test]
+    fn a_neighbours_shell_follows_a_landing_from_the_border_planes_its_solve_built() {
+        let (mut route, [origin, beside]) = two_shown(&light_needing_a_slot());
+        let (built, writes) = (route.counters.planes_built, route.counters.plane_writes);
+
+        // The origin comes to hold open air under full sky.
+        let (open, own) = open_sky_light();
+        let slot = SlotParts {
+            borders: Some(ChunkBorders::of(&open, None)),
+            ..default()
+        };
+        route.light_landed(in_world(IVec3::ZERO), origin, open.clone(), own, slot, true);
+
+        assert_eq!(route.counters.planes_built, built);
+        assert_eq!(route.counters.plane_writes, writes + 1);
+        let tag = route.chunks[&RouteId::Entity(beside)].tag;
+        let expected = border_plane(&open, Face::PosX, route.precision);
+        assert_eq!(
+            queued_shell(&route, tag & 0xFF_FFFF, Face::NegX),
+            &expected[..]
+        );
+
+        // The same light again: the hash matches the shell's, so nothing is
+        // built or written.
+        let (open, own) = open_sky_light();
+        let slot = SlotParts {
+            borders: Some(ChunkBorders::of(&open, None)),
+            ..default()
+        };
+        route.light_landed(in_world(IVec3::ZERO), origin, open, own, slot, true);
+        assert_eq!(route.counters.planes_built, built);
+        assert_eq!(route.counters.plane_writes, writes + 1);
+    }
+
     #[test]
     fn a_kept_chunk_takes_a_slot_with_no_mesh() {
         let mut route = route();
@@ -3630,8 +3707,8 @@ mod tests {
                 light.clone(),
                 own,
                 SlotParts {
-                    bytes: None,
                     own_colors,
+                    ..default()
                 },
                 true,
             );
@@ -3644,6 +3721,30 @@ mod tests {
         let on_landing = placed(None);
         assert!(on_landing.2.is_some(), "the chunk takes a colour slot");
         assert_eq!(placed(Some(OwnColors::of(&light, &colors))), on_landing);
+    }
+
+    #[test]
+    fn a_neighbours_colour_shell_follows_a_landing_from_the_border_colours_its_solve_built(
+    ) {
+        let colors = [pack(LinearRgba::RED)];
+        let mut route = route();
+        route.set_light_colors(Some(&colors));
+        let entities = [1, 2].map(|i| Entity::from_raw_u32(i).unwrap());
+        let keys = [IVec3::ZERO, IVec3::X].map(in_world);
+        for (entity, key) in entities.iter().zip(keys) {
+            let (light, own) = light_seeing_two_colors();
+            route.light_landed(key, *entity, light, own, SlotParts::default(), true);
+            route.show(*entity, key, false);
+        }
+        let built = route.counters.color_planes_built;
+
+        let (light, own) = light_seeing_two_colors();
+        let slot = SlotParts {
+            borders: Some(ChunkBorders::of(&light, Some(&colors))),
+            ..default()
+        };
+        route.light_landed(keys[0], entities[0], light, own, slot, true);
+        assert_eq!(route.counters.color_planes_built, built);
     }
 
     /// The entry the slot of the chunk `entity` holds, and its tag.

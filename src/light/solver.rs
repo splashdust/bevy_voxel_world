@@ -85,7 +85,9 @@ use super::inputs::{EmissiveVoxel, LightInputs, Occupancy, Rescan};
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::{LevelScale, LightLevels};
 use super::sky::{ColumnAnswer, SkyFound, SkyWalk, WalkCounters};
-use super::slot::{own_faces_see, slot_bytes, FacesSee, OwnColors, SlotParts};
+use super::slot::{
+    own_faces_see, slot_bytes, ChunkBorders, FacesSee, OwnColors, SlotParts,
+};
 use super::view::{world_position, LightView, Missing, Snapshot};
 use crate::chunk::{ChunkData, CHUNK_SIZE_I, CHUNK_SIZE_U};
 use crate::grid::{GridId, GridKey};
@@ -800,6 +802,7 @@ fn slot_parts<I>(
     SlotParts {
         bytes: own.needs_slot().then(|| slot_bytes(light)),
         own_colors: colors.map(|colors| OwnColors::of(light, colors)),
+        borders: Some(ChunkBorders::of(light, colors)),
     }
 }
 

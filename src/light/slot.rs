@@ -21,6 +21,10 @@
 //! border shows them, as [`across`], whenever either chunk's light changes. A
 //! neighbour that isn't loaded shows them nothing.
 
+use std::hash::BuildHasher;
+use std::sync::Arc;
+
+use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
@@ -251,6 +255,67 @@ pub(crate) struct SlotParts {
     pub bytes: Option<Box<[u8]>>,
     /// In a coloured world, the light colours of the chunk's own voxels.
     pub own_colors: Option<OwnColors>,
+    /// The chunk's border planes, for its face neighbours' shells.
+    pub borders: Option<ChunkBorders>,
+}
+
+/// A shell plane, shared between the solve that built it and the slots that
+/// copy it, with its hash.
+#[derive(Clone)]
+pub(crate) struct BorderPlane {
+    pub plane: Arc<ShellPlane>,
+    pub hash: u64,
+}
+
+impl BorderPlane {
+    pub fn new(plane: Box<ShellPlane>) -> Self {
+        let hash = plane_hash(&plane);
+        Self {
+            plane: plane.into(),
+            hash,
+        }
+    }
+}
+
+/// The hash of a shell plane's bytes, which tells a changed plane from an
+/// unchanged one.
+pub(crate) fn plane_hash(plane: &ShellPlane) -> u64 {
+    FixedHasher.hash_one(plane)
+}
+
+/// The planes a chunk's light puts into the shells of the chunks across its
+/// faces: on each face, its border plane, and in a coloured world its border
+/// colours, each with its hash, by [`Face`]. Its precision is the light's.
+///
+/// A solve builds them, so the main thread, landing the light, hands them to
+/// the neighbours' shells and compares hashes, building nothing.
+pub(crate) struct ChunkBorders {
+    pub precision: LightPrecision,
+    pub levels: [BorderPlane; 6],
+    pub colors: Option<[BorderPlane; 6]>,
+}
+
+impl ChunkBorders {
+    /// The border planes of `light`, with border colours if `colors`, the
+    /// packed light colour of each emissive material index, is given.
+    pub fn of(light: &ChunkLight, colors: Option<&[u16]>) -> Self {
+        let levels = Face::ALL
+            .map(|face| BorderPlane::new(border_plane(light, face, light.precision)));
+        let colors = colors.map(|colors| {
+            let lamp_color = |material: u16| {
+                colors
+                    .get(material as usize)
+                    .copied()
+                    .unwrap_or(super::color::WHITE)
+            };
+            Face::ALL.map(|face| BorderPlane::new(border_colors(light, face, lamp_color)))
+        });
+        Self {
+            precision: light.precision,
+            levels,
+            colors,
+        }
+    }
 }
 
 /// What a solve in a coloured world works out about the light colours of its
