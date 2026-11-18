@@ -163,7 +163,7 @@
 //!   changes, and read by position in the fragment shader.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
@@ -269,6 +269,10 @@ pub(crate) struct SlotCounters {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
+    /// Shell planes built on the main thread from a neighbour's light.
+    pub planes_built: u64,
+    /// Colour shell planes built on the main thread from a neighbour's light.
+    pub color_planes_built: u64,
     /// The most slots held at once.
     pub peak_held: u64,
     /// Colour slots given to chunks, counting late ones and evictions.
@@ -343,12 +347,47 @@ struct RouteChunk {
     /// A hash of each shell plane in the slot, by [`Face`], or `None` for a
     /// plane of zeros.
     shell: [Option<u64>; 6],
+    /// Each shell plane last built for the slot, by [`Face`], with the light
+    /// it was built from.
+    planes: [Option<BuiltPlane>; 6],
     /// Its colour slot, which it holds only while it holds a slot.
     color_slot: Option<u32>,
     /// A hash of each colour shell plane in the colour slot, by [`Face`], or
     /// `None` for a plane of zeros.
     color_shell: [Option<u64>; 6],
+    /// Each colour shell plane last built for the colour slot, by [`Face`],
+    /// with the light it was built from.
+    color_planes: [Option<BuiltPlane>; 6],
     tag: u32,
+}
+
+/// A shell plane, its hash, and the light of the neighbour it was built
+/// from.
+///
+/// A neighbour's light never changes once it has landed: new light lands as
+/// a new `ChunkLight`. So while the neighbour still holds the same light, the
+/// plane needn't be built again. It holds the light weakly, so the light's
+/// place in memory can't be taken by newer light while it's held.
+struct BuiltPlane {
+    from: Weak<ChunkLight>,
+    plane: Box<ShellPlane>,
+    hash: u64,
+}
+
+impl BuiltPlane {
+    fn new(from: &Arc<ChunkLight>, plane: Box<ShellPlane>) -> Self {
+        let hash = FixedHasher.hash_one(&plane[..]);
+        Self {
+            from: Arc::downgrade(from),
+            plane,
+            hash,
+        }
+    }
+
+    /// Whether it was built from `light`.
+    fn is_from(&self, light: &Arc<ChunkLight>) -> bool {
+        std::ptr::eq(self.from.as_ptr(), Arc::as_ptr(light))
+    }
 }
 
 /// A coarse chunk the route knows of.
@@ -610,6 +649,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// they show until their light lands again.
     pub fn set_light_colors(&mut self, colors: Option<&[u16]>) {
         self.light_colors = colors.map(Box::from);
+        // Colour shell planes hold emissive voxels' colours from the list.
+        for chunk in self.chunks.values_mut() {
+            chunk.color_planes = Default::default();
+        }
     }
 
     /// Whether the world's emission table holds a light colour other than
@@ -813,8 +856,10 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
             chunk.slot = None;
             chunk.shell = [None; 6];
+            chunk.planes = Default::default();
             chunk.color_slot = None;
             chunk.color_shell = [None; 6];
+            chunk.color_planes = Default::default();
             chunk.bytes = None;
             chunk.color_bytes = None;
             if starved && chunk.placed() {
@@ -1119,6 +1164,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let slot = chunk.slot.take();
         chunk.bytes = None;
         chunk.color_bytes = None;
+        chunk.planes = Default::default();
         if let Some(slot) = slot {
             self.free_slot(slot);
         }
@@ -1294,6 +1340,17 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             _ => chunk.color.entry,
         };
         Some(texel_levels(sky, voxel, self.precision).with_voxel_color(unpack(color)))
+    }
+
+    /// The bytes level-0 chunks keep as copies of the shell planes in their
+    /// slots and colour slots: see [`BuiltPlane`].
+    pub fn shell_copy_bytes(&self) -> usize {
+        self.chunks
+            .values()
+            .flat_map(|chunk| chunk.planes.iter().chain(&chunk.color_planes))
+            .flatten()
+            .map(|built| built.plane.len())
+            .sum()
     }
 
     /// The bytes coarse chunks keep as copies of their slots and colour
@@ -1528,6 +1585,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         chunk.color_bytes = None;
         if chunk.slot.is_none() {
             chunk.bytes = None;
+            chunk.planes = Default::default();
             if self.free_color_slot(id) {
                 self.counters.color_given_back += 1;
             }
@@ -1588,6 +1646,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             return false;
         };
         chunk.color_shell = [None; 6];
+        chunk.color_planes = Default::default();
         let Some(slot) = chunk.color_slot.take() else {
             return false;
         };
@@ -1838,13 +1897,26 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .bytes
             .take()
             .unwrap_or_else(|| slot_bytes(light));
+        let precision = self.precision;
         let mut shell = [None; 6];
         for face in Face::ALL {
-            if let Some(neighbour) = self.neighbour_light(key, face) {
-                let plane = border_plane(&neighbour, face.opposite(), self.precision);
-                write_shell(&mut bytes, face, Some(&plane), texel_bytes(self.precision));
-                shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
+            let neighbour = self.neighbour_light(key, face);
+            let built = &mut self.chunks.get_mut(&id).unwrap().planes[face as usize];
+            let Some(neighbour) = neighbour else {
+                *built = None;
+                continue;
+            };
+            if !built
+                .as_ref()
+                .is_some_and(|built| built.is_from(&neighbour))
+            {
+                let plane = border_plane(&neighbour, face.opposite(), precision);
+                *built = Some(BuiltPlane::new(&neighbour, plane));
+                self.counters.planes_built += 1;
             }
+            let built = built.as_ref().unwrap();
+            write_shell(&mut bytes, face, Some(&built.plane), texel_bytes(precision));
+            shell[face as usize] = Some(built.hash);
         }
         self.chunks.get_mut(&id).unwrap().shell = shell;
         self.uploads.insert(slot, Upload::Full(bytes));
@@ -1858,9 +1930,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
-        let plane = border_plane(&neighbour, face.opposite(), self.precision);
-        let hash = Some(FixedHasher.hash_one(&plane[..]));
-        let shell = &mut self.chunks.get_mut(&id).unwrap().shell[face as usize];
+        let precision = self.precision;
+        let chunk = self.chunks.get_mut(&id).unwrap();
+        let built = &mut chunk.planes[face as usize];
+        if built
+            .as_ref()
+            .is_some_and(|built| built.is_from(&neighbour))
+        {
+            return;
+        }
+        let plane = border_plane(&neighbour, face.opposite(), precision);
+        self.counters.planes_built += 1;
+        let new = BuiltPlane::new(&neighbour, plane.clone());
+        let hash = Some(new.hash);
+        *built = Some(new);
+        let shell = &mut chunk.shell[face as usize];
         if *shell == hash {
             return;
         }
@@ -1892,14 +1976,33 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             .unwrap_or_else(|| {
                 color_slot_bytes(light, |material| self.lamp_color(material))
             });
-        let lamp_color = |material| self.lamp_color(material);
+        let colors = self.light_colors.clone();
+        let lamp_color = |material: u16| {
+            colors
+                .as_ref()
+                .and_then(|colors| colors.get(material as usize).copied())
+                .unwrap_or(WHITE)
+        };
         let mut shell = [None; 6];
         for face in Face::ALL {
-            if let Some(neighbour) = self.neighbour_light(key, face) {
+            let neighbour = self.neighbour_light(key, face);
+            let built =
+                &mut self.chunks.get_mut(&id).unwrap().color_planes[face as usize];
+            let Some(neighbour) = neighbour else {
+                *built = None;
+                continue;
+            };
+            if !built
+                .as_ref()
+                .is_some_and(|built| built.is_from(&neighbour))
+            {
                 let plane = border_colors(&neighbour, face.opposite(), lamp_color);
-                write_shell(&mut bytes, face, Some(&plane), COLOR_TEXEL_BYTES);
-                shell[face as usize] = Some(FixedHasher.hash_one(&plane[..]));
+                *built = Some(BuiltPlane::new(&neighbour, plane));
+                self.counters.color_planes_built += 1;
             }
+            let built = built.as_ref().unwrap();
+            write_shell(&mut bytes, face, Some(&built.plane), COLOR_TEXEL_BYTES);
+            shell[face as usize] = Some(built.hash);
         }
         self.chunks.get_mut(&id).unwrap().color_shell = shell;
         self.color_uploads.insert(slot, Upload::Full(bytes));
@@ -1912,11 +2015,21 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
+        if self.chunks[&id].color_planes[face as usize]
+            .as_ref()
+            .is_some_and(|built| built.is_from(&neighbour))
+        {
+            return;
+        }
         let plane = border_colors(&neighbour, face.opposite(), |material| {
             self.lamp_color(material)
         });
-        let hash = Some(FixedHasher.hash_one(&plane[..]));
-        let shell = &mut self.chunks.get_mut(&id).unwrap().color_shell[face as usize];
+        self.counters.color_planes_built += 1;
+        let new = BuiltPlane::new(&neighbour, plane.clone());
+        let hash = Some(new.hash);
+        let chunk = self.chunks.get_mut(&id).unwrap();
+        chunk.color_planes[face as usize] = Some(new);
+        let shell = &mut chunk.color_shell[face as usize];
         if *shell == hash {
             return;
         }
@@ -2374,7 +2487,9 @@ impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
             }
             Tagged::Chunk(id) => {
                 let shows = self.most_common_shows(id);
-                self.chunks.get_mut(&id).unwrap().slot = None;
+                let chunk = self.chunks.get_mut(&id).unwrap();
+                chunk.slot = None;
+                chunk.planes = Default::default();
                 if self.free_color_slot(id) {
                     self.counters.color_given_back += 1;
                 }
@@ -2417,6 +2532,7 @@ impl<C: VoxelWorldConfig> Holders<ColorHolder> for LightRoute<C> {
         let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.color_slot = None;
         chunk.color_shell = [None; 6];
+        chunk.color_planes = Default::default();
         let Some(slot) = chunk.slot else {
             return;
         };
@@ -2444,8 +2560,10 @@ impl RouteChunk {
             across: [FacesSee::default(); 6],
             slot: None,
             shell: [None; 6],
+            planes: Default::default(),
             color_slot: None,
             color_shell: [None; 6],
+            color_planes: Default::default(),
             tag: 0,
         }
     }
@@ -2967,6 +3085,79 @@ mod tests {
         assert_eq!(route.distance(in_world(IVec3::new(1, -2, 0))), 10.0);
     }
 
+    /// Open air under full sky light: its faces see one level, so it needs
+    /// no slot.
+    fn open_sky_light() -> (Arc<ChunkLight>, FacesSee) {
+        let precision = LightPropagation::default().precision;
+        let light = ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy: Occupancy::Open,
+                emissive: Default::default(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Uniform(precision.top()),
+            voxel: ChunkLevels::Uniform(0),
+            color: Default::default(),
+            borders: Default::default(),
+            precision,
+        };
+        let own = own_faces_see(&light);
+        assert!(!own.needs_slot());
+        (Arc::new(light), own)
+    }
+
+    /// A route showing two chunks side by side along x, at the origin and
+    /// beside it, each lit by `light`. Returns the route and their entities.
+    fn two_shown(
+        light: &(Arc<ChunkLight>, FacesSee),
+    ) -> (LightRoute<DefaultWorld>, [Entity; 2]) {
+        let mut route = route();
+        let entities = [1, 2].map(|i| Entity::from_raw_u32(i).unwrap());
+        for (entity, x) in entities.iter().zip([0, 1]) {
+            let key = in_world(IVec3::new(x, 0, 0));
+            route.light_landed(key, *entity, light.0.clone(), light.1, None, None, true);
+            route.show(*entity, key, false);
+        }
+        (route, entities)
+    }
+
+    #[test]
+    fn a_chunk_keeps_copies_of_its_shell_planes_only_while_it_holds_a_slot() {
+        let plane = PLANE_TEXELS * texel_bytes(LightPropagation::default().precision);
+        let (mut route, [origin, beside]) = two_shown(&light_needing_a_slot());
+        // Each holds the plane facing the other.
+        assert_eq!(route.shell_copy_bytes(), 2 * plane);
+
+        // The origin's faces come to see one level, so it gives its slot up.
+        let (open, own) = open_sky_light();
+        route.light_landed(in_world(IVec3::ZERO), origin, open, own, None, None, true);
+        assert_eq!(route.chunks[&RouteId::Entity(origin)].slot, None);
+        assert_eq!(route.shell_copy_bytes(), plane);
+
+        route.forget(beside);
+        assert_eq!(route.shell_copy_bytes(), 0);
+    }
+
+    #[test]
+    fn a_shell_plane_is_built_again_only_once_its_neighbours_light_changes() {
+        let (mut route, [origin, beside]) = two_shown(&light_needing_a_slot());
+        let built = route.counters.planes_built;
+
+        // The origin's light lands again, its voxels new: its whole write
+        // keeps the plane facing its unchanged neighbour, and the neighbour
+        // builds the plane facing the origin's new light.
+        let (light, own) = light_needing_a_slot();
+        route.light_landed(in_world(IVec3::ZERO), origin, light, own, None, None, true);
+        assert_eq!(route.counters.planes_built, built + 1);
+
+        // The neighbour's light lands again: its whole write keeps the plane
+        // it just built, and the origin builds the one facing it.
+        let (light, own) = light_needing_a_slot();
+        route.light_landed(in_world(IVec3::X), beside, light, own, None, None, true);
+        assert_eq!(route.counters.planes_built, built + 2);
+    }
+
     #[test]
     fn a_kept_chunk_takes_a_slot_with_no_mesh() {
         let mut route = route();
@@ -3336,6 +3527,33 @@ mod tests {
             route.show(*entity, key, false);
         }
         (route, entities)
+    }
+
+    #[test]
+    fn a_colour_shell_plane_is_built_again_once_its_neighbours_light_or_the_light_colours_change(
+    ) {
+        let mut route = route();
+        route.set_light_colors(Some(&[pack(LinearRgba::RED)]));
+        let entities = [1, 2].map(|i| Entity::from_raw_u32(i).unwrap());
+        let keys = [IVec3::ZERO, IVec3::X].map(in_world);
+        for (entity, key) in entities.iter().zip(keys) {
+            let (light, own) = light_seeing_two_colors();
+            route.light_landed(key, *entity, light, own, None, None, true);
+            route.show(*entity, key, false);
+        }
+        let built = route.counters.color_planes_built;
+
+        // The origin's whole write keeps the colour plane facing its
+        // unchanged neighbour; the neighbour builds the one facing the origin.
+        let (light, own) = light_seeing_two_colors();
+        route.light_landed(keys[0], entities[0], light, own, None, None, true);
+        assert_eq!(route.counters.color_planes_built, built + 1);
+
+        // Colour planes hold emissive voxels' colours from the list.
+        route.set_light_colors(Some(&[pack(LinearRgba::BLUE)]));
+        let (light, own) = light_seeing_two_colors();
+        route.light_landed(keys[0], entities[0], light, own, None, None, true);
+        assert_eq!(route.counters.color_planes_built, built + 3);
     }
 
     #[test]
