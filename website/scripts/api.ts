@@ -272,6 +272,32 @@ async function markdownTools() {
   return { docs, guide };
 }
 
+/** Stands in for the URL of a guide's image `n` until the module imports it. */
+const imageMark = (n: number) => `@@guide-image-${n}@@`;
+const IMAGE_MARK = /@@guide-image-(\d+)@@/g;
+
+/**
+ * Swaps each image a guide gives by a path relative to its own file, as in
+ * `![A voxel](img/voxel.png)` or `<img src="img/voxel.png">`, for a mark, and
+ * adds the file to `images`. The module imports those, so Vite serves them in
+ * dev and copies them into the build.
+ */
+function guideImages(html: string, file: string, images: string[]): string {
+  return html.replace(/(<img\b[^>]*?\ssrc=)(["'])(.*?)\2/g, (whole, start: string, quote: string, src: string) => {
+    if (!src || /^([a-z][a-z0-9+.-]*:|\/|#)/i.test(src)) {
+      return whole;
+    }
+    const path = fileURLToPath(new URL(src, new URL(file, guideDir)));
+    if (!existsSync(path)) {
+      throw new Error(`${file}: the image ${src} isn't there`);
+    }
+    if (!images.includes(path)) {
+      images.push(path);
+    }
+    return `${start}${quote}${imageMark(images.indexOf(path))}${quote}`;
+  });
+}
+
 /** The first paragraph of rustdoc Markdown, as plain text. */
 function summary(docs: string): string {
   const first = docs.split(/\n\s*\n/)[0] ?? '';
@@ -384,7 +410,7 @@ function cargoFeatures(): { name: string; doc: string; enables: string[] }[] {
   return features;
 }
 
-async function buildView(): Promise<{ view: ApiView; files: string[] }> {
+async function buildView(): Promise<{ view: ApiView; files: string[]; images: string[] }> {
   if (!existsSync(apiFile)) {
     throw new Error('website/api.json is missing. Run `npm run build:api` first.');
   }
@@ -476,11 +502,14 @@ async function buildView(): Promise<{ view: ApiView; files: string[] }> {
     };
   }
 
+  const images: string[] = [];
   const topics: TopicView[] = guides.map((guide) => {
     const module = guide.module ? api.modules.find((m) => m.path === guide.module) : undefined;
     const { blocks, headings } = render.guide(guide.body, guide.links);
     for (const block of blocks) {
-      if ('embed' in block) {
+      if ('html' in block) {
+        block.html = guideImages(block.html, guide.file, images);
+      } else {
         block.embed = block.embed.map((reference) => {
           const key = resolve(reference);
           if (!key) {
@@ -529,7 +558,26 @@ async function buildView(): Promise<{ view: ApiView; files: string[] }> {
   return {
     view: { version: api.version, features, apiFeatures: api.features, topics, items, unguided },
     files: guideFiles.map((file) => fileURLToPath(new URL(file, guideDir))),
+    images,
   };
+}
+
+/** The module's code: the view, with each guide image's mark swapped for the URL Vite gives it. */
+function moduleCode(view: ApiView, images: string[]): string {
+  if (images.length === 0) {
+    return `export default ${JSON.stringify(view)};`;
+  }
+  return [
+    ...images.map((path, n) => `import image${n} from ${JSON.stringify(`${path}?url`)};`),
+    `const images = [${images.map((_, n) => `image${n}`).join(', ')}];`,
+    `const api = ${JSON.stringify(view)};`,
+    'for (const topic of api.topics) {',
+    '  for (const block of topic.blocks) {',
+    `    if (block.html) block.html = block.html.replace(${IMAGE_MARK}, (_, n) => images[n]);`,
+    '  }',
+    '}',
+    'export default api;',
+  ].join('\n');
 }
 
 /** Lets the site import `virtual:api`, the guide and the crate's API. */
@@ -545,14 +593,14 @@ export function api(): Plugin {
       if (id !== RESOLVED_MODULE_ID) {
         return null;
       }
-      const { view, files } = await buildView();
+      const { view, files, images } = await buildView();
       for (const file of [apiPath, ...files]) {
         this.addWatchFile(file);
       }
       if (view.unguided.length > 0) {
         this.warn(`No guide explains these items, so only the API page shows them:\n  ${view.unguided.join('\n  ')}`);
       }
-      return `export default ${JSON.stringify(view)};`;
+      return moduleCode(view, images);
     },
     // Editing, adding or removing a guide, or rebuilding api.json, reloads the
     // page, since nothing imports those files directly.
