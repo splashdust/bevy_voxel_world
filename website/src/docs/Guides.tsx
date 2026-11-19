@@ -11,7 +11,6 @@ import {
   type ApiView,
   Elsewhere,
   FeatureChips,
-  FeatureToggles,
   guideHref,
   TopicGuide,
   topicOfKey,
@@ -65,7 +64,6 @@ export function Guides({ api }: { api: ApiView }) {
         <div className="guides">
           <nav className="guides-sidebar" aria-label="Guides">
             <ApiSearchBox />
-            <FeatureToggles filter={filter} />
             <ol>
               {api.topics.map((t) => (
                 <li key={t.id}>

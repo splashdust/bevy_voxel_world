@@ -133,25 +133,6 @@ export type FeatureFilter = ReturnType<typeof useFeatureFilter>;
 /** Says whether to show something that needs these features. */
 export type Shows = { shows: (features: string[]) => boolean };
 
-export function FeatureToggles({ filter }: { filter: FeatureFilter }) {
-  return (
-    <div className="feature-toggles" role="group" aria-label="Features in your build">
-      <p>Features in your build</p>
-      {filter.all.map((feature) => (
-        <button
-          key={feature}
-          type="button"
-          className={`chip chip-${feature} toggle`}
-          aria-pressed={filter.enabled.has(feature)}
-          onClick={() => filter.toggle(feature)}
-        >
-          {feature}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /** Calls `follow` with the key of each docs link the reader clicks. */
 export function useApiLinks(follow: (key: string) => void) {
   useEffect(() => {
