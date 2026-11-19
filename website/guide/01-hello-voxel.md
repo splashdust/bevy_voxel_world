@@ -1,16 +1,10 @@
 ---
-title: Building your first voxel world
+title: Hello voxel!
 api:
   - VoxelWorldPlugin
   - VoxelWorldConfig
-  - DefaultWorld
   - VoxelWorldCamera
-  - VoxelWorldSet
-  - ChunkSpawnStrategy
-  - ChunkDespawnStrategy
 ---
-
-# Building your first voxel world
 
 This guide will show you how to get started building voxel games with Bevy and `bevy_voxel_world`. If you are new to Bevy, I strongly reccommend that you go through [Bevys getting started guide](https://bevy.org/learn/quick-start/introduction/) first. This guide assumes you have a working setup and at least a basic understanding of the Bevy game engine and the Rust programming language.
 
