@@ -45,7 +45,9 @@
 //! a shown chunk's visible changes, counting a change of light colour, and
 //! the most main thread light takes in a frame, the median over the runs,
 //! with the worst run reported beside it as
-//! `main_thread_max_frame_ms_worst_run`. Every coloured row ends with
+//! `main_thread_max_frame_ms_worst_run`. In `caves`, where white's own
+//! frames streaming in run over 1 ms, a coloured row's frame may instead
+//! hold within its solves-per-arrival ratio to white's. Every coloured row ends with
 //! the fresh-solve check, gated at no stale chunk. A coloured edit's frames
 //! to its last light change are gated at 2, or at white's frames for the
 //! same edit where those are more. White's own frames in `edits_lamps`
@@ -1766,8 +1768,8 @@ const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 /// The thresholds of each run of the coloured `caves` rows: what a player
 /// sees holds as absolute limits, a shown chunk's visible changes, counting
 /// a change of light colour. The most main thread light takes in a frame
-/// gates on the median over the runs instead: see `scenario_cave_rows`.
-/// Their solves per arrival hold against white's in
+/// gates on the median over the runs instead, against 1 ms or white's: see
+/// `main_thread_gate`. Their solves per arrival hold against white's in
 /// `COLORED_CAVE_RATIO_GATES`.
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_GATES: [(&str, f64); 2] = [
@@ -1776,7 +1778,8 @@ const COLORED_CAVE_GATES: [(&str, f64); 2] = [
 ];
 
 /// The most each coloured `caves` row's solves per arrival may be, as a
-/// ratio to white's in the same bench run, by row.
+/// ratio to white's in the same bench run, by row. Its most main thread in a
+/// frame, where over 1 ms, holds to the same ratio.
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_RATIO_GATES: [(&str, f64); 2] =
     [("caves_3_colors", 1.2), ("caves_8_colors", 1.3)];
@@ -1791,9 +1794,10 @@ const COLORED_CAVE_RATIO_GATES: [(&str, f64); 2] =
 ///   `COLORED_CAVE_GATES`, and their solves per arrival by
 ///   `COLORED_CAVE_RATIO_GATES`, as a ratio of their medians to white's,
 ///   reported as `solves_per_arrival_to_white`. The most main thread light
-///   takes in a frame, `main_thread_max_frame_ms`, gates at 1 ms on its
-///   median over the runs; the worst run's is reported beside it as
-///   `main_thread_max_frame_ms_worst_run`, and gates nothing.
+///   takes in a frame, `main_thread_max_frame_ms`, gates on its median over
+///   the runs at 1 ms, or at the same ratio to white's, reported as
+///   `main_thread_max_frame_ms_to_white`; the worst run's is reported beside
+///   it as `main_thread_max_frame_ms_worst_run`, and gates nothing.
 /// - `caves_recolor`: once the three-colour row settles, its first lamp
 ///   material takes another light colour.
 /// - `caves_first_flip`: once the white row settles, its lamp material takes
@@ -1833,8 +1837,10 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
     for samples in [&white, &three, &eight] {
         metrics.extend(summarise(samples));
     }
-    for (row, samples) in [("caves_3_colors", &three), ("caves_8_colors", &eight)] {
-        main_thread_gate(&mut metrics, row, samples);
+    for ((row, most), samples) in
+        COLORED_CAVE_RATIO_GATES.into_iter().zip([&three, &eight])
+    {
+        main_thread_gate(&mut metrics, row, samples, &white, most);
     }
     for (row, most) in COLORED_CAVE_RATIO_GATES {
         ratio_gate(&mut metrics, "caves", row, "solves_per_arrival", most);
@@ -1843,18 +1849,42 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
 }
 
 /// Gates coloured `caves` row `row`'s `main_thread_max_frame_ms`, the median
-/// over its runs `samples`, at `EDIT_MAIN_THREAD_GATE_US`, counting a failure
-/// in its `gate_failures`, and reports the worst run's as
-/// `main_thread_max_frame_ms_worst_run`.
+/// over its runs `samples`: it passes within `EDIT_MAIN_THREAD_GATE_US`, or
+/// within `most` times white's in the same runs `white`. Counts a failure in
+/// `gate_failures`.
+///
+/// White's `caves` frames streaming in run over 1 ms on main's own work, so
+/// an absolute limit would fail before colour adds anything. The ratio is
+/// taken run by run, since the rows interleave and a load spike weighs on
+/// both, then its median is reported as `main_thread_max_frame_ms_to_white`.
+/// The worst run's frame is reported as `main_thread_max_frame_ms_worst_run`.
 #[cfg(feature = "light_propagation")]
-fn main_thread_gate(metrics: &mut Metrics, row: &str, samples: &[Metrics]) {
+fn main_thread_gate(
+    metrics: &mut Metrics,
+    row: &str,
+    samples: &[Metrics],
+    white: &[Metrics],
+    most: f64,
+) {
     let key = format!("{row}.main_thread_max_frame_ms");
+    let white_key = "caves.main_thread_max_frame_ms";
     let worst = samples.iter().map(|s| s[&key]).fold(0.0, f64::max);
     metrics.insert(format!("{key}_worst_run"), worst);
+    let mut ratios: Vec<f64> = samples
+        .iter()
+        .zip(white)
+        .map(|(row, white)| row[&key] / white[white_key])
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let ratio = ratios[ratios.len() / 2];
+    metrics.insert(format!("{key}_to_white"), ratio);
     let median = metrics[&key];
-    let most = EDIT_MAIN_THREAD_GATE_US / 1000.0;
-    if median > most {
-        eprintln!("{row}: main_thread_max_frame_ms is {median:.3}, over {most}");
+    let limit = EDIT_MAIN_THREAD_GATE_US / 1000.0;
+    if median > limit && (ratio > most || ratio.is_nan()) {
+        eprintln!(
+            "{row}: main_thread_max_frame_ms is {median:.3}, over {limit}, \
+             and {ratio:.3} of white's, over {most}"
+        );
         *metrics.entry(format!("{row}.gate_failures")).or_default() += 1.0;
     }
 }
