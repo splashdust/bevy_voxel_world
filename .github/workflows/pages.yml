@@ -28,6 +28,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # The nightly that builds the rustdoc JSON behind the docs pages. A newer one
+  # may write a JSON format that website/api_extract can't read yet.
+  API_DOCS_TOOLCHAIN: nightly-2026-10-30
 
 jobs:
   build:
@@ -62,6 +65,21 @@ jobs:
         working-directory: website
       - name: Build the demo
         run: npm run build:demo
+        working-directory: website
+      - name: Install the nightly toolchain for the API docs
+        run: rustup toolchain install "$API_DOCS_TOOLCHAIN" --profile minimal
+      - name: Install Bevy's system libraries
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Cache the API docs build
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/
+            website/api_extract/target/
+          key: ${{ runner.os }}-api-docs-${{ env.API_DOCS_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'website/api_extract/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-api-docs-${{ env.API_DOCS_TOOLCHAIN }}-
+      - name: Build the API docs
+        run: npm run build:api
         working-directory: website
       - name: Build the site
         run: npm run build

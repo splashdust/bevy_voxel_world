@@ -1,3 +1,10 @@
+// The crate's front page is the README. Its code blocks are fragments, so they
+// are kept out of the doc tests.
+#![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
+// docs.rs builds with `--cfg docsrs` on nightly, where `doc_cfg` labels each
+// item with the cargo features it needs.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod chunk;
 mod chunk_lifecycle;
 mod chunk_map;

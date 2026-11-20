@@ -1,0 +1,16 @@
+# Turns the crate's rustdoc JSON into the data behind the site's docs
+# section. See website/README.md.
+[package]
+name = "api_extract"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stands alone so that its dependencies and lockfile stay out of the crate's.
+[workspace]
+
+[dependencies]
+# Must read the format version that the nightly toolchain writes.
+rustdoc-types = "=0.61.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

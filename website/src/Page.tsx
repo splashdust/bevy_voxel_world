@@ -7,18 +7,29 @@ import { SteppedEdge } from './SteppedEdge';
 export const REPOSITORY = 'https://github.com/splashdust/bevy_voxel_world';
 
 const PAGES = [
-  { id: 'landing', label: 'bevy_voxel_world', path: '' },
-  { id: 'changelog', label: 'Changelog', path: 'changelog/' },
+  { id: 'landing', label: 'Home', path: '' },
+  { id: 'docs', label: 'Docs', path: 'docs/' },
   { id: 'demo', label: 'Demo', path: 'demo/' },
-  { id: 'examples', label: 'Examples', path: 'examples/' },
+  { id: 'changelog', label: 'Changelog', path: 'changelog/' },
 ] as const;
 
-type PageId = (typeof PAGES)[number]['id'];
+/** The pages under Docs, each a tab in the docs header. */
+const DOCS_PAGES = [
+  { id: 'docs', label: 'Overview', path: 'docs/' },
+  { id: 'guides', label: 'Guides', path: 'docs/guides/' },
+  { id: 'api', label: 'API', path: 'docs/api/' },
+  { id: 'examples', label: 'Examples', path: 'docs/examples/' },
+] as const;
+
+type DocsPageId = (typeof DOCS_PAGES)[number]['id'];
+type PageId = (typeof PAGES)[number]['id'] | DocsPageId;
 
 export const pageUrl = (id: PageId) =>
-  import.meta.env.BASE_URL + PAGES.find((page) => page.id === id)!.path;
+  import.meta.env.BASE_URL + [...PAGES, ...DOCS_PAGES].find((page) => page.id === id)!.path;
 
 function SiteNav({ current }: { current: PageId }) {
+  // Every page under Docs marks Docs as the current page.
+  const section = DOCS_PAGES.some((page) => page.id === current) ? 'docs' : current;
   return (
     <nav className="site-nav" aria-label="Site">
       {PAGES.map((page) => (
@@ -26,7 +37,7 @@ function SiteNav({ current }: { current: PageId }) {
           key={page.id}
           className={`site-nav-page site-nav-${page.id}`}
           href={pageUrl(page.id)}
-          aria-current={page.id === current ? 'page' : undefined}
+          aria-current={page.id === section ? 'page' : undefined}
         >
           {page.label}
         </a>
@@ -43,6 +54,25 @@ export function PageHeader({ title }: { title: string }) {
   return (
     <header className="hero page-header">
       <div className="hero-content">
+        <h1>{title}</h1>
+      </div>
+      <SteppedEdge seed={2.4} fill="var(--dirt)" cap="var(--grass)" />
+    </header>
+  );
+}
+
+/** The header of a page under Docs: tabs for the docs pages, then the page's title. */
+export function DocsHeader({ current, title }: { current: DocsPageId; title: string }) {
+  return (
+    <header className="hero page-header docs-header">
+      <div className="hero-content">
+        <nav className="docs-tabs" aria-label="Docs">
+          {DOCS_PAGES.map((page) => (
+            <a key={page.id} href={pageUrl(page.id)} aria-current={page.id === current ? 'page' : undefined}>
+              {page.label}
+            </a>
+          ))}
+        </nav>
         <h1>{title}</h1>
       </div>
       <SteppedEdge seed={2.4} fill="var(--dirt)" cap="var(--grass)" />

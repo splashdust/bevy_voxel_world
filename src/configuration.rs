@@ -443,6 +443,8 @@ pub fn default_chunk_meshing_delegate<I: PartialEq + Copy, UB: Bundle>(
     )
 }
 
+/// A predefined world config that can be used instead of creating your own
+/// config struct. Mostly used for test and examples that don't need config.
 #[derive(Resource, Clone, Default)]
 pub struct DefaultWorld;
 

@@ -12,6 +12,12 @@ declare module '*.md' {
   export default document;
 }
 
+/** Generated at build time by scripts/api.ts. */
+declare module 'virtual:api' {
+  const api: import('../scripts/api.ts').ApiView;
+  export default api;
+}
+
 /** Generated at build time by scripts/examples.ts. */
 declare module 'virtual:examples' {
   const examples: import('../scripts/examples.ts').Example[];

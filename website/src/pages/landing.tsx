@@ -44,8 +44,8 @@ mountPage(
               <a className="button" href={REPOSITORY}>
                 GitHub
               </a>
-              <a className="button" href={pageUrl("examples")}>
-                Examples
+              <a className="button" href={pageUrl("docs")}>
+                Docs
               </a>
             </div>
           </div>
