@@ -533,32 +533,46 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
     });
 
     assert!(voxel_boxes_culled(&app) > 0);
-    let reference = Reference::voxel_light(
-        IVec3::splat(-32),
-        IVec3::splat(64),
-        14,
-        LightShape::Diamond,
-        |p| {
-            if p == lamp {
-                WorldVoxel::Solid(LAMP)
-            } else {
-                WorldVoxel::Air
-            }
-        },
-        |material| (material == LAMP).then_some(15.0),
-    );
+    let reference = |shape| {
+        Reference::voxel_light(
+            IVec3::splat(-32),
+            IVec3::splat(64),
+            14,
+            shape,
+            |p| {
+                if p == lamp {
+                    WorldVoxel::Solid(LAMP)
+                } else {
+                    WorldVoxel::Air
+                }
+            },
+            |material| (material == LAMP).then_some(15.0),
+        )
+    };
+    let diamond = reference(LightShape::Diamond);
     for p in origin_voxels() {
         assert_eq!(
             voxel_light(&mut app, p),
-            reference.voxel_at(p) as f32,
+            diamond.voxel_at(p) as f32,
             "at {p}"
         );
     }
     assert!(voxel_light(&mut app, IVec3::new(-1, -1, 0)) > 0.0);
 
-    // Round light gets there, moving along every axis at once.
-    let round = origin_ready(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
-    assert_eq!(voxel_boxes_culled(&round), 0);
+    // Round light gets there, moving along every axis at once. The cull
+    // counter can't show it: the chunks two out along each axis hold the
+    // lamp's chunk around them, and cull its lamp whatever the shape when
+    // they solve after it lands.
+    let mut round = origin_ready(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
+    let reference = reference(LightShape::Round);
+    for p in origin_voxels() {
+        assert_eq!(
+            voxel_light(&mut round, p),
+            reference.voxel_at(p) as f32,
+            "at {p}"
+        );
+    }
+    assert!(voxel_light(&mut round, IVec3::ZERO) > 0.0);
 }
 
 fn hash3(p: IVec3) -> u32 {
