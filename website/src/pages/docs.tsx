@@ -1,4 +1,4 @@
-// PROTOTYPE: the Docs overview, which leads to the guides, the API and the
+// The Docs overview, which leads to the guides, the API and the
 // examples, and lists the crate's features.
 
 import api from 'virtual:api';

@@ -1,7 +1,7 @@
-// PROTOTYPE: what the docs pages share: signatures, feature chips, the feature
-// filter, the API search box and one item's full docs.
+// What the docs pages share: signatures, feature chips, the API search box and
+// one item's full docs.
 
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect } from 'react';
 import type { ApiView, ItemView, MemberView, Token, TopicView } from '../../scripts/api.ts';
 import { pageUrl, REPOSITORY } from '../Page';
 
@@ -19,7 +19,7 @@ export const KIND_LABEL: Record<string, string> = {
   macro: 'macro',
 };
 
-/** A link to a public item or member, which the variant's own navigation follows. */
+/** A link to a public item or member, which the page's own navigation follows. */
 export function ApiLink({ to, children }: { to: string; children: React.ReactNode }) {
   return (
     <a href={`#${to}`} data-api={to}>
@@ -76,45 +76,6 @@ export function FeatureChips({ features }: { features: string[] }) {
   );
 }
 
-/** Where the feature filter is remembered, so it follows the reader from page to page. */
-const FILTER_KEY = 'bevy_voxel_world.docs.features-off';
-
-function rememberedOff(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(FILTER_KEY) ?? '[]');
-  } catch {
-    return [];
-  }
-}
-
-/** Which of the crate's features the reader's build has, to hide what it doesn't. */
-export function useFeatureFilter(all: string[]) {
-  const [enabled, setEnabled] = useState(() => {
-    const off = rememberedOff();
-    return new Set(all.filter((feature) => !off.includes(feature)));
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(FILTER_KEY, JSON.stringify(all.filter((feature) => !enabled.has(feature))));
-    } catch {
-      // Without storage, the filter lasts until the page is left.
-    }
-  }, [all, enabled]);
-  return {
-    all,
-    enabled,
-    shows: (features: string[]) => features.every((feature) => enabled.has(feature)),
-    toggle: (feature: string) =>
-      setEnabled((previous) => {
-        const next = new Set(previous);
-        if (!next.delete(feature)) {
-          next.add(feature);
-        }
-        return next;
-      }),
-  };
-}
-
 /** The Guides page of a topic, at a key's anchor if one is given. */
 export const guideHref = (topic: string, key?: string) =>
   `${pageUrl('guides')}?topic=${topic}${key ? `#${key}` : ''}`;
@@ -128,10 +89,11 @@ export function ApiSearchBox({ placeholder = 'Search the API' }: { placeholder?:
   );
 }
 
-export type FeatureFilter = ReturnType<typeof useFeatureFilter>;
-
 /** Says whether to show something that needs these features. */
 export type Shows = { shows: (features: string[]) => boolean };
+
+/** Shows everything, whatever features it needs. */
+export const SHOW_ALL: Shows = { shows: () => true };
 
 /** Calls `follow` with the key of each docs link the reader clicks. */
 export function useApiLinks(follow: (key: string) => void) {
@@ -295,7 +257,7 @@ export function TopicGuide({ api, topic, filter }: { api: ApiView; topic: TopicV
     <>
       {topic.blocks.map((block, i) =>
         'html' in block ? (
-          <div key={i} className="prose topic-intro" dangerouslySetInnerHTML={{ __html: block.html }} />
+          <div key={i} className="prose" dangerouslySetInnerHTML={{ __html: block.html }} />
         ) : (
           <ApiEmbed key={i} api={api} keys={block.embed} filter={filter} />
         ),
@@ -358,8 +320,8 @@ export function FeaturesOverview({ api, topicHref }: { api: ApiView; topicHref: 
     <div className="prose features-overview">
       <h2 id="features">Cargo features</h2>
       <p>
-        The guides and the API show every feature. A chip marks what needs one, and turning a
-        feature off in the filter hides what your build doesn't have.
+        The guides and the API cover every feature. A chip marks what needs one, and the API
+        page can show only what the features you pick add.
       </p>
       <table>
         <tbody>

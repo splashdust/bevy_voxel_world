@@ -1,4 +1,4 @@
-// PROTOTYPE: Docs › Guides, one topic at a time: ?topic=light.
+// Docs › Guides, one topic at a time: ?topic=light.
 
 import api from 'virtual:api';
 import '../docs/docs.css';

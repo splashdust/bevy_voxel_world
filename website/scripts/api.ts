@@ -1,4 +1,4 @@
-// PROTOTYPE: lets the site import `virtual:api`, the guide in website/guide/
+// Lets the site import `virtual:api`, the guide in website/guide/
 // with the crate's API sorted into its topics and the docs rendered to HTML. It
 // reads api.json, which `npm run build:api` writes.
 //

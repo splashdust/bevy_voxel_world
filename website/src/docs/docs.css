@@ -1,4 +1,4 @@
-/* PROTOTYPE: the docs section's styles, for all three variants. */
+/* The docs section's styles. */
 
 /* Feature chips */
 
@@ -36,7 +36,6 @@
   background: #c9b6ee;
 }
 
-.feature-toggles,
 .feature-picks {
   display: flex;
   flex-wrap: wrap;
@@ -44,7 +43,6 @@
   align-items: center;
 }
 
-.feature-toggles p,
 .feature-picks p {
   width: 100%;
   font: 600 0.7rem/1.4 var(--font-display);
@@ -52,7 +50,6 @@
   opacity: 0.7;
 }
 
-.chip.toggle,
 .chip.pick {
   cursor: pointer;
 }
@@ -66,14 +63,6 @@
 
 .chip.pick[aria-pressed='false']:hover {
   box-shadow: inset 0 0 0 2px rgb(244 236 217 / 0.7);
-}
-
-.chip.toggle[aria-pressed='false'] {
-  background: transparent;
-  color: var(--cream);
-  box-shadow: inset 0 0 0 2px rgb(244 236 217 / 0.3);
-  text-decoration: line-through;
-  opacity: 0.7;
 }
 
 /* Signatures */
@@ -260,10 +249,6 @@
   font: 800 clamp(1.5rem, 3vw, 2rem)/1.1 var(--font-display);
   font-stretch: 75%;
   letter-spacing: -0.02em;
-}
-
-.api-reference-heading + .api-item {
-  margin-top: 24px;
 }
 
 .guide-edit {

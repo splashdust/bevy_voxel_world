@@ -1,4 +1,4 @@
-# PROTOTYPE: turns the crate's rustdoc JSON into the data behind the site's docs
+# Turns the crate's rustdoc JSON into the data behind the site's docs
 # section. See website/README.md.
 [package]
 name = "api_extract"

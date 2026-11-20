@@ -1,4 +1,4 @@
-// PROTOTYPE: Docs › Guides, one page per topic, like a book. Topics down the
+// Docs › Guides, one page per topic, like a book. Topics down the
 // left, the topic's guide from website/guide/, then its reference as the same
 // list the API page shows, and a menu on the right that follows the reader.
 
@@ -12,16 +12,15 @@ import {
   Elsewhere,
   FeatureChips,
   guideHref,
+  SHOW_ALL,
   TopicGuide,
   topicOfKey,
   useApiLinks,
-  useFeatureFilter,
 } from './shared';
 
 export function Guides({ api }: { api: ApiView }) {
   const requested = new URLSearchParams(location.search).get('topic');
   const topic = api.topics.find((t) => t.id === requested) ?? api.topics[0];
-  const filter = useFeatureFilter(api.apiFeatures);
   const reference = useOpenItems(api);
 
   useEffect(() => {
@@ -44,17 +43,15 @@ export function Guides({ api }: { api: ApiView }) {
     }
   });
 
-  const items = topic.items.map((path) => api.items[path]).filter((item) => filter.shows(item.features));
+  const items = useMemo(() => topic.items.map((path) => api.items[path]), [api, topic]);
   const headings = useMemo(
     () => [
       ...topic.headings,
-      { id: 'reference', text: 'Reference', depth: 2 },
+      ...(items.length > 0 ? [{ id: 'reference', text: 'Reference', depth: 2 }] : []),
       ...items.map((item) => ({ id: item.path, text: item.name, depth: 3 })),
       ...(topic.elsewhere.length > 0 ? [{ id: 'elsewhere', text: 'Elsewhere', depth: 2 }] : []),
     ],
-    // The items change only with the topic and the filter.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [topic, filter.enabled],
+    [topic, items],
   );
 
   return (
@@ -76,19 +73,23 @@ export function Guides({ api }: { api: ApiView }) {
             </ol>
           </nav>
           <div className="guides-content">
-            <TopicGuide api={api} topic={topic} filter={filter} />
-            <h2 id="reference" className="api-reference-heading">
-              Reference
-            </h2>
-            <ItemList
-              api={api}
-              rows={items.map((item) => ({ item }))}
-              open={reference.open}
-              onToggle={reference.toggle}
-              filter={filter}
-              hideFeature={topic.feature}
-            />
-            <Elsewhere api={api} topic={topic} filter={filter} />
+            <TopicGuide api={api} topic={topic} filter={SHOW_ALL} />
+            {items.length > 0 && (
+              <>
+                <h2 id="reference" className="api-reference-heading">
+                  Reference
+                </h2>
+                <ItemList
+                  api={api}
+                  rows={items.map((item) => ({ item }))}
+                  open={reference.open}
+                  onToggle={reference.toggle}
+                  filter={SHOW_ALL}
+                  hideFeature={topic.feature}
+                />
+              </>
+            )}
+            <Elsewhere api={api} topic={topic} filter={SHOW_ALL} />
           </div>
           <DocMenu headings={headings} />
         </div>

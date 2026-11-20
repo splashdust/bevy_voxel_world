@@ -1,4 +1,4 @@
-//! PROTOTYPE. Builds the crate's rustdoc JSON with a nightly toolchain and
+//! Builds the crate's rustdoc JSON with a nightly toolchain and
 //! writes `website/api.json`, the data behind the site's docs section: each
 //! public item with its signature, docs, members and the cargo features it
 //! needs.

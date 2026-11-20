@@ -1,4 +1,4 @@
-// PROTOTYPE: Docs › API, the whole API on one searchable page: ?q=stamp.
+// Docs › API, the whole API on one searchable page: ?q=stamp.
 
 import api from 'virtual:api';
 import '../docs/docs.css';

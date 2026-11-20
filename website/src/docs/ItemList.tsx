@@ -1,4 +1,4 @@
-// PROTOTYPE: the list that the API page and each guide's reference share. One
+// The list that the API page and each guide's reference share. One
 // row per item with its summary, which opens in place to the item's full docs.
 
 import { useState } from 'react';

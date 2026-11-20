@@ -1,4 +1,4 @@
-// PROTOTYPE: Docs › API, every public item on one page, search first. Items are
+// Docs › API, every public item on one page, search first. Items are
 // grouped by the guide that explains them, and those no guide explains come
 // last under Other. `?q=` starts a search and `?features=` picks features, so
 // any page can link to either.
