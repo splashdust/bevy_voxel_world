@@ -1,17 +1,18 @@
 //! A house on a mountain ledge at dusk, with a cave beside it, lit by light
-//! propagation together with Bevy's atmosphere, fog and lights. Walk through it,
+//! propagation together with Bevy's atmosphere and fog. Walk through it,
 //! and place and remove voxels to see the light follow.
 //!
 //! Light propagation decides where light can reach. Sky light falls in through
 //! the door, the windows and the cave mouth, and voxel light spreads from the
-//! lanterns, the hearth and the crystals. Some rooms have lamps, some only
-//! windows, and the cellar has neither and stays dark however bright the sky.
+//! lanterns, the hearth and the crystals, each in its own colour: the lanterns
+//! warm, the hearth a deeper orange, the crystals blue. Where their light meets,
+//! the colours mix. Some rooms have lamps, some only windows, and the cellar has
+//! neither and stays dark however bright the sky.
 //!
 //! Bevy does the rest. The atmosphere draws the sky and lights the world through
 //! its environment map, which propagated light dims wherever sky light is weak.
-//! The sun shines only on faces with direct sky. Voxel light has no colour, so
-//! each lamp also has a warm point light, and distance fog and a volume of mist
-//! add haze.
+//! The sun shines only on faces with direct sky. Distance fog and a volume of
+//! mist add haze.
 //!
 //! The trees can be felled. Remove a voxel of a trunk, and the tree above it
 //! is cut loose. The world asks the crate to lift such a piece into a
@@ -330,29 +331,12 @@ fn in_cave(position: IVec3) -> bool {
 // ---------------------------------------------------------------------------
 // Placed voxels: the house, the cave's supports and lamps, boulders and trees
 
-/// Voxels placed by hand, which replace the ground and the cave where they are,
-/// and the Bevy lights that go with the lamps among them.
+/// Voxels placed by hand, which replace the ground and the cave where they are.
 #[derive(Default)]
 struct Blueprint {
     voxels: HashMap<IVec3, WorldVoxel>,
-    lamps: Vec<Lamp>,
-    /// Added to every position given to `set`, `fill` and `lamp`.
+    /// Added to every position given to `set` and `fill`.
     origin: IVec3,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum LampKind {
-    Lantern,
-    Hearth,
-    Crystal,
-}
-
-/// A Bevy light that goes with an emissive voxel, placed in the open space
-/// beside it.
-#[derive(Clone, Copy)]
-struct Lamp {
-    at: Vec3,
-    kind: LampKind,
 }
 
 impl Blueprint {
@@ -378,11 +362,6 @@ impl Blueprint {
 
     fn air(&mut self, min: [i32; 3], max: [i32; 3]) {
         self.fill(min, max, WorldVoxel::Air);
-    }
-
-    fn lamp(&mut self, at: [f32; 3], kind: LampKind) {
-        let at = self.origin.as_vec3() + Vec3::from_array(at);
-        self.lamps.push(Lamp { at, kind });
     }
 }
 
@@ -466,13 +445,11 @@ fn build_house(b: &mut Blueprint) {
     b.solid([4, 12, 1], [4, 12, d - 1], TIMBER);
     b.solid([14, 12, 1], [14, 12, d - 1], TIMBER);
 
-    // The front door, with a timber lintel and a lamp on each side. One light
-    // between the lamps stands in for both.
+    // The front door, with a timber lintel and a lamp on each side.
     b.air([8, 1, 0], [10, 3, 0]);
     b.solid([8, 4, 0], [10, 4, 0], TIMBER);
     b.set([7, 3, -1], Solid(LANTERN));
     b.set([11, 3, -1], Solid(LANTERN));
-    b.lamp([9.5, 3.3, -1.8], LampKind::Lantern);
 
     // Ground floor: the hearth room, the hall in the middle, the window room.
     b.solid([6, 1, 1], [6, 5, d - 1], DARK_PLANKS);
@@ -485,13 +462,11 @@ fn build_house(b: &mut Blueprint) {
     b.solid([1, 1, 4], [2, 4, 8], COBBLESTONE);
     b.air([1, 1, 5], [2, 2, 7]);
     b.solid([1, 1, 5], [1, 1, 7], HEARTH);
-    b.lamp([2.4, 1.6, 6.5], LampKind::Hearth);
     b.solid([1, 5, 5], [2, 21, 7], COBBLESTONE);
     b.set([4, 3, 11], Solid(LANTERN));
     b.air([1, 2, 0], [3, 4, 0]);
     b.set([2, 1, 1], Solid(TIMBER));
     b.set([2, 2, 1], Solid(LANTERN));
-    b.lamp([2.5, 3.4, 1.5], LampKind::Lantern);
     b.air([0, 2, 9], [0, 4, 10]);
 
     // The window room: no lamp, and big windows in the front and side walls.
@@ -529,7 +504,6 @@ fn build_house(b: &mut Blueprint) {
     b.air([2, 8, 0], [4, 10, 0]);
     b.set([3, 7, 1], Solid(TIMBER));
     b.set([3, 8, 1], Solid(LANTERN));
-    b.lamp([3.5, 9.4, 1.5], LampKind::Lantern);
     b.air([7, 8, 0], [8, 10, 0]);
     b.air([0, 9, 9], [0, 10, 10]);
 
@@ -556,7 +530,6 @@ fn build_cave(b: &mut Blueprint) {
 
     b.solid([-19, LEDGE_TOP + 1, 10], [-19, LEDGE_TOP + 3, 10], TIMBER);
     b.set([-19, LEDGE_TOP + 4, 10], Solid(LANTERN));
-    b.lamp([-18.2, LEDGE_TOP as f32 + 4.5, 9.2], LampKind::Lantern);
 
     // (tunnel segment, how far along it, whether a lamp hangs from the support)
     let supports = [
@@ -603,8 +576,6 @@ fn build_cave(b: &mut Blueprint) {
         if lamp {
             let middle = ((left + right).as_vec3() * 0.5).round().as_ivec3();
             b.set([middle.x, beam - 1, middle.z], Solid(LANTERN));
-            let (x, z) = (middle.x as f32 + 0.5, middle.z as f32 + 0.5);
-            b.lamp([x, beam as f32 - 1.4, z], LampKind::Lantern);
         }
     }
 
@@ -635,8 +606,6 @@ fn build_cave(b: &mut Blueprint) {
                 Solid(CRYSTAL),
             );
         }
-        let open = wall.as_vec3() + 0.5 - direction * 2.0;
-        b.lamp(open.to_array(), LampKind::Crystal);
     }
     for (x, z, height) in [(-46, 86, 3), (-39, 94, 2), (-37, 84, 1), (-48, 95, 2)] {
         b.solid([x, floor, z], [x, floor + height - 1, z], CRYSTAL);
@@ -868,21 +837,24 @@ impl VoxelWorldConfig for MountainWorld {
             // explains.
             #[cfg(target_arch = "wasm32")]
             sky_reach: 16,
-            look: LightLook {
-                // Voxel light is white. Less of it than the default lets the
-                // lamps' warm Bevy lights colour the rooms.
-                voxel_brightness: 400.0,
-                ..default()
-            },
             ..default()
         })
     }
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
         vec![
-            (LANTERN, Emission::level(15.0)),
-            (HEARTH, Emission::level(14.0)),
-            (CRYSTAL, Emission::level(9.0)),
+            (
+                LANTERN,
+                Emission::level(15.0).with_color(Color::srgb(1.0, 0.62, 0.28)),
+            ),
+            (
+                HEARTH,
+                Emission::level(14.0).with_color(Color::srgb(1.0, 0.45, 0.15)),
+            ),
+            (
+                CRYSTAL,
+                Emission::level(12.0).with_color(Color::srgb(0.35, 0.65, 1.0)),
+            ),
         ]
     }
 
@@ -936,7 +908,7 @@ impl Plugin for MountainHousePlugin {
         .insert_resource(Sun::DUSK)
         .init_resource::<Placing>()
         .init_resource::<GroundColliders>()
-        .add_systems(Startup, (setup, spawn_lamps, spawn_smoke))
+        .add_systems(Startup, (setup, spawn_smoke))
         // Right after the voxel world's own systems, in the frame a lift's
         // voxels first show in its sub-grid, so the piece and the ground
         // under it have colliders before the next physics step.
@@ -956,7 +928,6 @@ impl Plugin for MountainHousePlugin {
                 turn_sun,
                 follow_sun.run_if(resource_changed::<Sun>),
                 fit_scene_image,
-                flicker,
                 drift_smoke,
                 carry_lantern,
                 toggle_help,
@@ -1387,94 +1358,6 @@ fn follow_sun(
     }
 }
 
-fn spawn_lamps(mut commands: Commands) {
-    for lamp in &BLUEPRINT.lamps {
-        spawn_lamp(&mut commands, lamp.at, lamp.kind);
-    }
-}
-
-/// The Bevy light of a lamp.
-///
-/// Light propagation lights the voxels around a lamp, but voxel light has no
-/// colour, so a warm Bevy light adds it. The Bevy light also lights entities
-/// that aren't chunks.
-///
-/// The Bevy lights cast no shadows, so each also shines through the walls
-/// within its range. With shadows, each would render the world around it six
-/// times every frame, and the lantern voxel beside it would cast a shadow
-/// across the room.
-#[derive(Component)]
-struct LampLight;
-
-/// How far a lamp's Bevy light can be from the voxels that glow with it. The
-/// light goes out once none is left this close.
-const LAMP_SPREAD: f32 = 2.5;
-
-fn spawn_lamp(commands: &mut Commands, at: Vec3, kind: LampKind) {
-    let light = match kind {
-        LampKind::Lantern => PointLight {
-            color: Color::srgb(1.0, 0.62, 0.28),
-            intensity: 150_000.0,
-            range: 12.0,
-            radius: 0.2,
-            ..default()
-        },
-        LampKind::Hearth => PointLight {
-            color: Color::srgb(1.0, 0.45, 0.15),
-            intensity: 200_000.0,
-            range: 10.0,
-            radius: 0.6,
-            ..default()
-        },
-        LampKind::Crystal => PointLight {
-            color: Color::srgb(0.35, 0.65, 1.0),
-            intensity: 25_000.0,
-            range: 12.0,
-            radius: 0.5,
-            ..default()
-        },
-    };
-    let mut entity = commands.spawn((LampLight, Transform::from_translation(at), light));
-    if kind != LampKind::Crystal {
-        entity.insert(Flicker {
-            lumens: light.intensity,
-        });
-    }
-}
-
-/// Whether a lantern, hearth or crystal voxel lies within `LAMP_SPREAD` of `at`.
-fn lamp_voxel_near(voxel_world: &VoxelWorld<MountainWorld>, at: Vec3) -> bool {
-    let min = (at - LAMP_SPREAD).floor().as_ivec3();
-    let max = (at + LAMP_SPREAD).ceil().as_ivec3();
-    (min.x..max.x).any(|x| {
-        (min.y..max.y).any(|y| {
-            (min.z..max.z).any(|z| {
-                let position = IVec3::new(x, y, z);
-                (position.as_vec3() + 0.5).distance(at) <= LAMP_SPREAD
-                    && matches!(
-                        voxel_world.get_voxel(position),
-                        WorldVoxel::Solid(LANTERN | HEARTH | CRYSTAL)
-                    )
-            })
-        })
-    })
-}
-
-/// Makes a flame-lit lamp waver a little around its `lumens`.
-#[derive(Component)]
-struct Flicker {
-    lumens: f32,
-}
-
-fn flicker(time: Res<Time>, mut lights: Query<(&mut PointLight, &Transform, &Flicker)>) {
-    let t = time.elapsed_secs();
-    for (mut light, transform, flicker) in &mut lights {
-        let seed = transform.translation.x * 1.3 + transform.translation.z * 0.7;
-        let wave = (t * 7.0 + seed).sin() * 0.5 + (t * 13.0 + seed * 2.0).sin() * 0.3;
-        light.intensity = flicker.lumens * (1.0 + 0.08 * wave);
-    }
-}
-
 /// Where smoke leaves the top of the chimney.
 const CHIMNEY_TOP: Vec3 = Vec3::new(2.0, LEDGE_TOP as f32 + 22.5, 6.5);
 const SMOKE_PUFFS: usize = 14;
@@ -1864,18 +1747,14 @@ const REACH: f32 = 8.0;
 /// the face under the crosshair, and a right click removes the voxel there,
 /// in the world or in a felled tree.
 ///
-/// Light propagation relights the voxels around an edit on its own. The Bevy
-/// lights that colour the lamps are the example's, so it adds one in front of
-/// a placed lantern or crystal, and puts out those left with no lamp voxel
-/// beside them.
+/// Light propagation relights the voxels around an edit on its own, in the
+/// colour of the lamps that reach them.
 fn edit_voxels(
-    mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     placing: Res<Placing>,
     mut voxel_world: VoxelWorld<MountainWorld>,
     camera: Single<(&Transform, &Walker)>,
-    lamps: Query<(Entity, &Transform), With<LampLight>>,
 ) {
     let place = buttons.just_pressed(MouseButton::Left);
     let remove = buttons.just_pressed(MouseButton::Right);
@@ -1898,11 +1777,6 @@ fn edit_voxels(
         if let Some(mut grid) = voxel_world.grid_mut(hit.grid) {
             grid.set_voxel(hit.position, WorldVoxel::Air);
         }
-        for (lamp, transform) in &lamps {
-            if !lamp_voxel_near(&voxel_world, transform.translation) {
-                commands.entity(lamp).despawn();
-            }
-        }
         return;
     }
     let Some(normal) = hit.normal else {
@@ -1910,24 +1784,13 @@ fn edit_voxels(
     };
     let at = hit.position + normal;
     let (_, material, _) = PLACEABLE[placing.0];
-    if hit.grid != Grid::World {
-        // A voxel placed on a felled tree gets no Bevy light, which would
-        // stay behind as the tree moves. A lamp there still lights the tree
-        // itself through light propagation.
-        if let Some(mut grid) = voxel_world.grid_mut(hit.grid) {
-            grid.set_voxel(at, WorldVoxel::Solid(material));
-        }
+    // A hit on a felled tree is in the tree's own voxels, which aren't the
+    // world's, so only a hit on the world can be where the walker stands.
+    if hit.grid == Grid::World && body_hits(walker.feet, &|position| position == at) {
         return;
     }
-    if body_hits(walker.feet, &|position| position == at) {
-        return;
-    }
-    voxel_world.set_voxel(at, WorldVoxel::Solid(material));
-    let light_at = at.as_vec3() + 0.5 + normal.as_vec3() * 0.9;
-    match material {
-        LANTERN => spawn_lamp(&mut commands, light_at, LampKind::Lantern),
-        CRYSTAL => spawn_lamp(&mut commands, light_at, LampKind::Crystal),
-        _ => {}
+    if let Some(mut grid) = voxel_world.grid_mut(hit.grid) {
+        grid.set_voxel(at, WorldVoxel::Solid(material));
     }
 }
 
