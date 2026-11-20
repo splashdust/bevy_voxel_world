@@ -1,85 +1,37 @@
-//! Chunk lifecycle benchmarks.
+//! Chunk lifecycle benchmarks
 //!
-//! Runs scripted scenarios against a headless App (no window, no GPU) that still
-//! exercises the full chunk lifecycle: spawn, generate, mesh, publish, retire, despawn.
+//! This module runs scripted scenarios against a headless App, with no window
+//! and no GPU, that still exercises the full chunk lifecycle: spawn, generate,
+//! mesh, publish, retire and despawn. Each scenario records its metrics under
+//! its own name. `compare` sets the metrics of two builds side by side and
+//! fails on a regression in the metrics that `gate` gates, or in the on gate,
+//! `ON_GATE`. A scenario can also check thresholds of its own as it runs. It
+//! prints each threshold it missed on stderr and counts it in its
+//! `gate_failures`, which `compare` only reports.
+//!
+//! # Recording and comparing
 //!
 //! Record a run of every scenario, or only of those listed:
 //!     cargo bench --bench chunk_lifecycle -- run <label> [<scenario>,…]
-//! Compare recorded runs (exits non-zero if a gated metric regressed); each side
-//! may be a comma-separated list of labels, combined by their median:
+//! Compare recorded runs. The command exits non-zero if a gated metric
+//! regressed. Each side may be a comma-separated list of labels, combined by
+//! their median:
 //!     cargo bench --bench chunk_lifecycle -- compare <before>[,<before>…] <after>[,<after>…]
 //! A metric found on one side only prints as `new` (after only) or `gone`
-//! (before only) and gates nothing, so a scenario one build lacks still shows.
-//! Ratio lines, listed in `RATIO_LINES`, print the ratio of two metrics within
-//! the before build and within the after build, and the change between them;
-//! they gate nothing either.
-//!
-//! Gated metrics are listed in `gate`; a scenario's own thresholds are
-//! checked as it runs and reported as its `gate_failures`.
-//!
-//! The edit scenarios, `edits_lit` on the sine terrain, `edits_lamps`
-//! beside the lamp world's lamps and `vehicle_lit`'s paced edits on a
-//! sub-grid, count an edit's frames to its last light
-//! change: the last frame in which a relight landed that changed a voxel's
-//! level or light colour. Light can settle later, on relights that change
-//! nothing, and frames to settle are reported beside them. Each edit's
-//! frames and its main thread are the median over the scenario's runs, and
-//! the 1 ms gate on main thread binds that median; the worst run's main
-//! thread is reported beside it, as `max_main_thread_us_worst_run`, and
-//! gates nothing.
-//!
-//! `caves` and `edits_lamps` end with the fresh-solve check: every chunk and
-//! light entry is solved again from the world view and compared, voxel by
-//! voxel, with the light it holds, levels exactly and light colours within a
-//! step of their packing. Those that differ are reported as `stale_chunks`,
-//! and listed on stderr.
-//!
-//! Each of the two also runs coloured rows, interleaved with its white row
-//! in the same run: `caves_3_colors` and `caves_8_colors`, and
-//! `edits_lamps_3_colors` and `edits_lamps_8_colors`, in which each lamp
-//! takes one of three or eight light colours by a hash of its position.
-//! Their counts of work hold as ratios to white's, of the medians over the
-//! runs, checked in the bench and reported as `gate_failures`: solves per
-//! arrival in `caves`, mean relights per edit in `edits_lamps`. Those ratios
-//! also print as ratio lines. What a player sees holds as absolute limits:
-//! a shown chunk's visible changes, counting a change of light colour, and
-//! the most main thread light takes in a frame, the median over the runs,
-//! with the worst run reported beside it as
-//! `main_thread_max_frame_ms_worst_run`. In `caves`, where white's own
-//! frames streaming in run over 1 ms, a coloured row's frame may instead
-//! hold within its solves-per-arrival ratio to white's. Every coloured row ends with
-//! the fresh-solve check, gated at no stale chunk. A coloured edit's frames
-//! to its last light change are gated at 2, or at white's frames for the
-//! same edit where those are more. White's own frames in `edits_lamps`
-//! only report, since light the relight ripple carries to chunks farther
-//! off takes a frame for each face it crosses: see `scenario_edits_lamps`.
-//!
-//! `caves` also runs two recolour steps, which report relights, frames to
-//! settle and the worst frame's main thread, and gate only `stale_chunks`:
-//! `caves_recolor`, a lamp material of the settled three-colour row taking
-//! another light colour, and `caves_first_flip`, the settled white row's
-//! lamp material taking a light colour, the world's first.
-//!
-//! `vehicle_lit` runs a coloured row too, `vehicle_lit_3_colors`, interleaved
-//! with it, in which every lamp, the hull's included, takes one of three
-//! light colours. It holds every gate `vehicle_lit` holds, with its paced
-//! edits' frames gated by the rule for coloured edits above.
-//!
-//! `stream_in_lod_lamps` and `stream_in_lod_colored` stream
-//! `stream_in_lod`'s world with a lamp on one in 32 surface voxels, white
-//! and in three light colours, until its light settles. They only report; the cost of a coarse
-//! chunk's solve, `coarse_solve_us_per_chunk`, is read by hand, and the
-//! coloured row's against the white row's in a ratio line.
+//! (before only) and gates nothing, so a scenario that one build lacks still
+//! shows. Ratio lines, listed in `RATIO_LINES`, print the ratio of two metrics
+//! within the before build and within the after build, and the change between
+//! them. They gate nothing either.
 //!
 //! Background load on a desktop drifts by more than the gates over minutes, so
-//! comparisons alternate the two builds instead of reusing an old recording:
+//! a comparison alternates the two builds instead of reusing an old recording:
 //!     cargo bench --bench chunk_lifecycle -- save-binary baseline   # on the baseline commit
 //!     cargo bench --bench chunk_lifecycle -- ab baseline [<scenario>,…]   # on the candidate
 //! `ab` runs the saved baseline binary and this build alternately, `AB_ROUNDS`
 //! times each, then compares them. With a list, both builds run only the
-//! listed scenarios, and one the baseline doesn't know prints as `new`. A
-//! listed run is a quick check; the run without a list, over every scenario,
-//! is the binding one.
+//! listed scenarios, and a scenario the baseline doesn't know prints as `new`.
+//! A run with a list is a quick check. The run without a list, over every
+//! scenario, is the binding one.
 //!
 //! Scenarios behind a cargo feature run only in a build with it, so pick the
 //! features of an A/B by what the change touches. A change touching sub-grids
@@ -88,25 +40,101 @@
 //! when it touches light.
 //!
 //! Results and saved binaries are written to `target/bench/chunk_lifecycle/`
-//! of the checkout the binary was built in, which it finds through
+//! in the checkout the binary was built in, which the binary finds through
 //! `CARGO_MANIFEST_DIR`. A saved baseline binary keeps writing there when `ab`
-//! runs it from another checkout or worktree, so make that checkout's
-//! `target/bench/chunk_lifecycle` a link to the baseline's folder before
-//! running `ab` from it.
+//! runs it from another checkout or worktree. Before running `ab` from such a
+//! checkout, make its `target/bench/chunk_lifecycle` a link to the folder of
+//! the baseline.
 //!
-//! `[profile.bench]` in Cargo.toml builds both sides with one codegen unit. The
-//! voxel world's generic code is compiled inside this crate, and how the
-//! default sixteen units group it has moved flat terrain's generation
-//! throughput by more than the gates between builds that differ only in code
-//! the bench never runs; one unit makes such builds identical. A baseline from
-//! a commit older than that setting needs it from the environment:
+//! `[profile.bench]` in Cargo.toml builds both sides with one codegen unit.
+//! The generic code of the voxel world is compiled inside this crate, and how
+//! the default sixteen units group that code can move the generation
+//! throughput of flat terrain by more than the gates. It does so even between
+//! builds that differ only in code the bench never runs. One unit makes such
+//! builds identical. A baseline from a commit older than that setting needs
+//! it from the environment:
 //!     CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench --bench chunk_lifecycle -- save-binary baseline
 //!
-//! To see what a scenario's slow frames are doing, run it once under Tracy. Start
-//! the Tracy profiler (or `tracy-capture -o <file>.tracy`) first, then:
+//! To see what the slow frames of a scenario are doing, run it once under
+//! Tracy. Start the Tracy profiler (or `tracy-capture -o <file>.tracy`) first,
+//! then:
 //!     cargo bench --bench chunk_lifecycle --features trace_tracy -- profile <scenario>
-//! The Tracy version must match the protocol of the `tracy-client` crate Bevy uses;
-//! see the version table in the `tracy-client` README.
+//! The Tracy version must match the protocol of the `tracy-client` crate that
+//! Bevy uses. See the version table in the `tracy-client` README.
+//!
+//! # Edits and their light
+//!
+//! Three scenarios time the light of single voxel edits: `edits_lit` on the
+//! sine terrain, `edits_lamps` beside the lamps of the lamp world, and the
+//! paced edits of `vehicle_lit` on a sub-grid. Each counts the frames from an
+//! edit to its last light change, which is the last frame in which a relight
+//! landed that changed the level or the light colour of a voxel. Light can
+//! settle later, on relights that change nothing, so the frames to settle are
+//! reported beside them.
+//!
+//! These scenarios repeat their edits over several runs. The frames and the
+//! main thread of each edit are the median over the runs, and the 1 ms gate
+//! on main thread binds that median. The main thread of the worst run is
+//! reported beside it, as `max_main_thread_us_worst_run`, and gates nothing.
+//!
+//! # The fresh-solve check
+//!
+//! `caves`, its recolour steps and `edits_lamps` end with the fresh-solve
+//! check. The check solves every chunk and light entry again from the world
+//! view, and compares the result voxel by voxel with the light that chunk or
+//! light entry holds: levels exactly, and light colours within a step of their packing. Those
+//! that differ are reported as `stale_chunks` and listed on stderr. Every row
+//! that runs the check gates at no stale chunk.
+//!
+//! # Coloured rows
+//!
+//! A coloured row runs the world of a white row with lamps of several light
+//! colours, each lamp taking its light colour by a hash of its position. It
+//! runs interleaved with its white row in the same bench run:
+//!
+//! - `caves` runs `caves_3_colors` and `caves_8_colors`.
+//! - `edits_lamps` runs `edits_lamps_3_colors` and `edits_lamps_8_colors`.
+//! - `vehicle_lit` runs `vehicle_lit_3_colors`, in which each lamp of the
+//!   hull takes one of three light colours.
+//!
+//! A coloured row holds its counts of work against white in the same run, so
+//! that machine load and the cost of white itself don't read as the cost of
+//! colour. What a player sees holds as absolute limits. The gates are these:
+//!
+//! - Counts of work hold as ratios to white, of the medians over the runs:
+//!   solves per arrival in `caves`, and mean relights per edit in
+//!   `edits_lamps`. The bench checks them and counts a miss in
+//!   `gate_failures`. They also print as ratio lines.
+//! - In `caves`, a shown chunk changes the light its faces show, a level or
+//!   a light colour, no more often than the limit for white allows.
+//! - The most main thread that light takes in a frame holds at 1 ms, as the
+//!   median over the runs. In `caves`, the frames of white itself can take
+//!   more than 1 ms while the world streams in, so a coloured row there also
+//!   passes within its ratio to white in `COLORED_CAVE_RATIO_GATES`. The worst
+//!   run is reported beside it as `main_thread_max_frame_ms_worst_run`.
+//! - The last light change of a coloured edit lands within 2 frames, or
+//!   within the frames of white for the same edit where those are more.
+//!
+//! The frames of white in `edits_lamps` only report. There, light that the
+//! relight ripple carries to chunks farther off takes a frame for each face
+//! it crosses: see `scenario_edits_lamps`.
+//!
+//! `vehicle_lit_3_colors` also holds every gate that `vehicle_lit` holds.
+//!
+//! `caves` also runs two recolour steps. They report relights, frames to
+//! settle and the main thread of the worst frame, and gate only
+//! `stale_chunks`:
+//!
+//! - `caves_recolor`: once the three-colour row has settled, one of its lamp
+//!   materials takes another light colour.
+//! - `caves_first_flip`: once the white row has settled, its lamp material
+//!   takes a light colour, the first in the world that isn't white.
+//!
+//! `stream_in_lod_lamps` and `stream_in_lod_colored` stream the world of
+//! `stream_in_lod` with a lamp on one in `LOD_LAMP_EVERY` surface voxels, in
+//! white and in three light colours, until its light settles. They only
+//! report. The cost of a coarse solve, `coarse_solve_us_per_chunk`, is read
+//! by hand, and a ratio line compares the coloured row with the white row.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -250,20 +278,23 @@ impl<const TERRAIN: u8, const IN_VIEW: bool> VoxelWorldConfig
 }
 
 /// The sine terrain with a lamp on one in 64 surface voxels, lit with the
-/// default light settings when `LIT`. Its lamps are white, or with `COLORS`
-/// above 1, each takes one of that many light colours: see `lamp_material`.
-/// Its `stream_in` scenarios report what solving light in chunk tasks costs,
-/// against the same world unlit, and gate nothing.
+/// default light settings when `LIT`.
+///
+/// With `COLORS` at 1 the lamps are white. With more, each lamp takes one of
+/// that many light colours, as `lamp_material` picks. `stream_in_lamps` and
+/// `stream_in_lamps_unlit` stream it to report what solving light in chunk
+/// tasks costs, against the same world unlit, and gate nothing. `edits_lamps`
+/// edits beside its lamps.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
 struct LampWorld<const LIT: bool, const COLORS: usize = 1>;
 
-/// The material of white lamps, and of the first light colour's lamps.
+/// The material of white lamps, and of the lamps of the first light colour.
 #[cfg(feature = "light_propagation")]
 const LAMP: u8 = 2;
 
-/// The light colours of coloured rows' lamps. Three colours take the first
-/// three.
+/// The light colours of the lamps in coloured rows. A row of three light
+/// colours takes the first three, and a row of eight takes them all.
 #[cfg(feature = "light_propagation")]
 const LAMP_COLORS: [[f32; 3]; 8] = [
     [1.0, 0.5, 0.15],
@@ -276,9 +307,12 @@ const LAMP_COLORS: [[f32; 3]; 8] = [
     [1.0, 0.45, 0.75],
 ];
 
-/// The material of a lamp at `position` in a world of `colors` light
-/// colours: `LAMP` in a white world, else `LAMP` plus one of `colors`, picked
-/// by a hash of the lamp's position.
+/// Returns the material of a lamp at `position` in a world of `colors` light
+/// colours.
+///
+/// In a white world the material is `LAMP`. With more light colours it is
+/// `LAMP` plus an index below `colors`, picked by a hash of the position, so
+/// a lamp takes the same light colour in every run.
 #[cfg(feature = "light_propagation")]
 fn lamp_material(position: IVec3, colors: usize) -> u8 {
     if colors <= 1 {
@@ -290,8 +324,12 @@ fn lamp_material(position: IVec3, colors: usize) -> u8 {
     LAMP + ((hash >> 7) as usize % colors) as u8
 }
 
-/// The emissive materials of a world of `colors` light colours, each lamp
-/// material at level 15: one white lamp material, or one per light colour.
+/// Returns the emissive materials of a world of `colors` light colours, each
+/// glowing at level 15.
+///
+/// A white world has the one material `LAMP`, glowing white. A coloured world
+/// has one material for each of the first `colors` light colours of
+/// `LAMP_COLORS`, numbered up from `LAMP`.
 #[cfg(feature = "light_propagation")]
 fn lamp_emission(colors: usize) -> Vec<(u8, Emission)> {
     if colors <= 1 {
@@ -352,13 +390,17 @@ impl<const LIT: bool, const COLORS: usize> VoxelWorldConfig for LampWorld<LIT, C
     }
 }
 
-/// The world of `stream_in`, or of `stream_in_flat` with `FLAT`, lit with the
-/// default light settings. Its scenarios report what light costs on the gated
-/// worlds, against `light-baseline`'s runs of them, and gate nothing yet.
+/// The world of `stream_in`, or of `stream_in_flat` when `TERRAIN` is `FLAT`,
+/// lit with the default light settings.
 ///
-/// With `LAMPS`, the lamp materials of `lamp_emission(COLORS)` glow at level
-/// 15: `LAMP` alone when `COLORS` is 1. The terrain holds none of them, so
-/// only voxels a scenario sets with them are lamps.
+/// `stream_in_lit` and `stream_in_flat_lit` stream it to report what light
+/// costs on those worlds. The on gate, `ON_GATE`, holds their time until
+/// relights settle against the unlit stream of the before build. `edits_lit`
+/// and `vehicle_lit` edit it.
+///
+/// With `LAMPS`, the materials of `lamp_emission(COLORS)` glow at level 15,
+/// which is `LAMP` alone when `COLORS` is 1. The terrain holds none of them,
+/// so only the voxels a scenario sets with them are lamps.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
 struct LitBenchWorld<
@@ -585,21 +627,22 @@ impl VoxelWorldConfig for SettingsWorld {
 }
 
 /// The sine terrain streamed out to `LOD_SPAWNING_DISTANCE` chunks in four
-/// levels of detail, lit with the default light settings, with fill hints
-/// for the rock below and the air above it when `HINTED`. Its scenarios
-/// report what coarse chunks' light costs, and gate nothing yet.
+/// levels of detail, lit with the default light settings. With `HINTED`, fill
+/// hints declare the rock below the terrain and the air above it. Its
+/// scenarios report what the light of coarse chunks costs. `stream_in_lod`
+/// gates on its times as the other streams do, and its lamp rows only report.
 ///
-/// With `LAMPS` above 0, one in `LOD_LAMP_EVERY` surface voxels is a lamp:
-/// white when `LAMPS` is 1, or with more, taking one of that many light
-/// colours, as `lamp_material` picks. A surface voxel is a solid voxel with
-/// air above it, found from the voxels themselves, so the lamps follow
-/// whatever the terrain holds.
+/// With `LAMPS` above 0, one in `LOD_LAMP_EVERY` surface voxels is a lamp.
+/// The lamps are white when `LAMPS` is 1. With more, each lamp takes one of
+/// that many light colours, as `lamp_material` picks. A surface voxel is a
+/// solid voxel with air above it, found from the voxels themselves, so the
+/// lamps follow whatever the terrain holds.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone, Default)]
 struct LodWorld<const HINTED: bool, const LAMPS: usize = 0>;
 
-/// How many of `LodWorld`'s surface voxels hold one lamp, picked by a hash of
-/// their position.
+/// One in this many surface voxels of `LodWorld` holds a lamp, picked by a
+/// hash of the position.
 #[cfg(feature = "light_propagation")]
 const LOD_LAMP_EVERY: u32 = 32;
 
@@ -695,9 +738,10 @@ impl<const HINTED: bool, const LAMPS: usize> VoxelWorldConfig
 /// emissive voxels on one in 32 exposed floors and on the floors of its torch
 /// columns. Its voxels are read from [`cave_table`].
 ///
-/// Its emissive voxels are white lamps, or with `COLORS` above 1, each takes
-/// one of that many light colours: see `lamp_material`. A scenario changes
-/// their light colours through `emissive`.
+/// With `COLORS` at 1 its emissive voxels are white lamps. With more, each
+/// takes one of that many light colours, as `lamp_material` picks. A scenario
+/// changes their light colours through `emissive`, as a game would through
+/// its config resource.
 #[cfg(feature = "light_propagation")]
 #[derive(Resource, Clone)]
 struct CaveWorld<const COLORS: usize = 1> {
@@ -1668,18 +1712,22 @@ fn scenario_stream_in_lod<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     lod_metrics::<C>(prefix, &mut app, &result)
 }
 
-/// How long `stream_in_lod_lamps` and `stream_in_lod_colored` let their
-/// world stream before calling its light unsettled.
+/// How long `stream_in_lod_lamps` and `stream_in_lod_colored` let their world
+/// stream before they report its light as unsettled.
 #[cfg(feature = "light_propagation")]
 const LOD_LAMPS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// `scenario_stream_in_lod` on a world with lamps, streaming until its light
-/// settles, as `caves` streams, so every coarse chunk's solve counts. A
-/// world whose chunks hold lamps solves them more slowly than the lifecycle
-/// goes quiet, so `stream_in` would stop with most coarse chunks unsolved.
-/// Reports as `scenario_stream_in_lod` does, with `settled_ms`, the time
-/// until light settled, and `capped`, whether `LOD_LAMPS_CAP` ended the
-/// stream first. Only reports.
+/// Runs `scenario_stream_in_lod` on a world with lamps, streaming until its
+/// light settles, as `caves` streams, so that the solve of every coarse chunk
+/// counts.
+///
+/// A world whose chunks hold lamps solves them more slowly, so its lifecycle
+/// goes quiet before its light settles. `stream_in` stops once the lifecycle
+/// is quiet, with many coarse chunks still unsolved.
+///
+/// It reports what `scenario_stream_in_lod` reports, and two more metrics:
+/// `settled_ms`, the time until light settled, and `capped`, whether
+/// `LOD_LAMPS_CAP` ended the stream first. It only reports.
 #[cfg(feature = "light_propagation")]
 fn scenario_stream_in_lod_lamps<C: VoxelWorldConfig<MaterialIndex = u8> + Default>(
     prefix: &str,
@@ -1695,8 +1743,8 @@ fn scenario_stream_in_lod_lamps<C: VoxelWorldConfig<MaterialIndex = u8> + Defaul
     metrics
 }
 
-/// What `scenario_stream_in_lod` reports of world `C` in `app` under
-/// `prefix`, once `result`'s stream is done.
+/// Returns what `scenario_stream_in_lod` reports of world `C` in `app` under
+/// `prefix`, once the stream `result` is done.
 #[cfg(feature = "light_propagation")]
 fn lod_metrics<C: VoxelWorldConfig>(
     prefix: &str,
@@ -1744,10 +1792,13 @@ const CAVE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 #[cfg(feature = "light_propagation")]
 const SLOT_BYTES: f64 = 39_304.0;
 
-/// The thresholds of `caves`; see `scenario_caves`. Each is the most a metric
-/// may reach. The two counts sit about 20% above a run on an idle machine
-/// (4.55 solves per arrival, 1.93 visible changes per shown chunk); the costs
-/// have no threshold. No chunk may be stale after the stream settles.
+/// The thresholds of `caves`, each the most a metric may reach: see
+/// `scenario_caves`.
+///
+/// The two counts sit a margin above a run on an idle machine, so a change
+/// that makes light change more often after chunks show it fails. The two
+/// costs are infinite, so they only report. No chunk or light entry may be
+/// stale once light has settled.
 #[cfg(feature = "light_propagation")]
 const CAVE_GATES: [(&str, f64); 5] = [
     ("solves_per_arrival", CAVE_SOLVES_PER_ARRIVAL),
@@ -1765,43 +1816,48 @@ const CAVE_SOLVE_US: f64 = f64::INFINITY;
 #[cfg(feature = "light_propagation")]
 const CAVE_RELIGHT_US: f64 = f64::INFINITY;
 
-/// The thresholds of each run of the coloured `caves` rows: what a player
-/// sees holds as absolute limits, a shown chunk's visible changes, counting
-/// a change of light colour. The most main thread light takes in a frame
-/// gates on the median over the runs instead, against 1 ms or white's: see
-/// `main_thread_gate`. Their solves per arrival hold against white's in
-/// `COLORED_CAVE_RATIO_GATES`.
+/// The thresholds of each run of a coloured `caves` row.
+///
+/// What a player sees holds as an absolute limit: a shown chunk may change
+/// its visible light, a level or a light colour, no more often than the limit
+/// for white allows.
+/// No chunk or light entry may be stale. The solves per arrival hold against
+/// white instead, in `COLORED_CAVE_RATIO_GATES`. The most main thread light
+/// takes in a frame gates on the median over the runs: see
+/// `main_thread_gate`.
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_GATES: [(&str, f64); 2] = [
     ("visible_per_shown", CAVE_VISIBLE_PER_SHOWN),
     ("stale_chunks", 0.0),
 ];
 
-/// The most each coloured `caves` row's solves per arrival may be, as a
-/// ratio to white's in the same bench run, by row. Its most main thread in a
-/// frame, where over 1 ms, holds to the same ratio.
+/// The most that the solves per arrival of each coloured `caves` row may be,
+/// as a ratio to white in the same bench run.
+///
+/// Where the most main thread of a coloured row in a frame is over 1 ms, it
+/// holds to the same ratio: see `main_thread_gate`.
 #[cfg(feature = "light_propagation")]
 const COLORED_CAVE_RATIO_GATES: [(&str, f64); 2] =
     [("caves_3_colors", 1.2), ("caves_8_colors", 1.3)];
 
-/// `caves` in white, in three light colours and in eight, interleaved `runs`
-/// times so background load weighs on each alike, with the recolour steps.
-/// Each row's runs are summed up as `run_repeatedly` sums a scenario's runs.
+/// Runs `caves` in white, in three light colours and in eight, interleaved
+/// `runs` times so background load weighs on each alike, with the recolour
+/// steps. The runs of each row are summed up as `run_repeatedly` sums the
+/// runs of a scenario.
 ///
-/// - `caves`: white lamps, gated by `CAVE_GATES`.
-/// - `caves_3_colors` and `caves_8_colors`: each lamp takes one of three or
-///   eight light colours by a hash of its position. Gated by
-///   `COLORED_CAVE_GATES`, and their solves per arrival by
-///   `COLORED_CAVE_RATIO_GATES`, as a ratio of their medians to white's,
-///   reported as `solves_per_arrival_to_white`. The most main thread light
-///   takes in a frame, `main_thread_max_frame_ms`, gates on its median over
-///   the runs at 1 ms, or at the same ratio to white's, reported as
-///   `main_thread_max_frame_ms_to_white`; the worst run's is reported beside
-///   it as `main_thread_max_frame_ms_worst_run`, and gates nothing.
-/// - `caves_recolor`: once the three-colour row settles, its first lamp
-///   material takes another light colour.
-/// - `caves_first_flip`: once the white row settles, its lamp material takes
-///   a light colour, the world's first.
+/// - `caves` has white lamps, and `CAVE_GATES` gates each run.
+/// - `caves_3_colors` and `caves_8_colors` give each lamp one of three or
+///   eight light colours by a hash of its position. `COLORED_CAVE_GATES`
+///   gates each run. Their solves per arrival are gated by
+///   `COLORED_CAVE_RATIO_GATES`, as the ratio of their median to the median
+///   of white, and reported as `solves_per_arrival_to_white`. Their most main
+///   thread in a frame, `main_thread_max_frame_ms`, is gated by
+///   `main_thread_gate`.
+/// - `caves_recolor` changes the light colour of the first lamp material of
+///   the three-colour row, once that row has settled.
+/// - `caves_first_flip` gives the lamp material of the white row a light
+///   colour, the first in the world that isn't white, once that row has
+///   settled.
 ///
 /// The recolour steps report as `recolor_step` does, and gate only
 /// `stale_chunks`.
@@ -1848,16 +1904,18 @@ fn scenario_cave_rows(runs: usize) -> Metrics {
     metrics
 }
 
-/// Gates coloured `caves` row `row`'s `main_thread_max_frame_ms`, the median
-/// over its runs `samples`: it passes within `EDIT_MAIN_THREAD_GATE_US`, or
-/// within `most` times white's in the same runs `white`. Counts a failure in
-/// `gate_failures`.
+/// Gates `main_thread_max_frame_ms` of the coloured `caves` row `row`, the
+/// median over its runs `samples`. Counts a failure in the `gate_failures` of
+/// `row` unless the median is within `EDIT_MAIN_THREAD_GATE_US`, or its ratio
+/// to white in the same runs, `white`, is within `most`.
 ///
-/// White's `caves` frames streaming in run over 1 ms on main's own work, so
-/// an absolute limit would fail before colour adds anything. The ratio is
-/// taken run by run, since the rows interleave and a load spike weighs on
-/// both, then its median is reported as `main_thread_max_frame_ms_to_white`.
-/// The worst run's frame is reported as `main_thread_max_frame_ms_worst_run`.
+/// An absolute limit alone would fail before colour adds anything, since the
+/// frames of white `caves` can take more than 1 ms of main thread while the
+/// world streams in. The ratio is taken run by run, since the rows interleave
+/// and a load spike weighs on both rows of one run. The median of the ratios
+/// is reported as `main_thread_max_frame_ms_to_white`. The frame of the worst
+/// run is reported as `main_thread_max_frame_ms_worst_run`, and gates
+/// nothing.
 #[cfg(feature = "light_propagation")]
 fn main_thread_gate(
     metrics: &mut Metrics,
@@ -1889,9 +1947,9 @@ fn main_thread_gate(
     }
 }
 
-/// Puts the ratio of `row`'s metric `name` to `white`'s into `metrics` as
-/// `{row}.{name}_to_white`, and counts a failure in `row`'s `gate_failures`
-/// where it's over `most`.
+/// Puts the ratio of the metric `name` of `row` to the same metric of `white`
+/// into `metrics`, as `{row}.{name}_to_white`. Counts a failure in the
+/// `gate_failures` of `row` where the ratio is over `most` or isn't a number.
 #[cfg(feature = "light_propagation")]
 fn ratio_gate(metrics: &mut Metrics, white: &str, row: &str, name: &str, most: f64) {
     let ratio = metrics[&format!("{row}.{name}")] / metrics[&format!("{white}.{name}")];
@@ -1902,16 +1960,17 @@ fn ratio_gate(metrics: &mut Metrics, white: &str, row: &str, name: &str, most: f
     }
 }
 
-/// Changes world `C`'s light colours with `change` once its light has
-/// settled, as a game's system would through the config resource, and runs
-/// paced frames until light settles again. Reports under `prefix`:
+/// Changes the light colours of the `CaveWorld` in `app` with `change` once
+/// its light has settled, as a game system would through the config resource,
+/// then runs paced frames until light settles again. Reports under `prefix`:
 ///
-/// - `relights`: relights started;
-/// - `frames_to_settle`: frames from the change's frame until light settled;
-/// - `max_main_thread_us`: the most main thread light took in one frame;
-/// - `landed_changing_colors`: relight landings that changed light colours
-///   but no level;
-/// - `stale_chunks`: the fresh-solve check once light settled.
+/// - `relights`: the relights started.
+/// - `frames_to_settle`: the frames from the frame of the change until light
+///   settled.
+/// - `max_main_thread_us`: the most main thread light took in one frame.
+/// - `landed_changing_colors`: the relight landings that changed light
+///   colours but no level.
+/// - `stale_chunks`: what the fresh-solve check found once light settled.
 ///
 /// Only `stale_chunks` gates, reported as `gate_failures`.
 #[cfg(feature = "light_propagation")]
@@ -1958,35 +2017,36 @@ fn recolor_step<const COLORS: usize>(
     metrics
 }
 
-/// A stream into the reference scene's caves at the default light settings,
-/// sky reach 30 with round spread, ending once light is settled. Reports how
-/// often light changes after chunks first show it, and why:
+/// Streams into the caves of the reference scene at the default light
+/// settings, sky reach 30 with round `LightShape`, until light has settled.
+/// Reports how often light changes after chunks first show it, and why:
 ///
-/// - `solves_per_arrival`: solves in chunk tasks and relights, per chunk
-///   whose light landed;
-/// - `changed_batches_per_arrival`: frames after a chunk's arrival in which
-///   its light changed, per arrival;
-/// - `visible_per_shown`: frames after a chunk's arrival in which a relight
-///   changed light its own faces show, a level or a light colour, per chunk
-///   with any such voxel, as the probes counted them;
-///   `visible_with_shells_per_shown` also counts frames in which only light
-///   in front of its faces from a neighbour changed;
-/// - `visible_from_*_per_shown`: the frames of either, by cause: a
-///   neighbour arriving, a column found out by sky probes, a shell filling
-///   in in front of the chunk's solid voxels, and anything else. A frame
-///   with changes of several causes counts for the first.
+/// - `solves_per_arrival`: the solves in chunk tasks and relights, per chunk
+///   whose light landed.
+/// - `changed_batches_per_arrival`: the frames after the arrival of a chunk
+///   in which its light changed, per arrival.
+/// - `visible_per_shown`: the frames after the arrival of a chunk in which a
+///   relight changed light that its own faces show, a level or a light
+///   colour, per chunk with any such voxel, as `count_changes` counts them.
+///   `visible_with_shells_per_shown` also counts the frames in which only
+///   light in front of its faces, from a neighbour, changed.
+/// - `visible_from_*_per_shown`: the frames of either, by cause. The causes
+///   are a neighbour arriving, a column found out by sky probes, a shell
+///   filling in in front of the solid voxels of the chunk, and anything else.
+///   A frame with changes of several causes counts for the first.
 ///
 /// It also reports what the solves cost in chunk tasks, emissive scan
-/// included, the slots and memory light took at their peak, and relight
-/// landings by whether they changed a voxel's level, only its light colour,
-/// or nothing.
+/// included, and the slots and memory light took at their peak. It counts the
+/// relight landings by whether they changed the level of a voxel, only its
+/// light colour, or nothing.
 ///
-/// It ends with the fresh-solve check, reported as `stale_chunks`: the
-/// chunks and light entries whose light differs from a fresh solve of the
-/// settled world.
+/// It ends with the fresh-solve check, reported as `stale_chunks`: the chunks
+/// and light entries whose light differs from a fresh solve of the settled
+/// world.
 ///
-/// Thresholds, checked here and reported under `prefix` as `gate_failures`,
-/// are in `gates`. Returns the metrics and the settled app.
+/// The thresholds are in `gates`. The scenario checks them, and that light
+/// settled within `CAVE_CAP`, and counts each one missed in the
+/// `gate_failures` under `prefix`. Returns the metrics and the settled app.
 #[cfg(feature = "light_propagation")]
 fn scenario_caves<const COLORS: usize>(
     prefix: &str,
@@ -2248,8 +2308,10 @@ const PACED_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667
 /// many frames after the edit's frame...
 #[cfg(feature = "light_propagation")]
 const EDIT_FRAMES_GATE: u32 = 2;
-/// ...and relighting takes at most this much main thread in any frame, the
-/// median over the runs of a scenario that repeats its edits.
+/// ...and light takes at most this much main thread in any frame, in
+/// microseconds, as the median over the runs of a scenario that repeats its
+/// edits. `main_thread_gate` holds the coloured `caves` rows to the same
+/// limit.
 #[cfg(feature = "light_propagation")]
 const EDIT_MAIN_THREAD_GATE_US: f64 = 1000.0;
 
@@ -2260,27 +2322,27 @@ fn sine_height(x: i32, z: i32) -> i32 {
     (8.0 * (x as f32 / 23.0).sin() + 8.0 * (z as f32 / 17.0).cos()) as i32
 }
 
-/// One edit's light in one run of an edit scenario. Frames count from the
-/// edit's frame, frame 0, paced at 60 a second.
+/// The light of one edit in one run of an edit scenario. Frames count from
+/// the frame of the edit, frame 0, paced at 60 a second.
 #[cfg(feature = "light_propagation")]
 #[derive(Clone, Copy, Debug)]
 struct EditRun {
-    /// The frame of the edit's last light change: the last frame in which a
-    /// relight landed that changed a voxel's level or light colour. 0 if none
-    /// did.
+    /// The frame of the last light change of the edit: the last frame in which a
+    /// relight landed that changed the level or the light colour of a voxel. 0 if
+    /// none did.
     frames: u32,
-    /// The frame light settled in.
+    /// The frame in which light settled.
     settled: u32,
     /// The most main thread light took in one frame, in microseconds.
     main_thread_us: f64,
-    /// `main_thread_us` of the worst run, once runs are summed up by
-    /// `edit_medians`; in one run, the same as `main_thread_us`.
+    /// `main_thread_us` of the worst run, once `edit_medians` has summed up the
+    /// runs. In one run, the same as `main_thread_us`.
     main_thread_worst_run_us: f64,
-    /// Relights started.
+    /// The relights started from the edit until light settled.
     relights: u64,
 }
 
-/// Makes `edits` in world `C` and runs paced frames until its light settles.
+/// Makes `edits` in world `C`, then runs paced frames until its light settles.
 #[cfg(feature = "light_propagation")]
 fn run_edit<C: VoxelWorldConfig<MaterialIndex = u8>>(
     app: &mut App,
@@ -2326,14 +2388,16 @@ fn run_edit<C: VoxelWorldConfig<MaterialIndex = u8>>(
     }
     run.relights = stats(app).relights - started.relights;
     run.main_thread_worst_run_us = run.main_thread_us;
-    // A frame's rest, as a game's frame would give the edit's frame.
+    // Rests for one paced frame before the next edit, as a game runs a frame
+    // between two edits.
     std::thread::sleep(PACED_FRAME);
     run
 }
 
-/// Each edit's runs summed up, from `runs[run][edit]`: its frames, frames to
-/// settle, relights and main thread take the median over runs, and
-/// `main_thread_worst_run_us` the worst run's main thread.
+/// Returns the runs of each edit summed up, from `runs[run][edit]`. The
+/// frames, frames to settle, relights and main thread of an edit take the
+/// median over the runs, and `main_thread_worst_run_us` takes the main thread
+/// of the worst run.
 #[cfg(feature = "light_propagation")]
 fn edit_medians(runs: &[Vec<EditRun>]) -> Vec<EditRun> {
     (0..runs[0].len())
@@ -2352,10 +2416,12 @@ fn edit_medians(runs: &[Vec<EditRun>]) -> Vec<EditRun> {
         .collect()
 }
 
-/// Puts the summary of an edit scenario's `edits` into `metrics` under
-/// `prefix`, and returns how many missed the gate: frames over
-/// `frame_limits`, each edit's own limit, if given, or main thread over
-/// `EDIT_MAIN_THREAD_GATE_US`. The worst run's main thread,
+/// Puts the summary of the edits `edits` of an edit scenario into `metrics`
+/// under `prefix`, and returns how many missed the gate.
+///
+/// An edit misses the gate when its frames are over its own limit in
+/// `frame_limits`, if that is given, or when its main thread is over
+/// `EDIT_MAIN_THREAD_GATE_US`. The main thread of the worst run,
 /// `max_main_thread_us_worst_run`, only reports.
 #[cfg(feature = "light_propagation")]
 fn put_edits(
@@ -2405,7 +2471,8 @@ fn put_edits(
     failures
 }
 
-/// Prints the chunks the fresh-solve check found stale, if any.
+/// Prints the chunks and light entries the fresh-solve check found stale, if
+/// any.
 #[cfg(feature = "light_propagation")]
 fn report_stale(prefix: &str, fresh: &bevy_voxel_world::light_bench::FreshSolve) {
     if !fresh.stale.is_empty() {
@@ -2420,8 +2487,8 @@ fn report_stale(prefix: &str, fresh: &bevy_voxel_world::light_bench::FreshSolve)
     }
 }
 
-/// How many runs a scenario that repeats itself makes: `runs`, or 1 when
-/// profiling.
+/// Returns how many runs a scenario that repeats itself makes: `runs`, or 1
+/// when profiling.
 #[cfg(feature = "light_propagation")]
 fn repeats(runs: usize) -> usize {
     if PROFILING.load(Ordering::Relaxed) {
@@ -2431,19 +2498,19 @@ fn repeats(runs: usize) -> usize {
     }
 }
 
-/// Single voxel edits on the lit sine terrain once its light is at rest:
-/// placing a block on its surface and digging one from it, each followed by
-/// its undo, mid-chunk and against chunk faces, then a radius-8 bomb and its
-/// undo. Reports each edit's frames to its last light change and to settle,
-/// the most main thread light took in any frame, and the relights it started:
-/// see `EditRun`. The world is built and edited `runs` times, and each
-/// edit's runs are summed up by `edit_medians`.
+/// Makes single voxel edits on the lit sine terrain once its light is at
+/// rest: placing a block on its surface and digging one from it, each
+/// followed by its undo, mid-chunk and against chunk faces, then a radius-8
+/// bomb and its undo. Reports for each edit the frames to its last light
+/// change and to settle, the most main thread light took in any frame, and
+/// the relights it started: see `EditRun`. The world is built and edited
+/// `runs` times, and `edit_medians` sums up the runs of each edit.
 ///
-/// Gate, checked here and reported as `gate_failures`: each of these single
-/// voxel edits' last light change lands within 2 frames, and light takes at
-/// most 1 ms of main thread in any frame, the median over the runs. The 2
-/// frames are a limit for these edits, not for every edit: see
-/// `scenario_edits_lamps`. The bomb has no gate.
+/// Gate, checked here and reported as `gate_failures`: the last light change
+/// of each single voxel edit lands within `EDIT_FRAMES_GATE` frames, and
+/// light takes at most `EDIT_MAIN_THREAD_GATE_US` of main thread in any
+/// frame, as the median over the runs. The frame limit holds for these edits,
+/// not for every edit: see `scenario_edits_lamps`. The bomb has no gate.
 #[cfg(feature = "light_propagation")]
 fn scenario_edits_lit(runs: usize) -> Metrics {
     type Lit = LitBenchWorld<SINE>;
@@ -2531,42 +2598,52 @@ fn scenario_edits_lit(runs: usize) -> Metrics {
     metrics
 }
 
-/// How long `edits_lamps` lets the lamp world stream before calling its
-/// light unsettled.
+/// How long `edits_lamps` lets the lamp world stream before it reports the
+/// light as unsettled.
 #[cfg(feature = "light_propagation")]
 const LAMP_EDITS_CAP: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The most each coloured `edits_lamps` row's mean relights per edit may be,
-/// as a ratio to white's in the same bench run, by row.
+/// The most that the mean relights per edit of each coloured `edits_lamps`
+/// row may be, as a ratio to white in the same bench run.
 #[cfg(feature = "light_propagation")]
 const COLORED_EDIT_RATIO_GATES: [(&str, f64); 2] = [
     ("edits_lamps_3_colors", 1.3),
     ("edits_lamps_8_colors", 1.75),
 ];
 
-/// `edits_lit` on the lamp world, `LampWorld`, with each edit beside one of
-/// its lamps so it relights voxel light: a block placed on the ground beside
-/// the lamp, the lamp replaced by plain ground, and each undone, at six
-/// sites. The world streams until its light settles, as `caves` streams.
-/// Reports as `edits_lit` does, and ends each run with the fresh-solve
-/// check, reported as `stale_chunks`, the most of any run.
+/// Makes single voxel edits, as `edits_lit` does, on the lamp world,
+/// `LampWorld`, each beside a lamp so that it relights voxel light. At each
+/// of six sites it places a block on the ground beside the lamp, replaces the
+/// lamp with plain ground, and undoes each. The world streams until its light
+/// settles, as `caves` streams. Reports as `edits_lit` does, and ends each run
+/// with the fresh-solve check. `stale_chunks` reports the most that any run
+/// found.
 ///
 /// It runs in three rows, interleaved `runs` times so background load weighs
-/// on each alike: `edits_lamps` with white lamps, and `edits_lamps_3_colors`
-/// and `edits_lamps_8_colors`, where each lamp takes one of three or eight
-/// light colours by a hash of its position.
+/// on each alike:
 ///
-/// Gate, checked here and reported as each row's `gate_failures`: light
-/// takes at most 1 ms of main thread in any frame, the median over the runs,
-/// the stream settles, and no
-/// chunk is stale. White's frames only report: an edit directly relights only
-/// the chunks within `FILL_RUN_REACH` voxels of it, so the light of a chunk
-/// farther off that still holds the edit in its light box arrives a face
-/// neighbour a frame. A coloured edit's last light change lands within
-/// `EDIT_FRAMES_GATE` frames, or within white's frames for the same edit
-/// where those are more. A coloured row's mean relights per edit hold
-/// against white's in `COLORED_EDIT_RATIO_GATES`, as a ratio of their
-/// medians, reported as `mean_relights_to_white`.
+/// - `edits_lamps` has white lamps.
+/// - `edits_lamps_3_colors` and `edits_lamps_8_colors` give each lamp one of
+///   three or eight light colours by a hash of its position.
+///
+/// The gates are checked here and reported as the `gate_failures` of each
+/// row. In every row, light takes at most `EDIT_MAIN_THREAD_GATE_US` of main
+/// thread in any frame, as the median over the runs. The stream settles
+/// within `LAMP_EDITS_CAP`, and no chunk or light entry is stale. A coloured
+/// row also holds two gates against white:
+///
+/// - The last light change of each edit lands within `EDIT_FRAMES_GATE`
+///   frames, or within the frames of white for the same edit where those are
+///   more.
+/// - The mean relights per edit hold against white in
+///   `COLORED_EDIT_RATIO_GATES`, as a ratio of the medians, reported as
+///   `mean_relights_to_white`.
+///
+/// The frames of white only report. On a settled world, an edit at first
+/// relights only the chunk that holds it and the chunks within
+/// `FILL_RUN_REACH` voxels of it. A chunk farther off that still holds the
+/// edit in its light box gets the new light through the relight ripple, one
+/// face neighbour a frame.
 #[cfg(feature = "light_propagation")]
 fn scenario_edits_lamps(runs: usize) -> Metrics {
     let mut white = Vec::new();
@@ -2591,23 +2668,25 @@ fn scenario_edits_lamps(runs: usize) -> Metrics {
     metrics
 }
 
-/// One run of an `edits_lamps` row.
+/// The results of one run of an `edits_lamps` row.
 #[cfg(feature = "light_propagation")]
 struct LampEditsRun {
     edits: Vec<EditRun>,
-    /// Whether the stream's light didn't settle within `LAMP_EDITS_CAP`.
+    /// Whether the light of the stream didn't settle within `LAMP_EDITS_CAP`.
     capped: bool,
-    /// Chunks and light entries the fresh-solve check found stale.
+    /// How many chunks and light entries the fresh-solve check found stale.
     stale: usize,
-    /// The stream's runs of voxel light per light colour, and its reach
-    /// runs.
+    /// The runs of voxel light the stream made, one light colour at a time, as
+    /// `color_runs` of `LightStats` counts them. `reach_runs` counts the reach
+    /// runs of the stream alike.
     color_runs: u64,
     reach_runs: u64,
 }
 
-/// Puts the summary of an `edits_lamps` row's `runs` into `metrics` under
-/// `prefix`, gating frames by `frame_limits` as `put_edits` does. Returns
-/// each edit's runs summed up by `edit_medians`.
+/// Puts the summary of the runs `runs` of an `edits_lamps` row into `metrics`
+/// under `prefix`, gating frames by `frame_limits` as `put_edits` does. Its
+/// `gate_failures` also counts a stream whose light didn't settle, and any
+/// stale chunk. Returns the runs of each edit summed up by `edit_medians`.
 #[cfg(feature = "light_propagation")]
 fn put_lamp_edits(
     prefix: &str,
@@ -2651,7 +2730,7 @@ fn edits_lamps_run<const COLORS: usize>(prefix: &str) -> LampEditsRun {
     };
     let mut sites = Vec::new();
     for (x, z) in [(16, 16), (48, 20), (80, 72), (31, 40), (32, 40), (100, 63)] {
-        // The lamp nearest the site, by rings.
+        // Finds the lamp nearest the site, in squares growing around it.
         let lamp = (0..32)
             .flat_map(|r: i32| {
                 (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (x + dx, z + dz)))
@@ -3593,8 +3672,9 @@ fn record_hull_publishes<C: VoxelWorldConfig>(
 }
 
 /// Spawns a sub-grid at `transform` and builds the vehicle hull in it, with
-/// lamp voxels of the materials `lamp` gives when given. Returns the sub-grid's
-/// entity and what the hull holds. The hull commits in the next frame.
+/// lamp voxels of the materials that `lamp` returns, when it is given.
+/// Returns the entity of the sub-grid and what the hull holds. The hull
+/// commits in the next frame.
 #[cfg(feature = "sub_grids")]
 fn spawn_hull<C: VoxelWorldConfig<MaterialIndex = u8>>(
     app: &mut App,
@@ -3671,13 +3751,13 @@ fn add_vehicle<C: VoxelWorldConfig>(app: &mut App) {
         .add_systems(Last, record_hull_publishes::<C>);
 }
 
-/// Builds the vehicle hull in a new sub-grid at the start of its flight,
-/// with lamp voxels of the materials `lamp` gives when given, and runs frames until
-/// its chunks are Ready. Reports its solid voxels and Ready chunks under
-/// `prefix`, and returns the sub-grid's entity.
+/// Builds the vehicle hull in a new sub-grid at the start of its flight, with
+/// lamp voxels of the materials that `lamp` returns, when it is given. Runs
+/// frames until the chunks of the hull are Ready, reports its solid voxels
+/// and Ready chunks under `prefix`, and returns the entity of the sub-grid.
 ///
-/// Prints a warning when the Ready chunks differ from `vehicle_hull`'s
-/// prediction.
+/// Prints a warning when the Ready chunks differ from the prediction of
+/// `vehicle_hull`.
 #[cfg(feature = "sub_grids")]
 fn build_vehicle<C: VoxelWorldConfig<MaterialIndex = u8>>(
     app: &mut App,
@@ -3945,8 +4025,8 @@ struct LightFrame {
     sub_grid_relights: u64,
     /// Sub-grid chunks solved in their chunk tasks.
     sub_grid_chunk_solves: u64,
-    /// Whether a relight landed that changed a voxel's level or light
-    /// colour, in the frame or in any frame of a span.
+    /// Whether a relight landed that changed the level or the light colour of a
+    /// voxel, in the frame or in any frame of a span.
     changed: bool,
     /// Main thread spent landing light and starting relights, in
     /// microseconds: in a frame, or the most in any frame of a span.
@@ -4237,15 +4317,16 @@ impl<C: VoxelWorldConfig> BurstWatch for LightWatch<C> {
     }
 }
 
-/// The edits `vehicle_lit` makes to the hull one at a time, in order, with
-/// frames paced at 60 a second: `edits_lit`'s edits, on the hull. At each
-/// site, a block set on the surface and its undo, then the surface voxel
-/// dug and its undo.
+/// Returns the edits `vehicle_lit` makes to the hull one at a time, in order,
+/// with frames paced at 60 a second. They are the edits of `edits_lit`, on
+/// the hull: at each site, a block set on the surface and its undo, then the
+/// surface voxel dug and its undo.
 ///
-/// The sites are on the envelope's top and the cabin's floor, in the middle
-/// of a chunk and against chunk faces. Each dig leaves the wall under it
-/// closed, so the hull stays enclosed. `lamp` gives the hull's lamps their
-/// materials, as `vehicle_hull::build` was given it.
+/// The sites are on the top of the envelope and the floor of the cabin, in
+/// the middle of a chunk and against chunk faces. Each dig leaves the wall
+/// under it closed, so the hull stays enclosed. `lamp` is the function that
+/// gave the lamps of the hull their materials in `vehicle_hull::build`, so
+/// the edits read the hull as it was built.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 fn paced_hull_edits(lamp: fn(IVec3) -> u8) -> Vec<(IVec3, WorldVoxel<u8>)> {
     let lamp = Some(lamp);
@@ -4278,28 +4359,29 @@ fn paced_hull_edits(lamp: fn(IVec3) -> u8) -> Vec<(IVec3, WorldVoxel<u8>)> {
     edits
 }
 
-/// One run of a `vehicle_lit` row: its metrics, and each paced edit's
-/// light, which the row gates once its runs are summed up.
+/// The results of one run of a `vehicle_lit` row: its metrics, and the light
+/// of each paced edit, which the row gates once its runs are summed up.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 struct VehicleLitRun {
     metrics: Metrics,
     edits: Vec<EditRun>,
 }
 
-/// `vehicle_lit` with white lamps, and `vehicle_lit_3_colors`, where every
-/// lamp, the hull's included, takes one of three light colours by a hash of
-/// its position. The two rows run interleaved `runs` times so background
-/// load weighs on each alike, and each row's runs are summed up as
-/// `run_repeatedly` sums a scenario's runs. Each runs and gates as
-/// `vehicle_lit_run` says.
+/// Runs `vehicle_lit` with white lamps, and `vehicle_lit_3_colors`, where
+/// each lamp of the hull takes one of three light colours by a hash of its
+/// position. The world itself holds no lamps. The two rows run interleaved
+/// `runs` times so background load weighs on each alike, and the runs of each
+/// row are summed up as `run_repeatedly` sums the runs of a scenario.
+/// `vehicle_lit_run` makes each run and checks its gates.
 ///
 /// The paced edits gate on their runs summed up by `edit_medians`, reported
-/// as `put_edits` reports them under `{row}.paced`: a white edit's last
-/// light change lands within `EDIT_FRAMES_GATE` frames, and a coloured
-/// edit's within `EDIT_FRAMES_GATE` or white's frames for the same edit,
-/// where those are more. In both, light takes at most 1 ms of main thread in
-/// any frame, the median over the runs. Each edit that misses counts once in
-/// its row's `gate_failures`.
+/// as `put_edits` reports them under `{row}.paced`. In white, the last light
+/// change of each edit lands within `EDIT_FRAMES_GATE` frames. In the
+/// coloured row, it lands within `EDIT_FRAMES_GATE` frames, or within the
+/// frames of white for the same edit where those are more. In both rows,
+/// light takes at most `EDIT_MAIN_THREAD_GATE_US` of main thread in any
+/// frame, as the median over the runs. Each edit that misses counts once in
+/// the `gate_failures` of its row.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 fn scenario_vehicle_lit_rows(runs: usize) -> Metrics {
     let mut white = Vec::new();
@@ -4318,11 +4400,12 @@ fn scenario_vehicle_lit_rows(runs: usize) -> Metrics {
     metrics
 }
 
-/// Puts the summary of a `vehicle_lit` row's `runs` into `metrics` under
-/// `prefix`: their metrics summed up as `run_repeatedly` sums them up, and
-/// the paced edits as `put_edits` puts them, gated by `frame_limits`, each
-/// edit's own limit, or by `EDIT_FRAMES_GATE` when not given. Returns each
-/// paced edit's runs summed up by `edit_medians`.
+/// Puts the summary of the runs `runs` of a `vehicle_lit` row into `metrics`
+/// under `prefix`. Their metrics are summed up as `run_repeatedly` sums them
+/// up. The paced edits are put as `put_edits` puts them, gated by
+/// `frame_limits`, which holds a limit for each edit, or by
+/// `EDIT_FRAMES_GATE` when it isn't given. Returns the runs of each paced
+/// edit summed up by `edit_medians`.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
 fn put_vehicle_lit(
     prefix: &str,
@@ -4345,34 +4428,38 @@ fn put_vehicle_lit(
     edits
 }
 
-/// One run of a `vehicle_lit` row under `prefix`. The vehicle hull with lamps
-/// in its cabin, in the lit sine world, its lamps white, or with `COLORS`
-/// above 1, each taking one of that many light colours, as `lamp_material`
-/// picks. Built by voxel edits with its light and tag map settled before
-/// timing starts (see `settle_tag_map`), it hovers for
-/// `VEHICLE_HOVER_FRAMES`, then flies and tumbles as in `vehicle`. Still
-/// tumbling, it takes `paced_hull_edits` one at a time with frames paced at
-/// 60 a second, as `edits_lit` does, and then an edit every frame as in
-/// `vehicle`.
+/// Flies the vehicle hull, with lamps in its cabin, over the lit sine world,
+/// for one run of a `vehicle_lit` row under `prefix`.
 ///
-/// Reports frame metrics for each phase, and for each phase with no edits
-/// the sub-grid solves and relights it started and the most main thread
-/// light took in a frame. For the paced edits, their frames and time to
-/// publish, counting the edit's frame; their light is returned as
-/// `EditRun`s, counting frames to the last light change, as `run_edit`
-/// does. For the edits every frame, what `edit_vehicle_every_frame`
-/// reports, and the relights and most main thread in a frame from the
-/// phase's start until light settled. For every phase, what
-/// `LightWatch::report_tag_map` reports: the tag map's entries, entries
-/// written per frame, full rewrites, upkeep per frame, and the slots world
-/// chunks of air around the hull hold.
+/// The lamps are white when `COLORS` is 1. With more, each lamp takes one of
+/// that many light colours, as `lamp_material` picks. The hull is built by
+/// voxel edits, and its light and tag map settle before timing starts: see
+/// `settle_tag_map`. It hovers for `VEHICLE_HOVER_FRAMES`, then flies and
+/// tumbles as in `vehicle`. Still tumbling, it takes the edits of
+/// `paced_hull_edits` one at a time, with frames paced at 60 a second as in
+/// `edits_lit`, and then an edit every frame as in `vehicle`.
+///
+/// It reports:
+///
+/// - For each phase, its frame metrics, and what
+///   `LightWatch::report_tag_map` reports: the entries of the tag map, the
+///   entries written per frame, full rewrites, upkeep per frame, and the
+///   slots that world chunks of air around the hull hold.
+/// - For each phase with no edits, the sub-grid solves and relights it
+///   started, and the most main thread light took in a frame.
+/// - For the paced edits, their frames and time to publish, counting the
+///   frame of the edit. Their light is returned as `EditRun`s, which count
+///   the frames to the last light change as `run_edit` does.
+/// - For the edits every frame, what `edit_vehicle_every_frame` reports, and
+///   the relights and most main thread in a frame from the start of the phase
+///   until light settled.
 ///
 /// Gate, checked here and reported as `gate_failures`: no sub-grid solve or
 /// relight starts while the hull hovers, flies or tumbles with no edit, and
-/// no tag map entry is written while it hovers. Each solve, relight and
-/// entry written counts once. While the hull tumbles, its entries written
-/// per frame and the air chunks' slots stay within `VEHICLE_TAG_MAP_GATES`,
-/// each one over counting once. The paced edits gate once the row's runs
+/// no tag map entry is written while it hovers. Each solve, relight and entry
+/// written counts once. While the hull tumbles, its entries written per frame
+/// and the slots of the air chunks stay within `VEHICLE_TAG_MAP_GATES`, and
+/// each one over counts once. The paced edits gate once the runs of the row
 /// are summed up: see `scenario_vehicle_lit_rows`. The edits every frame
 /// have no gate, and no timing has a threshold.
 #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
@@ -5107,19 +5194,19 @@ fn combine(samples: &[Metrics], pick: impl Fn(&str, &[f64]) -> f64) -> Metrics {
         .collect()
 }
 
-/// Repeated runs within one process. Interference only ever slows a run down, so
-/// whole-run totals take their best run; everything else, already summarised over
-/// many frames, takes the median.
+/// Runs `scenario` `runs` times within one process, and sums the runs up.
 ///
-/// `gate_failures`, `errors` and `stale_chunks` take the worst run: a
-/// scenario's promise must hold in every run, and the median would read 0 for
-/// a promise broken in fewer than half.
+/// Interference only ever slows a run down, so whole-run totals take their
+/// best run. Everything else, already summarised over many frames, takes the
+/// median. `gate_failures`, `errors` and `stale_chunks` take the worst run: a
+/// promise of a scenario must hold in every run, and the median would read 0
+/// for a promise broken in fewer than half.
 fn run_repeatedly(runs: usize, scenario: impl Fn() -> Metrics) -> Metrics {
     let samples: Vec<Metrics> = (0..runs).map(|_| scenario()).collect();
     summarise(&samples)
 }
 
-/// Repeated runs' `samples` summed up as `run_repeatedly` sums them up.
+/// Sums up the `samples` of repeated runs as `run_repeatedly` describes.
 fn summarise(samples: &[Metrics]) -> Metrics {
     combine(samples, |key, values| {
         match key.rsplit('.').next().unwrap() {
@@ -5300,16 +5387,16 @@ fn run_all(only: Option<&str>) -> Metrics {
         scenario_stream_in_lod_lamps::<LodWorld<false, 3>>("stream_in_lod_colored")
     });
     #[cfg(feature = "light_propagation")]
-    // Its white and coloured rows run their own repeats, interleaved.
+    // `caves` runs its own repeats, interleaving its white and coloured rows.
     step("caves", 1, &|| scenario_cave_rows(repeats(CAVE_RUNS)));
     #[cfg(feature = "light_propagation")]
     if only.is_some_and(|only| only.split(',').any(|s| s == "lod_scale")) {
         step("lod_scale", 1, &scenario_lod_scale);
     }
     #[cfg(feature = "light_propagation")]
-    // The edit scenarios run their own repeats, to sum each edit up over
-    // runs: see `edit_medians`. `edits_lamps` interleaves its white and
-    // coloured rows.
+    // The edit scenarios run their own repeats, so that each edit can be summed
+    // up over the runs: see `edit_medians`. `edits_lamps` interleaves its white
+    // and coloured rows.
     step("edits_lit", 1, &|| scenario_edits_lit(repeats(RUNS)));
     #[cfg(feature = "light_propagation")]
     step("edits_lamps", 1, &|| scenario_edits_lamps(repeats(RUNS)));
@@ -5322,8 +5409,9 @@ fn run_all(only: Option<&str>) -> Metrics {
     #[cfg(feature = "sub_grids")]
     step("lift_burst", RUNS, &scenario_lift_burst);
     #[cfg(all(feature = "light_propagation", feature = "sub_grids"))]
-    // Its white and coloured rows run their own repeats, interleaved, to
-    // sum each paced edit up over runs: see `edit_medians`.
+    // `vehicle_lit` runs its own repeats, interleaving its white and coloured
+    // rows, so that each paced edit can be summed up over the runs: see
+    // `edit_medians`.
     step("vehicle_lit", 1, &|| {
         scenario_vehicle_lit_rows(repeats(RUNS))
     });
@@ -5354,17 +5442,18 @@ fn gate(key: &str) -> Gate {
         || key.starts_with("stream_in_lit")
         || key.starts_with("stream_in_flat_lit")
         || key.starts_with("stream_in_islands")
-        // Read by hand, unlike `stream_in_lod` itself.
+        // The lamp rows of `stream_in_lod` are read by hand. `stream_in_lod` itself
+        // gates on its times.
         || key.starts_with("stream_in_lod_lamps")
         || key.starts_with("stream_in_lod_colored")
         || key.starts_with("edits_lit")
-        // With `edits_lamps_3_colors` and `edits_lamps_8_colors`, whose
-        // ratios to white gate in the bench, as `gate_failures`.
+        // The prefix also covers `edits_lamps_3_colors` and `edits_lamps_8_colors`.
+        // Their ratios to white gate in the bench, as `gate_failures`.
         || key.starts_with("edits_lamps")
         || key.starts_with("settings_lit")
-        // With `caves_3_colors` and `caves_8_colors`, whose ratios to white
-        // gate in the bench, as `gate_failures`, and the recolour steps
-        // `caves_recolor` and `caves_first_flip`.
+        // The prefix also covers `caves_3_colors` and `caves_8_colors`, whose gates
+        // against white run in the bench, as `gate_failures`. It covers the recolour
+        // steps `caves_recolor` and `caves_first_flip` too.
         || key.starts_with("caves")
         || key.starts_with("lod_scale")
         || key.starts_with("fragments")

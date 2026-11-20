@@ -1,6 +1,13 @@
-//! Tests of light colours mixing where they meet, at LOD level 0, read
-//! through `light_at` and held against the coloured reference flood. Sky
-//! light is off in all of them.
+//! Light colours mixing where they meet
+//!
+//! This module streams scenes of lamps of several light colours at LOD level
+//! 0, and reads their light back through `light_at`. Most tests check the
+//! light of every chunk whose light box is loaded against the coloured
+//! reference flood of [`Reference`]. The others check how the world view
+//! stores the light colours of a chunk. The tests of coloured light through
+//! arrivals and edits build on its `Scene` and its checks.
+//!
+//! Sky light is off in every test, so only voxel light is compared.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,8 +28,11 @@ pub(super) const RED_LAMP: u8 = 6;
 pub(super) const GREEN_LAMP: u8 = 7;
 pub(super) const BLUE_LAMP: u8 = 8;
 
-/// The declared level and light colour of each emissive material: white
-/// lamps at 15 and 8, and a red, a green and a blue lamp at 15.
+/// The emissive materials of the scenes, each with its declared level and
+/// light colour.
+///
+/// `LAMP` and `DIM_LAMP` are white, at levels 15 and 8. `RED_LAMP`,
+/// `GREEN_LAMP` and `BLUE_LAMP` are all at level 15.
 const EMISSION: [(u8, f32, LinearRgba); 5] = [
     (LAMP, 15.0, LinearRgba::WHITE),
     (DIM_LAMP, 8.0, LinearRgba::WHITE),
@@ -31,8 +41,11 @@ const EMISSION: [(u8, f32, LinearRgba); 5] = [
     (BLUE_LAMP, 15.0, LinearRgba::BLUE),
 ];
 
-/// How far a light colour read back may be from the reference's: a step of
-/// its packing.
+/// How far each component of a light colour read back may be from the
+/// reference.
+///
+/// The packing holds a component in steps of 1/127, and the extra 1e-5 allows
+/// for rounding.
 pub(super) const STEP: f32 = 1.0 / 127.0 + 1e-5;
 
 pub(super) fn emissive() -> Vec<(u8, Emission)> {
@@ -44,8 +57,10 @@ pub(super) fn emissive() -> Vec<(u8, Emission)> {
         .collect()
 }
 
-/// Lamps in air, with stone wherever `wall` holds, and voxels `edits` sets
-/// over them.
+/// A scene of lamps in air, with stone wherever `wall` returns true.
+///
+/// Each voxel in `edits` replaces whatever the scene holds at its position.
+/// A later edit wins over an earlier one at the same position.
 #[derive(Clone)]
 pub(super) struct Scene {
     pub lamps: Vec<(IVec3, u8)>,
@@ -62,7 +77,7 @@ impl Scene {
         }
     }
 
-    /// This scene with `edits` set over it.
+    /// Returns a copy of this scene with `edits` set over it.
     pub fn edited(&self, edits: &[(IVec3, WorldVoxel)]) -> Self {
         let mut scene = self.clone();
         scene.edits.extend_from_slice(edits);
@@ -99,8 +114,8 @@ impl Scene {
         }
     }
 
-    /// The reference light, in a box reaching past the lamps far enough to
-    /// hold every voxel their light reaches.
+    /// Returns the reference light of the scene, in a box that reaches far
+    /// enough past the lamps to hold every voxel their light reaches.
     pub fn reference(
         &self,
         reach: u8,
@@ -154,8 +169,11 @@ pub(super) fn a_white_pool_ending_inside_a_red_one(_reach: u8) -> Scene {
     ])
 }
 
-/// A red lamp west of a wall filling the plane x = -1, and a green lamp east
-/// of it, in the chunk at the origin, whose light box holds both.
+/// Returns a wall filling the plane x = -1, with a red lamp west of it and a
+/// green lamp east of it.
+///
+/// The green lamp is in the chunk at the origin. The light box of that chunk
+/// holds both lamps, but the wall keeps the red light out of the chunk.
 pub(super) fn a_colour_walls_keep_from_a_chunk(_reach: u8) -> Scene {
     Scene {
         lamps: vec![
@@ -167,10 +185,11 @@ pub(super) fn a_colour_walls_keep_from_a_chunk(_reach: u8) -> Scene {
     }
 }
 
-/// The voxel [`every_colour_at_level_1`] lights at level 1 from each lamp.
+/// The voxel that each lamp of [`every_colour_at_level_1`] lights at level 1.
 const AT_LEVEL_1: IVec3 = IVec3::new(16, 16, 16);
 
-/// A red and a green lamp `reach` either side of [`AT_LEVEL_1`].
+/// Returns a red lamp and a green lamp, `reach` voxels from [`AT_LEVEL_1`] on
+/// either side of it.
 pub(super) fn every_colour_at_level_1(reach: u8) -> Scene {
     let reach = reach as i32;
     Scene::in_air(vec![
@@ -179,7 +198,8 @@ pub(super) fn every_colour_at_level_1(reach: u8) -> Scene {
     ])
 }
 
-/// The chunks around the origin, where the camera is.
+/// Returns the chunk position at the origin, where the camera is, and the 26
+/// positions around it.
 pub(super) fn around_origin() -> Vec<IVec3> {
     (-1..=1)
         .flat_map(|z| {
@@ -188,7 +208,7 @@ pub(super) fn around_origin() -> Vec<IVec3> {
         .collect()
 }
 
-/// The spawned chunks whose whole light box is loaded.
+/// Returns the spawned level-0 chunks whose whole light box is loaded.
 pub(super) fn boxed(app: &mut App) -> Vec<IVec3> {
     let spawned: Vec<IVec3> = chunk_keys::<LampWorld>(app)
         .into_iter()
@@ -210,10 +230,12 @@ pub(super) fn close(a: [f32; 3], b: [f32; 3], within: f32) -> bool {
     a.iter().zip(b).all(|(a, b)| (a - b).abs() <= within)
 }
 
-/// Streams `scene` under each reach, shape and precision until it settles,
-/// then holds it against the reference with [`assert_on_the_reference`]. It
-/// streams far enough that every chunk around the origin has its whole light
-/// box loaded, so the corners of the origin's light box are checked too.
+/// Streams `scene` under each voxel reach, shape and precision until it
+/// settles, then checks it with [`assert_on_the_reference`].
+///
+/// The world streams far enough that every chunk around the origin has its
+/// whole light box loaded. Those chunks are checked too, so the check covers
+/// the corners of the light box of the chunk at the origin.
 fn settles_on_the_reference(scene: fn(u8) -> Scene) {
     for reach in [14, 16] {
         for shape in [LightShape::Round, LightShape::Diamond] {
@@ -235,9 +257,13 @@ fn settles_on_the_reference(scene: fn(u8) -> Scene) {
     }
 }
 
-/// Fails unless every voxel of each chunk whose light box is loaded reads
-/// the reference light of `scene`: levels exactly, light
-/// colours within a step of the packing.
+/// Fails unless every voxel of each chunk whose light box is loaded reads the
+/// reference light of `scene`.
+///
+/// The voxel light level must match the reference, and each component of the
+/// light colour must lie within [`STEP`] of it. A voxel outside the reference
+/// box must be unlit and white. More than 1000 voxels must be lit, so an empty
+/// scene can't pass.
 pub(super) fn assert_on_the_reference(
     app: &mut App,
     scene: &Scene,
@@ -357,8 +383,9 @@ fn a_light_box_whose_walls_keep_one_colour_out_stores_the_other() {
 
 #[test]
 fn a_white_chunk_in_a_coloured_world_holds_no_light_colour() {
-    // A white lamp in the chunk at the origin, and a red one two chunks east.
-    // The chunk between holds both in its light box, and neither's light.
+    // A white lamp stands in the chunk at the origin, and a red lamp two chunks
+    // east. Red light reaches neither the chunk at the origin nor the chunk
+    // between them.
     let scene = Scene::in_air(vec![
         (IVec3::new(16, 16, 16), LAMP),
         (IVec3::new(80, 16, 16), RED_LAMP),
@@ -376,17 +403,17 @@ fn a_mixed_chunk_holds_a_packed_light_colour_per_voxel_and_unlit_voxels_read_whi
         panic!("the chunk at the origin isn't mixed");
     };
     assert_eq!(packed.len(), 32 * 32 * 32);
-    // The light box holds both lamps whenever the chunk solves, so it runs
-    // once for each.
+    // The light box of the chunk holds both lamps whenever the chunk solves,
+    // so every solve makes one colour run for each lamp.
     assert!(color_runs(&app) >= 2);
-    // Too far from either lamp for their light.
+    // This voxel is too far from either lamp for their light to reach it.
     let dark = IVec3::new(16, 16, 0);
     let levels = light_at(&mut app, dark).unwrap();
     assert_eq!(levels.voxel, 0.0);
     assert_eq!(levels.voxel_color, LinearRgba::WHITE);
     assert_eq!(packed[voxel_index(16, 16, 0)], WHITE);
-    // Between the lamps the colours mix to yellow-ish, and a lamp reads its
-    // own colour.
+    // Between the lamps, red and green light mix to a yellow. An emissive voxel
+    // reads its own light colour.
     let between = light_at(&mut app, IVec3::new(19, 17, 16)).unwrap();
     assert!(between.voxel_color.red > 0.5 && between.voxel_color.green > 0.5);
     assert_eq!(
@@ -397,7 +424,8 @@ fn a_mixed_chunk_holds_a_packed_light_colour_per_voxel_and_unlit_voxels_read_whi
     );
 }
 
-/// What a look change mustn't touch: relights, solves and runs.
+/// Returns the counts of relights, solves and colour runs, which a look change
+/// must leave alone.
 fn work_done(app: &App) -> [u64; 3] {
     let stats = light_stats::<LampWorld>(app.world()).unwrap();
     [stats.relights, stats.solves, color_runs(app)]

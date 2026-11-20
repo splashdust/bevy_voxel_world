@@ -1,16 +1,18 @@
-//! The reference flood: what light should be, worked out by brute force over a
-//! flat array of a whole region, with every voxel in it known.
+//! The reference flood
 //!
-//! It is written from the rules of light propagation alone and shares no code
-//! with the crate's solver, so a test can hold the solver's light against it.
-//! It is slow on purpose: every round of spreading visits every voxel.
+//! This module works out what light should be by brute force, over a flat
+//! array of a whole box of the world with every voxel in it known. It is
+//! written from the rules of light propagation alone and shares no code with
+//! the solver, so a test can hold the light of the solver against it. It is
+//! slow on purpose: every round of spreading visits every voxel.
 //!
-//! Sky light and voxel light are each worked out from their sources, each a
-//! voxel and the distance it starts at, so another kind of source, such as
-//! direct sky, adds sources without changing the flood.
+//! Sky light and voxel light are each worked out from their sources. A source
+//! is a voxel and the distance its light starts at, so another kind of
+//! source, such as direct sky, adds sources without changing the flood.
+//! Voxel light floods once for each light colour.
 //!
-//! Levels are held in steps: 0 to 15 at 16 levels, 0 to 255 at 256, where
-//! direct sky holds `top`, 255.
+//! Levels are held in steps, from 0 to `top`. Direct sky holds `top`, which is
+//! 15 at 16 steps and 255 at 256 steps.
 
 use bevy::prelude::*;
 
@@ -38,20 +40,22 @@ pub(super) struct Reference {
     voxel: Vec<u8>,
     /// The sky light level of every voxel.
     sky: Vec<u8>,
-    /// The light colour of every voxel's voxel light, in linear RGB.
+    /// The light colour of the voxel light of every voxel, in linear RGB.
     color: Vec<[f32; 3]>,
 }
 
-/// `color` scaled so its brightest component is 1, each negative component
-/// read as 0, or `None` for black.
+/// Returns `color` scaled so its brightest component is 1, with each negative
+/// component read as 0. Returns `None` for black.
 fn brightest_at_1(color: [f32; 3]) -> Option<[f32; 3]> {
     let color = color.map(|component| component.max(0.0));
     let brightest = color[0].max(color[1]).max(color[2]);
     (brightest > 0.0).then(|| color.map(|component| component / brightest))
 }
 
-/// The light colour that light of each of `reaching`'s light colours, at its
-/// level on the 0 to 15 scale, mixes to.
+/// Returns the light colour that the light colours in `reaching` mix to, each
+/// at its level on the 0 to 15 scale.
+///
+/// [`Reference::colored_voxel_light_in_steps`] describes the mix.
 fn mixed(reaching: &[([f32; 3], f32)]) -> [f32; 3] {
     let weight = |level: f32| {
         (0.7f64.powf(15.0 - level as f64) - 0.7f64.powi(14)) / (1.0 - 0.7f64.powi(14))
@@ -108,20 +112,28 @@ impl Reference {
         )
     }
 
-    /// [`voxel_light_in_steps`](Self::voxel_light_in_steps) of emissive
-    /// voxels that each give off a light colour. `emission` gives the
-    /// declared level and light colour, in linear RGB, of an emissive
+    /// Works as [`voxel_light_in_steps`](Self::voxel_light_in_steps), for
+    /// emissive voxels that each give off a light colour. `emission` gives the
+    /// declared level and the light colour, in linear RGB, of an emissive
     /// material.
     ///
-    /// A light colour counts only by its hue and saturation: it's scaled so
-    /// its brightest component is 1, a negative component reads as 0, and
-    /// black gives no light. Light of each light colour floods on its own. A
-    /// voxel's level is the highest of the floods', and its light colour, per
-    /// component, the max over the floods reaching it of colour times
-    /// `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`, scaled back to a brightest
-    /// component of 1. Where those weights are all 0, at level 1, each flood
-    /// weighs 1. An emissive voxel has its own light colour, and a voxel no
-    /// light reaches is white.
+    /// A light colour counts only by its hue and saturation. It is scaled so
+    /// its brightest component is 1, and a negative component reads as 0.
+    /// Black gives no light.
+    ///
+    /// Light of each light colour floods on its own. The voxel light level of
+    /// a voxel is the highest level among the floods that reach it. The light
+    /// colour of the voxel mixes those floods. Each component is the largest,
+    /// over the floods, of the flood colour times a weight, and the mix is
+    /// then scaled back to a brightest component of 1. A flood at `level`
+    /// weighs `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`, which is 1 at
+    /// level 15 and 0 at level 1. For example, red light at level 15 and green
+    /// light at level 8 weigh 1 and about 0.076, so they mix to red with a
+    /// green component of about 0.076.
+    ///
+    /// Where no weight is above 0, as where every flood reaches at level 1,
+    /// each flood weighs 1. An emissive voxel has its own light colour. A
+    /// voxel that no light reaches is white.
     pub fn colored_voxel_light_in_steps<I: Copy + PartialEq>(
         top: u32,
         min: IVec3,
@@ -176,7 +188,7 @@ impl Reference {
                 colors.push(*color);
             }
         }
-        // Each voxel's level from each light colour's flood.
+        // The level of every voxel in the flood of each light colour.
         let floods: Vec<([f32; 3], Vec<u8>)> = colors
             .iter()
             .map(|color| {
@@ -371,12 +383,13 @@ impl Reference {
         self.voxel[self.index(position).expect("a position in the box")]
     }
 
-    /// Whether `position` is in the box.
+    /// Returns whether `position` lies in the box.
     pub fn holds(&self, position: IVec3) -> bool {
         self.index(position).is_some()
     }
 
-    /// The light colour of the voxel light at `position`, in linear RGB.
+    /// Returns the light colour of the voxel light at `position`, in linear
+    /// RGB.
     pub fn color_at(&self, position: IVec3) -> [f32; 3] {
         self.color[self.index(position).expect("a position in the box")]
     }

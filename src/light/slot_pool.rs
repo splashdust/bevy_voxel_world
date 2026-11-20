@@ -1,25 +1,34 @@
-//! The bookkeeping of a texture of slots: which slots are free, which chunk
-//! holds each one, and which holder gives way when every slot is taken.
+//! Slot pools
 //!
-//! A [`SlotPool`] hands out slots by index and knows nothing of what a slot
-//! holds or what its holder shows without one. An adapter, a type
-//! implementing [`Holders`], supplies those: how far a holder is from the
-//! cameras, and what it shows once it gives its slot up. The route's light
-//! slots are one such adapter.
+//! This module keeps the books of a texture of slots: which slots are free,
+//! which chunk holds each one, and which holder gives way when every slot is
+//! taken. A [`SlotPool`] hands out slots by index. It knows nothing of what
+//! a slot holds, or of what its holder shows without one. An adapter, a type
+//! that implements [`Holders`], supplies those: how far a holder is from the
+//! cameras, and what it shows once it gives its slot up. The
+//! [`LightRoute`](super::route::LightRoute) is the adapter of two pools, one
+//! for its slots and one for its colour slots.
 //!
-//! The pool hands out slots given back first, the last one first, and
-//! otherwise the next slot never handed out. The texture's shape is set
-//! when the first slot is taken, and the slot count is clamped then to the
-//! largest 3D texture the device makes, with a warning. When every slot is
-//! taken, the holder farthest from the cameras gives way to a nearer chunk,
-//! never to a farther one, and the pool warns once. Finding that holder
-//! costs a pass over every holder, so it grows with the slot count.
+//! A pool hands out the slots given back before any other, the one given
+//! back last first. Otherwise it hands out the lowest slot it has never
+//! handed out.
+//! When every slot is taken, the holder farthest from the cameras gives way
+//! to a nearer chunk, never to a farther one, and the pool warns once.
+//! Finding that holder costs a pass over every holder, so the cost grows with
+//! the slot count.
 //!
-//! A pool made with [`SlotPool::growing`] starts with no slots, and its
-//! adapter raises the count with [`SlotPool::grow`] as its texture grows.
-//! Growing never moves a slot. Its adapter places its slots in its texture
-//! and checks the device itself, so the pool never clamps it. The route's
-//! colour slots are such a pool.
+//! # Fixed and growing pools
+//!
+//! A pool made with [`SlotPool::new`] has a fixed slot count, and it sets the
+//! shape of its texture when the first slot is taken. It clamps the slot
+//! count then to the largest 3D texture the device makes, with a warning.
+//! The slots of the route are such a pool.
+//!
+//! A pool made with [`SlotPool::growing`] starts with no slots. Its adapter
+//! raises the count with [`SlotPool::grow`] as its texture grows, and growing
+//! never moves a slot. The adapter places the slots in its texture and checks
+//! the device itself, so the pool never clamps the count. The colour slots of
+//! the route are such a pool.
 
 use bevy::log::warn_once;
 use bevy::platform::collections::HashMap;
@@ -27,19 +36,19 @@ use bevy::prelude::*;
 
 use super::route::SLOT_SIDE;
 
-/// What a pool's slots are for, supplied to the pool by the route that owns
-/// it: how far a holder is, and what a holder shows once it gives its slot
-/// up.
+/// The adapter of a pool, which tells the pool what its holders are: how far
+/// a holder is from the cameras, and what a holder shows once it gives its
+/// slot up.
 pub(crate) trait Holders<H> {
-    /// What the pool's slots are called in its warnings, such as
+    /// The name of the slots in the warnings of the pool, such as
     /// "light slots".
     const SLOTS: &'static str;
 
-    /// What a holder shows once it gives its slot up, as said in the
-    /// pool's warning that every slot is taken.
+    /// What a holder shows once it gives its slot up, in the words of the
+    /// warning that every slot is taken.
     const WITHOUT_SLOT: &'static str;
 
-    /// How far `holder` is from the nearest camera.
+    /// Returns how far `holder` is from the nearest camera.
     fn distance(&self, holder: H) -> f32;
 
     /// Makes `holder` show what it shows without a slot, after it gave its
@@ -49,27 +58,29 @@ pub(crate) trait Holders<H> {
 
 /// The slots of one texture, and the holder of each slot taken.
 pub(crate) struct SlotPool<H> {
-    /// The slot count, clamped to the device once the texture's shape is set.
+    /// The slot count. A pool that doesn't grow clamps it to the device when
+    /// it sets the shape of the texture.
     capacity: u32,
     /// How many slots the texture holds along each axis, once the first slot
     /// is taken.
     shape: Option<UVec3>,
-    /// The device's largest 3D texture side, if there's a device.
+    /// The side of the largest 3D texture the device makes, if there is a
+    /// device.
     max_side: Option<u32>,
     /// The lowest slot never handed out.
     next: u32,
-    /// Slots given back, the last one first.
+    /// The slots given back, to be handed out again from the end.
     free: Vec<u32>,
     holders: HashMap<u32, H>,
     /// How many times the pool warned that every slot is taken.
     full_warnings: u32,
-    /// Whether its adapter grows it, so the pool sets no shape and never
-    /// clamps its count.
+    /// Whether the adapter grows the pool. A growing pool sets no shape and
+    /// never clamps its slot count.
     grows: bool,
 }
 
 impl<H: Copy> SlotPool<H> {
-    /// A pool of `capacity` slots, none of them taken.
+    /// Returns a pool of `capacity` slots, none of them taken.
     pub fn new(capacity: u32) -> Self {
         Self {
             capacity,
@@ -83,7 +94,8 @@ impl<H: Copy> SlotPool<H> {
         }
     }
 
-    /// A pool of no slots, which its adapter grows with [`grow`](Self::grow).
+    /// Returns a pool of no slots, which its adapter grows with
+    /// [`grow`](Self::grow).
     pub fn growing() -> Self {
         Self {
             grows: true,
@@ -91,22 +103,24 @@ impl<H: Copy> SlotPool<H> {
         }
     }
 
-    /// Raises the slot count to `capacity`, keeping every slot taken where it
-    /// is. Only a pool made with [`growing`](Self::growing) grows.
+    /// Raises the slot count to `capacity`, and keeps every slot taken where
+    /// it is. A lower `capacity` changes nothing. Only a pool made with
+    /// [`growing`](Self::growing) grows.
     pub fn grow(&mut self, capacity: u32) {
         debug_assert!(self.grows);
         self.capacity = self.capacity.max(capacity);
     }
 
-    /// The slot count: for a pool that doesn't grow, clamped to the device
-    /// once the first slot is taken.
+    /// Returns the slot count. A pool that doesn't grow clamps it to the
+    /// device when the first slot is taken.
     pub fn capacity(&self) -> u32 {
         self.capacity
     }
 
-    /// Notes the device's largest 3D texture side, if there is a device,
-    /// which the slot count is clamped to when the texture's shape is set.
-    /// Once it's set this does nothing.
+    /// Notes `max_side`, the side of the largest 3D texture the device makes,
+    /// if there is a device. The pool clamps its slot count to it when it
+    /// sets the shape of the texture. Once the shape is set, this does
+    /// nothing.
     pub fn set_device(&mut self, max_side: Option<u32>) {
         if self.shape.is_none() {
             self.max_side = max_side;
@@ -114,8 +128,8 @@ impl<H: Copy> SlotPool<H> {
     }
 
     /// Empties the pool and makes it `capacity` slots, without telling the
-    /// holders. The texture's shape is set again when a slot is next taken,
-    /// and the pool warns again when every slot is taken.
+    /// holders. The pool sets the shape of the texture again when a slot is
+    /// next taken. It warns again when every slot is taken.
     pub fn reset(&mut self, capacity: u32) {
         *self = Self {
             max_side: self.max_side,
@@ -124,16 +138,20 @@ impl<H: Copy> SlotPool<H> {
         };
     }
 
-    /// How many slots the texture holds along each axis, once the first slot
-    /// is taken.
+    /// Returns how many slots the texture holds along each axis, or `None`
+    /// until the first slot is taken. A growing pool always returns `None`.
     pub fn shape(&self) -> Option<UVec3> {
         self.shape
     }
 
-    /// A slot for `holder`, `near` from the cameras: a free one, or else the
-    /// slot of the holder farthest from the cameras if it's farther than
-    /// `near`, which `holders` then shows without a slot. Returns `None` if
-    /// every holder is as near as `near` or nearer.
+    /// Takes a slot for `holder`, which is `near` from the cameras, and
+    /// returns it.
+    ///
+    /// The slot is a free one where there is one. Otherwise it is the slot of
+    /// the holder farthest from the cameras, if that holder is farther than
+    /// `near`, and `holders` then shows that holder without a slot. Returns
+    /// `None` when every slot is taken and every holder is as near as `near`
+    /// or nearer.
     pub fn take<A: Holders<H>>(
         &mut self,
         holder: H,
@@ -155,7 +173,8 @@ impl<H: Copy> SlotPool<H> {
         Some(slot)
     }
 
-    /// Gives `slot` back, so it's handed out again.
+    /// Gives `slot` back, so the pool can hand it out again. A slot that no
+    /// holder holds is left as it is.
     pub fn give_back(&mut self, slot: u32) {
         if self.holders.remove(&slot).is_some() {
             self.free.push(slot);
@@ -167,7 +186,7 @@ impl<H: Copy> SlotPool<H> {
         !self.free.is_empty() || self.next < self.capacity
     }
 
-    /// How many slots are held.
+    /// Returns how many slots are held.
     pub fn held(&self) -> usize {
         self.holders.len()
     }
@@ -177,7 +196,8 @@ impl<H: Copy> SlotPool<H> {
         self.full_warnings > 0
     }
 
-    /// Sets the texture's shape, clamping the slot count to the device.
+    /// Sets the shape of the texture, and clamps the slot count to the
+    /// device.
     fn set_shape<A: Holders<H>>(&mut self) {
         let (capacity, axes) = texture_shape(self.capacity, self.max_side);
         if capacity < self.capacity {
@@ -192,8 +212,10 @@ impl<H: Copy> SlotPool<H> {
         self.shape = Some(axes);
     }
 
-    /// Takes the slot of the holder farthest from the cameras, if it's
-    /// farther than `near`, and has `holders` show it without a slot.
+    /// Takes the slot of the holder farthest from the cameras, if that holder
+    /// is farther than `near`, and has `holders` show that holder without a
+    /// slot. The first time this runs, the pool warns that every slot is
+    /// taken.
     fn take_farthest<A: Holders<H>>(
         &mut self,
         near: f32,
@@ -222,20 +244,26 @@ impl<H: Copy> SlotPool<H> {
         Some(slot)
     }
 
-    /// How many times the pool warned that every slot is taken.
+    /// Returns how many times the pool warned that every slot is taken.
     #[cfg(test)]
     fn full_warnings(&self) -> u32 {
         self.full_warnings
     }
 }
 
-/// How many slots the texture holds along each of its axes, for `capacity`
-/// slots on a device whose 3D textures are at most `max_side` texels on a
-/// side: the smallest axis doubles, x first, until they hold them all.
+/// Returns the slot count of a texture for `capacity` slots, on a device
+/// whose 3D textures are at most `max_side` texels on a side, and how many
+/// slots the texture holds along each of its axes.
 ///
-/// Returns the slot count the texture holds, which is less than `capacity`
-/// only if the device can't make a texture that large. Then each axis holds
-/// as many slots as fit.
+/// The shape starts at one slot, and the axis holding the fewest slots
+/// doubles, x first on a tie, until the texture holds `capacity` slots. For
+/// 100 slots on a device with no limit, the axes go to 8, 4 and 4, which hold
+/// 128 slots.
+///
+/// An axis stops doubling where it would hold more slots than fit on the
+/// device. When no axis can double, every axis holds as many slots as fit.
+/// The slot count is then less than `capacity` if the device can't make a
+/// texture that large.
 pub(crate) fn texture_shape(capacity: u32, max_side: Option<u32>) -> (u32, UVec3) {
     let limit = max_side.map_or(u32::MAX, |side| (side / SLOT_SIDE).max(1));
     let mut axes = UVec3::ONE;
@@ -256,8 +284,8 @@ pub(crate) fn texture_shape(capacity: u32, max_side: Option<u32>) -> (u32, UVec3
 mod tests {
     use super::*;
 
-    /// Holders numbered by their distance from the cameras, noting which
-    /// gave way.
+    /// An adapter whose holders are numbers, each its own distance from the
+    /// cameras. It notes each holder that gave way.
     #[derive(Default)]
     struct ByDistance {
         gave_way: Vec<u32>,
@@ -333,7 +361,7 @@ mod tests {
         assert_eq!(taken, 343);
         assert_eq!(pool.shape(), Some(UVec3::splat(7)));
 
-        // The device is read only until the shape is set.
+        // The pool reads the device only until it sets the shape.
         pool.set_device(Some(4096));
         assert!(!pool.has_free());
     }

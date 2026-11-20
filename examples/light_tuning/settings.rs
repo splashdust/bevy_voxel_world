@@ -29,8 +29,8 @@ pub struct Tuning {
     /// The levels the lanterns and crystals are declared at.
     pub lantern: f32,
     pub crystal: f32,
-    /// The light colours of the lanterns and of the red, green and blue
-    /// crystals, by index in [`LIGHT_COLORS`].
+    /// The light colours of the lanterns, and of the red, green and blue
+    /// crystals in that order, each an index into [`LIGHT_COLORS`].
     pub lantern_color: usize,
     pub crystal_colors: [usize; 3],
     /// The brightness of the app's `GlobalAmbientLight`, which isn't a light
@@ -70,8 +70,8 @@ impl Tuning {
         }
     }
 
-    /// Each lamp material with the level and the index in [`LIGHT_COLORS`]
-    /// of its light colour.
+    /// Returns each lamp material with its level and the index of its light
+    /// colour in [`LIGHT_COLORS`].
     pub fn lamps(&self) -> [(u8, f32, usize); 4] {
         let [red, green, blue] = self.crystal_colors;
         [
@@ -82,8 +82,10 @@ impl Tuning {
         ]
     }
 
-    /// The emissive list, with white lamps left uncoloured as the printed
-    /// Rust leaves them.
+    /// Returns the emissive materials for the world config.
+    ///
+    /// A white lamp gets no `Emission::with_color`, as in the Rust that
+    /// "Print as Rust" prints.
     pub fn emissive_materials(&self) -> Vec<(u8, Emission)> {
         self.lamps()
             .into_iter()
@@ -99,8 +101,10 @@ impl Tuning {
     }
 }
 
-/// The light colours a lamp's colour row picks from, by name, with the sRGB
-/// components `Color::srgb` takes, or `None` for white.
+/// The light colours that the colour rows of the lamps pick from.
+///
+/// Each colour has a name and the sRGB components for `Color::srgb`, or
+/// `None` for white.
 pub const LIGHT_COLORS: [(&str, Option<[f32; 3]>); 8] = [
     ("White", None),
     ("Warm", Some([1.0, 0.7, 0.4])),
@@ -169,8 +173,8 @@ pub enum Applies {
     NewTexture,
     /// It caps what the world may use, and changes nothing on screen.
     Limit,
-    /// It changes what solving costs from the next solve, and never the
-    /// light, so it relights nothing.
+    /// It changes what solving costs from the next solve on. It never
+    /// changes the light, so it relights nothing.
     Cost,
     /// It belongs to the app, not to light propagation.
     App,

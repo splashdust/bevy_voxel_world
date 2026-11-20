@@ -1,96 +1,129 @@
-//! Relights: solving a chunk's light again when chunks arriving around it
-//! could light it, and landing every solve's light on the main thread.
+//! Relights
 //!
-//! A chunk's light can change after it appears, because its neighbours arrive
-//! after its first solve, which reads a neighbour that isn't loaded as solid.
-//! When a chunk's light lands, it is compared with each loaded face
-//! neighbour's: a neighbour relights if this chunk's light could get to a
-//! voxel on their shared face sooner than the neighbour's level there says
-//! light did. The chunk task makes that comparison against the neighbours it
-//! read, and landing makes it again only for neighbours whose light has
-//! changed since. Landing also checks the other way for those, so a chunk
-//! whose task missed a neighbour arriving relights itself. Those checks find
-//! only light that could get somewhere sooner, so a chunk whose solve, in its
-//! chunk task or a relight, read inputs around it that were replaced before
-//! its light landed, such as a column answer a sky probe disproved, relights
-//! itself too: its light may hold light those inputs no longer give.
+//! This module solves the light of a chunk again when something it depends on
+//! changes, and lands the light of every solve on the main thread.
+//! [`LightWork`] keeps the light state of each chunk and the queues of
+//! relights to start. Each relight runs [`relight`](super::solver::relight)
+//! in a task of its own. Landing writes the light into the world view, hands
+//! it on for the shader, and triggers the relights that the new light calls
+//! for.
 //!
-//! A relight goes on as a relight ripple: when its light lands, it relights a
+//! # Arrivals
+//!
+//! The light of a chunk can change after it appears, because its neighbours
+//! arrive after its first solve, which reads a neighbour that isn't loaded as
+//! solid. When the light of an arriving chunk lands, landing compares it with
+//! the light of each loaded face neighbour. A neighbour relights if the light
+//! of the arriving chunk could get to a voxel on their shared face sooner than
+//! the level of the neighbour there says light did. The chunk task makes that
+//! comparison against the neighbours it read. Landing makes it again only for
+//! neighbours whose light has changed since, and for those it also compares
+//! the other way, so a chunk whose task missed a neighbour arriving relights
+//! itself.
+//!
+//! These comparisons find only light that could get somewhere sooner. A solve
+//! can also read inputs around its chunk that are replaced before its light
+//! lands, such as a column answer that a sky probe disproved. Its light may
+//! then hold light those inputs no longer give, so the chunk relights itself
+//! too, whether that solve ran in its chunk task or in a relight.
+//!
+//! # The relight ripple
+//!
+//! A relight goes on as a relight ripple. When its light lands, it relights a
 //! neighbour only across faces where light reached the chunk at another time
 //! than before. Each solve keeps a hash per face of the round in which light
-//! reached each voxel on that face, and with round spread the pass too,
-//! because in a round of three passes a voxel reached early in the round
-//! still sends light across some faces in that same round. Light crossing
+//! reached each voxel on that face. With round spread the hash covers the pass
+//! too, because in a round of three passes a voxel reached early in the round
+//! still sends light across some faces in that same round. Light that crosses
 //! every face at the same times as before can't light the neighbours any
 //! differently, so the ripple stops there.
 //!
-//! Where light of several light colours reaches a chunk, both the face hashes
-//! and the arrival comparison look at each light colour's light on its own:
-//! see [`faces`](super::faces). A solve reads only the voxels in its light
-//! box, never its neighbours' light, so these checks only ever skip work: a
-//! check may relight a chunk whose light then doesn't change, but must never
-//! skip one whose light would.
+//! Where light of several light colours reaches a chunk, the face hashes and
+//! the arrival comparison both look at the light of each light colour on its
+//! own: see [`faces`](super::faces).
 //!
-//! Relights are tasks of their own. They never change a chunk's
-//! `ChunkState` and never re-mesh it, so a relit chunk stays Ready and
-//! visible. Each chunk has a light state beside its chunk state: clean, dirty
-//! or relighting. A chunk runs at most one relight: a newer trigger marks it
-//! dirty, the running relight still lands, and one more follows.
+//! A solve reads only the voxels in its light box, never the light of its
+//! neighbours. So these checks only ever skip work. A check may relight a
+//! chunk whose light then doesn't change, but it must never skip a chunk whose
+//! light would change.
 //!
-//! Relights a voxel edit triggers are urgent (see [`edit`](super::edit)):
-//! they start at once, ahead of the pool budget, and so does their ripple. A
-//! chunk being re-meshed for the edit holds its relit light until a mesh of
-//! the voxels that relight read lands, so its old mesh never shows light
-//! worked out for its new voxels, such as a placed block's old floor face
-//! reading the new solid's level of 0.
+//! # Light state
 //!
-//! A handover holds the light of its chunks the same way, being re-meshed
-//! or not, until it lands, and waits for the relights its commit started to
-//! solve: see the `handover` module, with `sub_grids`.
+//! Relights are tasks of their own. They never change the `ChunkState` of a
+//! chunk and never re-mesh it, so a relit chunk stays Ready and visible. Each
+//! chunk has a light state beside its chunk state: clean, dirty or relighting.
+//! A chunk runs at most one relight at a time. A newer trigger marks it dirty,
+//! the running relight still lands, and one more relight follows.
 //!
-//! A change of light settings marks chunks dirty in a queue of its own,
-//! whose relights start after chunk tasks, nearest a camera first. A relight
-//! solved under older settings is thrown away as it lands and started again,
-//! and a chunk task's light solved under them lands and is relit. When the
-//! emissive list changed, a relight first finds the chunk's emissive voxels
-//! again from its published voxels and voxel edits, and the chunks around it
-//! relight if they changed.
+//! # Edits and handovers
 //!
-//! On WASM, where tasks get no thread of their own and would all run between
-//! two frames, relights run on the main thread as they start, in the same
-//! order from the same queues, until this frame's relights have taken the
-//! world's `wasm_relight_budget`. Urgent relights go first there too, those
-//! of chunks holding edited voxels before the rest, so the light of the
-//! chunks holding an edit's voxels lands as soon as it does on native. The
-//! rest wait for the next frame. Light the relight ripple carries on to
-//! other chunks takes a frame more for each face it crosses, there as on
-//! native.
+//! The relights that a voxel edit triggers are urgent (see
+//! [`edit`](super::edit)). They start at once, ahead of the pool budget, and
+//! so does their ripple. A chunk being re-meshed for the edit holds its relit
+//! light until a mesh of the voxels that the relight read lands. So its old
+//! mesh never shows light worked out for its new voxels, such as the old floor
+//! face under a placed block reading the level 0 of the new solid.
+//!
+//! A handover holds the light of its chunks the same way until it lands,
+//! whether they are being re-meshed or not. It also waits for the relights
+//! that its commit started to solve: see the `handover` module, with
+//! `sub_grids`.
+//!
+//! # Changes of light settings
+//!
+//! A change of light settings marks chunks dirty in a queue of its own, whose
+//! relights start after chunk tasks, nearest a camera first. A relight solved
+//! under older settings is thrown away as it lands and started again. The
+//! light of a chunk task solved under older settings lands, and the chunk is
+//! relit. When the emissive list changed, a relight first finds the emissive
+//! voxels of the chunk again from its published voxels and voxel edits. If
+//! they changed, the chunks around it relight.
+//!
+//! A change of light colours alone marks only the chunks whose light box
+//! holds a recoloured emissive material, in the same queue. No level moves,
+//! so their light lands without relighting the chunks beside them. A chunk
+//! task solved under the old light colours is marked as it lands, if its
+//! light box held a recoloured material.
+//!
+//! # WASM
+//!
+//! On WASM, tasks get no thread of their own and would all run between two
+//! frames. So relights run on the main thread as they start, in the same
+//! order and from the same queues, until the relights of this frame have
+//! taken the `wasm_relight_budget` of the world. Urgent relights go first
+//! there too, and among them the relights of chunks holding edited voxels go
+//! first. So the light of the chunks that hold the voxels of an edit lands as
+//! soon as it does on native. The other relights wait for the next frame.
+//! Light that the relight ripple carries on to other chunks takes a frame
+//! more for each face it crosses, there as on native.
+//!
+//! # Light entries, sub-grids and retiring chunks
 //!
 //! Light entries, the light of hinted air beside loaded solids, relight like
 //! chunks. A relight that would go on into hinted air holding no light entry
 //! passes on through it to the chunks beside it: see
 //! [`hinted`](super::hinted).
 //!
-//! A sub-grid's chunks relight with the world's, but never from arrivals or
-//! ripples: the commit that changes a sub-grid relights every chunk of it
-//! whose light can change. See the `sub_grid` module.
+//! The chunks of a sub-grid relight alongside those of the world, but never
+//! from arrivals or ripples. The commit that changes a sub-grid relights every
+//! chunk of it whose light can change: see the `sub_grid` module.
 //!
 //! A chunk that retires relights nothing, unless it had provisional columns.
 //! Its neighbours keep the light it gave them, which was the truth while it
-//! was loaded, and their next solve reads it as solid. A chunk with provisional
+//! was loaded. Their next solve reads it as solid. A chunk with provisional
 //! columns may have given them direct sky it doesn't have, so its face
 //! neighbours relight, reading it as solid.
 //!
 //! # References
 //!
-//! - [Luanti's light algorithms](https://github.com/luanti-org/luanti/blob/master/src/voxelalgorithms.cpp):
+//! - [Luanti, light algorithms](https://github.com/luanti-org/luanti/blob/master/src/voxelalgorithms.cpp):
 //!   a block marks the borders its light couldn't cross into a neighbour that
 //!   wasn't loaded, and `update_block_border_lighting` lights them again once
 //!   the neighbour arrives.
-//! - [Starlight's technical details](https://github.com/PaperMC/Starlight/blob/fabric/TECHNICAL_DETAILS.md):
+//! - [Starlight, technical details](https://github.com/PaperMC/Starlight/blob/fabric/TECHNICAL_DETAILS.md):
 //!   when a chunk is lit, an edge check compares its border with what its
 //!   neighbours say it should be.
-//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
+//! - [tesserae, light propagation](https://github.com/mkappworks-dev/tesserae/pull/3)
 //!   compares the light on a shared face to decide whether a neighbour solves
 //!   again, which costs far less than the solve.
 
@@ -165,8 +198,8 @@ struct LightChunk {
     urgent: bool,
     /// Why its next relight, or the one running, was started.
     cause: Cause,
-    /// Whether its next relight was triggered by a change of light colour
-    /// alone, so its light lands without rippling: see
+    /// Whether its next relight comes only from a change of light colour, so
+    /// that its light lands without rippling: see
     /// [`trigger_recolor`](LightWork::trigger_recolor).
     only_recolored: bool,
 }
@@ -194,8 +227,9 @@ struct Landing {
     version: u64,
     /// For a relight, why it was started.
     cause: Cause,
-    /// Whether its light relights the chunks beside it whose light could
-    /// change with it. A relight for a change of light colour alone doesn't.
+    /// Whether landing this light relights the chunks beside the chunk whose
+    /// light could change with it. A relight for a change of light colour
+    /// alone doesn't, since no level moves.
     ripples: bool,
 }
 
@@ -242,26 +276,27 @@ type CoarseRunning<I> = (ChunkKey, Entity, Task<CoarseSolved<I>>);
 /// A coarse chunk whose light has landed.
 struct LandedCoarse<I> {
     key: ChunkKey,
-    /// The levels its tag holds without a slot, as in a texel, with its
-    /// tag's light colour.
+    /// The levels that its tag holds without a slot, as in a texel, with the
+    /// light colour of its tag.
     levels: LightLevels,
     /// The solid materials its cells hold, as its solve noted them.
     materials: Box<[I]>,
 }
 
-/// Relight landings by what they changed. A relight lands when its light is
-/// written into the world view, or when it's found equal to the light there
-/// and thrown away. Light held for a chunk's new mesh counts when it's
-/// released.
+/// Counts of relight landings, by what they changed.
+///
+/// A relight lands when its light is written into the world view, or when it
+/// is found equal to the light there and thrown away. Light held for the new
+/// mesh of a chunk counts when it is released.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LandedRelights {
-    /// Landings that changed the level of a voxel, of sky light or voxel
-    /// light.
+    /// Landings that changed a sky light or voxel light level of some voxel,
+    /// or the precision of the levels.
     pub changed_levels: u64,
-    /// Landings that left every voxel's levels as they were but changed the
-    /// light colour of its voxel light.
+    /// Landings that changed no level, but changed the light colour of the
+    /// voxel light of some voxel.
     pub changed_colors: u64,
-    /// Landings that left every voxel's levels and light colour as they were.
+    /// Landings that changed no level and no light colour.
     pub changed_nothing: u64,
 }
 
@@ -320,8 +355,8 @@ pub(crate) struct LightWork<C: VoxelWorldConfig> {
     coarse_landing: Vec<(ChunkKey, Entity, CoarseSolved<C::MaterialIndex>)>,
     /// Each coarse chunk whose light has landed.
     coarse: HashMap<Entity, LandedCoarse<C::MaterialIndex>>,
-    /// Coarse chunks whose light landed under other settings than the
-    /// world's, waiting to be solved again: see
+    /// Coarse chunks whose light landed under other settings than those of
+    /// the world, waiting to be solved again: see
     /// [`solve_coarse_again`](Self::solve_coarse_again) and
     /// [`solve_coarse_holding`](Self::solve_coarse_holding).
     coarse_queue: Vec<(ChunkKey, Entity)>,
@@ -471,14 +506,14 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             .collect();
     }
 
-    /// Queues every coarse chunk whose light has landed and which holds a
-    /// material whose entry in the emissive list differs between `old` and
-    /// `new`, in level or in light colour, to be solved again from its
-    /// published voxels.
+    /// Queues every coarse chunk whose light has landed to be solved again
+    /// from its published voxels, if it holds a material whose entry in the
+    /// emissive list differs between `old` and `new`, in level or in light
+    /// colour.
     ///
-    /// Its old light shows until the new light lands. A coarse chunk whose
-    /// light is still to land, or which is being solved again, is checked as
-    /// it lands.
+    /// The old light of each chunk shows until its new light lands. A coarse
+    /// chunk whose light is still to land, or which is queued or being solved
+    /// again, is checked when its light lands instead.
     pub fn solve_coarse_holding(
         &mut self,
         old: &LightTaskSettings<C::MaterialIndex>,
@@ -624,11 +659,12 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         self.trigger_as(key, true, Cause::Other);
     }
 
-    /// Marks the chunk at `key`, which holds edited voxels, for an
-    /// urgent relight, as [`trigger_urgent`](Self::trigger_urgent) does. When
-    /// relights run on the main thread, its relight starts before other
-    /// urgent ones, so its own light lands as soon as it would on the task
-    /// pool, however many chunks the edit relights. Chunks its relight
+    /// Marks the chunk at `key`, which holds edited voxels, for an urgent
+    /// relight, as [`trigger_urgent`](Self::trigger_urgent) does.
+    ///
+    /// When relights run on the main thread, its relight starts before other
+    /// urgent ones. So its own light lands as soon as it would on the task
+    /// pool, however many chunks the edit relights. The chunks that its relight
     /// ripple reaches wait their turn in the budget.
     pub fn trigger_edited(&mut self, key: GridKey) {
         // Only a chunk with light leaves `edited` when its relight starts.
@@ -878,15 +914,17 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 chunk.state = LightState::Dirty;
                 self.settings_queue.insert(key);
             }
-            // A fill-only relight may skip its solve.
+            // A relight from the fill queue may skip its solve, so the chunk
+            // moves to the settings queue.
             LightState::Dirty => self.solve_fill_queued(key),
             LightState::Relighting { .. } => {}
         }
     }
 
-    /// Moves the chunk at `key` from the fill queue, if it waits there, to
-    /// the settings queue, whose relight always solves: a fill-only relight
-    /// skips its solve when its sky fill seeds are unchanged.
+    /// Moves the chunk at `key` from the fill queue to the settings queue, if
+    /// it waits in the fill queue. A relight from the fill queue skips its
+    /// solve when the sky fill seeds of the chunk are unchanged, and a relight
+    /// from the settings queue always solves.
     fn solve_fill_queued(&mut self, key: GridKey) {
         if self.fill_queue.remove(&key) {
             self.settings_queue.insert(key);
@@ -916,15 +954,20 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
-    /// Marks the chunk at `key` for a relight with the settings relights
-    /// because the light colour of an emissive material in its light box
-    /// changed, and nothing else did, if it has light.
+    /// Marks the chunk at `key`, if it has light, for a relight in the
+    /// settings queue, because the light colour of an emissive material in
+    /// its light box changed and nothing else did.
     ///
-    /// A chunk already dirty needs nothing more, since its relight reads the
-    /// new colours. A relight running now lands, and another follows. Unless
-    /// something else triggers it meanwhile, its relight's light lands without
-    /// relighting the chunks beside it: a change of colour moves no level,
-    /// and every chunk whose light it changes is marked itself.
+    /// - A clean chunk becomes dirty, and the light of its relight lands
+    ///   without relighting the chunks beside it. A change of light colour
+    ///   moves no level, and every chunk whose light it changes is marked
+    ///   itself.
+    /// - A dirty chunk needs nothing more, since its relight reads the new
+    ///   light colours. It only leaves the fill queue, whose relight may skip
+    ///   its solve.
+    /// - A chunk with a relight running lets that relight land, and another
+    ///   follows. Unless something else triggered the chunk, that one lands
+    ///   without rippling too.
     pub fn trigger_recolor(&mut self, key: GridKey) {
         let Some(chunk) = self.chunks.get_mut(&key) else {
             return;
@@ -1001,24 +1044,28 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         }
     }
 
-    /// Lands one result: writes its light into the world view and triggers
-    /// the relights it calls for. `scales` are the levels of voxel light and,
-    /// with sky light on, of sky light. `colors` is the world's emissive list
-    /// where it holds a light colour other than white.
+    /// Lands one result. It writes the light into the world view and
+    /// triggers the relights that the light calls for. `scales` holds the
+    /// levels of voxel light and, with sky light on, of sky light. `colors`
+    /// is the emissive list of the world, where it holds a light colour other
+    /// than white.
     ///
-    /// Returns the chunk's light if it changed, with the bytes of its slot,
-    /// for the shader.
+    /// Returns the light of the chunk for the shader, with what the solve
+    /// worked out for its slot. It returns `None` where the light is held or
+    /// thrown away, or where a relight found the light already there.
     ///
-    /// A relight of a chunk being re-meshed, which isn't `ready` and shows a
-    /// mesh older than the edits the relight read, triggers its ripple at
-    /// once but holds its light until a new enough mesh lands: see
-    /// [`hold`](Self::hold).
+    /// A relight of a chunk being re-meshed holds its light until a new
+    /// enough mesh lands, but triggers its ripple at once: see
+    /// [`hold`](Self::hold). Such a chunk isn't `ready`, and its mesh is older
+    /// than the edits the relight read. A relight of a chunk that a handover
+    /// holds is held the same way.
     ///
-    /// A chunk task's light solved under settings older than `generation`
-    /// lands, and the chunk is marked for the settings relight.
+    /// The light of a chunk task solved under settings older than
+    /// `generation` still lands, and the chunk is then marked for a settings
+    /// relight.
     ///
-    /// A sub-grid's chunk relights none of its neighbours as its light
-    /// lands, except where its emissive voxels were found again: see
+    /// A chunk of a sub-grid relights none of its neighbours as its light
+    /// lands, except where a relight found other emissive voxels for it: see
     /// [`passes_light_on`].
     fn land(
         &mut self,
@@ -1070,8 +1117,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             let mut view = view.write();
             match source {
                 Source::Relight => {
-                    // Inputs around the chunk replaced while the relight
-                    // ran: see `inputs_replaced`.
+                    // Whether inputs around the chunk were replaced while the
+                    // relight ran: see `inputs_replaced`.
                     let outdated = inputs_replaced(&view, key, &solved.read);
                     let chunk = view.chunks.get_mut(&key)?;
                     // A chunk task landed new voxels since the relight
@@ -1084,8 +1131,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     // A light entry's first solve changes no inputs a
                     // neighbour reads, so it ripples nowhere.
                     let fresh = self.fresh.remove(&key);
-                    // A recolour relight lands even with the same light, for
-                    // the new colour of the chunk's own lamps.
+                    // A relight for a change of light colour lands even with
+                    // the same light. The shader still needs the new light
+                    // colour of the emissive voxels of the chunk, which the
+                    // light doesn't hold.
                     if solved.rescanned.is_none()
                         && ripples
                         && chunk.light.same_light_and_borders(&solved.light)
@@ -1296,7 +1345,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let mut triggers = Vec::new();
         let same = {
             let mut view = view.write();
-            // Held light lands later, solved from what it read here.
+            // Held light lands later without this check, so inputs around
+            // the chunk replaced while the relight ran relight it now.
             let outdated = inputs_replaced(&view, key, &landing.solved.read);
             let Some(chunk) = view.chunks.get_mut(&key) else {
                 return;
@@ -1827,8 +1877,8 @@ impl<C: VoxelWorldConfig> Relights<C> {
             let (sky, voxel) = solved.levels;
             let levels = LightLevels::of_steps(sky, voxel, solved.precision)
                 .with_voxel_color(unpack(solved.color.tag));
-            // Solved before a change of precision, or of the emission of a
-            // material it holds.
+            // Whether the light was solved before a change of precision, or
+            // before a change to the emission of a material the chunk holds.
             let stale = solved.precision != settings.task.precision
                 || emission_changed(&solved.materials, &solved.settings, &settings.task);
             work.coarse.insert(
@@ -2259,9 +2309,10 @@ impl<C: VoxelWorldConfig> Rescans<'_, C> {
     }
 }
 
-/// Whether `solved` was solved under light colours changed since for an
-/// emissive material its light box holds: whether a material the chunks it
-/// read note has a later colour generation in `recolored` than its own.
+/// Whether `solved` was solved before the light colour of an emissive
+/// material in its light box changed. That holds when a material that the
+/// chunks it read note has a later colour generation in `recolored` than the
+/// solve.
 fn solved_before_recolor(solved: &Solved, recolored: &[u64]) -> bool {
     solved
         .read
@@ -2289,15 +2340,19 @@ fn around(key: GridKey) -> impl Iterator<Item = GridKey> {
 }
 
 /// Whether a chunk, light entry or hinted air in the 3×3×3 around the chunk
-/// at `key` holds other inputs than its solve `read` there. A position that
-/// held nothing then counts as unchanged: a chunk arriving there compares its
-/// light with this chunk's as it lands.
+/// at `key` now holds other inputs than the ones its solve `read` there.
 ///
-/// Replaced inputs, such as a column answer a sky probe disproved, relight
-/// the chunks around them and ripple on, but that never reaches a chunk whose
-/// chunk task is still running, and not always one whose relight is: a
+/// A position that held nothing when the solve read it counts as unchanged,
+/// since a chunk arriving there compares its light with the light of this
+/// chunk as it lands. A position that holds nothing now counts as unchanged
+/// too.
+///
+/// Replaced inputs, such as a column answer that a sky probe disproved,
+/// relight the chunks around them, and the relight ripple goes on from there.
+/// But the ripple never reaches a chunk whose chunk task is still running. It
+/// doesn't always reach a chunk whose relight is running either, since a
 /// ripple stops at faces where light crosses at the same times as before.
-/// Light solved from the old inputs may hold light the new ones no longer
+/// Light solved from the old inputs may hold light the new inputs no longer
 /// give, so the chunk solves again.
 fn inputs_replaced(view: &ViewMaps, key: GridKey, read: &Neighbourhood) -> bool {
     around(key).any(|at| {

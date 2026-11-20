@@ -1,148 +1,176 @@
-//! The material of a lit world that shows its light: the world's material
-//! wrapped in the crate's own extension, [`VoxelWorldBindings`].
+//! Lit chunk materials
+//!
+//! This module wraps the material of a lit world that shows its light in
+//! [`VoxelWorldBindings`], the extension the crate adds, and gives the wrapped
+//! material to the chunks of the world. The extension binds the light texture, the look, the colour texture
+//! and, with the `sub_grids` feature, the tag map, for the shader to read
+//! light from. The systems here keep those bindings current as the textures
+//! are made, replaced or grown, and as the look or the light colours of the
+//! world change.
 //!
 //! # The material wrap
 //!
-//! A world names one material, `M`, with `with_material`, or gets the
-//! crate's default. When the world is lit and shows its light, its chunks
-//! don't get `M` but [`VoxelWorldMaterial<M>`],
-//! `ExtendedMaterial<M, VoxelWorldBindings<M>>`, one per lit world. The
-//! world's Rust code doesn't change, and only its shader imports light. A
-//! world whose material is added by hand, as `VoxelWorldMaterialHandle<M>`,
-//! gets a wrapped copy of that material, so two lit worlds naming the same
-//! handle each bind their own light texture. An unlit world, one with
-//! `shown: false`, and a `VoxelWorldPlugin::minimal()` world keep their
-//! material unwrapped, or get none.
+//! A world names one material, `M`, with `with_material`, or gets the default
+//! material of the crate. When the world is lit and shows its light, its
+//! chunks get [`VoxelWorldMaterial<M>`] in place of `M`. That type is
+//! `ExtendedMaterial<M, VoxelWorldBindings<M>>`, and each lit world has one.
+//! The Rust code of the world doesn't change, and only its shader imports
+//! light. A world whose material is added by hand, as
+//! `VoxelWorldMaterialHandle<M>`, gets a wrapped copy of that material. So two
+//! lit worlds naming the same handle each bind their own light texture. An
+//! unlit world, a world with `shown: false` and a `VoxelWorldPlugin::minimal()`
+//! world keep their material unwrapped, or get none.
 //!
-//! The extension holds what the shader needs to read light, the world's light
-//! texture and its look, at bindings the crate keeps for itself, 200 to 219.
-//! It has no shader of its own, so the world's material keeps its shaders, and
-//! a shader that wants light imports the `bevy_voxel_world::light` module,
-//! which declares those bindings. The one exception is a world whose material
-//! is exactly `StandardMaterial`: Bevy's shader for it can't read light, so
-//! the extension picks the crate's lit PBR shader, which can. The extension
-//! adds the `VOXEL_LIGHT` shader def, under which the crate's vertex shaders
-//! also output the chunk's tag. That module reads the tag with the local
-//! position and normal they output in every world.
+//! The extension holds what the shader needs to read light, the light texture
+//! of the world and its look. They sit at bindings the crate keeps for itself,
+//! 200 to 219. The extension has no shader of its own, so the world material
+//! keeps its shaders. A shader that wants light imports the
+//! `bevy_voxel_world::light` module, which declares those bindings. The one
+//! exception is a world whose material is exactly `StandardMaterial`. The Bevy
+//! shader for it can't read light, so the extension picks the lit PBR shader
+//! of the crate, which can. The extension adds the `VOXEL_LIGHT` shader def,
+//! under which the vertex shaders of the crate also output the tag of the
+//! chunk. The light module reads the tag together with the local position and
+//! normal, which those shaders output in every world.
 //!
-//! With the `sub_grids` feature the extension also binds the world's tag map
-//! at 202, a placeholder of one empty entry until the world has a sub-grid,
-//! and adds the `SUB_GRIDS` shader def, under which the crate's vertex
-//! shaders also output the face's position in the world's grid. The shader
-//! reads the world's light at a sub-grid's faces from both: see
-//! [Sub-grids](#sub-grids). The tag map's texture is replaced each time it
-//! grows, and the world's materials bind the new one in the same frame, as
-//! they do the light texture once it's made.
+//! With the `sub_grids` feature the extension also binds the tag map of the
+//! world at 202. Until the world has a sub-grid, it binds a placeholder of one
+//! empty entry. The extension also adds the `SUB_GRIDS` shader def, under
+//! which the vertex shaders of the crate also output the position of the face
+//! in the grid of the world. The shader reads the world light at the faces of
+//! a sub-grid from both: see [Sub-grids](#sub-grids). The tag map gets a new
+//! texture each time it grows. The materials of the world bind the new one in
+//! the same frame, as they bind the light texture once it is made.
 //!
-//! The extension also binds the world's colour texture at 203, a placeholder
-//! of one white texel until a chunk with a slot shows a light colour other
-//! than white. When the world's emission table holds such a colour, the
-//! extension adds the `LIGHT_COLOR` shader def through the material's key,
-//! from when the material is made for a world coloured at startup. Under it
-//! the shader reads each chunk's light colour from its tag and its entry in
-//! the colour texture. Without it, the shader's colours are white, and a
-//! white world's shader does no colour work at all.
+//! The extension also binds the colour texture of the world at 203. Until a
+//! chunk with a slot shows a light colour other than white, it binds a
+//! placeholder of one white texel. When the emission table of the world holds
+//! such a colour, the extension adds the `LIGHT_COLOR` shader def. The def
+//! travels in the material key, [`VoxelWorldBindingsKey`], since `specialize`
+//! sees only the key and not the material. Under the def, the shader reads the
+//! light colour of each chunk from its tag and from its entry in the colour
+//! texture. Without the def, every colour in the shader is white, so the
+//! shader of a white world does no colour work at all.
 //!
-//! A running world's emission table can gain its first colour other than
-//! white, or lose its last, which changes the def and so the material's key.
-//! Bevy then takes the world's chunks out of their bins for the main pass,
-//! the prepass and shadows, and draws them again only once their pipelines
-//! for the new key have compiled. Where Bevy compiles pipelines in the
-//! background, as on native Linux and Windows, the chunks would vanish for
-//! the frames that takes. So in the frame the def first changes, the render
-//! world waits for those pipelines, as Bevy's upscaling waits for its own,
-//! and the frame takes longer instead. Bevy keeps both variants compiled, so
-//! later changes wait on nothing. A world coloured at startup has the def
-//! before its first chunk draws, so only a later change waits.
+//! # Changing the colour def
+//!
+//! A world coloured at startup makes its material with `LIGHT_COLOR` already
+//! set, so its chunks draw with it from the first frame. A running world sets
+//! the def when its emission table gains its first light colour other than
+//! white, and clears it when the table loses its last one. Either change
+//! changes the material key. Bevy then takes the chunks of the world out of
+//! their bins for the main pass, the prepass and shadows. It draws them again
+//! only once their pipelines for the new key have compiled. Where Bevy
+//! compiles pipelines in the background, as on native Linux and Windows, the
+//! chunks would vanish for the frames the compile takes.
+//!
+//! So in each frame the def changes, the render world waits for those
+//! pipelines, as the upscaling pass of Bevy waits for its own. The frame takes
+//! longer instead of showing the world without its chunks. Bevy keeps the
+//! pipelines it compiled for both values of the def, so a change back to a
+//! value it already compiled costs the wait nothing.
+//!
+//! # Forward rendering
 //!
 //! `ExtendedMaterial` takes `enable_prepass` and `enable_shadows` from the
-//! extension alone, so the extension passes on the wrapped material's. It
-//! takes the opaque render method from the wrapped material, so the extension
-//! can't force forward rendering. Light adds to the emissive output only in
-//! the forward pass, so a lit chunk material must render forward.
+//! extension alone, so the extension passes on those of the wrapped material.
+//! It takes the opaque render method from the wrapped material, so the
+//! extension can't force forward rendering. Light adds to the emissive output
+//! only in the forward pass, so a lit chunk material must render forward.
 //!
 //! # Reading light on any mesh
 //!
-//! Light comes from voxels, and the shader finds a face's voxels from the
-//! face's position and normal alone, so a mesher emits nothing for light. A
-//! face on the voxel grid, as every cube face is, reads the voxel in front of
-//! it, half a voxel along its normal. A face off the grid, such as a slope or
-//! a rounded corner of a marching cubes mesh, can cut into a solid voxel, so
-//! the voxel half a voxel along its normal may be solid and read black. It
-//! reads the 8 voxels around that point instead, leaving out those holding no
-//! light and those not joined through counted voxels to the nearest of the 8,
-//! so light doesn't pass through a corner between two solids. A cube world
-//! reads exactly as before.
+//! Light comes from voxels, and the shader finds the voxels of a face from the
+//! position and normal of the face alone, so a mesher emits nothing for light.
+//! A face on the voxel grid, as every cube face is, reads the voxel in front
+//! of it, half a voxel along its normal. A face off the grid, such as a slope
+//! or a rounded corner of a marching cubes mesh, can cut into a solid voxel.
+//! The voxel half a voxel along its normal may then be solid and read black.
+//! Such a face reads the 8 voxels around that point instead. It leaves out
+//! those holding no light, and those not joined to the nearest of the 8
+//! through voxels it counts, so light doesn't pass through a corner between
+//! two solids. A face of a cube mesh is always on the grid, so it never reads
+//! the 8 voxels.
 //!
-//! A face glows when the voxel half a voxel behind it is a lamp. A lamp's own
-//! cell holds the top voxel level, which no open voxel holds, with the lamp's
-//! level in its sky half, which a solid never uses. A face off the grid can
-//! have an open voxel lit by the lamp behind it, as a rounded inside corner
-//! beside a lamp does, and it doesn't glow, because only a lamp's cell holds
-//! the top level.
+//! A face glows when the voxel half a voxel behind it is an emissive voxel.
+//! The cell of an emissive voxel holds the top voxel light level, which no
+//! open voxel holds, and holds the level of the emissive voxel in its sky
+//! half, which a solid never uses. A face off the grid can have an open voxel
+//! in front of it lit by the emissive voxel behind it, as a rounded inside
+//! corner beside an emissive voxel does. That face doesn't glow, because only
+//! the cell of an emissive voxel holds the top level.
 //!
 //! # The sun gate
 //!
-//! By default Bevy's directional lights shine only on faces
-//! with direct sky. Bevy's shadow map can't be trusted for this, because it
-//! holds only spawned chunks, and under the default streaming rock out of
-//! view isn't spawned, so the sun would shine into caves through it. Direct
-//! sky falls straight down, so the sun stops at an overhang's drip line.
-//! A face reads light blended between voxels, so the gate is a step between
-//! direct sky and the level beside it, worked out from sky reach and
-//! precision.
+//! By default the Bevy directional lights shine only on faces with direct sky.
+//! The Bevy shadow map can't be trusted for this, because it holds only
+//! spawned chunks. Under the default streaming, solid chunks out of view
+//! aren't spawned, so the sun would shine into caves through them. Direct sky
+//! falls straight down, so the sun stops at the drip line of an overhang. A
+//! face reads light blended between voxels, so the gate is a step between
+//! direct sky and the level beside it. The step is worked out from the sky
+//! light reach and the light precision.
 //!
 //! # Sub-grids
 //!
-//! With the `sub_grids` feature, a sub-grid's chunk holds light of its own,
-//! which the world's light never sees, and its tag has bit 30 set. The
-//! shader's `sample_face_light` reads such a face's own light with
-//! `sample_light`, and the world's light at the face with `world_light`,
-//! from its position and normal in the world's grid. The face shows the
-//! smaller of the two sky levels, so a sub-grid's enclosure caps the world's
-//! sky. Under [`SubGridSky::Enclosed`](super::config::SubGridSky) with sky
-//! light on, the look's `enclosure_caps_voxel` caps the world's voxel light by
-//! the same sky level, so the world's lamps don't light a closed cabin's
-//! inside through its walls. The face shows the larger of that and its own
-//! voxel level, so its own lamps add to the world's. The sun gate reads the
-//! capped sky. A world chunk's face reads as `sample_light` reads it.
+//! With the `sub_grids` feature, a chunk of a sub-grid holds light of its own,
+//! which the light of the world never sees, and its tag has bit 30 set. For a
+//! face of such a chunk, the shader function `sample_face_light` reads the
+//! light of the sub-grid with `sample_light`. It reads the world light at the
+//! face with `world_light`, from the position and normal of the face in the
+//! grid of the world. The face shows the smaller of the two sky light levels,
+//! so the enclosure of a sub-grid caps the sky of the world.
+//!
+//! Under [`SubGridSky::Enclosed`](super::config::SubGridSky) with sky light on,
+//! the `enclosure_caps_voxel` field of the look caps the world voxel light by
+//! the same sky light level. So the emissive voxels of the world don't light
+//! the inside of a closed cabin through its walls. The face shows the larger
+//! of that capped level and the voxel light level of the sub-grid, so the
+//! emissive voxels of the sub-grid add to those of the world. Under
+//! `LIGHT_COLOR`, the face shows the light colour that the two voxel lights
+//! mix to. The sun gate reads the capped sky. A face of a world chunk reads
+//! light as `sample_light` reads it.
 //!
 //! `world_light` reads as `sample_light` would for a world face at the same
-//! place: a face on the world's grid, as every face of a sub-grid at a pose
-//! a stamp keeps is, reads the voxel in front of it, and any other face the
-//! 8 voxels around the point in front of it. So a sub-grid at such a pose,
-//! with sky of its own at the top level and no lamps, looks as its voxels
-//! would set in the world. It looks up one world chunk in the world's tag
-//! map, kept by the `tag_map` module: the chunk holding the voxel in front
-//! of the face, the nearest of those it reads. It reads every voxel from
-//! that chunk's slot, whose shell holds the cells across its faces. A
-//! coarse chunk's entry is read in its own cells, `1 << L` voxels wide. A position the tag map doesn't hold reads
-//! open sky with no lamps, so a sub-grid far from any camera never goes
-//! black.
+//! place. A face on the grid of the world reads the voxel in front of it, and
+//! any other face reads the 8 voxels around the point in front of it. Every
+//! face of a sub-grid at a pose that a stamp keeps lies on the grid of the
+//! world. So a sub-grid at such a pose, with sky of its own at the top level
+//! and no emissive voxels, looks as its voxels would look set in the world.
 //!
-//! The shader takes Bevy's world position as a position in the world's
-//! grid, so it assumes the world's `WorldRoot` is at the identity. A custom
-//! shader that still calls `sample_light` lights a sub-grid's faces from the
-//! sub-grid's own light alone.
+//! `world_light` looks up one world chunk in the tag map of the world, which
+//! the `tag_map` module keeps. That chunk is the one holding the voxel in
+//! front of the face, the nearest of those it reads. `world_light` reads every
+//! voxel from the slot of that chunk, whose shell holds the cells across its
+//! faces. It reads the entry of a coarse chunk at LOD level `L` in the cells
+//! of that chunk, each `1 << L` voxels wide. A position the tag map doesn't
+//! hold reads as open sky with no emissive voxels, so a sub-grid far from any
+//! camera never goes black.
+//!
+//! The shader takes the Bevy world position as a position in the grid of the
+//! world, so it assumes the `WorldRoot` of the world is at the identity. A
+//! custom shader that still calls `sample_light` lights the faces of a
+//! sub-grid from the light of the sub-grid alone.
 //!
 //! What it costs grows with:
 //!
-//! - On the GPU, each fragment of a sub-grid's face: one lookup in the tag
-//!   map's hash table, and one more read's cells. A world chunk's face costs
-//!   nothing more, and each vertex of a lit world carries one more output.
-//! - On the CPU, the world chunks that sub-grids' boxes touch, which a
-//!   tumbling sub-grid's box touches more of.
+//! - On the GPU, each fragment of a face of a sub-grid. It costs one lookup in
+//!   the hash table of the tag map, and the cells of one more read of light. A
+//!   face of a world chunk costs nothing more, and each vertex of a lit world
+//!   carries one more output.
+//! - On the CPU, the world chunks that the boxes of sub-grids touch. A
+//!   tumbling sub-grid has a box that touches more of them.
 //! - Slots, for the chunks of air near sub-grids whose light varies.
-//! - Texture memory, 16 bytes for each entry of the tag map.
-//! - One column answer for each position of hinted air a sub-grid comes to
+//! - Texture memory, which takes 16 bytes for each entry of the tag map.
+//! - Column answers, one for each position of hinted air a sub-grid comes to
 //!   touch.
 //!
-//! Nothing hides where a sub-grid's light and the world's differ. A
-//! sub-grid's lamps light only the sub-grid, and its voxels cast no sky
-//! shadow on the world, though Bevy's shadow map still draws its shadow
-//! from the sun. A lamp that should light the world around it can carry a
-//! Bevy point light as a child of the sub-grid's entity, which moves with
-//! it:
+//! Nothing hides the places where the light of a sub-grid and the light of the
+//! world differ. The emissive voxels of a sub-grid light only the sub-grid.
+//! The voxels of a sub-grid cast no sky shadow on the world, though the Bevy
+//! shadow map still draws their shadow from the sun. An emissive voxel that
+//! should light the world around it can carry a Bevy point light as a child of
+//! the sub-grid entity, which moves with the sub-grid:
 //!
 //! ```
 //! use bevy::prelude::*;
@@ -164,16 +192,16 @@
 //!
 //! # References
 //!
-//! - [Terasology's `BlockMeshPart`](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/block/shapes/BlockMeshPart.java):
+//! - [`BlockMeshPart` in Terasology](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/block/shapes/BlockMeshPart.java):
 //!   lights a vertex from 8 points around it, so a vertex anywhere gets light.
-//! - [Cubyz's lighting](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
+//! - [Lighting in Cubyz](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
 //!   blends the light of the 8 cells around a vertex off the grid.
-//! - [Luanti's smooth lighting](https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp):
+//! - [Smooth lighting in Luanti](https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp):
 //!   averages the cells around a corner, leaving out cells that don't carry
 //!   light.
-//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
-//!   sky light dims Bevy's ambient light and sun, and voxel light adds through
-//!   the emissive output.
+//! - [Light propagation in tesserae](https://github.com/mkappworks-dev/tesserae/pull/3):
+//!   sky light dims the Bevy ambient light and sun, and voxel light adds
+//!   through the emissive output.
 
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -225,53 +253,69 @@ use crate::voxel_world_internal::Internals;
 /// must render forward itself.
 pub type VoxelWorldMaterial<M> = ExtendedMaterial<M, VoxelWorldBindings<M>>;
 
-/// The crate's extension of a lit world's material: the world's light texture
-/// and how light looks, for the `bevy_voxel_world::light` shader module.
+/// The extension the crate adds to the material of a lit world: the light
+/// texture of the world and how light looks, for the `bevy_voxel_world::light`
+/// shader module.
 ///
 /// It passes on `enable_prepass` and `enable_shadows` from `M`, and adds the
 /// `VOXEL_LIGHT` shader def. It has no shader of its own, except when `M` is
-/// exactly `StandardMaterial`, which gets the crate's lit PBR shader. That
-/// shader draws any mesh, with or without the crate's texture index, and
-/// vertex colours tint the base colour as in Bevy's own shader. The look's
-/// [`LightAo`] setting doesn't apply to it, since the vertex colour belongs
-/// to the mesher. Any other `M`, `ExtendedMaterial<StandardMaterial, _>`
-/// included, reads light in its own shader by importing the
-/// `bevy_voxel_world::light` module, which declares the crate's bindings.
-/// With the `sub_grids` feature it also binds the world's tag map at 202 and
-/// adds the `SUB_GRIDS` shader def. It binds the world's colour texture at 203,
-/// and adds the `LIGHT_COLOR` shader def when the world's emissive materials
-/// give a light colour other than white. A custom shader can test
-/// `LIGHT_COLOR`: without it, the light colours the module's `LightLevels`
-/// holds are white. Bindings 200 to 219 are the crate's.
+/// exactly `StandardMaterial`, which gets the lit PBR shader of the crate.
+/// That shader draws any mesh, with or without the texture index of the crate,
+/// and vertex colours tint the base colour as they do in the Bevy shader. The
+/// [`LightAo`] setting of the look doesn't apply to it, since the vertex
+/// colour belongs to the mesher. Any other `M`, including
+/// `ExtendedMaterial<StandardMaterial, _>`, reads light in its own shader by
+/// importing the `bevy_voxel_world::light` module, which declares the
+/// bindings.
+///
+/// Bindings 200 to 219 belong to the crate, and the extension uses these:
+///
+/// - Binding 200 holds the light texture of the world, and binding 201 holds
+///   the look.
+/// - With the `sub_grids` feature, binding 202 holds the tag map of the world,
+///   and the extension adds the `SUB_GRIDS` shader def.
+/// - Binding 203 holds the colour texture of the world. The extension adds the
+///   `LIGHT_COLOR` shader def when an emissive material of the world gives a
+///   light colour other than white.
+///
+/// A custom shader can test `LIGHT_COLOR`. Without it, every light colour in
+/// the `LightLevels` of the shader module is white. When a running world
+/// gains its first light colour other than white, or loses its last one, the
+/// def changes. The frame it changes in takes longer while Bevy compiles the
+/// shaders for the new def, and the chunks keep drawing.
 ///
 /// # Meshes and vertex shaders
 ///
-/// Light comes from voxels, not from the mesh: a shaft the mesh rounds away
-/// still lets light through, and a wall it doesn't draw still blocks it. The
-/// shader finds a face's voxels from its local position and normal, so a
-/// custom mesh is built in the chunk's padded local coordinates, as the
-/// [`rendering`](crate::rendering) module docs describe them, with normals
-/// pointing out of the solid. A surface sunk more than about half a voxel
-/// into solid voxels can read black along convex edges, where it lies more
-/// than a voxel from open air.
+/// Light comes from voxels, not from the mesh. A shaft the mesh rounds away
+/// still lets light through, and a wall the mesh doesn't draw still blocks it.
+/// The shader finds the voxels of a face from its local position and normal.
+/// So a custom mesh is built in the padded local coordinates of the chunk, as
+/// the [`rendering`](crate::rendering) module docs describe them, with normals
+/// pointing out of the solid. A surface sunk more than about half a voxel into
+/// solid voxels can read black along convex edges, where it lies more than a
+/// voxel from open air.
 ///
 /// A custom vertex shader outputs what the [`rendering`](crate::rendering)
-/// module docs list. Light reads the local position at location 9, the local
-/// normal at 10 and the chunk's `MeshTag` at 11, the last only under the
-/// `VOXEL_LIGHT` shader def this extension adds, and under `SUB_GRIDS` the
-/// position in the world's grid at 12.
+/// module docs list. Light reads these outputs:
+///
+/// - Location 9 holds the local position, and location 10 the local normal.
+/// - Location 11 holds the `MeshTag` of the chunk, which light reads only
+///   under the `VOXEL_LIGHT` shader def this extension adds.
+/// - Location 12 holds the position in the grid of the world, which light
+///   reads only under `SUB_GRIDS`.
 ///
 /// # Sub-grids
 ///
-/// With the `sub_grids` feature, a fragment shader lights any face, a world
-/// chunk's or a sub-grid's, with the `bevy_voxel_world::light` module's
-/// `sample_face_light`. A sub-grid's face shows the world's light where it
-/// is, capped by its enclosure, with its own lamps on top. A
-/// shader that still calls `sample_light` lights a sub-grid's faces from the
-/// sub-grid's own light alone, so they don't darken as the sub-grid enters a
-/// cave or brighten as it passes a lamp of the world. The shader reads Bevy's
-/// world position as a position in the world's grid, so it assumes the
-/// world's `WorldRoot` is at the identity.
+/// With the `sub_grids` feature, a fragment shader lights any face, of a
+/// world chunk or of a sub-grid, with `sample_face_light` from the
+/// `bevy_voxel_world::light` module. A face of a sub-grid shows the light of
+/// the world where it is, capped by the enclosure of the sub-grid, with the
+/// light of its own emissive voxels on top. A shader that still calls
+/// `sample_light` lights the faces of a sub-grid from the light of the
+/// sub-grid alone. Those faces then don't darken as the sub-grid enters a
+/// cave, or brighten as it passes an emissive voxel of the world. The shader
+/// reads the Bevy world position as a position in the grid of the world, so
+/// it assumes the `WorldRoot` of the world is at the identity.
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 #[bind_group_data(VoxelWorldBindingsKey)]
 pub struct VoxelWorldBindings<M: Material> {
@@ -284,18 +328,24 @@ pub struct VoxelWorldBindings<M: Material> {
     #[cfg(feature = "sub_grids")]
     #[texture(202, sample_type = "u_int")]
     tag_map: Handle<Image>,
-    /// The world's colour texture, or a placeholder of one white texel until a
-    /// chunk with a slot shows a light colour other than white.
+    /// The colour texture of the world, or a placeholder of one white texel
+    /// until a chunk with a slot shows a light colour other than white.
     #[texture(203, dimension = "3d", sample_type = "u_int")]
     light_colors: Handle<Image>,
-    /// Whether the world's emission table holds a light colour other than
-    /// white, which sets the `LIGHT_COLOR` shader def.
+    /// Whether the emission table of the world holds a light colour other
+    /// than white. It reaches `specialize` through [`VoxelWorldBindingsKey`],
+    /// and sets the `LIGHT_COLOR` shader def there.
     light_color: bool,
     _material: PhantomData<fn() -> M>,
 }
 
 /// The part of [`VoxelWorldBindings`] that picks its pipeline: whether the
-/// shader def `LIGHT_COLOR` is set.
+/// `LIGHT_COLOR` shader def is set.
+///
+/// Bevy gives `specialize` this key and not the material, so a shader def
+/// that depends on the world has to travel in it. The type is `pub` because
+/// it is the bind group data of the public [`VoxelWorldBindings`], but the
+/// crate doesn't re-export it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoxelWorldBindingsKey {
     pub(crate) light_color: bool,
@@ -400,12 +450,14 @@ pub(crate) struct LookUniform {
     /// 0 for [`LightAo::IndirectLight`], 1 for the base colour, 2 for off.
     pub ao: u32,
     /// 1 at [`LightPrecision::Steps256`], whose texels and tags hold 8 bits
-    /// each for sky light and voxel light, 0 at 16 levels.
+    /// each for sky light and voxel light, and 0 at
+    /// [`LightPrecision::Steps16`].
     pub steps_256: u32,
     /// 1 when a sub-grid's enclosure caps the world's voxel light its faces
     /// show, as it caps the world's sky. 0 without the `sub_grids` feature.
     pub enclosure_caps_voxel: u32,
-    /// 1 when an emissive voxel's own faces glow tinted by its light colour.
+    /// 1 when the faces of an emissive voxel glow in its light colour, and 0
+    /// when they glow white.
     pub tinted_glow: u32,
 }
 
@@ -495,16 +547,18 @@ pub(crate) fn add_light_shader(shaders: &mut Assets<Shader>) {
     shaders.insert(LIT_PBR_SHADER_HANDLE.id(), lit_pbr).unwrap();
 }
 
-/// Sets up giving the chunks of lit world `C` its material `base` wrapped in
-/// [`VoxelWorldBindings`], with the world's light texture, and the crate's tag.
+/// Sets up giving the chunks of lit world `C` its material `base`, wrapped in
+/// [`VoxelWorldBindings`] with the light texture of the world, and giving each
+/// chunk its tag.
 ///
-/// The route reads `world`'s light colours from the start, so a world
-/// coloured at startup makes its material with the `LIGHT_COLOR` shader def
-/// already in its key.
+/// The route reads the light colours of `world` before the material is made,
+/// so a world coloured at startup makes its material with the `LIGHT_COLOR`
+/// shader def already in its key.
 ///
-/// With no `base`, the world's material is added by hand: each time
+/// With no `base`, the material of the world is added by hand. Each time
 /// `VoxelWorldMaterialHandle<M>` names another material, the world wraps a
-/// copy of it. Returns the wrapped material's handle when there's a `base`.
+/// copy of it. Returns the handle of the wrapped material when there is a
+/// `base`.
 pub(crate) fn add_lit_material_path<C: VoxelWorldConfig, M: Material>(
     app: &mut App,
     base: Option<M>,
@@ -618,8 +672,8 @@ where
     handle
 }
 
-/// The textures a world's material binds for the shader to read light, and
-/// whether it reads light colours.
+/// The textures the material of a world binds for the shader to read light
+/// from, and whether the shader reads light colours.
 struct Textures {
     light: Handle<Image>,
     #[cfg(feature = "sub_grids")]
@@ -629,7 +683,8 @@ struct Textures {
 }
 
 impl Textures {
-    /// What a material made now binds for the world `route` belongs to.
+    /// Returns what a material made now binds, for the world that `route`
+    /// belongs to.
     fn of<C: VoxelWorldConfig>(
         route: &LightRoute<C>,
         #[cfg(feature = "sub_grids")] tag_map: &TagMapBinding<C>,
@@ -806,14 +861,14 @@ where
     }
 }
 
-/// What world `C`'s materials last bound as its colour texture, and whether
-/// they carry the `LIGHT_COLOR` shader def.
+/// What the materials of world `C` last bound as its colour texture, and
+/// whether they carry the `LIGHT_COLOR` shader def.
 #[derive(Resource)]
 struct ColorBinding<C> {
     bound: AssetId<Image>,
     light_color: bool,
-    /// The materials whose def changed this frame, whose new pipelines
-    /// the render world waits on.
+    /// The materials whose `LIGHT_COLOR` def changed this frame. The render
+    /// world waits on their new pipelines.
     first_flip: Vec<UntypedAssetId>,
     _world: PhantomData<C>,
 }
@@ -829,7 +884,7 @@ impl<C: VoxelWorldConfig> ColorBinding<C> {
     }
 }
 
-/// The materials of world `C` whose `LIGHT_COLOR` shader def changed
+/// Returns the materials of world `C` whose `LIGHT_COLOR` shader def changed
 /// this frame.
 #[cfg(test)]
 pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(
@@ -838,16 +893,20 @@ pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(
     &world.resource::<ColorBinding<C>>().first_flip
 }
 
-/// Gives world `C`'s materials its colour texture in place of the one they
-/// bind, and sets or clears their `LIGHT_COLOR` shader def, when either
-/// changes: when the colour texture is made or replaced, and when the
-/// world's emission table gains or loses a light colour other than white.
+/// Gives the materials of world `C` its current colour texture and
+/// `LIGHT_COLOR` shader def, where either differs from what they bind.
 ///
-/// A world coloured at startup makes its material with the def already set,
-/// so only a change of emission while the world runs changes it here.
-/// Changing the def changes the material's key, so Bevy specializes its
-/// pipelines again. It runs before Bevy sends this frame's asset events, so
-/// the frame renders with the new binding.
+/// The colour texture changes when it is made or replaced. The def changes
+/// when the emission table of the world gains its first light colour other
+/// than white, or loses its last one. A world coloured at startup makes its
+/// material with the def already set, so only a change of emission while the
+/// world runs changes the def here.
+///
+/// Changing the def changes the material key, so Bevy specializes the
+/// pipelines of the material again. The system notes each material whose def
+/// changed in `first_flip`, for the render world to wait on. It runs before
+/// Bevy sends the asset events of this frame, so the frame renders with the
+/// new binding.
 fn bind_colors<C: VoxelWorldConfig, M: Material>(
     route: Res<LightRoute<C>>,
     mut binding: ResMut<ColorBinding<C>>,
@@ -863,14 +922,14 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
         return;
     }
     let old = std::mem::replace(&mut binding.bound, texture.id());
-    // Every flip waits, since a view or pipeline key that came since the
-    // last one has never compiled the new def. Pipelines already compiled
-    // cost the wait nothing.
+    // Every change of the def waits, not only the first. A view or pipeline
+    // key that arrived since the last change has never been compiled with the
+    // new def. Pipelines already compiled cost the wait nothing.
     let first_flip = light_color != binding.light_color;
     binding.light_color = light_color;
     // Each world has its own placeholder and colour texture, so the materials
-    // binding the old texture are this world's: its material, and any earlier
-    // copy of a hand-added material that chunks still show.
+    // binding the old texture belong to this world. They are its material, and
+    // any earlier copy of a hand-added material that chunks still show.
     let ours: Vec<_> = materials
         .iter()
         .filter(|(_, material)| {
@@ -892,13 +951,16 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
     }
 }
 
-/// The materials whose `LIGHT_COLOR` shader def changed this frame, in
-/// the render world, from every lit world.
+/// The materials of every lit world whose `LIGHT_COLOR` shader def changed
+/// this frame, as the render world holds them.
 #[derive(Resource, Default)]
 struct FirstFlipMaterials(Vec<UntypedAssetId>);
 
-/// Sets up the render world to wait on the new pipelines of world `C`'s
-/// chunks in each frame its `LIGHT_COLOR` shader def changes.
+/// Sets up the render world to wait on the new pipelines of the chunks of
+/// world `C`, in each frame the `LIGHT_COLOR` shader def of the world changes.
+///
+/// One wait system serves every lit world, so the first world to call this
+/// adds it. Each world adds its own system to extract its materials.
 fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -916,7 +978,8 @@ fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
     render_app.add_systems(ExtractSchedule, extract_first_flip::<C>);
 }
 
-/// Takes the materials of world `C` whose def changed this frame.
+/// Copies into the render world the materials of world `C` whose
+/// `LIGHT_COLOR` def changed this frame.
 fn extract_first_flip<C: VoxelWorldConfig>(
     binding: Extract<Option<Res<ColorBinding<C>>>>,
     mut flipped: ResMut<FirstFlipMaterials>,
@@ -927,15 +990,14 @@ fn extract_first_flip<C: VoxelWorldConfig>(
 }
 
 /// Waits for the pipelines of the main pass, the prepass and shadows that
-/// draw the chunks of a material whose def changed this frame.
+/// draw the chunks of a material whose `LIGHT_COLOR` def changed this frame.
 ///
-/// It runs after Bevy specializes the chunks for their new key, and takes
-/// the pipeline ids from Bevy's caches of specialized pipelines, for every
-/// view.
+/// The system runs after Bevy specializes the chunks for their new key. It
+/// takes the pipeline ids from the Bevy caches of specialized pipelines, for
+/// every view.
 ///
-/// On macOS and WASM Bevy compiles a pipeline in the frame it's queued, so
-/// the wait changes nothing there, and macOS showed no frame without the
-/// chunks even with the wait left out. The gap it closes comes from Bevy
+/// On macOS and WASM, Bevy compiles a pipeline in the frame it is queued, so
+/// the wait changes nothing there. The gap the wait closes comes from Bevy
 /// compiling pipelines in the background on native Linux and Windows.
 fn wait_on_first_flip(
     mut flipped: ResMut<FirstFlipMaterials>,
@@ -1111,7 +1173,8 @@ mod tests {
         assert_eq!(uniform.sun_falloff[0].x, 0.0);
         assert_eq!(uniform.voxel_falloff[3].w, 1.0);
         assert!((uniform.sky_falloff[3].z - 0.7).abs() < 1e-6);
-        // (0.7 - 0.7^14) / (1 - 0.7^14).
+        // The default voxel falloff at level 14 is
+        // `(0.7 - 0.7^14) / (1 - 0.7^14)`.
         assert!((uniform.voxel_falloff[3].z - 0.697_951).abs() < 1e-6);
     }
 

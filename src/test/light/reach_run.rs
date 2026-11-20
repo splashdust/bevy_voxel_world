@@ -1,6 +1,14 @@
-//! Tests of `skip_unreached_colors`, the reach run: turning it on or off
-//! changes no light anywhere and starts no relight. Sky light is off in all
-//! of them.
+//! Skipping light colours that can't reach a chunk
+//!
+//! This module tests `skip_unreached_colors`. With it on, a solve whose light
+//! box holds four or more light colours first makes a reach run. The reach
+//! run finds the light colours whose light can't reach the chunk, and the
+//! solve skips their colour runs. The tests check that turning the setting on
+//! or off changes no light anywhere and starts no relight. They also check
+//! that the reach run doesn't run with three light colours or in a white
+//! world.
+//!
+//! Sky light is off in every test.
 
 use std::sync::atomic::Ordering;
 
@@ -16,7 +24,7 @@ use crate::light::LightSettings;
 use crate::light_bench::light_stats;
 use crate::prelude::*;
 
-/// The first of eight lamp materials, each of its own light colour.
+/// The first of eight lamp materials, each with a light colour of its own.
 const FIRST_LAMP: u8 = 10;
 
 const COLORS: [LinearRgba; 8] = [
@@ -34,10 +42,13 @@ fn lamp(color: usize) -> u8 {
     FIRST_LAMP + color as u8
 }
 
-/// Lamps of the first `colors` light colours, one each, in rooms
-/// whose walls fill the planes x = 0, x = 31, z = 0 and z = 31, the chunk at
-/// the origin's faces. The room in it holds the first lamps, and its light
-/// box the rest, whose light the walls keep out.
+/// Returns one lamp of each of the first `colors` light colours, among walls
+/// that fill the planes x = 0, x = 31, z = 0 and z = 31.
+///
+/// The walls lie along the faces of the chunk at the origin and close a room
+/// inside it. Some lamps stand in the room. The rest stand outside it, within
+/// the light box of the chunk, and the walls keep their light out of the
+/// chunk.
 fn walls_keep_colours_apart(colors: usize) -> Scene {
     let places = [
         IVec3::new(8, 16, 16),
@@ -58,8 +69,8 @@ fn walls_keep_colours_apart(colors: usize) -> Scene {
     }
 }
 
-/// Eight lamps of eight light colours in air, in and beside the chunk at the
-/// origin, so every colour's light reaches it.
+/// Returns eight lamps of eight light colours in air, in the chunk at the
+/// origin and just beside it, so the light of every colour reaches that chunk.
 fn every_colour_reaches() -> Scene {
     let places = [
         IVec3::new(4, 4, 4),
@@ -109,7 +120,8 @@ fn colors_skipped(app: &App) -> u64 {
     })
 }
 
-/// The light of every voxel of the chunks around the origin.
+/// Returns the light of every voxel of the chunk at the origin and the 26
+/// chunks around it, with `None` for a chunk that has no light published.
 fn light_around(app: &mut App) -> Vec<Option<Vec<(IVec3, LightLevels)>>> {
     around_origin()
         .into_iter()
@@ -117,9 +129,12 @@ fn light_around(app: &mut App) -> Vec<Option<Vec<(IVec3, LightLevels)>>> {
         .collect()
 }
 
-/// An app of `world` settled, then relit and settled again, so every chunk
-/// has solved with its whole light box loaded. Without the relight, walls
-/// can keep a chunk from ever solving again once its neighbours arrive.
+/// Returns an app of `world` that has settled, relit through `reset_light`
+/// and settled again, so every chunk has solved with its whole light box
+/// loaded.
+///
+/// Without the relight, the walls can keep a chunk from ever solving again
+/// once its neighbours arrive.
 fn settled_and_relit(world: LampWorld) -> App {
     let mut app = settled(world);
     app.world_mut()
@@ -134,9 +149,11 @@ fn settled_and_relit(world: LampWorld) -> App {
     app
 }
 
-/// Settles `scene` under each shape with `skip_unreached_colors` on and off,
-/// and fails unless the light around the origin is the same. Returns the
-/// light colours the reach run skipped, summed over the shapes.
+/// Settles `scene` under each shape, with `skip_unreached_colors` on and off,
+/// and fails unless the light around the origin is the same both ways.
+///
+/// Returns how many light colours the reach runs skipped, summed over the
+/// shapes.
 fn same_light_either_way(scene: &Scene) -> u64 {
     let mut skipped = 0;
     for shape in [LightShape::Round, LightShape::Diamond] {
@@ -167,8 +184,8 @@ fn where_every_colour_reaches_skipping_unreached_colours_changes_no_light() {
     same_light_either_way(&every_colour_reaches());
 }
 
-/// What a change of `skip_unreached_colors` mustn't touch: relights and
-/// solves.
+/// Returns the counts of relights and solves, which a change of
+/// `skip_unreached_colors` must leave alone.
 fn work_done(app: &App) -> [u64; 2] {
     let stats = light_stats::<LampWorld>(app.world()).unwrap();
     [stats.relights, stats.solves]

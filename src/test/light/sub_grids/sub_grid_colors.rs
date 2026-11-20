@@ -1,7 +1,12 @@
-//! Tests of coloured light on sub-grids: a sub-grid's own emissive voxels
-//! light it in their colour, `grid(g).light_at` mixes the world's light with
-//! the sub-grid's own, and a recolour relights the sub-grid chunks holding
-//! the material. Sky light is off in all of them.
+//! Coloured light on sub-grids
+//!
+//! This module checks that the emissive voxels of a sub-grid light it in
+//! their own light colour, and never light the world. It checks that
+//! `grid(g).light_at` mixes the light of the world with the light of the
+//! sub-grid. It also checks that a recolour relights only the sub-grid chunks
+//! that hold the material.
+//!
+//! Sky light is off in every test.
 
 use std::sync::Arc;
 
@@ -14,10 +19,12 @@ use crate::test::light::edits::{relights_started, settle};
 use crate::test::light::mixing::{emissive, BLUE_LAMP, RED_LAMP, STEP};
 use crate::test::light::voxel_light::{app, light_at, LampWorld, LAMP, STONE};
 
-/// A lamp of the sub-grid, in the middle of its chunk at the origin.
+/// The position of the lamp of the sub-grid, in the middle of the sub-grid
+/// chunk at the origin.
 const OWN_LAMP: IVec3 = IVec3::splat(16);
 
-/// A world of air, apart from `lamps`, with white, red, green and blue lamps.
+/// Returns a world of air apart from `lamps`, whose emissive materials are
+/// the white, red, green and blue lamps of the mixing tests.
 fn world(lamps: Vec<(IVec3, u8)>) -> LampWorld {
     LampWorld {
         scene: Arc::new(move |p| {
@@ -33,7 +40,8 @@ fn world(lamps: Vec<(IVec3, u8)>) -> LampWorld {
     }
 }
 
-/// Fails unless `color` is within a step of the packing of `expected`.
+/// Fails unless each component of `color` lies within [`STEP`] of the same
+/// component of `expected`.
 fn assert_color(color: LinearRgba, expected: [f32; 3], at: IVec3) {
     let read = color.to_f32_array_no_alpha();
     for (read, expected) in read.iter().zip(expected) {
@@ -74,7 +82,11 @@ fn a_sub_grids_red_lamp_lights_it_red_and_never_the_world() {
     assert_color(lamp.voxel_color, [1.0, 0.0, 0.0], OWN_LAMP);
 }
 
-/// The fixed mixing curve's weight of `level`, from its formula.
+/// Returns the weight that light at `level` carries in a mix of light colours.
+///
+/// The weight comes from the fixed formula
+/// `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`, not from the voxel falloff
+/// of the look. A weight below 0 reads as 0.
 fn weight(level: f32) -> f32 {
     let floor = 0.7f32.powi(14);
     ((0.7f32.powf(15.0 - level) - floor) / (1.0 - floor)).max(0.0)
@@ -93,8 +105,8 @@ fn a_cabin_with_a_white_lantern_docked_in_blue_world_light_mixes_the_two() {
     settle(&mut app, "the sub-grid's light to settle");
 
     let own = lone_lamp(OWN_LAMP);
-    // From beyond the blue lamp's reach on the west, past the lantern, to
-    // beyond the lantern's reach on the east.
+    // Read voxels along x, from a west end beyond the reach of the blue lamp,
+    // past the lantern, to an east end beyond the reach of the lantern.
     let positions: Vec<IVec3> = (-12..40)
         .map(|x| IVec3::new(x, 16, 16))
         .filter(|p| *p != OWN_LAMP && *p != blue)
@@ -106,7 +118,8 @@ fn a_cabin_with_a_white_lantern_docked_in_blue_world_light_mixes_the_two() {
         let world = light_at(&mut app, *p).expect("the world's light").voxel;
         let lantern = own.read(own.voxel_at(*p));
         assert_eq!(levels.voxel, world.max(lantern), "at {p}");
-        // White weighs into every component, blue into blue alone.
+        // White light weighs into every component. Blue light weighs into
+        // blue alone.
         let expected = match (world > 0.0, lantern > 0.0) {
             (false, false) | (false, true) => [1.0, 1.0, 1.0],
             (true, false) => [0.0, 0.0, 1.0],
@@ -115,8 +128,8 @@ fn a_cabin_with_a_white_lantern_docked_in_blue_world_light_mixes_the_two() {
                     (0.0, 0.0) => (1.0, 1.0),
                     weights => weights,
                 };
-                // Red and green are the lantern's weight, blue the larger
-                // weight, scaled so blue is 1.
+                // Red and green take the weight of the lantern, and blue takes
+                // the larger of the two weights. Scaling then makes blue 1.
                 let top = w.max(b);
                 [w / top, w / top, 1.0]
             }
@@ -135,7 +148,7 @@ fn a_cabin_with_a_white_lantern_docked_in_blue_world_light_mixes_the_two() {
     );
 }
 
-/// How many sub-grid chunk relights have started.
+/// Returns how many relights of sub-grid chunks have started.
 fn sub_grid_relights(app: &App) -> u64 {
     app.world()
         .resource::<crate::light::LightSettings<LampWorld>>()
@@ -148,8 +161,9 @@ fn sub_grid_relights(app: &App) -> u64 {
 fn recolouring_a_material_relights_only_the_sub_grid_chunks_holding_it() {
     let mut app = app(world(Vec::new()));
     settle(&mut app, "the world to settle");
-    // The lamp's chunk, and a chunk of stone two chunks east, beyond the
-    // lamp chunk's light box.
+    // The sub-grid holds the chunk of the lamp and a chunk of stone two chunks
+    // east of it. The chunk of stone lies beyond the light box of the chunk of
+    // the lamp, so the recolour must leave it alone.
     let entity = spawn_holding(
         &mut app,
         Transform::default(),

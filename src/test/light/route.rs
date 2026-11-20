@@ -305,8 +305,8 @@ fn a_chunks_tag_names_its_slot_or_its_levels_when_it_has_none() {
         "a solid voxel holds no light"
     );
 
-    // The floor beside it sees one sky light level and one voxel light level,
-    // which its tag carries.
+    // Each floor chunk beside the one at the origin sees one sky light level and
+    // one voxel light level. Its tag carries both.
     for position in FLOOR_ONLY {
         let tag = tag_of(&mut app, position);
         let levels = light_at(&mut app, position * 32 + IVec3::new(5, 1, 5));
@@ -480,8 +480,8 @@ fn a_lit_world_at_256_levels_makes_its_texture_rg8uint_and_a_no_slot_chunks_tag_
         );
     }
 
-    // The floor beside it sees one sky light level and one voxel light level: 8
-    // bits each in its tag.
+    // Each floor chunk beside the one at the origin sees one sky light level and
+    // one voxel light level. Its tag carries both, in 8 bits each.
     for position in FLOOR_ONLY {
         let tag = tag_of(&mut app, position);
         let levels = light_at(&mut app, position * 32 + IVec3::new(5, 1, 5));
@@ -528,8 +528,9 @@ fn changing_precision_or_slot_capacity_replaces_the_texture_and_chunks_take_slot
     });
     let old = light_textures(&app)[0].0;
 
-    // Slot holders drop to one sky light level and one voxel light level on the
-    // frame of the change, 8 bits each at 256 levels, and the old texture goes.
+    // A chunk that held a slot gives it up on the frame of the change. Its tag
+    // then carries one sky light level and one voxel light level, in 8 bits each
+    // at 256 steps. The old texture goes after that.
     change_light(&mut app, |light| light.precision = LightPrecision::Steps256);
     app.update();
     let tag = tag_of(&mut app, IVec3::ZERO);

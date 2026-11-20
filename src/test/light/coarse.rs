@@ -30,8 +30,8 @@ struct CoarseWorld {
     hints: Option<KeyHints>,
     light: LightPropagation,
     emissive: Vec<(u8, Emission)>,
-    /// Holds back the padding lookups of the chunk task at its chunk
-    /// position, at any level.
+    /// Holds back the lookups that the chunk task at the position of the hold
+    /// makes in its padding, at any LOD level.
     hold: Option<Arc<Hold>>,
     /// The `min_despawn_distance`, within which chunks spawn whatever their
     /// fill hint.
@@ -86,7 +86,10 @@ impl VoxelWorldConfig for CoarseWorld {
             let scene = scene.clone();
             let hold = hold.clone().filter(|hold| hold.chunk == chunk);
             Box::new(move |position, _| {
-                // A chunk task generates its padding first.
+                // A chunk task generates its padding first. Sky probes and walks
+                // read only voxels inside the chunk position they look up, so
+                // holding back the padding lookups holds back the chunk task
+                // alone.
                 let inside = position.div_euclid(IVec3::splat(32)) == chunk;
                 if let Some(hold) = hold.as_ref().filter(|_| !inside) {
                     hold.wait();
@@ -653,8 +656,11 @@ fn a_walk_on_request_in_a_world_with_slow_lookups_runs_once_per_voxel() {
 
 // --- A change of emission ----------------------------------------------------
 
-/// [`slab_and_shaft`] with a block of lamps floating in the sunlit part of
-/// [`ABOVE`], away from its padding, so [`BELOW`] holds no lamp.
+/// Returns [`slab_and_shaft`] with a block of lamps floating in the sunlit
+/// part of [`ABOVE`].
+///
+/// The lamps lie well inside [`ABOVE`], so not even the padding of [`BELOW`]
+/// holds one.
 fn slab_and_lamp(p: IVec3) -> WorldVoxel {
     let lamp =
         (112..116).contains(&p.x) && (20..24).contains(&p.y) && (40..44).contains(&p.z);
@@ -665,11 +671,11 @@ fn slab_and_lamp(p: IVec3) -> WorldVoxel {
     }
 }
 
-/// Beside the lamps of [`slab_and_lamp`], in [`ABOVE`].
+/// A voxel beside the lamps of [`slab_and_lamp`], in [`ABOVE`].
 const BY_LAMP: IVec3 = IVec3::new(114, 26, 42);
-/// Under the slab, in [`ABOVE`], out of the lamps' reach.
+/// A voxel under the slab, in [`ABOVE`], beyond the reach of the lamps.
 const FAR_FROM_LAMP: IVec3 = IVec3::new(70, 4, 4);
-/// In the shaft, in [`BELOW`].
+/// A voxel in the shaft, in [`BELOW`].
 const SHAFT: IVec3 = IVec3::new(106, -10, 26);
 
 fn emission_app(world: CoarseWorld) -> App {
@@ -688,10 +694,12 @@ fn coarse_solves(app: &App) -> u64 {
         .coarse_solves
 }
 
-/// Runs `app` until streaming is done and its light is settled: every chunk
-/// is Ready and no chunk has spawned or retired for 20 frames in a row, and
-/// light is settled. It counts frames and waits on chunk states, never on
-/// time, so a busy machine only makes it take longer.
+/// Updates `app` until streaming is done and light has settled.
+///
+/// Streaming is done once every chunk is Ready and no chunk has spawned or
+/// retired for 20 frames in a row. The wait counts frames rather than time,
+/// so a busy machine can't end it before streaming is done. The whole wait
+/// still fails at the deadline of `update_until`.
 fn until_still(app: &mut App) {
     let mut still = 0;
     let mut keys = chunk_keys::<CoarseWorld>(app);
@@ -794,7 +802,8 @@ fn a_coarse_chunk_task_solved_under_the_old_emissive_list_solves_again_as_it_lan
     update_until(&mut app, "the lamps' coarse chunk task to be held", |_| {
         hold.waited.load(Ordering::Acquire) > 0
     });
-    // Into the light the held task solves at level 6.
+    // The held task started under a lamp level of 6. Raise the level while the
+    // task waits.
     set_emissive(&mut app, vec![(LAMP, Emission::level(15.0))]);
     for _ in 0..5 {
         app.update();
@@ -862,7 +871,7 @@ fn a_change_of_reach_shape_sky_or_sky_fill_leaves_coarse_chunks_as_they_are() {
 
 // --- Coloured light ----------------------------------------------------------
 
-/// A material emitting blue light.
+/// A lamp material that gives off blue light.
 const BLUE_LAMP: u8 = 9;
 
 fn red(level: f32) -> Emission {
@@ -873,8 +882,9 @@ fn blue(level: f32) -> Emission {
     Emission::level(level).with_color(LinearRgba::BLUE)
 }
 
-/// [`slab_and_lamp`] with a block of blue lamps floating just above the slab,
-/// 40 voxels from the red ones, in [`ABOVE`] too.
+/// Returns [`slab_and_lamp`] with a block of blue lamps floating just above
+/// the slab, 40 voxels from the lamps of [`slab_and_lamp`]. The blue lamps
+/// lie in [`ABOVE`] too.
 fn two_lamps(p: IVec3) -> WorldVoxel {
     let blue =
         (72..76).contains(&p.x) && (14..18).contains(&p.y) && (40..44).contains(&p.z);
@@ -885,7 +895,7 @@ fn two_lamps(p: IVec3) -> WorldVoxel {
     }
 }
 
-/// Above the blue lamps of [`two_lamps`].
+/// A voxel above the blue lamps of [`two_lamps`].
 const BY_BLUE: IVec3 = IVec3::new(74, 20, 42);
 
 fn two_colour_world() -> CoarseWorld {
@@ -896,9 +906,11 @@ fn two_colour_world() -> CoarseWorld {
     }
 }
 
-/// Runs `app` until [`ABOVE`] shows its mesh and its light, and then as
-/// [`until_still`] does, so a busy machine's slow streaming can't end the
-/// wait before it shows.
+/// Updates `app` until [`ABOVE`] shows its mesh and its light, then waits as
+/// [`until_still`] does.
+///
+/// Waiting for [`ABOVE`] first means that slow streaming on a busy machine
+/// can't end the wait before that chunk shows.
 fn until_coarse_shown(app: &mut App) {
     update_until(app, "the lamps' coarse chunk to show its light", |app| {
         tag_of(app, ABOVE).is_some() && coarse_lit(app, &[BY_LAMP])
@@ -923,20 +935,24 @@ fn a_coarse_chunk_with_lamps_of_two_colours_reads_its_colours_cell_by_cell() {
     let tag = tag_of(&mut app, ABOVE).unwrap();
     assert_eq!(tag & 0xF000_0000, HAS_SLOT | 1 << 29, "tag {tag:#x}");
 
-    // The slab's top cell under the blue lamps, a level-1 cell 2 voxels wide.
+    // The top cell of the slab under the blue lamps. A level-1 cell is 2 voxels
+    // wide.
     let in_slab = IVec3::new(74, 10, 42);
     let above = light_at(&mut app, in_slab + IVec3::Y * 2).unwrap();
     assert!(above.voxel > 0.0);
     let solid = light_at(&mut app, in_slab).unwrap();
     assert!(solid.voxel >= above.voxel);
     assert_eq!(solid.voxel_color, LinearRgba::BLUE);
-    // A lamp's own cell reads its own colour.
+    // The cell of a lamp reads the light colour of that lamp.
     assert_eq!(color_at(&mut app, IVec3::new(114, 22, 42)), LinearRgba::RED);
 }
 
-/// Ground below y = 8, a roof near the origin that shades a level-0 chunk,
-/// and in [`ABOVE`] a block of bright red lamps beside a wide field of dim
-/// blue ones, whose pool lights more of the ground than the red one does.
+/// Returns ground below y = 8, with a roof near the origin that shades a
+/// level-0 chunk.
+///
+/// In [`ABOVE`], a block of bright red lamps stands beside a wide field of dim
+/// blue lamps. The blue light lights more of the ground than the red light
+/// does.
 fn red_beside_blue(p: IVec3) -> WorldVoxel {
     let roof =
         (8..16).contains(&p.x) && (12..14).contains(&p.y) && (8..16).contains(&p.z);
@@ -956,7 +972,7 @@ fn red_beside_blue(p: IVec3) -> WorldVoxel {
 
 #[test]
 fn a_coarse_chunk_that_gives_its_slot_up_shows_the_colour_of_its_brightest_tenth() {
-    // One slot, which a nearer level-0 chunk takes.
+    // The world has one slot, which a level-0 chunk nearer the camera takes.
     let mut app = emission_app(CoarseWorld {
         scene: Arc::new(red_beside_blue),
         emissive: vec![(LAMP, red(15.0)), (BLUE_LAMP, blue(3.0))],
@@ -978,7 +994,8 @@ fn a_coarse_chunk_that_gives_its_slot_up_shows_the_colour_of_its_brightest_tenth
         "red, not blue or magenta: {tag:#x}"
     );
     assert!(tag >> 4 & 15 > 3, "brighter than the blue pool: {tag:#x}");
-    // Its tag's colour, in every cell.
+    // Every cell of the chunk shows the light colour of its tag, even where
+    // blue light lights it.
     let in_blue = IVec3::new(70, 8, 10);
     assert!(voxel_at(&mut app, in_blue) > 0.0);
     assert_eq!(color_at(&mut app, in_blue), LinearRgba::RED);
@@ -1015,7 +1032,8 @@ fn recolouring_a_lamp_solves_again_the_coarse_chunk_holding_it_alone() {
     assert_eq!(light_at(&mut app, SHAFT), below);
     assert_eq!(light_at(&mut app, FAR_FROM_LAMP), far);
 
-    // The same light colour once scaled.
+    // Dim green scales to the same light colour as green, so nothing solves
+    // again.
     let dim_green = Emission::level(15.0).with_color(LinearRgba::rgb(0.0, 0.5, 0.0));
     set_emissive(&mut app, vec![(LAMP, dim_green), (BLUE_LAMP, blue(15.0))]);
     for _ in 0..20 {
@@ -1063,8 +1081,8 @@ fn a_level_0_chunk_with_another_data_shape_shows_coloured_light() {
     assert_eq!(color_at(&mut app, by_lamp), LinearRgba::RED);
 }
 
-/// The colour textures the world's route has made: 3D `R16Uint` images
-/// bigger than one texel.
+/// Returns how many colour textures the route of the world has made. A colour
+/// texture is an `R16Uint` image bigger than the one-texel placeholder.
 fn color_textures(app: &App) -> usize {
     use bevy::render::render_resource::TextureFormat;
     app.world()
@@ -1146,6 +1164,7 @@ fn coarse_copy_bytes_count_the_copies_of_colour_slots() {
         ..two_colour_world()
     });
     let colored = copies(two_colour_world());
-    // One coarse chunk holds a colour slot: 34³ texels of 2 bytes.
+    // One coarse chunk holds a colour slot, which copies 34³ texels of 2 bytes
+    // each.
     assert_eq!(colored, white + 34 * 34 * 34 * 2);
 }

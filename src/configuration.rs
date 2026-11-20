@@ -359,26 +359,33 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The materials whose voxels give off light, and how much. Empty by
     /// default, and then no chunk looks for light sources among its voxels.
     ///
-    /// Relights on change. A change of a material's level, or a material
+    /// Relights on change. A change to the level of a material, or a material
     /// added or dropped, relights like a change of reach: every chunk with a
-    /// solid looks for its emissive voxels again in a relight task on the task
-    /// pool, and its neighbours relight again where its emissive voxels
-    /// changed. A chunk above LOD level 0 holding such a material is solved
-    /// again on the task pool too, and shows its old light until then.
+    /// solid looks for its emissive voxels again, in a relight task on the
+    /// task pool. The neighbours of such a chunk then relight again where its
+    /// emissive voxels changed.
     ///
     /// Each [`Emission`] can give its light a colour. A change of colour alone
-    /// changes no level, so it relights only the chunks that hold an emissive
-    /// voxel of a recoloured material, or have one in the 26 chunks around
-    /// them, nearest the camera first, with old light shown until new light
-    /// lands. Materials whose colours are the same once scaled give the same
-    /// light, so a change between them relights nothing. A world declaring
-    /// more than 8,192 emissive materials warns once, and gives each one past
-    /// that the colour of the earlier one nearest it.
+    /// changes no level, so it relights fewer chunks: only those that hold an
+    /// emissive voxel of a recoloured material, or have one in the 26 chunks
+    /// around them. They relight nearest the camera first, and show their old
+    /// light until the new light lands. Two colours that are the same once
+    /// [`Emission::with_color`] scales them give the same light, so a change
+    /// from one to the other relights nothing.
     ///
-    /// The first time a running world's emissive materials go from all white
-    /// to holding another colour, or back, its chunk shaders compile for the
-    /// other case, and that frame waits for them. Later changes wait on
-    /// nothing.
+    /// Either kind of change also solves again, on the task pool, each chunk
+    /// above LOD level 0 that holds a changed material. Such a chunk shows its
+    /// old light until then.
+    ///
+    /// Up to 8,192 emissive materials can each have a light colour of their
+    /// own. A world declaring more warns once, and gives each material past
+    /// the 8,192nd the light colour of the earlier material nearest its own.
+    ///
+    /// The first time a running world switches between emissive materials
+    /// that are all white and emissive materials with another colour, its
+    /// chunk shaders compile for the new case, and that frame waits for them.
+    /// A later switch waits only for shaders that haven't compiled for the new
+    /// case yet, such as those of a camera added since.
     ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.

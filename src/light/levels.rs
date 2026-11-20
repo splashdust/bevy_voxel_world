@@ -27,8 +27,8 @@ impl LightPrecision {
         }
     }
 
-    /// How many bits a level has, which is how many bit planes sky light
-    /// or voxel light stores for a chunk.
+    /// Returns how many bits a level has. Sky light and voxel light each
+    /// store that many bit planes for a chunk.
     #[inline]
     pub(crate) fn bits(self) -> usize {
         match self {
@@ -72,13 +72,15 @@ impl LightPrecision {
     }
 }
 
-/// The light at a voxel, as read by
-/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at): a level for
-/// each kind of light, and the colour of its voxel light.
+/// The light at a voxel, as
+/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) reads it:
+/// a level of sky light, a level of voxel light, and the colour of the voxel
+/// light.
 ///
-/// Each kind of light is a level from 0, pitch black, to 15. Sky light at 15
-/// means the voxel has direct sky. At 16 levels every level is a whole
-/// number, and at 256 levels a step of 1/17.
+/// Each level runs from 0, pitch black, to 15. Sky light at 15 means the
+/// voxel has direct sky, as [`direct_sky`](Self::direct_sky) reports. Under
+/// [`LightPrecision::Steps16`] every level is a whole number. Under
+/// [`LightPrecision::Steps256`] a level moves in steps of 1/17.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub struct LightLevels {
@@ -86,11 +88,14 @@ pub struct LightLevels {
     pub sky: f32,
     /// Light from emissive voxels.
     pub voxel: f32,
-    /// The colour of the voxel light, with its brightest component 1, so
-    /// [`voxel`](Self::voxel) alone says how bright it is. Where light of several
-    /// colours reaches the voxel, it's the colour they mix to. An emissive voxel
-    /// reads its own colour. White where `voxel` is 0, and everywhere in a world
-    /// whose emissive voxels are all white.
+    /// The colour of the voxel light, scaled so its brightest component is 1.
+    ///
+    /// The colour says nothing about brightness: [`voxel`](Self::voxel) alone
+    /// says how bright the light is. Where light of several colours reaches
+    /// the voxel, this is the colour they mix to. At LOD level 0 an emissive
+    /// voxel reads the colour of its own light. The colour is white where
+    /// `voxel` is 0, and everywhere in a world whose emissive voxels all give
+    /// white light.
     pub voxel_color: LinearRgba,
 }
 
@@ -113,7 +118,8 @@ impl LightLevels {
         }
     }
 
-    /// These levels with their voxel light in `color`, where it has any.
+    /// Returns these levels with their voxel light in `color`. Where they hold
+    /// no voxel light, the colour stays white, since no light colour shows.
     pub(crate) fn with_voxel_color(self, color: LinearRgba) -> Self {
         Self {
             voxel_color: if self.voxel > 0.0 {

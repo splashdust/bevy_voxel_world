@@ -1,8 +1,12 @@
-//! Tests of light as it runs on WASM, where relights run on the main thread
-//! within the world's `wasm_relight_budget` each frame and at most one sky
-//! probe starts a frame. They turn that mode on in a native app. Each check
-//! of relights runs in a white world and in one lit by emissive voxels of
-//! several light colours, whose chunks solve once per colour.
+//! Light as it runs on WASM
+//!
+//! This module turns on the WASM mode of light in a native app. In that mode,
+//! relights run on the main thread within the `wasm_relight_budget` of the
+//! world each frame, and at most one sky probe starts a frame.
+//!
+//! Each check of relights runs twice: in a white world, and in a world lit by
+//! emissive voxels of several light colours. A solve in the coloured world
+//! runs the kernel once for each light colour, so its relights cost more.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -111,8 +115,8 @@ fn a_big_edit_relights_within_the_budget_each_frame_give_or_take_one_relight() {
     );
 }
 
-/// Stone below y = 0, with a red, a green and a blue lamp on it 10 voxels
-/// from the origin, where 8 chunks meet.
+/// Returns stone below y = 0, with a red, a green and a blue lamp on it. Each
+/// lamp stands 10 voxels from the origin, where 8 chunks meet.
 fn three_colours_on_stone() -> Scene {
     Scene {
         lamps: vec![
@@ -128,7 +132,8 @@ fn three_colours_on_stone() -> Scene {
 const COLOURED_REACH: (u8, LightShape, LightPrecision) =
     (14, LightShape::Round, LightPrecision::Steps16);
 
-/// An app of `scene` whose light runs as on WASM, with `budget` for relights.
+/// Returns an app of `scene` whose light runs as on WASM, with `budget` as its
+/// relight budget for each frame.
 fn coloured_main_thread_app(scene: &Scene, budget: Duration) -> App {
     let (reach, shape, precision) = COLOURED_REACH;
     let mut world = LampWorld {
@@ -150,8 +155,8 @@ fn a_single_voxel_edits_coloured_light_lands_within_2_frames() {
     for _ in 0..5 {
         framed_update(&mut app);
     }
-    // A block on the stone between the green and the blue lamp, where their
-    // light meets.
+    // Place a block on the stone where the light of the green lamp meets the
+    // light of the blue lamp.
     let edit = [(IVec3::new(5, 0, 0), WorldVoxel::Solid(STONE))];
     set_voxels(&mut app, &edit);
     app.update();
@@ -174,8 +179,8 @@ fn a_big_edit_in_coloured_light_relights_within_the_budget_each_frame_give_or_ta
     settle(&mut app, "the world to stream in");
     let relights = counter(&app, |c| c.relights.load(Ordering::Relaxed));
 
-    // Into the stone where 8 chunks meet, between the lamps, so the edit
-    // relights each of those chunks in each colour.
+    // Dig a ball out of the stone where 8 chunks meet, between the lamps. The
+    // edit then relights each of those chunks in each light colour.
     let centre = IVec3::ZERO;
     let bomb: Vec<(IVec3, WorldVoxel)> = (-8..=8)
         .flat_map(|z| {

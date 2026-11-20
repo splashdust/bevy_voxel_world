@@ -54,8 +54,8 @@ const CABIN_TOP: i32 = 34;
 const DOOR_MIN: IVec3 = IVec3::new(36, 15, 126);
 const DOOR_MAX: IVec3 = IVec3::new(39, 19, 129);
 
-/// Where lamp voxels go when [`build`] is given lamps: under the cabin's
-/// roof, towards each end of the cabin.
+/// Where [`build`] places lamp voxels when it is given `lamp`: under the roof
+/// of the cabin, one towards each end.
 pub const LAMPS: [IVec3; 2] = [IVec3::new(48, 33, 116), IVec3::new(48, 33, 140)];
 
 /// What [`build`] put in the sub-grid.
@@ -68,9 +68,11 @@ pub struct Hull {
     pub chunks: HashSet<IVec3>,
 }
 
-/// The material of the hull's voxel at `position`, or `None` where the hull
-/// holds air. With `lamp`, each voxel at [`LAMPS`] holds the material `lamp`
-/// gives for its position.
+/// Returns the material of the hull voxel at `position`, or `None` where the
+/// hull holds air.
+///
+/// With `lamp`, each position in [`LAMPS`] holds the material that `lamp`
+/// returns for that position, so each lamp can take a light colour of its own.
 pub fn hull_voxel(position: IVec3, lamp: Option<fn(IVec3) -> u8>) -> Option<u8> {
     if let Some(lamp) = lamp.filter(|_| LAMPS.contains(&position)) {
         return Some(lamp(position));
@@ -90,10 +92,12 @@ pub fn hull_voxel(position: IVec3, lamp: Option<fn(IVec3) -> u8>) -> Option<u8> 
     .then_some(GONDOLA)
 }
 
-/// Fills `grid` with the hull, placing lamp voxels in the cabin of the
-/// materials `lamp` gives when it is given, and returns what it put there.
+/// Fills `grid` with the hull and returns what it put there.
 ///
-/// It sets voxels and removes none, so `grid` is best an empty sub-grid.
+/// With `lamp`, the voxels at [`LAMPS`] hold the materials that `lamp`
+/// returns for them.
+///
+/// `build` sets voxels and removes none, so `grid` is best an empty sub-grid.
 /// The voxels commit in the next `PreUpdate`.
 pub fn build<C: VoxelWorldConfig<MaterialIndex = u8>>(
     grid: &mut GridVoxelsMut<C>,

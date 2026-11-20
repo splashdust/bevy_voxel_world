@@ -1,47 +1,55 @@
-//! What a chunk's light shows its six face neighbours: a hash per face of when
-//! light reached it, and the comparison an arriving chunk makes with each
-//! neighbour's light.
+//! Light across chunk faces
+//!
+//! This module holds what the light of a chunk shows its six face neighbours.
+//! A solve hashes, for each face, when light reached the voxels of the chunk
+//! on that face, and a relight ripples to a neighbour only where that hash
+//! changed. When a chunk gets new light, [`could_reach_sooner`] compares it
+//! with the light of each neighbour, to find the neighbours it could light
+//! sooner than their own light says.
 //!
 //! The comparison looks at each pair of touching open voxels on the shared
 //! face, and at each emissive voxel on the face. An emissive voxel is solid,
 //! so it holds no light to compare, yet its light crosses the face into the
 //! open voxel beside it. Where no open voxel of its own chunk on the face
 //! carries that light across, as with an emissive voxel set in a solid wall,
-//! comparing open voxels alone would never relight the neighbour, which would
-//! keep light dimmer than solving it again gives. Only voxel light needs this:
-//! direct sky, the other source on a face, is held by open voxels.
+//! comparing open voxels alone would never relight the neighbour. The light
+//! there would then stay dimmer than solving it again gives. Only voxel light
+//! needs this, since direct sky, the other source on a face, is held by open
+//! voxels.
 //!
 //! # Light colours
 //!
 //! Where emissive voxels of several light colours light a chunk, its solve
-//! runs once per light colour (see [`solver`](super::solver)), and each run is
-//! hashed and compared on its own.
+//! runs the kernel once per light colour (see [`solver`](super::solver)).
+//! Each run is hashed and compared on its own.
 //!
-//! A face's hash mixes the hash of each run whose light crosses it, keyed by
-//! the run's light colour. A change of light colour never changes a level, so
-//! without the key, an edit swapping an emissive voxel for one of another
-//! light colour would leave every hash as it was, and ripple nowhere. A run
-//! that doesn't cross a face adds nothing to its hash, and white light adds
-//! its hash unkeyed, so a face only white light crosses hashes as it would in
-//! a white world.
+//! The hash of a face mixes the hash of each run whose light crosses it,
+//! keyed by the light colour of the run. The key is there because a change
+//! of light colour never changes a level. Without it, an edit that swaps an
+//! emissive voxel for one of another light colour would leave every hash as
+//! it was, and the relight would ripple nowhere. A run whose light doesn't
+//! cross a face adds nothing to the hash of that face. White light adds its
+//! hash unkeyed, so a face that only white light crosses hashes as it would
+//! in a white world.
 //!
-//! An arrival compares each run with the run of the same light colour across
-//! the face. Comparing levels alone misses colour: a neighbour lit green on
-//! its face at a level above what an arriving red gives it still has to
-//! relight, since red would tint it. A chunk stores only the highest level of
-//! its runs at each voxel, so it also keeps [`BorderLevels`]: each run's
-//! levels on each face where two or more runs light its open voxels. On any
-//! other face one run at most lights the face's voxels, and its levels and
-//! light colour are what the chunk stores.
+//! The comparison matches each run with the run of the same light colour
+//! across the face, because comparing levels alone misses colour. Say a
+//! neighbour is lit green on its face, at a level above what an arriving red
+//! run gives it. The neighbour still has to relight, since the red light
+//! would tint it. A chunk stores only the highest level of its runs at each
+//! voxel, so it also keeps [`BorderLevels`]: the levels of each run on each
+//! face where two or more runs light its open voxels. On any other face, at
+//! most one run lights the voxels of the face, so the levels and light colour
+//! the chunk stores there are those of that run.
 //!
 //! An emissive voxel on the face is compared with the run of its own light
-//! colour across the face, for the same reason: the neighbour may be lit
-//! brighter there by another colour, which the emissive voxel's light would
-//! still tint.
+//! colour across the face, for the same reason. The neighbour may be lit
+//! brighter there by another light colour, and the light of the emissive
+//! voxel would still tint it.
 //!
-//! Border levels take a bit plane of the face per bit of a level, for each
-//! run, on each face two or more runs light, so they grow with the light
-//! colours that meet on a chunk's faces.
+//! Border levels cost one bit plane of a face per bit of a level, for each
+//! run on each face that two or more runs light. So they grow with how many
+//! light colours meet on the faces of a chunk.
 
 use std::sync::Arc;
 
@@ -135,12 +143,14 @@ pub(crate) fn mix(hash: u64, value: u64) -> u64 {
     (hash.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
-/// The face hashes of voxel light solved in runs, one per light colour, from
-/// each run's packed light colour and face hashes, in order of light colour.
+/// Returns the face hashes of voxel light solved in runs, one run per light
+/// colour, from the packed light colour and the face hashes of each run.
 ///
-/// Each face mixes the hash of every run whose light crosses it, keyed by its
-/// light colour. White's hash goes in unkeyed, so a face only white light
-/// crosses keeps the hash a white world gives it.
+/// Each face mixes the hash of every run whose light crosses it, keyed by the
+/// light colour of the run. The hash of a white run goes in unkeyed, so a
+/// face that only white light crosses keeps the hash that a white world gives
+/// it. Mixing depends on order, so `runs` come in order of light colour, and
+/// the same runs always give the same hashes.
 pub(crate) fn run_hashes(runs: impl IntoIterator<Item = (u16, [u64; 6])>) -> [u64; 6] {
     let mut faces = [0; 6];
     for (color, hashes) in runs {
@@ -159,15 +169,18 @@ pub(crate) fn run_hashes(runs: impl IntoIterator<Item = (u16, [u64; 6])>) -> [u6
     faces
 }
 
-/// For sky light and voxel light and per face, a hash of when light reached
-/// each of a chunk's voxels on that face: 96 B a chunk.
+/// A hash for each face of when light reached the voxels of a chunk on that
+/// face, one set for sky light and one for voxel light: 96 B a chunk.
 ///
-/// A neighbour's light can only change with a chunk's light where light
-/// crosses their shared face at another time, so a relight that leaves a
-/// face's hash alone needn't relight the neighbour across it. Round spread
-/// hashes passes too, since in a round of three passes, along x, then y, then
-/// z, a voxel reached in the pass along x still sends light across a Y face in
-/// the same round, and one reached by the pass along y across a Z face.
+/// The light of a neighbour can only change with the light of the chunk where
+/// light crosses their shared face at another time. So a relight that leaves
+/// the hash of a face alone needn't relight the neighbour across that face.
+///
+/// Under [`LightShape::Round`](super::config::LightShape::Round), the hash
+/// records the pass as well as the round. Some rounds there take three
+/// passes, along x, then y, then z. A voxel reached in the pass along x still
+/// sends light across a Y face in the same round, and a voxel reached in the
+/// pass along y sends light across a Z face.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FaceHashes {
     pub sky: [u64; 6],
@@ -181,26 +194,28 @@ impl FaceHashes {
         self.sky[face] != other.sky[face] || self.voxel[face] != other.voxel[face]
     }
 
-    /// The hashes of sky light or voxel light holding `level` in every open
-    /// voxel, which no kernel run spread.
+    /// Returns the face hashes of sky light or voxel light that holds `level`
+    /// in every open voxel, where no kernel run spread it.
     pub fn uniform(level: u8) -> [u64; 6] {
         [if level == 0 { 0 } else { mix(0, level as u64) }; 6]
     }
 }
 
-/// Each run's voxel light on each face of a chunk where two or more runs, of
-/// different light colours, light the chunk's open voxels on that face.
+/// The voxel light of each run on each face of a chunk where two or more
+/// runs, of different light colours, light the open voxels of the chunk.
 ///
 /// A chunk stores only the highest level of its runs at each voxel, which
-/// can't say how far each light colour got. An arrival compares runs of the
-/// same light colour across a face, so it reads them here: see the module
-/// docs. Nothing else reads them, and two chunks' light that differs only in
-/// them is the same light.
+/// can't say how far each light colour got. The comparison across a face
+/// matches runs of the same light colour, so it reads their levels here: see
+/// the module docs. Nothing else reads border levels. Two lights that differ
+/// only in their border levels count as the same light, as
+/// [`ChunkLight::same_light`] says.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct BorderLevels(Option<Arc<[Box<[FaceRun]>; 6]>>);
 
-/// One run's levels on one face: its packed light colour, and one bit plane
-/// of the face per bit of a level, a `u32` per `u` with a bit per `v`.
+/// The levels of one run on one face: the packed light colour of the run,
+/// and one bit plane of the face per bit of a level. A plane holds a `u32`
+/// for each `u`, with a bit for each `v`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FaceRun {
     color: u16,
@@ -218,9 +233,11 @@ impl FaceRun {
 }
 
 impl BorderLevels {
-    /// The border levels of a chunk with `occupancy`, lit by runs of the
-    /// packed light colours in `runs`, each with its level in steps of
-    /// `precision` at every voxel, at [`voxel_index`].
+    /// Returns the border levels of a chunk with `occupancy`, lit by `runs`.
+    ///
+    /// Each run gives its packed light colour and its level at every voxel of
+    /// the chunk, in steps of `precision`, indexed by [`voxel_index`]. A face
+    /// that fewer than two runs light keeps no border levels.
     pub fn of<'a>(
         runs: impl IntoIterator<Item = (u16, &'a [u8])> + Clone,
         occupancy: &Occupancy,
@@ -266,15 +283,20 @@ impl BorderLevels {
         self.0.is_none()
     }
 
-    /// The runs whose levels the chunk keeps on `face`, if it keeps any there.
+    /// Returns the runs whose levels the chunk keeps on `face`, or `None`
+    /// where it keeps none.
     fn on(&self, face: Face) -> Option<&[FaceRun]> {
         let runs = &self.0.as_ref()?[face as usize];
         (!runs.is_empty()).then_some(&runs[..])
     }
 }
 
-/// The level the run of the packed light colour `color` gives `light`'s open
-/// voxel at `u` and `v` on `face`.
+/// Returns the level that the run of the packed light colour `color` gives
+/// the open voxel at `u` and `v` on `face` of the chunk lit by `light`.
+///
+/// On a face without border levels, the stored level is that of the one run
+/// lighting the voxel, so it counts only if the stored light colour is
+/// `color`.
 fn run_level(light: &ChunkLight, face: Face, u: usize, v: usize, color: u16) -> u8 {
     if let Some(runs) = light.borders.on(face) {
         return runs
@@ -290,24 +312,25 @@ fn run_level(light: &ChunkLight, face: Face, u: usize, v: usize, color: u16) -> 
     }
 }
 
-/// Whether light in `from` could reach its neighbour across `face`, lit by
-/// `to`, sooner than `to`'s levels say light got there, so the neighbour must
-/// relight.
+/// Whether light in `from` could reach the neighbour across `face`, lit by
+/// `to`, sooner than the levels of `to` say light got there. If so, the
+/// neighbour must relight.
 ///
-/// It holds when, in sky light or voxel light, at some pair of touching open
-/// voxels, the first distance from a source that holds `from`'s level is less
-/// than the last distance that holds `to`'s, with level 0 counting as
-/// `reach + 1`. Direct sky, at the top level, is a source itself, so a
-/// neighbour beside it is one step from a source. `sky_scale` is `None` with sky light off.
+/// It holds in either of two cases:
 ///
-/// It also holds when an emissive voxel of `from` on the face could light the
-/// open voxel of `to` across it sooner than `to`'s voxel light there says:
-/// see [`emissive_reaches_sooner`].
+/// - At some pair of touching open voxels, in sky light or voxel light, the
+///   first distance from a source that holds the level in `from` is less than
+///   the last distance that holds the level in `to`. Level 0 counts as
+///   `reach + 1`. Direct sky, at the top level, is a source itself, so a
+///   neighbour beside it is one step from a source.
+/// - An emissive voxel of `from` on the face could light the open voxel of
+///   `to` across it sooner than the voxel light of `to` there says: see
+///   [`emissive_reaches_sooner`].
 ///
-/// `colors` is the world's emissive list where it holds a light colour other
-/// than white, and `None` in a white world. With it, voxel light is compared
-/// run by run, each run with the run of the same light colour across the
-/// face.
+/// `sky_scale` is `None` with sky light off. `colors` is the emission table
+/// of the world where it holds a light colour other than white, and `None`
+/// in a white world. With `colors`, voxel light is compared run by run, each
+/// run with the run of the same light colour across the face.
 pub(crate) fn could_reach_sooner<I>(
     from: &ChunkLight,
     to: &ChunkLight,
@@ -344,8 +367,8 @@ pub(crate) fn could_reach_sooner<I>(
         }
         false
     };
-    // Between two chunks lit only by white, the one run of each is its
-    // stored levels.
+    // Between two chunks lit only by white light, each chunk has one run, and
+    // its stored levels are that run, so they are compared as they are.
     let voxel = match colors {
         Some(_) if !(from.is_white() && to.is_white()) => {
             runs_reach_sooner(from, to, face, voxel_scale)
@@ -359,7 +382,7 @@ pub(crate) fn could_reach_sooner<I>(
 
 /// Whether, at some pair of touching open voxels on `face`, a run of `from`
 /// could reach `to` sooner than the run of the same light colour in `to` says
-/// light got there, comparing levels as [`could_reach_sooner`] does.
+/// light got there. It compares levels as [`could_reach_sooner`] does.
 fn runs_reach_sooner(
     from: &ChunkLight,
     to: &ChunkLight,
@@ -404,14 +427,17 @@ fn runs_reach_sooner(
 }
 
 /// Whether an emissive voxel of `from` on `face` could light the open voxel of
-/// `to` across it sooner than `to`'s voxel light there says light got there.
+/// `to` across it sooner than the voxel light of `to` there says light got
+/// there.
 ///
 /// Light from an emissive voxel starts at the distance [`LevelScale::start`]
 /// gives for its level, and the voxels beside it are lit at the next distance.
-/// So it lights the voxel across the face one step past its start, unlike an
-/// open voxel, whose light can cross a face at the distance that reached it.
-/// With `colors`, `to`'s voxel light there is that of the run of the emissive
-/// voxel's own light colour.
+/// So an emissive voxel lights the voxel across the face one step past its
+/// start. An open voxel differs, since its light can cross a face at the
+/// distance that reached it.
+///
+/// With `colors`, the voxel light of `to` that counts is that of the run of
+/// the light colour of the emissive voxel.
 ///
 /// It looks at every emissive voxel of `from`, so its cost grows with how many
 /// the chunk has.

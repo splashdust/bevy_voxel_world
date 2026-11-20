@@ -1,81 +1,105 @@
-//! Light in coarse chunks: chunks above LOD level 0, and level-0 chunks whose
-//! `chunk_data_shape` isn't the default, so that their data voxels aren't
-//! world voxels.
+//! Light in coarse chunks
 //!
-//! A coarse chunk works out its light once, in its own chunk task, from its
-//! own 32³ cells and their padding, each cell `1 << L` voxels wide at level
-//! `L`. It runs the same kernel as a level-0 chunk on those cells, reads no
-//! neighbour and gives no neighbour anything to read. So **a coarse chunk's
-//! light never relights**: it changes only when the chunk task runs again,
-//! and a voxel edit outside the chunk and its padding doesn't reach it until
-//! then. It takes no part in the world view, the sky record or sky fill.
+//! This module works out the light of coarse chunks: chunks above LOD level
+//! 0, and level-0 chunks whose `chunk_data_shape` isn't the default, so that
+//! their data voxels aren't world voxels. A coarse chunk solves its light
+//! once, in its own chunk task, from its own 32³ cells and their padding. Each
+//! cell is `1 << L` voxels wide at LOD level `L`. [`CoarseTask::solve`] runs
+//! the same kernel as a level-0 chunk on those cells, and returns a
+//! [`CoarseSolved`] for `relight` to land and `route` to show.
+//!
+//! A coarse chunk reads no neighbour and gives no neighbour anything to read.
+//! So **the light of a coarse chunk never relights**: it changes only when the
+//! chunk task runs again. A voxel edit outside the chunk and its padding
+//! doesn't reach the chunk until then. A coarse chunk takes no part in the
+//! world view, the sky record or sky fill.
+//!
+//! # Changes of settings
 //!
 //! Two changes of settings solve coarse chunks again from their published
-//! voxels on the task pool, and
+//! voxels on the task pool:
+//!
+//! - A change of precision solves every coarse chunk.
+//! - A change to the emissive list solves each coarse chunk holding a
+//!   material whose entry was added, dropped, or given a new level or a new
+//!   light colour. This holds in a world whose emissive voxels all give white
+//!   too.
+//!
 //! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) waits
-//! for those solves. A change of precision solves every coarse chunk. A change
-//! to the emissive list solves the coarse chunks holding a material whose
-//! entry was added, dropped, or given a new level or a new scaled light
-//! colour, in a white world too. For that, each solve notes
-//! the solid materials of its cells, emissive or not, which costs a solve a
-//! little more for each material its cells hold. Old light shows until new
-//! light lands. No other change of settings reaches a coarse chunk.
+//! for these solves, and the old light shows until the new light lands. No
+//! other change of settings reaches a coarse chunk.
+//!
+//! To find the chunks that a change to the emissive list reaches, each solve
+//! notes the materials of the solid cells of its chunk, emissive or not. That
+//! costs the solve a little more for each material the cells hold.
+//!
+//! # Cells
 //!
 //! A cell is the data voxel at its middle. Where data voxels are finer than
 //! cells, a cell is open if any data voxel in it is open.
 //!
-//! Sky light falls into a column of cells from the chunk's top when the
-//! chunk's own cells above it are open and a walk above the chunk finds the
-//! column clear (see [`CoarseWalk`]). Light spreads from there and from the
-//! emissive cells as at level 0, with its reach counted in voxels, so a pool
-//! of light keeps its size in voxels as the level rises (see
-//! [`LevelScale::coarse`]).
+//! Sky light falls down a column of cells from the top of the chunk, through
+//! open cells, when a walk above the chunk finds that column clear (see
+//! [`CoarseWalk`]). Light spreads from there and from the emissive cells as at
+//! level 0. Its reach is counted in voxels, so a pool of light keeps its size
+//! in voxels as the level rises (see [`LevelScale::coarse`]).
 //!
-//! The light is plausible, not exact. A lamp, or a shaft one voxel wide,
-//! shows only if a cell's sample lands on it, and the underside of a floating
-//! solid goes black in the middle, where only sky fill would light it.
+//! The light is plausible, not exact. A lamp, or a shaft one voxel wide, shows
+//! only if the sample of a cell lands on it. The underside of a floating solid
+//! goes black in the middle, where only sky fill would light it.
 //!
-//! A coarse chunk's slot holds its own cells, and its shell holds its own
-//! padding cells' light rather than its neighbours' border planes. The tag of
-//! a chunk with a slot carries its LOD level in bits 24–27, which the shader
-//! divides the chunk's local positions by.
+//! The slot of a coarse chunk holds its own cells. Its shell holds the light
+//! of its own padding cells, not the border planes of its neighbours. The tag
+//! of a coarse chunk with a slot carries its LOD level `L` in bits 24–27, and
+//! the shader divides the local positions of the chunk by the cell width,
+//! `1 << L`.
 //!
 //! # Light colour
 //!
-//! A coarse chunk with an emissive cell of a light colour other than white
-//! spreads voxel light once per light colour among its own emissive cells,
-//! white included, and mixes the runs cell by cell as level 0 does (see
-//! [`color`](super::color)). Materials of one colour share a run, so the
-//! cost grows with the light colours among its emissive cells. Since all of
-//! them are its own, every colour reaches it and none is skipped. A chunk
-//! whose emissive cells all give white solves as it would in a white world.
+//! A coarse chunk with an emissive cell whose light colour isn't white spreads
+//! voxel light once per light colour among its emissive cells, white
+//! included. It then mixes the runs cell by cell, as a level-0 chunk does (see
+//! [`color`](super::color)). Materials of one light colour share a run, so the
+//! cost grows with the light colours among the emissive cells. Every emissive
+//! cell lies in the chunk or its padding, so the light of each colour starts
+//! inside the slot of the chunk, and the solve skips no colour. A chunk whose
+//! emissive cells all give white solves as it would in a white world.
 //!
-//! It takes a colour slot when the cells its faces read for levels, and its
-//! emissive cells touching an open cell, see more than one light colour.
-//! The colour slot's shell holds its own padding cells' colours, with its
-//! edges and corners left at 0, and taking one takes a slot too. With a slot
-//! and one light colour seen, its entry holds that colour.
+//! A coarse chunk takes a colour slot when its faces see more than one light
+//! colour, among the cells they read and the emissive cells that touch an
+//! open cell. Taking a colour slot takes a slot too. The shell of the colour
+//! slot holds the colours of the padding cells of the chunk, with its edges
+//! and corners left at 0. A chunk with a slot whose faces see one light colour
+//! holds that colour in its entry.
 //!
-//! # Why the fallback takes the brightest tenth's colour
+//! # Why the fallback takes the colour of the brightest tenth
 //!
-//! A coarse chunk with no slot shows the brightest voxel light level a tenth
-//! of the cells its faces read see, and the most common light colour among
-//! those cells at that level or brighter. A far chunk then shows the colour
-//! of the light that sets its level. Mixing the colours it holds by
-//! brightness would turn a red pool and a blue pool magenta, a colour no lamp
-//! gives. Counting every lit cell would let a large dim pool outvote the
-//! bright one that sets its level. Counting only the cells at exactly that
-//! level can pick out a thin ring at another pool's edge. At a level of 0 it
-//! shows white. A chunk that keeps its slot but finds no colour slot holds
-//! the same colour in its entry.
+//! A coarse chunk without a slot, because it needs none or none is free,
+//! shows one sky light level, one voxel light level and one light colour on
+//! every face. Each level is the brightest level that at least a tenth of the
+//! cells its faces read hold or exceed. The colour is the most common light
+//! colour among those cells at that voxel light level or brighter. A far
+//! chunk then shows the colour of the light that sets its level. The other
+//! ways to pick a colour each show one that reads wrong:
+//!
+//! - Mixing the colours the chunk holds by brightness would turn a red pool
+//!   and a blue pool magenta, a colour no lamp gives.
+//! - Counting every lit cell would let a large dim pool outvote the bright
+//!   pool that sets the level.
+//! - Counting only the cells at exactly that level can pick out a thin ring
+//!   at the edge of another pool.
+//!
+//! At a voxel light level of 0 the chunk shows white. A chunk whose faces see
+//! several light colours, and which holds a slot but gets no colour slot,
+//! holds this same colour in its entry.
 //!
 //! # References
 //!
-//! - [Cubyz's lighting](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
+//! - [Lighting in Cubyz](https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig):
 //!   each LOD level spreads its own light, losing more per cell as cells widen.
-//! - [Terasology's batch propagator](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/propagation/StandardBatchPropagator.java):
-//!   spreads light with a scale, which its LOD chunks set so light fades faster
-//!   per cell.
+//! - [The batch propagator of Terasology](https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/propagation/StandardBatchPropagator.java):
+//!   it spreads light with a scale, which the LOD chunks of Terasology set so
+//!   that light fades faster per cell.
 
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
@@ -120,44 +144,54 @@ pub(crate) fn takes_coarse_path(key: ChunkKey, data_shape: UVec3) -> bool {
 
 /// A coarse chunk's light, as its task worked it out.
 pub(crate) struct CoarseSolved<I> {
-    /// The sky light and voxel light its tag holds without a slot: the one
-    /// level of each that its faces see, or else the brightest level a tenth
-    /// of them see.
+    /// The sky light level and voxel light level that the tag of the chunk
+    /// holds without a slot. Each is the brightest level that at least a
+    /// tenth of the cells its faces read hold or exceed. Where the faces see
+    /// one level, it is that level.
     pub levels: (u8, u8),
     /// The precision of its levels and of its slot's format.
     pub precision: LightPrecision,
     /// The bytes of its slot, in a world showing its light, if its faces see
     /// more than one level or a lamp.
     pub bytes: Option<Box<[u8]>>,
-    /// The light colour it shows.
+    /// The light colour the chunk shows.
     pub color: CoarseColor,
-    /// The solid materials of the cells that can hold a lamp, emissive or
-    /// not, so a change to the emissive list finds the chunk.
+    /// The materials of the solid cells of the chunk, emissive or not, so
+    /// that a change to the emissive list can find the chunks it reaches.
     pub materials: Box<[I]>,
-    /// The settings it solved under.
+    /// The settings the chunk solved under. Landing compares them with the
+    /// settings of the world, to find whether the emissive list changed for
+    /// one of `materials` while the chunk solved.
     pub settings: Arc<LightTaskSettings<I>>,
 }
 
-/// The light colour a coarse chunk shows, as packed light colours. All of it
-/// is white in a chunk whose emissive cells all give white.
+/// The light colour a coarse chunk shows, as packed light colours.
+///
+/// In a chunk whose emissive cells all give white, `tag` and `entry` are
+/// white and `bytes` is `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CoarseColor {
-    /// The colour its tag holds without a slot: the most common light colour
-    /// among the cells its faces read at the voxel light level its tag holds
-    /// or brighter. White at a voxel light level of 0.
+    /// The colour the tag of the chunk holds without a slot: the most common
+    /// light colour among the cells its faces read, counting those at the
+    /// voxel light level of the tag or brighter. White where that level is 0.
     pub tag: u16,
-    /// The colour its entry holds with a slot and no colour slot: the one
-    /// light colour its faces see, or else `tag`'s.
+    /// The colour the entry of the chunk holds with a slot and no colour
+    /// slot: the one light colour its faces see. Where they see several, it
+    /// is [`tag`](Self::tag), and where they see none, white.
     pub entry: u16,
-    /// The bytes of its colour slot, in a world showing its light, if its
-    /// faces see more than one light colour.
+    /// The bytes of the colour slot of the chunk, if its faces see more than
+    /// one light colour, in a world showing its light.
     pub bytes: Option<Box<[u8]>>,
 }
 
-/// Whether light solved under `old` differs from light solved under `new` in
-/// a coarse chunk holding `materials`: whether the entry of one of them in
-/// the emissive list was added, dropped, or given a new level or a new
-/// scaled light colour.
+/// Whether a coarse chunk holding `materials`, solved under `old`, needs
+/// solving again under `new`.
+///
+/// It does when the emissive list of `new` makes one of `materials` emissive
+/// or no longer emissive, or gives it a different level or packed light
+/// colour. When `old` and `new` share `generation`, `emission_generation`
+/// and `color_generation`, they hold the same emissive list, and the answer
+/// is `false` without a lookup.
 pub(crate) fn emission_changed<I: Copy + PartialEq>(
     materials: &[I],
     old: &LightTaskSettings<I>,
@@ -265,36 +299,39 @@ impl<I: Copy + PartialEq> CoarseTask<I> {
 /// An emissive cell of a coarse chunk.
 #[derive(Clone, Copy)]
 struct Lamp {
-    /// Where it is, in padded cell coordinates.
+    /// Where the cell is, in padded cell coordinates.
     cell: UVec3,
-    /// Its whole level.
+    /// The level its material gives off, as a whole level from 0 to 15.
     level: u8,
-    /// Its packed light colour.
+    /// The packed light colour its material gives off.
     color: u16,
 }
 
-/// What a coarse chunk's faces read from its cells.
+/// What the faces of a coarse chunk read from its cells, as
+/// [`Cells::faces_see`] works it out.
 struct CoarseFacesSee {
-    /// The sky light and voxel light its tag holds without a slot.
+    /// The sky light level and voxel light level that the tag of the chunk
+    /// holds without a slot.
     levels: (u8, u8),
     needs_slot: bool,
-    /// The packed light colours of the cells they read with voxel light, and
-    /// of its emissive cells touching an open cell, or [`Seen::Nothing`] in a
-    /// chunk whose emissive cells all give white.
+    /// The packed light colours the faces see: the colours of the voxel
+    /// light in the cells they read, and the colours of the emissive cells
+    /// touching an open cell. It is [`Seen::Nothing`] in a chunk whose
+    /// emissive cells all give white.
     color: Seen<u16>,
-    /// The light colour its tag holds without a slot: see
-    /// [`CoarseColor::tag`].
+    /// The light colour the tag holds without a slot, as
+    /// [`CoarseColor::tag`] describes.
     fallback: u16,
 }
 
-/// A coarse chunk's cells: which are open, its emissive cells, and the
-/// materials of the cells that could be emissive.
+/// The cells of a coarse chunk: which are open, which are emissive, and the
+/// materials of the solid ones.
 struct Cells<I> {
     /// A column along z per cell `x`, `y`, at `x + y × 34`, padding included.
     open: Vec<u64>,
     lamps: Vec<Lamp>,
-    /// Each material of a solid cell, once. A chunk solid through its
-    /// padding holds none, since it lights no cell whatever its material.
+    /// Each material of a solid cell, once. A chunk that is solid through
+    /// its padding holds none, since it lights no cell whatever its material.
     materials: Vec<I>,
 }
 
@@ -326,8 +363,9 @@ impl<I: Copy + PartialEq> Cells<I> {
         let mut open = vec![0; SIDE * SIDE];
         let mut lamps = Vec::new();
         let mut materials = Vec::new();
-        // Neighbouring cells mostly hold the same material, so the last one
-        // and what it gives off are kept to skip looking them up again.
+        // Neighbouring cells mostly hold the same material. Keeping the last
+        // material and what it gives off skips the search of `materials` and
+        // the lookup in `emission` for each cell that holds it again.
         let mut last: Option<(I, Option<(u8, u16)>)> = None;
         for z in 0..SIDE {
             let rz = &ranges[2][z];
@@ -383,8 +421,8 @@ impl<I: Copy + PartialEq> Cells<I> {
         self.open[x + y * SIDE] >> z & 1 == 1
     }
 
-    /// The packed light colours of the emissive cells, each once, in order,
-    /// or none if they all give white.
+    /// Returns the packed light colours of the emissive cells, each once and
+    /// sorted, or none if every emissive cell gives white.
     fn light_colors(&self) -> Vec<u16> {
         if self.lamps.iter().all(|lamp| lamp.color == WHITE) {
             return Vec::new();
@@ -399,10 +437,12 @@ impl<I: Copy + PartialEq> Cells<I> {
         colors
     }
 
-    /// The bytes of the chunk's colour slot, given `colors`, the packed light
-    /// colour of each cell's voxel light in slot order: those colours, each
-    /// emissive cell's own colour, and the shell's edges and corners left at
-    /// 0.
+    /// Returns the bytes of the colour slot of the chunk.
+    ///
+    /// `colors` holds the packed light colour of the voxel light of each
+    /// cell, in slot order. Each cell holds its colour from `colors`, except
+    /// that an emissive cell holds the light colour it gives off. The edges
+    /// and corners of the shell are left at 0.
     fn color_slot_bytes(&self, colors: &[u16]) -> Box<[u8]> {
         let mut bytes = vec![0; SLOT_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
         for (texel, color) in colors.iter().enumerate() {
@@ -472,15 +512,18 @@ impl<I: Copy + PartialEq> Cells<I> {
         bytes
     }
 
-    /// What the chunk's faces read from `bytes`, a slot of `precision`'s
-    /// format, and from `colors`, the packed light colour of each cell's
-    /// voxel light in slot order, given in a chunk whose emissive cells don't
-    /// all give white.
+    /// Returns what the faces of the chunk read from `bytes`, a slot in the
+    /// format of `precision`, and from `colors`.
     ///
-    /// Faces read the open cells touching one of the chunk's own solid cells
-    /// by a face, an edge or a corner, as at level 0, padding included. A
-    /// chunk with no such cell reads all its open cells. A chunk whose faces
-    /// see more than one light colour needs a slot.
+    /// `colors` holds the packed light colour of the voxel light of each
+    /// cell, in slot order. It is `None` in a chunk whose emissive cells all
+    /// give white, and then no light colour is read.
+    ///
+    /// Faces read the open cells that touch one of the solid cells of the
+    /// chunk by a face, an edge or a corner, as at level 0, padding included.
+    /// A chunk with no such cell reads all its open interior cells. The chunk
+    /// needs a slot when its faces see more than one level or more than one
+    /// light colour, or when one of its emissive cells touches an open cell.
     fn faces_see(
         &self,
         bytes: &[u8],
@@ -499,7 +542,8 @@ impl<I: Copy + PartialEq> Cells<I> {
         let mut sky = [0u32; 256];
         let mut voxel = [0u32; 256];
         let mut color = Seen::Nothing;
-        // How many cells of each light colour are at each voxel light level.
+        // For each light colour, how many of the cells read hold it at each
+        // voxel light level.
         let mut by_color: Vec<(u16, Box<[u32; 256]>)> = Vec::new();
         let mut count = |cells: &dyn Fn(usize, usize) -> u64| {
             let mut any = false;
@@ -582,8 +626,9 @@ impl<I: Copy + PartialEq> Cells<I> {
         let needs_slot =
             lamp || levels(&sky) > 1 || levels(&voxel) > 1 || color == Seen::Mixed;
         let tenth = brightest_tenth(&voxel);
-        // The most common colour at the tag's voxel light level or brighter,
-        // the lowest packed colour on a tie. At level 0 no cell counts.
+        // The most common light colour among the cells at the voxel light
+        // level of the tag or brighter. A tie goes to the lowest packed
+        // colour. At level 0 no cell counts, and the tag shows white.
         let fallback = by_color
             .iter()
             .map(|(packed, counts)| {
@@ -602,8 +647,8 @@ impl<I: Copy + PartialEq> Cells<I> {
     }
 }
 
-/// Sets the shell's edges and corners in `bytes`, a slot or a colour slot of
-/// `wide` bytes a texel, to 0.
+/// Sets the edges and corners of the shell to 0 in `bytes`, a slot or a
+/// colour slot with `wide` bytes a texel.
 fn clear_shell_edges(bytes: &mut [u8], wide: usize) {
     let edge = |v: usize| v == 0 || v == SIDE - 1;
     for y in 0..SIDE {
@@ -625,16 +670,17 @@ fn clear_shell_edges(bytes: &mut [u8], wide: usize) {
     }
 }
 
-/// Spreads voxel light through the chunk's open cells once per light colour
-/// in `colors`, each run from that colour's emissive cells alone, as at
-/// level 0. Returns each cell's level, the highest of the runs', and the
-/// packed light colour of its voxel light, both in slot order, padding
-/// included.
+/// Spreads voxel light through the open cells of the chunk once per light
+/// colour in `colors`, each run from the emissive cells of that colour alone,
+/// as at level 0.
 ///
-/// A cell one run lights takes that run's colour, and one that more light
-/// takes their colours at their levels, mixed by [`mix_weighted`]. A cell no
-/// run lights holds white. The cost grows with the light colours in
-/// `colors`.
+/// Returns two lists in slot order, padding included: the level of each
+/// cell, which is the highest level any run gives it, and the packed light
+/// colour of its voxel light. A cell that one run lights takes the colour of
+/// that run. A cell that several runs light takes their colours, mixed by
+/// [`RunMixer`] at their levels. A cell that no run lights holds white.
+///
+/// The cost grows with the light colours in `colors`.
 fn spread_colors<I>(
     cells: &Cells<I>,
     colors: &[u16],
@@ -792,8 +838,8 @@ thread_local! {
 }
 
 /// Spreads sky light or voxel light through the `open` cells, from the `lit`
-/// cells and the emissive cells `lamps`. Returns each cell's level in slot
-/// order, padding included.
+/// cells and the emissive cells `lamps`. Returns the level of each cell in
+/// slot order, padding included.
 fn spread(
     open: &[u64],
     lit: Option<&[u64]>,

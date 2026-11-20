@@ -1,7 +1,12 @@
-//! Tests of changing an emissive material's light colour while the world
-//! runs, through `ResMut` of its config: only the chunks whose light box
-//! holds an emissive voxel of the material relight, and light settles on the
-//! reference for the new colours. Sky light is off in all of them.
+//! Recolouring an emissive material while the world runs
+//!
+//! This module changes the light colour of an emissive material through
+//! `ResMut` of the world config, as a system of a game would. The tests check
+//! that only the chunks holding an emissive voxel of the material, and the 26
+//! chunks around each of them, relight. Light must then settle on the
+//! reference for the new light colours.
+//!
+//! Sky light is off in every test, so only voxel light is compared.
 
 use std::sync::Arc;
 
@@ -17,15 +22,18 @@ use crate::prelude::*;
 const RED_LAMP: u8 = 6;
 const GREEN_LAMP: u8 = 7;
 
-/// A lamp in the chunk at the origin whose light crosses into the chunk east
-/// of it.
+/// The position of the west lamp, in the chunk at the origin. Its light
+/// crosses into the chunk east of it.
 const WEST: IVec3 = IVec3::new(24, 16, 16);
-/// A green lamp in the chunk two east of the origin, whose light meets the
-/// west lamp's in the chunk between.
+/// The position of the green east lamp, two chunks east of the origin. Its
+/// light and the light of the west lamp both reach the chunk between them.
 const EAST: IVec3 = IVec3::new(72, 16, 16);
 
-/// How far a light colour read back may be from the reference's: a step of
-/// its packing.
+/// How far each component of a light colour read back may be from the
+/// reference.
+///
+/// The packing holds a component in steps of 1/127, and the extra 1e-5 allows
+/// for rounding.
 const STEP: f32 = 1.0 / 127.0 + 1e-5;
 
 fn scene(position: IVec3) -> WorldVoxel {
@@ -40,7 +48,8 @@ fn lamp(color: LinearRgba) -> Emission {
     Emission::level(15.0).with_color(color)
 }
 
-/// The scene with the west lamp in `west` and the east lamp green.
+/// Returns the world of the scene, with the west lamp giving off `west` and
+/// the east lamp green.
 fn world(west: LinearRgba) -> LampWorld {
     LampWorld {
         scene: Arc::new(scene),
@@ -54,8 +63,8 @@ fn world(west: LinearRgba) -> LampWorld {
     }
 }
 
-/// Sets the west lamp's light colour through `ResMut`, as a game's system
-/// would.
+/// Sets the light colour of the west lamp through `ResMut` of the config, as
+/// a system of a game would.
 fn recolor(app: &mut App, color: impl Into<Color> + Send + 'static) {
     let color = color.into();
     app.world_mut()
@@ -65,7 +74,8 @@ fn recolor(app: &mut App, color: impl Into<Color> + Send + 'static) {
         .unwrap();
 }
 
-/// The chunks around the origin, where the camera is.
+/// Returns the chunk position at the origin, where the camera is, and the 26
+/// positions around it.
 fn around_origin() -> Vec<IVec3> {
     (-1..=1)
         .flat_map(|z| {
@@ -75,8 +85,11 @@ fn around_origin() -> Vec<IVec3> {
 }
 
 /// Fails unless every voxel of each spawned chunk whose light box is loaded
-/// reads the reference light for the world's current emissive list: levels
-/// exactly, light colours within a step of the packing.
+/// reads the reference light for the current emissive list of the world.
+///
+/// The voxel light level must match the reference, and each component of the
+/// light colour must lie within [`STEP`] of it. The chunk east of the origin
+/// must be among the chunks checked.
 fn matches_reference(app: &mut App, when: &str) {
     let emissive = app.world().resource::<LampWorld>().emissive.clone();
     let reference = Reference::colored_voxel_light_in_steps(
@@ -126,7 +139,8 @@ fn matches_reference(app: &mut App, when: &str) {
     }
 }
 
-/// Where the west lamp's light alone reaches.
+/// A voxel that the light of the west lamp reaches, and the light of the east
+/// lamp doesn't.
 const WEST_LIT: IVec3 = IVec3::new(18, 16, 16);
 
 #[test]
@@ -135,9 +149,10 @@ fn recolouring_a_material_relights_only_the_chunks_whose_light_box_holds_it() {
     let relights = relights_started(&app);
     recolor(&mut app, LinearRgba::BLUE);
     settle(&mut app, "light to settle after the recolour");
-    // The west lamp is in the chunk at the origin, so the chunks around it
-    // relight, and nothing else: not the chunk of the green lamp, though
-    // the chunk between the lamps mixes both colours.
+    // The west lamp is in the chunk at the origin, so that chunk and the 26
+    // chunks around it relight. Nothing else relights. The chunk of the green
+    // lamp keeps its light, although the chunk between the lamps holds both
+    // light colours.
     let boxed = spawned(&mut app)
         .into_iter()
         .filter(|chunk| (*chunk).abs().max_element() <= 1)
@@ -188,7 +203,8 @@ fn a_chunk_task_solved_under_the_old_colours_relights_as_it_lands() {
         hold: Some(hold.clone()),
         ..world(LinearRgba::RED)
     });
-    // Everything but the held chunk settles, its task waiting on its padding.
+    // Wait until everything but the held chunk has settled, and the task of
+    // the held chunk waits on a lookup in its padding.
     super::super::update_until(&mut app, "all but the held chunk to settle", |app| {
         super::sky_light::settled_but(app, Some(IVec3::X))
             && hold.waited.load(std::sync::atomic::Ordering::Acquire) > 0
@@ -197,7 +213,8 @@ fn a_chunk_task_solved_under_the_old_colours_relights_as_it_lands() {
     app.update();
     hold.release();
     settle(&mut app, "light to settle after the held chunk lands");
-    // The east chunk's own voxels lit by the west lamp alone.
+    // The west lamp alone lights this voxel of the held chunk, so the voxel
+    // must show the new blue.
     let east_lit = IVec3::new(33, 16, 16);
     let color = light_at(&mut app, east_lit).unwrap().voxel_color;
     assert!(color.blue > 0.9 && color.red < 0.01, "{color:?}");
@@ -259,7 +276,8 @@ fn the_fresh_solve_check_finds_a_chunk_holding_another_light_colour() {
 
     let mut app = settled(world(LinearRgba::RED));
     assert_eq!(fresh_solve_check::<LampWorld>(app.world()).stale, vec![]);
-    // The chunk at the origin is lit by the red west lamp alone.
+    // The red west lamp alone lights the chunk at the origin. `hold` replaces
+    // the light colour that the world view holds for that chunk.
     let hold = |app: &mut App, color: LinearRgba| {
         let settings = app.world().resource::<LightSettings<LampWorld>>();
         let mut view = settings.view.write();
@@ -279,7 +297,8 @@ fn the_fresh_solve_check_finds_a_chunk_holding_another_light_colour() {
         fresh_solve_check::<LampWorld>(app.world()).stale,
         vec![(IVec3::ZERO, false)]
     );
-    // A step of the packing away, it holds the same light colour.
+    // A colour one step of the packing away from red still counts as the same
+    // light colour.
     hold(&mut app, LinearRgba::rgb(1.0, 0.004, 0.0));
     assert_eq!(fresh_solve_check::<LampWorld>(app.world()).stale, vec![]);
 }
@@ -288,7 +307,8 @@ fn the_fresh_solve_check_finds_a_chunk_holding_another_light_colour() {
 fn a_recolour_counts_as_a_visible_change_of_light() {
     use crate::light_bench::{change_counts, count_changes};
 
-    // A floor under the west lamp, so its light shows on faces.
+    // A floor lies under the west lamp, so the light of the lamp shows on
+    // faces.
     let mut app = app(LampWorld {
         scene: Arc::new(|position: IVec3| {
             if position.y < 12 {

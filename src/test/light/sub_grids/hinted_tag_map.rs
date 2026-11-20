@@ -161,11 +161,14 @@ fn hinted_air_answers_its_column_once_the_answer_lands() {
     assert_eq!(answer(&app, OPEN), Some(OPEN_SKY));
 }
 
-/// The most common sky light level and voxel light level that `light_at`
-/// reads among the voxels of the chunk position `chunk`, and how many pairs
-/// of levels it reads.
+/// Returns the most common sky light level and the most common voxel light
+/// level that `light_at` reads among the voxels of the chunk position
+/// `chunk`.
+///
+/// Also returns how many different pairs of a sky light level and a voxel
+/// light level the voxels read.
 fn most_common_levels(app: &mut App, chunk: IVec3) -> ((u32, u32), usize) {
-    // How many voxels read each pair of levels.
+    // Count how many voxels read each pair of levels.
     let read = app
         .world_mut()
         .run_system_once(move |voxel_world: VoxelWorld<LampWorld>| {
@@ -207,7 +210,7 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_level() {
     assert_eq!(answer(&app, BELOW_ISLAND), Some(sky | voxel << 4));
 }
 
-/// [`islands`] with a red lamp in every voxel of the underside of the
+/// Returns [`islands`] with a red lamp in every voxel of the underside of the
 /// island at [`ISLAND`].
 fn red_underside(p: IVec3) -> WorldVoxel {
     let chunk = p.div_euclid(IVec3::splat(32));
@@ -223,7 +226,8 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_colour() {
     let mut app = app(LampWorld {
         scene: Arc::new(red_underside),
         emissive: emissive(),
-        // Every voxel of the entry under the island is then within reach.
+        // A voxel reach of 32 puts every voxel of the entry under the island
+        // within reach of the lamps.
         light: Some(LightPropagation {
             voxel_reach: 32,
             ..sky_light(Sky::default(), 30)
@@ -241,8 +245,8 @@ fn hinted_air_holding_a_light_entry_answers_its_most_common_colour() {
     let red = tag_cut(pack(LinearRgba::RED)) << 16;
     assert_ne!(red, 0);
     assert_eq!(answer(&app, BELOW_ISLAND), Some(sky | voxel << 4 | red));
-    // Nothing is known of the hinted air beyond the spawning distance, so it
-    // answers open sky in white.
+    // The world knows nothing of the hinted air beyond the spawning distance,
+    // so the tag map answers open sky in white for it.
     assert_eq!(answer(&app, FAR_UNDER), Some(OPEN_SKY));
 }
 

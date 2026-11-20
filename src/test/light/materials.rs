@@ -456,8 +456,8 @@ fn a_chunk_whose_mesh_has_no_cube_face_still_gets_light() {
     let tag = tag_of(&mut app, IVec3::ZERO);
     assert_ne!(tag & HAS_SLOT, 0, "tag {tag:#x}");
 
-    // The floor beside it sees one sky light level and one voxel light level,
-    // which its tag carries.
+    // Each floor chunk beside the one at the origin sees one sky light level and
+    // one voxel light level. Its tag carries both.
     for position in FLOOR_ONLY {
         let levels = light_at::<LampFloor>(&mut app, position * 32 + IVec3::new(5, 1, 5));
         assert_eq!(

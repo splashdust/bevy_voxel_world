@@ -1,6 +1,12 @@
-//! Tests of coloured light through arrivals and edits: in hostile arrival
-//! orders, and through edits beside emissive voxels of other colours, light
-//! settles on the coloured reference. Sky light is off in all of them.
+//! Coloured light through arrivals and edits
+//!
+//! This module streams scenes of emissive voxels of several light colours,
+//! and checks that light settles on the coloured reference in two kinds of
+//! test. The arrival tests hold back one chunk task until the chunks around
+//! it have settled, so that chunk arrives last. The edit tests set voxels
+//! beside emissive voxels of other light colours and then set them back.
+//!
+//! Sky light is off in every test, so only voxel light is compared.
 
 use std::time::{Duration, Instant};
 
@@ -24,8 +30,10 @@ use crate::light::solver::ChunkLight;
 use crate::light::LightSettings;
 use crate::prelude::*;
 
-/// Runs `app` until every chunk but `held` is Ready and light has settled,
-/// for a few frames in a row.
+/// Updates `app` until, for three frames in a row, every chunk but `held` is
+/// Ready and light has settled.
+///
+/// The test fails after 60 seconds of waiting, naming `what`.
 fn settle_but(app: &mut App, held: Option<IVec3>, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut frames_done = 0;
@@ -40,9 +48,12 @@ fn settle_but(app: &mut App, held: Option<IVec3>, what: &str) {
     }
 }
 
-/// Streams `scene`, holding back the chunk task of `held` until everything
-/// else has settled, then holds the light around the origin against the
+/// Streams `scene` with the chunk task of `held` held back until everything
+/// else has settled, then checks the light around the origin against the
 /// reference.
+///
+/// Holding `held` back makes it arrive after the chunks around it have
+/// solved without its voxels.
 fn settles_with_held(
     scene: &Scene,
     held: IVec3,
@@ -86,9 +97,13 @@ fn in_hostile_arrival_orders_coloured_light_settles_on_the_reference() {
     }
 }
 
-/// A red lamp in the chunk at the origin, and a green one in the chunk east
-/// of it, nearer their shared face, so green is brighter than red on both
-/// sides of it.
+/// Returns a red lamp in the chunk at the origin and a green lamp in the chunk
+/// east of it.
+///
+/// The green lamp is nearer the shared face of the two chunks, so green light
+/// is brighter than red on both sides of that face. When the red chunk
+/// arrives, the east chunk sees the same voxel light level on the face, and
+/// only the light colour there changes.
 fn green_on_the_face_and_red_further_in() -> Scene {
     Scene::in_air(vec![
         (IVec3::new(25, 16, 16), RED_LAMP),
@@ -99,7 +114,8 @@ fn green_on_the_face_and_red_further_in() -> Scene {
 #[test]
 fn a_neighbour_lit_green_on_its_face_relights_for_a_dimmer_red_arriving() {
     let scene = green_on_the_face_and_red_further_in();
-    // Green outshines red on the face.
+    // Check the scene first. Red light reaches the face, but less brightly than
+    // green light does.
     let reference = scene.reference(14, LightShape::Round, LightPrecision::Steps16);
     let face = IVec3::new(32, 16, 16);
     let green = reference.voxel_at(face);
@@ -115,8 +131,10 @@ fn a_neighbour_lit_green_on_its_face_relights_for_a_dimmer_red_arriving() {
     }
 }
 
-/// Stone filling the plane x = 31, the east face of the chunk at the origin,
-/// with a red lamp set in it, and a green lamp a voxel east of the face.
+/// Returns stone filling the plane x = 31, which holds the east face of the
+/// chunk at the origin, with a red lamp set in the stone.
+///
+/// A green lamp stands at x = 33, in the chunk east of the origin.
 fn a_red_lamp_on_the_face_and_green_across_it() -> Scene {
     Scene {
         lamps: vec![
@@ -139,8 +157,11 @@ fn an_emissive_voxel_on_a_face_lights_the_voxel_across_it_in_a_colour_the_neighb
     }
 }
 
-/// A red lamp beside the east face of the chunk at the origin, a green lamp
-/// west of it, a blue one above, and stone below y = 0.
+/// Returns three lamps of different light colours in the chunk at the origin,
+/// over stone below y = 0.
+///
+/// The red lamp at `RED` sits near the east face of the chunk. The green lamp
+/// stands west of it, and the blue lamp above them.
 fn lamps_of_three_colours() -> Scene {
     Scene {
         lamps: vec![
@@ -159,7 +180,8 @@ fn reach_14() -> (u8, LightShape, LightPrecision) {
     (14, LightShape::Round, LightPrecision::Steps16)
 }
 
-/// The world of `scene`, with every emissive material white when `white`.
+/// Returns the world of `scene`, with every emissive material made white when
+/// `white` is true.
 fn three_colour_world(scene: &Scene, white: bool) -> LampWorld {
     let (reach, shape, precision) = reach_14();
     let mut world = LampWorld {
@@ -174,7 +196,7 @@ fn three_colour_world(scene: &Scene, white: bool) -> LampWorld {
     world
 }
 
-/// The light the world view holds for each chunk and light entry.
+/// Returns the light that the world view holds for each chunk and light entry.
 fn view_lights(app: &App) -> HashMap<GridKey, Arc<ChunkLight>> {
     let settings = app.world().resource::<LightSettings<LampWorld>>();
     let view = settings.view.read();
@@ -184,7 +206,11 @@ fn view_lights(app: &App) -> HashMap<GridKey, Arc<ChunkLight>> {
         .collect()
 }
 
-/// Whether any chunk's light in `now` differs from its light in `was`.
+/// Returns whether the light of any chunk in `now` differs from its light in
+/// `was`.
+///
+/// A chunk that `was` doesn't hold counts as changed. Border levels don't
+/// count.
 fn light_changed(
     was: &HashMap<GridKey, Arc<ChunkLight>>,
     now: &HashMap<GridKey, Arc<ChunkLight>>,
@@ -193,9 +219,16 @@ fn light_changed(
         .any(|(key, light)| was.get(key).is_none_or(|old| !old.same_light(light)))
 }
 
-/// Sets `edits` over the world of `scene`, then sets the voxels back, and
-/// returns the frame after each commit on which light last changed. Coloured
-/// light must settle on the reference each time.
+/// Sets `edits` over the world of `scene` and then sets the voxels back.
+/// Returns, for each of the two commits, the last frame on which light
+/// changed.
+///
+/// Frame 0 is the frame that commits the voxels. The test fails if light
+/// hasn't settled 30 frames after a commit.
+///
+/// Unless `white` is true, light must also settle on the reference after
+/// each commit. The reference uses the declared light colours, so a world
+/// made white can't be checked against it.
 fn frames_to_last_change(
     scene: &Scene,
     edits: &[(IVec3, WorldVoxel)],
@@ -222,7 +255,7 @@ fn frames_to_last_change(
         }
         let mut lights = view_lights(&app);
         set_voxels(&mut app, edits);
-        // Frame 0, which commits the edit.
+        // This update is frame 0, which commits the voxels.
         app.update();
         let mut frame = 0;
         while !settled_but(&mut app, None) {
@@ -242,15 +275,18 @@ fn frames_to_last_change(
     taken
 }
 
-/// Sets `edits` over [`lamps_of_three_colours`], and then sets the voxels
-/// back. Light must settle on the reference each time, and its last change
-/// land within 2 frames wherever the same edit's does in a world whose lamps
-/// are all white.
+/// Sets `edits` over [`lamps_of_three_colours`] and then sets the voxels back.
+/// Light must settle on the reference each time.
+///
+/// Light must also last change no later than it does for the same edits in a
+/// world whose lamps are all white, or by frame 2 if that is later. Light
+/// colours must not make a relight ripple take more frames.
 fn edit_and_undo(edits: &[(IVec3, WorldVoxel)]) {
     edit_and_undo_beside(edits, edits);
 }
 
-/// As [`edit_and_undo`], comparing with `white_edits` in the white world.
+/// Works as [`edit_and_undo`], but makes `white_edits` in the all-white world
+/// that the frames are compared with.
 fn edit_and_undo_beside(
     edits: &[(IVec3, WorldVoxel)],
     white_edits: &[(IVec3, WorldVoxel)],
@@ -275,8 +311,8 @@ fn placing_an_emissive_voxel_beside_lamps_of_other_colours_and_digging_it_out_se
 
 #[test]
 fn swapping_an_emissive_material_for_one_of_another_colour_settles_on_the_reference() {
-    // In a white world the swap changes no light, so it's held to digging
-    // the lamp out, which relights the same chunks.
+    // In an all-white world the swap changes no light. The white world digs
+    // the lamp out instead, which relights the same chunks.
     edit_and_undo_beside(
         &[(RED, WorldVoxel::Solid(BLUE_LAMP))],
         &[(RED, WorldVoxel::Air)],
@@ -300,8 +336,8 @@ fn digging_in_a_dark_cave_beside_coloured_light_starts_no_relight() {
     let (reach, shape, precision) = reach_14();
     let mut app = settled(scene.world(reach, shape, precision));
     let before = relights_started(&app);
-    // A voxel dug deep in the stone, and a stone placed back in it, both out
-    // of every lamp's reach.
+    // Dig a voxel deep in the stone, then put the stone back. Both edits lie
+    // beyond the voxel reach of every lamp.
     let dug = IVec3::new(16, -24, 16);
     let edits = [(dug, WorldVoxel::Air), (dug, WorldVoxel::Solid(STONE))];
     for edit in edits {
@@ -325,7 +361,7 @@ fn after_reset_light_coloured_light_settles_on_the_reference() {
     assert_on_the_reference(&mut app, &scene, reach, shape, precision);
 }
 
-/// The voxel at `p` in the published chunk holding it.
+/// Returns the voxel at `p` in the published level-0 chunk that holds it.
 fn published_voxel(app: &mut App, p: IVec3) -> Option<WorldVoxel> {
     app.world_mut()
         .run_system_once(move |chunk_map: Res<ChunkMap<LampWorld, u8>>| {
@@ -345,7 +381,8 @@ fn a_swapped_lamps_new_light_colour_lands_with_its_mesh() {
     let beside = RED - IVec3::Y;
     let old = light_at(&mut app, beside).unwrap();
 
-    // The origin's new mesh waits, so its light lands first.
+    // Hold back the new mesh of the chunk at the origin. Until the mesh lands,
+    // the chunk must keep its old voxels and its old light.
     let hold = Hold::new(IVec3::ZERO);
     app.world_mut().resource_mut::<LampWorld>().mesh_hold = Some(hold.clone());
     let swap = [(RED, WorldVoxel::Solid(BLUE_LAMP))];
@@ -365,7 +402,8 @@ fn a_swapped_lamps_new_light_colour_lands_with_its_mesh() {
         assert!(Instant::now() < deadline, "timed out waiting for the mesh");
         app.update();
     }
-    // The new mesh and the new light, levels and colour, landed together.
+    // The new mesh landed together with the new light, both its voxel light
+    // level and its light colour.
     let after = scene.edited(&swap);
     let reference = after.reference(reach, shape, precision);
     let read = light_at(&mut app, beside).unwrap();

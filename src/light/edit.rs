@@ -1,75 +1,93 @@
-//! Voxel edits: what an edit changes for light, worked out on the main thread
-//! the frame it is committed, and the relights it starts.
+//! Light after voxel edits
 //!
-//! An edited chunk's inputs in the world view take in its new voxels at once:
-//! its occupancy and its emissive voxels. Its own direct sky follows from
-//! them. The sky record takes in the position's new mask, and every loaded
-//! chunk below whose column answer the edit changes gets its new answer: a
-//! placed solid blocks a column, and a dug one can open it, provisionally if
-//! some position above isn't known.
+//! This module works out what a voxel edit changes for light, on the main
+//! thread in the frame the edit is committed, and starts the relights it
+//! needs. Every edit committed in one frame is worked out together, as one
+//! change.
+//!
+//! The inputs of an edited chunk in the world view take in its new voxels at
+//! once: its occupancy and its emissive voxels. The direct sky of the chunk
+//! follows from them. The sky record takes in the new mask of the position.
+//! Every loaded chunk below whose column answer the edit changes gets its new
+//! answer. A placed solid blocks a column, and a dug one can open it,
+//! provisionally if some position above isn't known.
+//!
+//! # What relights
 //!
 //! A relight ripple then starts at the edited chunks and at the chunks whose
-//! direct sky changed, and goes on to neighbours only across faces whose
-//! hashes change (see [`relight`](super::relight)). Where an edit touches no
-//! light, nothing relights: a placed solid relights only if its voxel held
-//! light, a dug one only if a voxel beside it did, sky light or voxel light.
-//! Placing or removing an emissive voxel always relights, and so does swapping
-//! one for an emissive voxel of another light colour, whose ripple goes on
-//! because face hashes are keyed by light colour (see
-//! [`faces`](super::faces)). Light here means a level above 0 from light of
-//! any colour, which is the level a chunk stores. Every edit committed
-//! in one frame is worked out together, as one change.
+//! direct sky changed. It goes on to neighbours only across faces whose hashes
+//! change (see [`relight`](super::relight)). Here a voxel holds light when it
+//! holds a level above 0, of sky light or of voxel light of any light colour,
+//! since that level is what a chunk stores. Where an edit touches no light,
+//! nothing relights:
 //!
-//! The ripple compares a solve's face hashes with those the world view holds.
-//! While an earlier ripple is still out, those hashes are about to be
-//! replaced, so an edit made then relights every chunk within light reach of
+//! - A placed solid relights only if its voxel held light.
+//! - A dug solid relights only if a voxel beside it held light.
+//! - Placing or removing an emissive voxel always relights.
+//! - In a world with light colours, swapping one emissive material for
+//!   another always relights. The ripple goes on past the chunk because face
+//!   hashes are keyed by light colour (see [`faces`](super::faces)).
+//! - In a white world, swapping one emissive material for another relights
+//!   only if their levels differ. The inputs still take the new material, for
+//!   a later change of light colours to find.
+//!
+//! The ripple compares the face hashes of a solve with those the world view
+//! holds. While an earlier ripple is still out, those hashes are about to be
+//! replaced. So an edit made then relights every chunk within light reach of
 //! the voxels it changed instead, and doesn't look at light to skip any.
 //!
-//! These relights are urgent: they start at once, ahead of the pool budget,
+//! These relights are urgent. They start at once, ahead of the pool budget,
 //! even for chunks being re-meshed, whose chunk tasks skip their own solve.
 //! The light of a chunk being re-meshed waits for its new mesh to land.
 //!
-//! Light tells whether what it holds for a position is current by the
-//! position's edit stamp, [`VoxelEdits::edit_stamp`]: the chunk's edit
-//! sequence, plus a forget epoch that each forget raises past every stamp
-//! handed out before it, so the stamp never goes back. The world view, the
-//! sky record and running probes each note the stamp their voxels were read
-//! at. A chunk task's light that lands with a smaller stamp than the world
-//! view holds is dropped as stale, and equal stamps mean the same voxels.
-//! Forgetting sets the edit sequence back to 0, so the sequence alone would
-//! have the chunk task that regenerates a forgotten chunk dropped as stale,
-//! and could come back to a value light noted for different voxels.
+//! # Edit stamps
 //!
-//! The epoch moves every position's stamp, not only those of the forgotten
-//! chunks, so after a forget light treats all it holds as read before the
-//! last edit: each chunk takes the miss path once, and the sky record and
-//! running probes start over. A stamp above the epoch,
-//! [`VoxelEdits::stamp_has_edits`], tells a position with edits, whose fill
+//! Light tells whether what it holds for a position is current by the edit
+//! stamp of the position, [`VoxelEdits::edit_stamp`]. The stamp is the edit
+//! sequence of the chunk plus a forget epoch, which each forget raises past
+//! every stamp handed out before it, so the stamp never goes back. The world
+//! view, the sky record and running probes each note the stamp their voxels
+//! were read at. Light from a chunk task that lands with a smaller stamp than
+//! the world view holds is dropped as stale, and equal stamps mean the same
+//! voxels.
+//!
+//! Forgetting sets the edit sequence back to 0. With the sequence alone, the
+//! chunk task that regenerates a forgotten chunk would be dropped as stale.
+//! The sequence could also come back to a value light noted for different
+//! voxels.
+//!
+//! The epoch moves the stamp of every position, not only those of the
+//! forgotten chunks. So after a forget, light treats all it holds as read
+//! before the last edit. Each chunk task then solves its light once rather
+//! than keep the light the world view holds, and the sky record and running
+//! probes start over. A stamp above the epoch,
+//! [`VoxelEdits::stamp_has_edits`], marks a position with edits, whose fill
 //! hint light ignores.
 //!
-//! A removed edit leaves the voxel the world generates there, which light
-//! looks up for the chunks that lost a few edits, so that, for instance, a
-//! cleared dig closes its columns at once. A commit looks up a few hundred
-//! removed voxels at most, so the chunks past that, and any chunk that lost
-//! more, as a clear or forget of a dense chunk does, have their removed
-//! voxels read as unset rather than make thousands of lookups on the main
-//! thread. Light can then be wrong about them only for a moment: such a chunk
-//! regenerates, and its chunk task works out its inputs and solves its light
-//! again.
+//! # Removed edits
 //!
-//! A chunk whose edits were replaced relights whole, with the chunks within
-//! reach of the box around its changed voxels, rather than having each voxel
-//! checked against the light it held: a forget or clear can change every
-//! voxel of many chunks at once.
+//! A removed edit leaves the voxel the world generates there. Light looks
+//! that voxel up for the chunks that lost a few edits, so that, for instance,
+//! a cleared dig closes its columns at once. A commit looks up a few hundred
+//! removed voxels at most. The chunks past that, and any chunk that lost more,
+//! as a clear or forget of a dense chunk does, have their removed voxels read
+//! as unset. That spares the main thread thousands of lookups. Light can then
+//! be wrong about those chunks only for a moment: such a chunk regenerates,
+//! and its chunk task works out its inputs and solves its light again.
+//!
+//! A chunk whose edits were replaced relights whole, together with the chunks
+//! within reach of the box around its changed voxels. Checking each voxel
+//! against the light it held would not pay, since a forget or clear can
+//! change every voxel of many chunks at once.
 //!
 //! An edit is worked out against what light held before the commit, at the
-//! stamp after it less the number of voxels the commit changed. A commit that
-//! replaced a chunk's edits, a clear, a forget or an applied full delta,
-//! can't be counted back that way, so light treats that chunk as one it holds
-//! nothing for, and the chunk's next chunk task works out its inputs. That
-//! chunk regenerates, and a chunk task that regenerates always solves its
-//! light rather than keep the light the world view holds, since its voxels
-//! can change while its edit stamp doesn't: see
+//! stamp after the commit less the number of voxels the commit changed. A
+//! commit that replaced the edits of a chunk, as a clear, a forget or an
+//! applied full delta does, can't be counted back that way. So light treats
+//! that chunk as one it holds nothing for, and the next chunk task of the
+//! chunk works out its inputs. That chunk regenerates. A chunk task that
+//! regenerates always solves its light rather than keep the light the world
+//! view holds, since its voxels can change while its edit stamp doesn't: see
 //! [`LightSettings::task_for`](super::LightSettings::task_for).
 
 use std::sync::atomic::Ordering;
@@ -354,9 +372,10 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
             if before == now {
                 continue;
             }
-            // In a world whose light is all white, a swap between emissive
-            // materials of one level changes no light, but the inputs still
-            // take the new material, for a later recolour to find.
+            // In a white world, a swap between emissive materials of one
+            // level changes no light, so it doesn't relight. The inputs still
+            // take the new material, for a later change of light colours to
+            // find.
             if emission.is_colored()
                 || before.map(EmissiveVoxel::level) != now.map(EmissiveVoxel::level)
             {
@@ -635,9 +654,11 @@ fn touches_light(view: &View, p: IVec3, solid: bool) -> bool {
         })
 }
 
-/// Whether the open voxel at `p` holds sky light or voxel light, or `None` if
-/// it is solid or its chunk isn't in the view. An open voxel of hinted air
-/// holding no light entry may hold light, which nothing keeps.
+/// Returns whether the open voxel at `p` holds sky light or voxel light, or
+/// `None` if the voxel is solid or its chunk isn't in the view.
+///
+/// An open voxel of hinted air holding no light entry counts as holding light,
+/// since it may hold light that nothing keeps.
 fn open_light(view: &View, p: IVec3) -> Option<bool> {
     let local = local(p);
     let Some(chunk) = view.get(&chunk_containing(p)) else {
@@ -700,8 +721,8 @@ fn column_looked_up<I: Copy + PartialEq>(
     })
 }
 
-/// How far, in voxels, a change can move light under `settings`: the longer
-/// of sky light's and voxel light's reaches.
+/// Returns how far, in voxels, a change can move light under `settings`: the
+/// longer of the sky light reach and the voxel light reach.
 pub(super) fn reach_of<I>(settings: &LightTaskSettings<I>) -> i32 {
     settings
         .sky_scale

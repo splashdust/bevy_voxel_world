@@ -220,8 +220,9 @@ fn lamps_in_air(lamps: Vec<(IVec3, u8)>, shape: LightShape) -> LampWorld {
     }
 }
 
-/// An app of `world`, run until the chunk at the origin is ready and, in a
-/// lit world, its light has landed and light is settled.
+/// Returns an app of `world`, run until the chunk at the origin is Ready. In a
+/// lit world, the app also runs until the light of that chunk has landed and
+/// light has settled.
 fn origin_ready(world: LampWorld) -> App {
     let lit = world.light.is_some();
     let mut app = app(world);
@@ -482,14 +483,16 @@ fn voxel_boxes_culled(app: &App) -> u64 {
 
 #[test]
 fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
-    // Five voxels outside the chunk at the origin along every axis: 15 face
-    // steps from it, past the 14 a lamp at level 15 lights. It's the only
-    // lamp in the origin's light box, and no other chunk's box holding it is
-    // that far.
+    // The lamp stands five voxels outside the chunk at the origin along every
+    // axis. That is 15 face steps from the chunk, past the 14 that a lamp at
+    // level 15 lights. It is the only lamp in the light box of the chunk at
+    // the origin. Every other chunk whose light box holds the lamp is nearer
+    // to it.
     let lamp = IVec3::splat(-5);
-    // The lamp's chunk only touches the origin's corner, and light relights
-    // across faces, so the origin solves with the lamp in its box only if its
-    // own task starts after the lamp's chunk has landed.
+    // The chunk of the lamp touches the chunk at the origin only at a corner.
+    // A relight ripple crosses faces only, so the chunk at the origin solves
+    // with the lamp in its light box only if its own task starts after the
+    // chunk of the lamp has landed.
     let _holding = Hold::exclusive();
     let hold = Hold::new(IVec3::ZERO);
     let mut app = app(LampWorld {
@@ -510,8 +513,8 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
                 && landed_stamp(app, *chunk).is_some()
         })
     });
-    // An edit that changes nothing starts a new task for the origin once the
-    // held one lands.
+    // An edit that changes nothing starts a new task for the chunk at the
+    // origin once the held task lands.
     let edited = IVec3::new(5, 5, 5);
     app.world_mut()
         .run_system_once(move |mut voxel_world: VoxelWorld<LampWorld>| {
@@ -524,8 +527,8 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
         .resource::<VoxelEdits<LampWorld, u8>>()
         .edit_stamp(IVec3::ZERO);
     hold.release();
-    // The chunks beside the lamp's relight as it arrives, so light settles
-    // after the origin's own light lands.
+    // The chunks around the chunk at the origin relight when it arrives, so
+    // light settles only after the light of the chunk at the origin lands.
     update_until(&mut app, "the follow-up task's light to land", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
             && landed_stamp(app, IVec3::ZERO) == Some(stamp)
@@ -559,10 +562,12 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
     }
     assert!(voxel_light(&mut app, IVec3::new(-1, -1, 0)) > 0.0);
 
-    // Round light gets there, moving along every axis at once. The cull
-    // counter can't show it: the chunks two out along each axis hold the
-    // lamp's chunk around them, and cull its lamp whatever the shape when
-    // they solve after it lands.
+    // Round light reaches the chunk at the origin, because it spreads along
+    // every axis at once. The cull counter can't show this. Each chunk two
+    // out from the origin on the side of the lamp has the chunk of the lamp
+    // among the chunks around it, but not the lamp in its light box. Such a
+    // chunk culls the lamp whatever the shape when it solves after the chunk
+    // of the lamp lands.
     let mut round = origin_ready(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
     let reference = reference(LightShape::Round);
     for p in origin_voxels() {
@@ -714,9 +719,10 @@ fn a_chunk_whose_task_starts_after_its_whole_box_has_published_matches_the_refer
         .resource::<VoxelEdits<LampWorld, u8>>()
         .edit_stamp(IVec3::ZERO);
     hold.release();
-    // The held task's light reflects the stamp before the edit.
-    // The chunks beside the lamp's relight as it arrives, so light settles
-    // after the origin's own light lands.
+    // The light of the held task carries the edit stamp from before the edit,
+    // so the wait is for a later landing that carries `stamp`. The chunks
+    // around the chunk at the origin relight when it arrives, so light settles
+    // only after the light of the chunk at the origin lands.
     update_until(&mut app, "the follow-up task's light to land", |app| {
         app.world().resource::<OriginPublishes>().0 >= 2
             && landed_stamp(app, IVec3::ZERO) == Some(stamp)

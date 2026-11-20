@@ -1,57 +1,69 @@
-//! Light colour: what an emissive material's light colour is, how light of
-//! several colours mixes where it meets, how a light colour is packed into 16
-//! bits, and how a chunk holds the light colour of its voxel light.
+//! Light colour
 //!
-//! A light colour is linear RGB scaled so its brightest component is 1, so
-//! the level alone says how bright light is. Only voxel light has one.
+//! This module says what light colour each emissive material gives, how light
+//! of several colours mixes where it meets, how a light colour packs into 16
+//! bits, and how a chunk holds the light colour of its voxel light. The
+//! [`EmissionTable`] of a world names the level and light colour of each
+//! emissive material. The inputs of a chunk note which emissive materials the
+//! chunk holds, so a solve finds the light colours around its chunk from
+//! those notes alone. The solver runs the kernel once per light colour and
+//! mixes the runs with a [`RunMixer`], and a chunk keeps the result as a
+//! [`ChunkColor`].
 //!
-//! The world's [`EmissionTable`] names each emissive material's level and
-//! light colour. A chunk's inputs note which emissive materials it holds, so a
-//! solve finds the light colours around its chunk from those notes alone.
-//! Where every emissive material around a chunk gives white, the chunk solves
-//! and stores its light as it would with no colour at all.
+//! A light colour is linear RGB scaled so that its brightest component is 1.
+//! Only voxel light has one. Where every emissive material around a chunk
+//! gives white, the chunk solves and stores its light as it would with no
+//! colour at all.
 //!
 //! # Why the level alone sets brightness
 //!
-//! Everything that reads light, from the kernel's rows of bits to
-//! `light_at`'s `voxel`, works in levels, and a level already says how far
-//! light reaches and how bright it is. A light colour then says only which
-//! hue and saturation that light has, so it's scaled to a brightest
+//! Everything that reads light works in levels, from the rows of bits of the
+//! kernel to the `voxel` field of a `light_at` reading. A level already says
+//! how far light reaches and how bright it is. A light colour then says only
+//! the hue and saturation of that light, so it is scaled to a brightest
 //! component of 1 and never changes a level. A dim red and a bright red give
-//! the same light, a coloured lamp reaches exactly as far as a white one, and
-//! blue reads darker than red or green at the same level, as those colours
-//! are.
+//! the same light, and a coloured lamp reaches exactly as far as a white one.
+//! At the same level, blue light looks darker than red or green light, as
+//! pure blue looks darker than pure red or green.
 //!
 //! # Why a run per light colour
 //!
 //! Where a light box holds emissive voxels of two or more light colours, the
-//! solver runs the kernel once per colour, each run from that colour's
-//! emissive voxels alone, and mixes the runs voxel by voxel with
-//! [`mix_weighted`]. One run can't carry the colours: its front stops at
-//! voxels it has already lit,
-//! so a dimmer colour never reaches the voxels where a brighter one got first,
-//! and pools would meet in a hard seam. Separate runs each see the whole of
-//! their colour's pool, so a dim colour still tints a brighter pool where it
-//! reaches. The cost of a solve grows with the light colours in its light box.
-//! A voxel's level is the highest of the runs', which is what one run of all
-//! the emissive voxels gives, so everything that reads levels sees what it
-//! would in a white world.
+//! solver runs the kernel once per colour, each run from the emissive voxels
+//! of that colour alone. It then mixes the runs voxel by voxel with
+//! [`mix_weighted`]. One run can't carry the colours, because its front stops
+//! at voxels it has already lit. A dimmer colour would then never reach the
+//! voxels that a brighter one reached first, and pools would meet in a hard
+//! seam. Separate runs each see the whole pool of their colour, so a dim
+//! colour still tints a brighter pool where it reaches.
+//!
+//! The level at a voxel is the highest level among the runs. One run of all
+//! the emissive voxels gives the same level, so everything that reads levels
+//! sees what it would see in a white world. The cost of a solve grows with the
+//! light colours in its light box.
 //!
 //! # Why a fixed mixing curve
 //!
-//! Each component of a voxel's light colour is the max over the colours of
-//! colour times [`mixing_weight`] at that colour's level, whatever voxel
-//! falloff the world's look uses. The weight is `0.7^(15 - level)`, each level
-//! 70% as bright as the one above, shifted and scaled so level 1 weighs 0.
-//! Under a voxel falloff of that same curve, the mix is exactly the look:
-//! each component of a voxel's brightness is the max over the colours of
-//! colour times brightness. A light colour is part of the light, not of the look, so
-//! changing the falloff never relights and `light_at` reads the same colour
-//! under any look. Under another falloff, overlaps mix in the default
-//! curve's proportions, which nothing reads as a bug. The curve's weight falls
-//! to 0 at level 1, so a pool fades out of another colour's pool instead of
-//! ending in a hue step. Where every colour at a voxel is at level 1, the
-//! weights are all 0 and the colours mix evenly.
+//! Each component of the light colour at a voxel is the largest, over the
+//! colours reaching the voxel, of `colour × mixing_weight(level)`, where
+//! `level` is the level that colour reaches the voxel at. The result is then
+//! scaled so that its brightest component is 1. The weight follows
+//! `0.7^(15 - level)`, so each level weighs 70% of the level above it,
+//! shifted and scaled so that level 15 weighs 1 and level 1 weighs 0. For
+//! example, red at level 14 and blue at level 10 mix to `(1, 0, 0.23)`.
+//!
+//! The mix uses this curve whatever voxel falloff the look of the world uses.
+//! The default voxel falloff is the same curve, and under it the mix matches
+//! the look exactly: each component of the brightness at a voxel is the
+//! largest, over the colours, of colour times brightness. A light colour is
+//! part of the light, not of the look. So changing the falloff never relights,
+//! and `light_at` reads the same colour under any look. Under another falloff,
+//! overlaps still mix in the proportions of the default curve, which looks
+//! plausible.
+//!
+//! The weight falls to 0 at level 1, so a pool fades out of the pool of
+//! another colour instead of ending in a step of hue. Where every colour at a
+//! voxel is at level 1, the weights are all 0, and the colours mix evenly.
 
 use std::sync::Arc;
 
@@ -63,24 +75,28 @@ use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// The packed light colour white. A voxel with no voxel light reads it.
+/// The packed light colour of white, which a voxel with no voxel light also
+/// holds.
 pub(crate) const WHITE: u16 = 0;
 
-/// How many emissive materials the [`EmissionTable`] tells apart: an
-/// [`EmissiveVoxel`](super::inputs::EmissiveVoxel) holds its material's
-/// index in 13 bits.
+/// How many emissive materials the [`EmissionTable`] tells apart. An
+/// [`EmissiveVoxel`](super::inputs::EmissiveVoxel) holds the index of its
+/// material in 13 bits.
 pub(crate) const MAX_EMISSIVE_MATERIALS: usize = 1 << 13;
 
-/// Steps in each packed component below the brightest.
+/// How many steps each packed component other than the brightest has.
 const STEPS: f32 = 127.0;
 
-/// `color` as a light colour: linear RGB with alpha 1, each negative component
-/// read as 0, scaled so its brightest component is 1. Black stays black.
-/// Returns it, and whether any component was negative.
+/// Returns `color` as a light colour, and whether any of its components was
+/// negative.
+///
+/// The light colour is linear RGB with alpha 1, scaled so that its brightest
+/// component is 1. A negative or NaN component reads as 0. Black gives black,
+/// and so does a colour with an infinite component.
 pub(crate) fn scaled(color: LinearRgba) -> (LinearRgba, bool) {
     let components = [color.red, color.green, color.blue];
     let negative = components.iter().any(|component| *component < 0.0);
-    // `max` reads NaN as 0 too.
+    // `f32::max` returns 0 for a NaN component too.
     let [red, green, blue] = components.map(|component| component.max(0.0));
     let brightest = red.max(green).max(blue);
     if brightest <= 0.0 || !brightest.is_finite() {
@@ -92,13 +108,16 @@ pub(crate) fn scaled(color: LinearRgba) -> (LinearRgba, bool) {
     )
 }
 
-/// `color`, a light colour, packed into 16 bits.
+/// Returns the light colour `color` packed into 16 bits.
 ///
-/// Bits 14 and 15 name the brightest component, 0 for red to 2 for blue, the
-/// lowest one on a tie. Bits 7 to 13 and 0 to 6 hold how far each of the other
-/// two components, in order, falls short of 1, in steps of 1/127. So white
-/// packs to [`WHITE`], white and the primaries are exact, and 3 in the top
-/// bits never names a colour.
+/// Bits 14 and 15 name the brightest component, from 0 for red to 2 for blue,
+/// and the lowest of them on a tie. Bits 7 to 13 hold how far the first of the
+/// other two components falls short of 1, in steps of 1/127, and bits 0 to 6
+/// hold the same for the second. For example, `(1, 0.5, 0)` packs to 0 in the
+/// top bits, 64 in bits 7 to 13 and 127 in bits 0 to 6.
+///
+/// White packs to [`WHITE`], and so does black. White and the primaries are
+/// exact, and 3 in the top bits never names a colour.
 pub(crate) fn pack(color: LinearRgba) -> u16 {
     let components = [color.red, color.green, color.blue].map(|c| c.max(0.0));
     let brightest = components[0].max(components[1]).max(components[2]);
@@ -107,38 +126,41 @@ pub(crate) fn pack(color: LinearRgba) -> u16 {
     }
     let short = components
         .map(|c| ((1.0 - c / brightest).clamp(0.0, 1.0) * STEPS).round() as u16);
-    // The lowest component that rounds to the brightest names it, so a colour
-    // packs one way only.
+    // The lowest component that rounds to the brightest names it, so each
+    // colour has only one packing.
     let top = short.iter().position(|short| *short == 0).unwrap_or(0);
     let [first, second] = others(top).map(|component| short[component]);
     (top as u16) << 14 | first << 7 | second
 }
 
-/// The packed light colour `packed` cut to the 14 bits a tag with no slot
-/// holds: the 2 bits naming the brightest component, then each of the other
-/// two components in 6 bits, in steps of 1/63. White cuts to 0, so a white
-/// chunk's tag is the tag it would have in a world with no light colour.
+/// Returns the packed light colour `packed` cut to the 14 bits that a tag
+/// with no slot holds.
+///
+/// The top 2 bits name the brightest component, and each of the other two
+/// components takes 6 bits, in steps of 1/63. White cuts to 0, so the tag of
+/// a white chunk is the tag it would have in a world with no light colour.
 pub(crate) fn tag_cut(packed: u16) -> u32 {
     let cut = |short: u16| short.div_ceil(2).min(63) as u32;
     let top = (packed >> 14) as u32;
     top << 12 | cut(packed >> 7 & 0x7f) << 6 | cut(packed & 0x7f)
 }
 
-/// The top 2 bits of an entry naming a colour slot: 3, the spare value,
-/// which no packed light colour holds there.
+/// The top 2 bits of an entry that names a colour slot. They hold 3, the one
+/// value that no packed light colour has there.
 pub(crate) const SPARE: u16 = 3 << 14;
 
-/// How many colour slots an entry can name: the 14 bits below [`SPARE`].
+/// How many colour slots an entry can name, in the 14 bits below [`SPARE`].
 pub(crate) const MAX_COLOR_SLOTS: u32 = 1 << 14;
 
-/// The entry of a chunk holding the colour slot `index`: [`SPARE`] in the
-/// top 2 bits and the index in the other 14.
+/// Returns the entry of a chunk that holds the colour slot `index`: [`SPARE`]
+/// in the top 2 bits, and the index in the other 14.
 pub(crate) fn color_slot_entry(index: u32) -> u16 {
     debug_assert!(index < MAX_COLOR_SLOTS);
     SPARE | index as u16
 }
 
-/// The light colour `packed` holds, which must name one.
+/// Returns the light colour that `packed` holds. The top 2 bits of `packed`
+/// must name a component, so they can't be 3.
 pub(crate) fn unpack(packed: u16) -> LinearRgba {
     let top = (packed >> 14) as usize;
     debug_assert!(
@@ -152,33 +174,39 @@ pub(crate) fn unpack(packed: u16) -> LinearRgba {
     LinearRgba::rgb(components[0], components[1], components[2])
 }
 
-/// The base of the fixed mixing curve: the default voxel falloff's.
+/// The base of the fixed mixing curve, which is also the base of the default
+/// voxel falloff.
 const MIXING_BASE: f32 = 0.7;
 
-/// The weight a light colour at `level`, on the 0 to 15 scale, has where
-/// light of several colours meets: the fixed mixing curve,
-/// `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`. It's 1 at level 15 and 0 at
-/// level 1 and below.
+/// Returns the weight that a light colour at `level`, on the 0 to 15 scale,
+/// has where light of several colours meets.
+///
+/// The weight follows the fixed mixing curve,
+/// `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`. It is 1 at level 15 and 0 at
+/// level 1 and below. For example, level 14 weighs about 0.70, and level 10
+/// about 0.16.
 #[inline]
 pub(crate) fn mixing_weight(level: f32) -> f32 {
     let floor = MIXING_BASE.powi(14);
     ((MIXING_BASE.powf(15.0 - level) - floor) / (1.0 - floor)).max(0.0)
 }
 
-/// The mixing rule for a solve's per-colour runs: at each voxel, the
-/// brightest run's level, and the light colours of the runs lighting it
-/// mixed by [`mix_weighted`]. A voxel only one run lights takes that run's
-/// light colour as it is. Level-0 and coarse chunks both mix this way.
+/// Mixes the runs of a solve, one for each light colour. At each voxel the
+/// mix gives the level of the brightest run, and the light colours of the
+/// runs that light the voxel, mixed by [`mix_weighted`].
+///
+/// A voxel that only one run lights takes the light colour of that run as it
+/// is. Level-0 and coarse chunks both mix this way.
 pub(crate) struct RunMixer<'a> {
     colors: &'a [u16],
     unpacked: Vec<LinearRgba>,
-    /// The [`mixing_weight`] of each level in steps of the precision.
+    /// The [`mixing_weight`] of each level, indexed in steps of the precision.
     weights: Vec<f32>,
 }
 
 impl<'a> RunMixer<'a> {
-    /// A mixer for runs of the packed light colours `colors`, whose levels
-    /// are in steps of `precision`.
+    /// Returns a mixer for runs of the packed light colours `colors`, whose
+    /// levels are in steps of `precision`.
     pub fn new(colors: &'a [u16], precision: super::config::LightPrecision) -> Self {
         Self {
             colors,
@@ -189,8 +217,8 @@ impl<'a> RunMixer<'a> {
         }
     }
 
-    /// The level and packed light colour at a voxel where run `i` reaches
-    /// level `level(i)`, or `None` where no run lights it.
+    /// Returns the level and packed light colour at a voxel where run `i`
+    /// reaches level `level(i)`, or `None` where no run lights the voxel.
     #[inline]
     pub fn mix(&self, level: impl Fn(usize) -> u8) -> Option<(u8, u16)> {
         let (mut top, mut lit, mut only) = (0, 0, 0);
@@ -217,8 +245,9 @@ impl<'a> RunMixer<'a> {
     }
 }
 
-/// [`mix_weighted`] of `lights`, each a light colour and its level on the 0
-/// to 15 scale. A light at level 0 doesn't count.
+/// Returns the light colour that `lights` mix to under [`mix_weighted`].
+/// Each light is a light colour and its level, on the 0 to 15 scale. A light
+/// at level 0 doesn't count.
 #[cfg(any(test, feature = "sub_grids"))]
 pub(crate) fn mix(lights: impl IntoIterator<Item = (LinearRgba, f32)>) -> LinearRgba {
     mix_weighted(
@@ -229,16 +258,17 @@ pub(crate) fn mix(lights: impl IntoIterator<Item = (LinearRgba, f32)>) -> Linear
     )
 }
 
-/// The light colour that `lights` mix to where they meet at a voxel, each a
-/// light colour whose light reaches the voxel and its [`mixing_weight`] at
-/// the level it reaches it at.
+/// Returns the light colour that `lights` mix to where they meet at a voxel.
+/// Each light is a light colour that reaches the voxel, with its
+/// [`mixing_weight`] at the level it reaches the voxel at.
 ///
-/// Each component is the max over the lights of colour times weight, scaled
-/// so the brightest component is 1. Where every light weighs 0, at level 1,
-/// each weighs 1 instead, so they mix evenly. No light mixes to white.
+/// Each component is the largest, over the lights, of colour times weight,
+/// and the result is scaled so that its brightest component is 1. Where
+/// every light weighs 0, at level 1, each weighs 1 instead, so they mix
+/// evenly. No light at all mixes to white.
 ///
-/// The light shader's `mix_color` and `mixed_color` mirror this rule and
-/// [`mixing_weight`], so a change here changes them too.
+/// The `mix_color` and `mixed_color` functions of the light shader mirror
+/// this rule and [`mixing_weight`], so a change here must change them too.
 pub(crate) fn mix_weighted(
     lights: impl IntoIterator<Item = (LinearRgba, f32)>,
 ) -> LinearRgba {
@@ -267,7 +297,7 @@ pub(crate) fn mix_weighted(
     LinearRgba::rgb(red, green, blue)
 }
 
-/// The two components other than `top`, in order.
+/// Returns the two components other than `top`, in order.
 fn others(top: usize) -> [usize; 2] {
     match top {
         0 => [1, 2],
@@ -279,20 +309,22 @@ fn others(top: usize) -> [usize; 2] {
 /// How a chunk or light entry holds the light colour of its voxel light.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) enum ChunkColor {
-    /// Every voxel's voxel light is white: nothing beside its levels.
+    /// The voxel light of every voxel is white, so the chunk holds nothing
+    /// beside its levels.
     #[default]
     White,
-    /// Every lit voxel's voxel light has the one packed light colour, never
-    /// [`WHITE`].
+    /// The voxel light of every lit voxel has this one packed light colour,
+    /// which is never [`WHITE`].
     One(u16),
     /// The packed light colour of each voxel, at `x + y × 32 + z × 32²`, for
-    /// a chunk that light of two or more light colours reaches: 64 KiB. A
-    /// voxel with no voxel light holds [`WHITE`].
+    /// a chunk that light of two or more light colours reaches. It takes
+    /// 64 KiB. A voxel with no voxel light holds [`WHITE`].
     Mixed(Arc<[u16]>),
 }
 
 impl ChunkColor {
-    /// The packed light colour `packed` held for a whole chunk.
+    /// Returns how a chunk holds the packed light colour `packed` for all of
+    /// its voxels.
     pub fn of(packed: u16) -> Self {
         if packed == WHITE {
             ChunkColor::White
@@ -301,8 +333,9 @@ impl ChunkColor {
         }
     }
 
-    /// The packed light colour of the chunk's open voxel `x`, `y`, `z`, which
-    /// has voxel light.
+    /// Returns the packed light colour at the open voxel `x`, `y`, `z` of the
+    /// chunk. The voxel must have voxel light, since under
+    /// [`ChunkColor::One`] an unlit voxel reads the colour too.
     pub fn packed_at(&self, x: usize, y: usize, z: usize) -> u16 {
         match self {
             ChunkColor::White => WHITE,
@@ -311,8 +344,8 @@ impl ChunkColor {
         }
     }
 
-    /// The light colour of the chunk's open voxel `x`, `y`, `z`, which has
-    /// voxel light.
+    /// Returns the light colour at the open voxel `x`, `y`, `z` of the chunk.
+    /// The voxel must have voxel light, as for [`packed_at`](Self::packed_at).
     pub fn at(&self, x: usize, y: usize, z: usize) -> LinearRgba {
         match self {
             ChunkColor::White => LinearRgba::WHITE,
@@ -322,33 +355,34 @@ impl ChunkColor {
     }
 }
 
-/// Where the chunk's voxel `x`, `y`, `z` is in [`ChunkColor::Mixed`].
+/// Returns where the voxel `x`, `y`, `z` of a chunk is in
+/// [`ChunkColor::Mixed`].
 #[inline]
 pub(crate) fn voxel_index(x: usize, y: usize, z: usize) -> usize {
     x + y * CHUNK + z * CHUNK * CHUNK
 }
 
-/// What an emissive material gives off, as its emissive voxels hold it: its
-/// level, as a whole level from 0 to 15, and its index in the world's
-/// [`EmissionTable`], which names its light colour.
+/// What an emissive material gives off, as its emissive voxels hold it: a
+/// whole level from 0 to 15, and the index of the material in the
+/// [`EmissionTable`] of the world, which names its light colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Emitter {
     pub level: u8,
     pub material: u16,
 }
 
-/// Each emissive material of a world, with its level and light colour, built
-/// from its emissive list.
+/// The emissive materials of a world, each with its level and light colour,
+/// built from the emissive list of the world.
 ///
-/// A material's index is its place in the list. Past
-/// [`MAX_EMISSIVE_MATERIALS`] the world warns once, and each further material
-/// takes the index of the earlier one whose light colour is nearest its own.
-/// A material whose light is level 0, or black, holds white, so it never
-/// makes a world coloured.
+/// The index of a material is its place in the list. Past
+/// [`MAX_EMISSIVE_MATERIALS`], the world warns once, and each further
+/// material takes the index of the earlier one whose light colour is nearest
+/// its own. A material whose light is level 0 or black holds white, so it
+/// never makes a world coloured.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EmissionTable<I> {
     materials: Vec<(I, Emitter)>,
-    /// The packed light colour of each index.
+    /// The packed light colour at each index.
     colors: Vec<u16>,
     /// Whether any index holds a light colour other than white.
     colored: bool,
@@ -365,7 +399,7 @@ impl<I> Default for EmissionTable<I> {
 }
 
 impl<I: Copy + PartialEq> EmissionTable<I> {
-    /// The table of the emissive list `emission`.
+    /// Returns the table of the emissive list `emission`.
     pub fn new(emission: &[(I, Emission)]) -> Self {
         let mut table = Self::default();
         let mut scaled = Vec::new();
@@ -400,7 +434,7 @@ impl<I: Copy + PartialEq> EmissionTable<I> {
         table
     }
 
-    /// A table of white materials at the whole levels `levels`.
+    /// Returns a table of white materials at the whole levels `levels`.
     pub fn white(levels: &[(I, u8)]) -> Self {
         let emission: Vec<(I, Emission)> = levels
             .iter()
@@ -409,7 +443,7 @@ impl<I: Copy + PartialEq> EmissionTable<I> {
         Self::new(&emission)
     }
 
-    /// What `material` gives off, if it's emissive.
+    /// Returns what `material` gives off, or `None` if it isn't emissive.
     #[inline]
     pub fn get(&self, material: I) -> Option<Emitter> {
         self.materials
@@ -422,10 +456,11 @@ impl<I: Copy + PartialEq> EmissionTable<I> {
         self.materials.is_empty()
     }
 
-    /// The material indices whose packed light colour differs in `new`, if
-    /// `new` gives each material the same level and index as this table, so
-    /// that only light colours changed. `None` if any material's level or
-    /// index changed, or a material came or went.
+    /// Returns the material indices whose packed light colour differs in
+    /// `new`, where only light colours changed between the two tables.
+    ///
+    /// Returns `None` if a material came or went, or if the level or index of
+    /// any material changed.
     pub fn recolored(&self, new: &Self) -> Option<Vec<u16>> {
         if self.materials != new.materials {
             return None;
@@ -443,26 +478,29 @@ impl<I: Copy + PartialEq> EmissionTable<I> {
 }
 
 impl<I> EmissionTable<I> {
-    /// Whether any material gives a light colour other than white. A world
-    /// whose table isn't solves and stores its light with no colour.
+    /// Returns whether any material gives a light colour other than white. A
+    /// world whose table gives only white solves and stores its light with no
+    /// colour.
     #[inline]
     pub fn is_colored(&self) -> bool {
         self.colored
     }
 
-    /// The packed light colour of each material index, in order.
+    /// Returns the packed light colour of each material index, in order.
     pub fn colors(&self) -> &[u16] {
         &self.colors
     }
 
-    /// The packed light colour of the material index `material`.
+    /// Returns the packed light colour of the material index `material`, or
+    /// [`WHITE`] for an index past the end of the table.
     #[inline]
     pub fn color(&self, material: u16) -> u16 {
         self.colors.get(material as usize).copied().unwrap_or(WHITE)
     }
 }
 
-/// The index in `colors` of the light colour nearest `color`.
+/// Returns the index in `colors` of the light colour nearest `color` in
+/// linear RGB, or 0 if `colors` is empty.
 fn nearest(colors: &[LinearRgba], color: LinearRgba) -> usize {
     let distance = |other: &LinearRgba| {
         Vec3::from_array(other.to_f32_array_no_alpha())
@@ -507,7 +545,7 @@ mod tests {
         assert_eq!(tag_cut(pack(LinearRgba::RED)), 63 << 6 | 63);
         assert_eq!(tag_cut(pack(LinearRgba::GREEN)), 1 << 12 | 63 << 6 | 63);
         assert_eq!(tag_cut(pack(LinearRgba::BLUE)), 2 << 12 | 63 << 6 | 63);
-        // Half is 64 of 127 steps short of 1, so 32 of 63.
+        // Half falls 64 of 127 steps short of 1, which cuts to 32 of 63.
         assert_eq!(tag_cut(pack(LinearRgba::rgb(1.0, 0.5, 0.5))), 32 << 6 | 32);
         for packed in [pack(LinearRgba::rgb(0.2, 0.7, 1.0)), u16::MAX >> 2] {
             assert!(tag_cut(packed) < 1 << 14);
@@ -580,7 +618,8 @@ mod tests {
         assert!(negative);
     }
 
-    /// The fixed mixing curve's weight at `level`, worked out from its formula.
+    /// Returns the weight of the fixed mixing curve at `level`, worked out from
+    /// its formula.
     fn weight(level: f32) -> f32 {
         (0.7f32.powf(15.0 - level) - 0.7f32.powi(14)) / (1.0 - 0.7f32.powi(14))
     }
@@ -620,7 +659,7 @@ mod tests {
             (LinearRgba::BLUE, 1.0),
         ]);
         assert_eq!(mixed, LinearRgba::GREEN);
-        // So does one a step of 256 levels above level 1.
+        // So does a colour one step of 1/17 above level 1, as at 256 levels.
         let mixed = mix([
             (LinearRgba::RED, 1.0),
             (LinearRgba::GREEN, 1.0 + 1.0 / 17.0),
@@ -640,8 +679,9 @@ mod tests {
     #[test]
     fn orange_hidden_at_a_face_by_red_and_green_shows_further_in() {
         let orange = LinearRgba::rgb(1.0, 0.5, 0.0);
-        // At the face: orange and red at 12, green at 11. Red's red and
-        // green's green both beat orange's, so orange adds nothing.
+        // At the face, orange and red are at 12, and green is at 11. The red
+        // light beats orange in red, and the green light beats it in green, so
+        // orange adds nothing.
         let at_face = mix([
             (orange, 12.0),
             (LinearRgba::RED, 12.0),
@@ -654,8 +694,8 @@ mod tests {
             LinearRgba::rgb(1.0, weight(11.0) / weight(12.0), 0.0),
             1e-6
         ));
-        // Nine voxels in: orange and red at 3, green at 2. Orange's green now
-        // beats green's.
+        // Nine voxels in, orange and red are at 3, and green is at 2. Orange
+        // now beats the green light in green.
         let inside = mix([
             (orange, 3.0),
             (LinearRgba::RED, 3.0),
@@ -726,7 +766,7 @@ mod tests {
         assert_eq!(table.color(emitter(1).material), WHITE);
         assert_eq!(emitter(2).level, 8);
         assert_eq!(unpack(table.color(emitter(2).material)), LinearRgba::RED);
-        // Equal once scaled.
+        // Red and half red are equal once scaled.
         assert_eq!(
             table.color(emitter(3).material),
             table.color(emitter(2).material)

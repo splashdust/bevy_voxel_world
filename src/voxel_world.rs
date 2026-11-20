@@ -589,52 +589,56 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         )
     }
 
-    /// The light at the voxel at `position`, as levels from 0 to 15.
+    /// Returns the light at the voxel at `position`, as levels from 0 to 15,
+    /// with the light colour of its voxel light.
     ///
-    /// It reads the light landed for the finest published chunk holding the
-    /// voxel. In a level-0 chunk a solid voxel reads 0, an emissive voxel its
-    /// own level, and an open voxel the light that reached it. Light beside a
-    /// chunk that isn't loaded can read darker than the truth, never brighter.
-    /// A chunk's light can change after it appears, as chunks arriving around
-    /// it relight it; [`VoxelWorld::light_is_settled`] says when that has
-    /// finished.
+    /// It reads the light that has landed for the finest published chunk
+    /// holding the voxel. In a level-0 chunk, a solid voxel reads 0, and an
+    /// emissive voxel reads its own level and light colour. An open voxel reads
+    /// the light that reached it. Light beside a chunk that isn't loaded can
+    /// read darker than the truth, never brighter. The light of a chunk can
+    /// change after the chunk appears, as chunks arriving around it relight
+    /// it. [`VoxelWorld::light_is_settled`] says when that has finished.
     ///
     /// A chunk above LOD level 0, or a level-0 chunk with a non-default
     /// [`chunk_data_shape`](VoxelWorldConfig::chunk_data_shape), reads what it
-    /// renders, which is plausible rather than exact: the cell holding the
-    /// voxel while the chunk holds a slot in the world's light texture, and
-    /// otherwise the one sky light level and voxel light level its tag shows. A
-    /// solid cell reads the brightest of its six neighbours, or 0 if all six
-    /// are solid. Its light colour is the cell's own where the chunk's faces
-    /// see more than one light colour, and otherwise the one colour the
-    /// chunk shows.
+    /// renders, which is plausible rather than exact:
     ///
-    /// Where nothing renders, in such a chunk with no voxels to mesh or in air
-    /// a [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning,
-    /// it walks up the column above the voxel and reads sky light 15 if
-    /// nothing solid is found within the world's
-    /// [sky rule](crate::prelude::Sky),
-    /// and 0 otherwise. **The first reading of such a voxel can run the
-    /// world's voxel lookups on the caller's thread**: under the default sky
-    /// rule, up to about 50 lookups and a lookup closure for each of up to 17
-    /// level-0 chunks the column passes through. The
-    /// answer is kept until the next voxel edit or
+    /// - While the chunk holds a slot in the light texture of the world, the
+    ///   voxel reads the cell of the chunk that holds it.
+    /// - Otherwise the voxel reads the one sky light level and voxel light
+    ///   level that the whole chunk shows.
+    /// - A solid cell reads the brightest of its six neighbours, or 0 if all
+    ///   six are solid.
+    /// - Where the faces of the chunk see more than one light colour, the
+    ///   voxel reads the light colour of its cell. Otherwise it reads the one
+    ///   light colour the chunk shows.
+    ///
+    /// Where nothing renders, the reading walks up the column above the voxel.
+    /// That happens in such a chunk with no voxels to mesh, and in air that a
+    /// [fill hint](VoxelWorldConfig::chunk_fill_hint) kept from spawning. The
+    /// voxel reads sky light 15 if the walk finds nothing solid within the
+    /// [sky rule](crate::prelude::Sky) of the world, and 0 otherwise. **The
+    /// first reading of such a voxel can run the voxel lookups of the world on
+    /// the calling thread**: under the default sky rule, up to about 50
+    /// lookups, and a lookup closure for each of up to 17 level-0 chunks the
+    /// column passes through. The answer is kept until the next voxel edit or
     /// [`VoxelWorld::reset_light`]. A chunk of solid voxels reads 0 with no
     /// walk.
     ///
     /// These readings are plausible, not exact:
     ///
     /// - In a chunk of air with no solid voxel beside it, which no face reads,
-    ///   the reading takes the larger of its own light and the sky fill
-    ///   level around it, and can be a level or two off.
-    /// - In air a fill hint kept from spawning with no solid voxel beside it,
-    ///   the reading misses the light beside a 1×1 shaft or a lamp, by up to
-    ///   14 levels, as in the middle of a hinted cavern.
-    /// - The walk's rows step further apart higher up, so it can step past a
-    ///   thin roof far above.
+    ///   the reading takes the larger of its own light and the sky fill level
+    ///   around it. It can be a level or two off.
+    /// - In air that a fill hint kept from spawning, with no solid voxel beside
+    ///   it, the reading misses the light beside a 1×1 shaft or a lamp, by up
+    ///   to 14 levels, as in the middle of a cavern the fill hint declares air.
+    /// - The rows of the walk step further apart higher up, so the walk can
+    ///   step past a thin roof far above.
     ///
-    /// Returns `None` when the world has no light propagation, or no published
-    /// chunk or fill hint says what is at the voxel.
+    /// Returns `None` when the world has no light propagation, or when no
+    /// published chunk or fill hint says what is at the voxel.
     #[cfg(feature = "light_propagation")]
     pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
         let light = self.light.as_ref()?;
@@ -648,35 +652,42 @@ impl<C: VoxelWorldConfig> VoxelWorld<'_, '_, C> {
         )
     }
 
-    /// Whether the world's light has caught up with its chunks: no relight is
-    /// waiting to start or running, no solved light is waiting to land, and
-    /// no sky probe is waiting or running. A loading screen can wait on it.
+    /// Returns whether the light of the world has caught up with its chunks.
+    /// It has when no relight is waiting to start or running, no solved light
+    /// is waiting to land, and no sky probe is waiting or running. A loading
+    /// screen can wait on it.
     ///
-    /// A voxel edit makes it false from when it is set until its light has
-    /// landed, including the light of chunks re-meshed for it, which waits
-    /// for their new meshes. With the `sub_grids` feature that holds for a
-    /// sub-grid's edits too, and the first light of the chunks they spawn.
+    /// A voxel edit makes it false from when the edit is set until the light
+    /// of the edit has landed. That includes the light of the chunks re-meshed
+    /// for the edit, which waits for their new meshes. With the `sub_grids`
+    /// feature, the same holds for the edits of a sub-grid, and for the first
+    /// light of the chunks those edits spawn.
     ///
     /// A change of light settings that relights makes it false from the frame
     /// the change is applied until the light of every chunk it relights has
     /// landed.
     ///
     /// Sky probes look up the voxels above chunks whose own tasks couldn't
-    /// tell whether sky light reaches them, which takes a while after a
-    /// stream: until they finish, such chunks show direct sky in columns
-    /// nothing has proved open yet.
+    /// tell whether sky light reaches them. They take a while after a stream.
+    /// Until they finish, such chunks show direct sky in the columns that
+    /// nothing has proved open or blocked yet.
     ///
-    /// With sky fill on, it is also false while the sky fill field has work
-    /// left, a change of fill waits for its relight, which comes at most every
-    /// 500 ms, or a fill probe runs or waits to start.
+    /// With sky fill on, it is also false in these cases:
+    ///
+    /// - The sky fill field has work left.
+    /// - A change of fill waits for its relight, which comes at most every
+    ///   500 ms.
+    /// - A fill probe runs or waits to start.
     ///
     /// Chunk tasks still running aren't counted, though their light may start
     /// relights once it lands. Chunks above LOD level 0 have no relights to
-    /// wait for, except after a change of precision, which solves them all
-    /// again, and a change to the emissive list, which solves again those
-    /// holding a material whose entry changed. Settled doesn't mean exact:
-    /// light beside a chunk that isn't loaded can be darker than the truth. A
-    /// world without light propagation is always settled.
+    /// wait for, except in two cases that solve them again. A change of
+    /// precision solves them all again. A change to the emissive list solves
+    /// again those holding a material whose entry in the list changed.
+    ///
+    /// Settled doesn't mean exact: light beside a chunk that isn't loaded can
+    /// be darker than the truth. A world without light propagation is always
+    /// settled.
     #[cfg(feature = "light_propagation")]
     pub fn light_is_settled(&self) -> bool {
         let reset = self

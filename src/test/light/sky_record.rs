@@ -407,11 +407,14 @@ fn chunks_retiring_one_at_a_time_leave_no_reading_brighter_than_the_reference() 
     assert_no_brighter(&mut app, roof_reference());
 }
 
-/// [`roof_with_hole`], with a slab of stone from y = 63 to 65 at x from 64
-/// on: the top of the chunks at chunk height 1 and x = 2 is solid, and so is
-/// the row of voxels above them, which settles their columns blocked with no
-/// probe. One more stone at (90, 33, 5) gives the chunk at (2, 1, 0) voxels
-/// no other chunk has, so it gets a mesh of its own, not one from the cache.
+/// Returns [`roof_with_hole`] with a slab of stone from y = 63 to 65 at x
+/// from 64 on, and one more stone at (90, 33, 5).
+///
+/// The slab fills the top row of the chunks at chunk height 1 and x = 2, and
+/// the row of voxels above them. Their columns are then settled as blocked
+/// without a sky probe. The extra stone gives the chunk at (2, 1, 0) voxels
+/// that no other chunk has, so that chunk gets a mesh of its own rather than
+/// one from the cache.
 fn roof_and_slab(p: IVec3) -> WorldVoxel {
     if p.x >= 64 && (63..66).contains(&p.y) || p == IVec3::new(90, 33, 5) {
         WorldVoxel::Solid(STONE)
@@ -424,8 +427,9 @@ fn roof_and_slab(p: IVec3) -> WorldVoxel {
 fn a_chunk_solved_beside_provisional_direct_sky_disproved_before_it_lands_reads_no_brighter_than_the_reference(
 ) {
     let _holding = Hold::exclusive();
-    // Under the roof, the chunk below `ROOF` shows direct sky across its face
-    // with the late chunk until a probe of the roof disproves it.
+    // The chunk `provisional` lies under the roof, below `ROOF`. Until a sky
+    // probe of `ROOF` disproves it, that chunk shows provisional direct sky on
+    // its face with the late chunk.
     let provisional = IVec3::new(1, 1, 0);
     let late = IVec3::new(2, 1, 0);
     let hold = Hold::inside(ROOF);
@@ -439,8 +443,9 @@ fn a_chunk_solved_beside_provisional_direct_sky_disproved_before_it_lands_reads_
     assert!(!spawned(&mut app).contains(&late));
     assert!(levels(&mut app, provisional * 32 + IVec3::new(31, 16, 16)).direct_sky());
 
-    // Moving the camera along x spawns the late chunk, whose task solves its
-    // light beside that direct sky, then waits to mesh before its light lands.
+    // Moving the camera along x spawns the late chunk. Its task solves its
+    // light beside that provisional direct sky, then waits on its mesh before
+    // the light lands.
     let along = Transform::from_xyz(42.0, 10.0, 10.0)
         .looking_at(Vec3::new(32.0, 0.0, 0.0), Vec3::Y);
     move_cameras::<LampWorld>(&mut app, along);
@@ -452,7 +457,8 @@ fn a_chunk_solved_beside_provisional_direct_sky_disproved_before_it_lands_reads_
     update_until(&mut app, "the provisional direct sky to go", |app| {
         !levels(app, provisional * 32 + IVec3::new(31, 16, 16)).direct_sky()
     });
-    // The relights the probe started land, while the late chunk still waits.
+    // Let the relights that the probe started land while the late chunk still
+    // waits on its mesh.
     for _ in 0..30 {
         app.update();
     }
@@ -471,8 +477,8 @@ fn a_chunk_solved_beside_provisional_direct_sky_disproved_before_it_lands_reads_
     }
 }
 
-/// The reference sky light of [`roof_and_slab`] for the chunks from the
-/// origin's box to two chunks along x.
+/// Returns the reference sky light of [`roof_and_slab`] for the chunks around
+/// the origin, and on along x up to the chunks at x = 2.
 fn roof_and_slab_reference() -> &'static Reference {
     static REFERENCE: OnceLock<Reference> = OnceLock::new();
     REFERENCE.get_or_init(|| {

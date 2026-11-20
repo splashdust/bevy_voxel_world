@@ -263,8 +263,8 @@ fn a_lift_out_of_a_lit_slab_lands_with_the_holes_light_and_the_pieces_lamp_in_on
     let _ = lift_lands_in_one_frame(overhang_world());
 }
 
-/// A green lamp in the underside of the slab of [`overhang`], beside the
-/// piece a lift takes.
+/// The position of a green lamp in the underside of the slab of [`overhang`],
+/// just outside the piece that a lift takes.
 const GREEN_SLAB_LAMP: IVec3 = IVec3::new(20, 36, 12);
 
 #[test]
@@ -283,7 +283,8 @@ fn a_lift_beside_coloured_lamps_lands_with_the_pieces_red_lamp_in_one_frame() {
         ],
         ..overhang_world()
     });
-    // Under the lamp, which outshines the green lamp's light in the hole.
+    // Read the voxel under the red lamp of the piece. Red light outshines the
+    // light of the green lamp there, so the voxel shows red with little green.
     let levels = run(&mut app, move |voxel_world| {
         voxel_world
             .grid(Grid::SubGrid(sub_grid))
@@ -299,10 +300,12 @@ fn a_lift_beside_coloured_lamps_lands_with_the_pieces_red_lamp_in_one_frame() {
     );
 }
 
-/// Lifts the piece of the slab of `world` holding [`SLAB_LAMP`], holding
-/// back the new sub-grid's mesh, and fails unless the hole's light, the
-/// chunks' meshes and the piece's lamp all land in one frame. Returns the
-/// app and the sub-grid.
+/// Lifts the piece of the slab of `world` that holds [`SLAB_LAMP`], and
+/// returns the app and the new sub-grid.
+///
+/// The mesh of the new sub-grid is held back for a while. The test fails
+/// unless the light of the hole, the new mesh of the chunk the piece left and
+/// the lamp of the piece all land in the same frame.
 fn lift_lands_in_one_frame(world: LampWorld) -> (App, Entity) {
     let _holding = Hold::exclusive();
     let mut app = recording_app(world, false);

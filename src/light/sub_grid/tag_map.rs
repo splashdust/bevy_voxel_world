@@ -1,90 +1,115 @@
-//! The tag map: a lit world's GPU hash table from a level-0 world chunk
-//! position to the tag the screen shows there, so a sub-grid's face can find
-//! the world's light at its world position. Compiled only with `sub_grids`
-//! and `light_propagation`.
+//! The tag map
 //!
-//! **What it holds.** Each sub-grid adds every level-0 world chunk position
-//! that the box around its solid voxels touches, placed by the pose drawn
-//! this frame and padded by one voxel. A sub-grid with no solid voxel adds
-//! none. Positions are on the world's grid, so a sub-grid's own chunks are
-//! never held. Each position holds the tag of the chunk the screen shows there, in
-//! the encoding [`route`](crate::light::route) describes: a level-0 chunk's tag, or
-//! else the tag of the coarse chunk covering the position, whose LOD bits
-//! say how wide its cells are. Hinted air holds levels: see [Hinted
-//! air](#hinted-air). Any other position with no chunk showing a tag, such
-//! as one past the spawning distance, holds sky 15 and voxel 0 in white, as
-//! open sky with no lamps does. Tags carry their chunk's light colour, so
-//! the map's entries do too.
+//! This module keeps the tag map of a lit world: a hash table on the GPU from
+//! a level-0 world chunk position to the tag the screen shows there. A face
+//! of a sub-grid looks up its world position in it to find the light of the
+//! world there. The module is compiled only with `sub_grids` and
+//! `light_propagation`.
 //!
-//! **Slots near a sub-grid.** While the map holds a position, the route
-//! keeps the level-0 world chunk there, a chunk of air with no mesh
-//! included, and gives it a slot unless every one of its open voxels, and
-//! every open voxel its slot's shell copies from its face neighbours, holds
-//! one sky light level and one voxel light level. Its slot's bytes are made
-//! from the light the world view already stores, so no relight runs. A chunk of
-//! air with no solid in its padding shows the larger of its own sky light and
-//! the sky fill field's, as `light_at` reads it. Slots come from the world's
-//! budget under the rule the route describes, with no priority for sub-grids,
-//! and while a chunk has none its entry holds the most common level among its
-//! open voxels. When the map stops holding the position, the chunk's slot
-//! is freed in the frame its entry leaves, and a chunk showing its mesh
-//! goes back to the slot rule in [`slot`](crate::light::slot).
+//! # What it holds
 //!
-//! **When entries are written.** Upkeep runs in `PostUpdate`, after
-//! transform propagation and after the last change to a chunk's tag, and an
-//! entry is written only when the positions held change or the tag at one
-//! of them does. The writes go to the render world in the same extract as
-//! the chunks' tags and the light texture's slots, so an entry never names a
-//! slot its chunk gave up in an earlier frame. Nothing is written while the
-//! sub-grids and the tags they touch stay as they are.
+//! Each sub-grid adds every level-0 world chunk position that the box around
+//! its solid voxels touches, placed by the pose drawn this frame and padded by
+//! one voxel. A sub-grid with no solid voxel adds none. Positions are on the
+//! grid of the world, so the map never holds the chunks of a sub-grid.
 //!
-//! **Cost.** Upkeep grows with the world chunk positions the sub-grids'
-//! boxes touch, and a tumbling sub-grid's box touches more of them than a
-//! still one's. Slots go to the chunks of air near sub-grids whose light
-//! varies, and making a slot's bytes grows with the chunk's voxels. Each
-//! entry takes 16 bytes of texture, and the table keeps at least twice as
-//! many entries' room as it holds. When it runs out of room it doubles,
-//! replacing its texture, and every entry is written again in that frame.
-//! It never shrinks. A world makes its tag map in the frame its first
-//! sub-grid exists, and a world without light propagation makes none.
+//! Each position holds the tag of the chunk the screen shows there, in the
+//! encoding [`route`](crate::light::route) describes:
 //!
-//! **The shader.** The world's materials bind the map's texture at binding
-//! 202, and the shader looks up the world chunk in front of a sub-grid's
-//! face in it: see [`material`](crate::light::material). Until the world makes its
-//! tag map they bind a placeholder of one empty entry, where every lookup
-//! misses, which has no upkeep. Each time the table grows into a new
-//! texture, the materials bind it in the same frame.
+//! - A position with a level-0 chunk holds the tag of that chunk.
+//! - A position covered by a coarse chunk holds the tag of the coarse chunk,
+//!   whose LOD bits say how wide its cells are.
+//! - A position of hinted air holds levels: see [Hinted air](#hinted-air).
+//! - Any other position with no chunk showing a tag, such as one past the
+//!   spawning distance, holds sky 15 and voxel 0 in white, as open sky with no
+//!   emissive voxels does.
+//!
+//! A tag carries the light colour of its chunk, so the entries of the map
+//! carry it too.
+//!
+//! # Slots near a sub-grid
+//!
+//! While the map holds a position, the route keeps the level-0 world chunk
+//! there, including a chunk of air with no mesh. It gives that chunk a slot,
+//! unless every one of its open voxels holds one sky light level and one voxel
+//! light level, and so does every open voxel that the shell of its slot copies
+//! from its face neighbours. The bytes of the slot are made from the light the
+//! world view already stores, so no relight runs. A chunk of air with no solid
+//! in its padding shows the larger of its own sky light and the sky light of
+//! the sky fill field, as `light_at` reads it.
+//!
+//! Slots come from the budget of the world under the rule the route
+//! describes, with no priority for sub-grids. While a chunk has no slot, its
+//! entry holds the most common level among its open voxels. When the map stops
+//! holding the position, the slot of the chunk is freed in the frame its entry
+//! leaves. A chunk showing its mesh then goes back to the slot rule in
+//! [`slot`](crate::light::slot).
+//!
+//! # When entries are written
+//!
+//! Upkeep runs in `PostUpdate`, after transform propagation and after the last
+//! change to the tag of a chunk. It writes an entry only when the positions
+//! held change, or the tag at one of them does. The writes go to the render
+//! world in the same extract as the tags of the chunks and the slots of the
+//! light texture, so an entry never names a slot its chunk gave up in an
+//! earlier frame. Nothing is written while the sub-grids and the tags they
+//! touch stay as they are.
+//!
+//! # Cost
+//!
+//! Upkeep grows with the world chunk positions the boxes of the sub-grids
+//! touch. A tumbling sub-grid has a box that touches more of them than a still
+//! one does. Slots go to the chunks of air near sub-grids whose light varies,
+//! and making the bytes of a slot grows with the voxels of the chunk.
+//!
+//! Each entry takes 16 bytes of texture, and the table keeps room for at least
+//! twice as many entries as it holds. When it runs out of room it doubles,
+//! replacing its texture, and every entry is written again in that frame. It
+//! never shrinks. A world makes its tag map in the frame its first sub-grid
+//! exists, and a world without light propagation makes none.
+//!
+//! # The shader
+//!
+//! The materials of the world bind the texture of the map at binding 202. The
+//! shader looks up in it the world chunk in front of the face of a sub-grid:
+//! see [`material`](crate::light::material). Until the world makes its tag
+//! map, the materials bind a placeholder of one empty entry, where every
+//! lookup misses, which has no upkeep. Each time the table grows into a new
+//! texture, the materials bind the new texture in the same frame.
 //!
 //! # Hinted air
 //!
-//! A position of hinted air within the spawning distance of a camera holds
-//! the most common level among the open voxels of its light entry, if it
-//! has one, with the most common light colour among those at that voxel
-//! light level. Otherwise it holds what `light_at` reads at its middle voxel
-//! with sky fill left out: sky 15 if the column above that voxel is open
-//! and 0 if not, and voxel 0, or sky 0 with sky light off. The column is
-//! walked in a task under
-//! `JobKind::HintedColumn`, and the position holds sky 15 until the answer
-//! lands. Its answer is kept while the position stays in the map, and it
-//! walks again after any voxel edit of the world, a `reset_light` or a
-//! change of light settings, keeping its old answer until the new one
-//! lands: see [`columns`]. This costs one walk for each position of hinted
-//! air a sub-grid's box comes to touch, and one for each such position held
-//! after each of those changes. Hinted air never gets a light entry or a
-//! slot for a sub-grid.
+//! A position of hinted air within the spawning distance of a camera holds the
+//! light of its light entry, if it has one. Its sky light level and its voxel
+//! light level are each the most common among the open voxels of the entry.
+//! Its light colour is the most common light colour among the open voxels at
+//! that voxel light level.
+//!
+//! Otherwise the position holds what `light_at` reads at its middle voxel with
+//! sky fill left out. That is sky 15 if the column above the voxel is open and
+//! sky 0 if not, with voxel 0. With sky light off it is sky 0.
+//!
+//! The column is walked in a task under `JobKind::HintedColumn`, and the
+//! position holds sky 15 until the answer lands. The answer is kept while the
+//! position stays in the map. The column walks again after any voxel edit of
+//! the world, a `reset_light` or a change of light settings, and the position
+//! keeps its old answer until the new one lands: see [`columns`].
+//!
+//! This costs one walk for each position of hinted air the box of a sub-grid
+//! comes to touch, and one for each such position held after each of those
+//! changes. Hinted air never gets a light entry or a slot for a sub-grid.
 //!
 //! # The table
 //!
-//! The table is open addressing with linear probing, held in an
-//! `Rgba32Uint` 2D texture with one texel per entry: the position's x, y and
-//! z as `u32`s, then the tag. Entry `i` is texel `(i % TABLE_WIDTH, i /
+//! The table is open addressing with linear probing. It is held in an
+//! `Rgba32Uint` 2D texture with one texel per entry: the x, y and z of the
+//! position as `u32`s, then the tag. Entry `i` is texel `(i % TABLE_WIDTH, i /
 //! TABLE_WIDTH)`. A lookup starts at [`hash`] of the position masked by the
-//! capacity, a power of two, and steps to the next entry, wrapping at the
-//! end, until it finds the position or an entry whose tag is [`EMPTY`]. A
-//! removal shifts the entries after it back instead of leaving a marker, so
-//! that a lookup stops at the first empty entry. A shader reading the table
-//! must follow these steps exactly, so it stops where the CPU's lookup
-//! does.
+//! capacity, a power of two. It steps to the next entry, wrapping at the end,
+//! until it finds the position or an entry whose tag is [`EMPTY`]. A removal
+//! shifts the entries after it back instead of leaving a marker, so that a
+//! lookup stops at the first empty entry. A shader reading the table must
+//! follow these steps exactly, so it stops where the lookup on the CPU does.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::MeshTag;

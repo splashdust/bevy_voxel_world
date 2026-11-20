@@ -1,5 +1,11 @@
-//! Tests of light colour at LOD level 0, read through `light_at`. Sky light is
-//! off in all of them.
+//! Light colours at LOD level 0
+//!
+//! This module streams worlds of lamps that give off declared light colours,
+//! and reads their light back through `light_at`. Other tests check that the
+//! chunk materials of a world carry the `LIGHT_COLOR` shader def exactly when
+//! the world gives off a light colour other than white.
+//!
+//! Sky light is off in every test, so only voxel light is compared.
 
 use std::sync::Arc;
 
@@ -27,12 +33,13 @@ const BLUE_LAMP: u8 = 5;
 /// The middle voxel of the chunk at the origin.
 const MIDDLE: IVec3 = IVec3::splat(16);
 
-/// How far a light colour read back may be from the one declared: a step of
-/// its packing.
+/// How far each component of a light colour read back may be from the one
+/// declared. The packing holds a component in steps of 1/127.
 const STEP: f32 = 1.0 / 127.0;
 
 fn orange() -> LinearRgba {
-    // `css::ORANGE` scaled so its brightest component is 1.
+    // A light colour counts only by its hue and saturation, so an orange lamp
+    // gives off `css::ORANGE` scaled to a brightest component of 1.
     let linear = LinearRgba::from(css::ORANGE);
     LinearRgba::rgb(1.0, linear.green / linear.red, linear.blue / linear.red)
 }
@@ -44,8 +51,10 @@ fn close(a: LinearRgba, b: LinearRgba) -> bool {
         .all(|(a, b)| (a - b).abs() <= STEP)
 }
 
-/// A world of air with `lamps` in it, each of a material, with a white lamp
-/// [`LAMP`], an orange one and a blue one, all at level 15.
+/// Returns a world of air with `lamps` in it, each a position and a material.
+///
+/// Three materials are emissive, all at level 15. [`LAMP`] is white,
+/// `ORANGE_LAMP` is orange and `BLUE_LAMP` is blue.
 fn lamps(lamps: Vec<(IVec3, u8)>) -> LampWorld {
     LampWorld {
         scene: Arc::new(move |position| {
@@ -64,8 +73,8 @@ fn lamps(lamps: Vec<(IVec3, u8)>) -> LampWorld {
     }
 }
 
-/// The light of every voxel of the chunk at the origin, once the world has
-/// settled.
+/// Settles `world` and returns the light of every voxel of the chunk at the
+/// origin.
 fn origin_light(world: LampWorld) -> Vec<(IVec3, LightLevels)> {
     let mut app = settled(world);
     chunk_light(&mut app, IVec3::ZERO).expect("the origin chunk's light")
@@ -204,7 +213,8 @@ fn at_reach_14_256_levels_read_the_same_colours_as_16() {
 
 #[test]
 fn an_edit_recolouring_a_lamp_recolours_its_pool() {
-    // A lamp near the chunk's +X face, so its pool reaches the chunk beside.
+    // The lamp stands near the +X face of the chunk at the origin, so its light
+    // reaches into the chunk beside it.
     let lamp = IVec3::new(28, 16, 16);
     let mut app = settled(lamps(vec![(lamp, LAMP)]));
     let beside = lamp - IVec3::new(5, 0, 0);
@@ -232,15 +242,17 @@ fn an_edit_recolouring_a_lamp_recolours_its_pool() {
     }
 }
 
-/// The chunk position the camera stands in for [`light_entry_world`].
+/// The chunk position that the camera stands in for [`light_entry_world`].
 const CAMERA_CHUNK: IVec3 = IVec3::new(4, 0, 0);
 
-/// The orange lamp of [`light_entry_world`].
+/// The position of the orange lamp of [`light_entry_world`].
 const ENTRY_LAMP: IVec3 = IVec3::new(96, 16, 16);
 
-/// An orange lamp on the -X face of the chunk position west of
-/// [`CAMERA_CHUNK`], with every chunk position west of that hinted air, so the
-/// lamp touches the hinted air beside it, which holds a light entry.
+/// Returns a world with an orange lamp on the -X face of the chunk position
+/// west of [`CAMERA_CHUNK`]. Every chunk position further west is hinted air.
+///
+/// The lamp is a solid that touches the hinted air beside it, so that chunk
+/// position holds a light entry.
 fn light_entry_world() -> LampWorld {
     LampWorld {
         hints: Some(Arc::new(|position: IVec3| {
@@ -285,8 +297,8 @@ fn a_light_entry_in_hinted_air_reads_its_colour_and_hinted_air_without_one_white
 
 type LitMaterial = VoxelWorldMaterial<DefaultVoxelMaterial>;
 
-/// Whether each of the world's chunk materials carries the `LIGHT_COLOR`
-/// shader def in its key.
+/// Returns, for each chunk material of the world, whether the material
+/// carries the `LIGHT_COLOR` shader def in its key.
 fn material_keys(app: &mut App) -> Vec<bool> {
     let handles = chunk_materials::<LampWorld, LitMaterial>(app);
     let materials = app.world().resource::<Assets<LitMaterial>>();

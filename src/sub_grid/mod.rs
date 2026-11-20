@@ -1,76 +1,83 @@
-//! Sub-grids: sets of voxels on grids of their own, each belonging to one
-//! voxel world, that a game moves freely against the world's grid.
+//! Sub-grids
+//!
+//! This module holds sub-grids: sets of voxels on grids of their own, each
+//! belonging to one voxel world, that a game moves freely against the grid of
+//! the world. Its parts spawn the chunks of each sub-grid from its commits,
+//! keep the pose of each sub-grid, and land the handovers that move voxels
+//! between grids.
 //!
 //! A sub-grid is an entity carrying [`SubGrid<C>`], made with
 //! [`VoxelWorld::spawn_sub_grid`] or [`VoxelWorld::insert_sub_grid`], and
-//! named by a [`Grid`]. [`VoxelWorld::grid`] and [`VoxelWorld::grid_mut`]
-//! read and edit any grid with the calls the world's own methods use.
+//! named by a [`Grid`]. [`VoxelWorld::grid`] and [`VoxelWorld::grid_mut`] read
+//! and edit any grid with the calls the methods of the world itself use.
 //!
 //! A sub-grid has no generator, so every voxel it holds is a voxel edit, and
 //! its edits are exactly its solid voxels. Setting air or `Unset` removes a
-//! voxel, and a position with no solid reads air. Its edits commit in the
-//! next `PreUpdate`, with the world's.
+//! voxel, and a position with no solid reads air. The edits of a sub-grid
+//! commit in the next `PreUpdate`, with those of the world.
 //!
 //! [`VoxelWorld::lift`](crate::prelude::VoxelWorld::lift) moves the solid
 //! voxels a game picks out of any grid into a new sub-grid, which shows them
-//! where they were, and leaves air behind. Lifting from a sub-grid cuts it
-//! in two. [`Lifted`] says when the move has landed.
+//! where they were, and leaves air behind. Lifting from a sub-grid cuts it in
+//! two. [`Lifted`] says when the move has landed.
 //!
-//! [`VoxelWorld::stamp`](crate::prelude::VoxelWorld::stamp) writes a
-//! sub-grid's voxels into any other grid, snapped to the nearest pose that
-//! lines up with it, and despawns the sub-grid once [`Stamped`] says the move
-//! has landed. Together they move voxels every way: from the world into a
-//! sub-grid, from a sub-grid into the world, from one sub-grid into a new
+//! [`VoxelWorld::stamp`](crate::prelude::VoxelWorld::stamp) writes the voxels
+//! of a sub-grid into any other grid, snapped to the nearest pose that lines
+//! up with it. It despawns the sub-grid once [`Stamped`] says the move has
+//! landed. Together, lift and stamp move voxels every way: from the world into
+//! a sub-grid, from a sub-grid into the world, from one sub-grid into a new
 //! one, and from one sub-grid into another.
 //!
 //! # Chunks
 //!
-//! A sub-grid shows through chunks of its own, built by the world's chunk
-//! tasks and meshed by the world's mesher, material and mesh cache, so
-//! identical voxels in two grids share one mesh. Each commit spawns and
-//! retires them in place of the streaming policy: after it, the sub-grid
-//! has a chunk at LOD level 0 at every chunk position whose padded voxels
-//! hold one of its solid voxels, and no other. A chunk's voxels are the
-//! sub-grid's voxel edits over air, so the world's voxel lookup delegate and
-//! fill hints are never called for them. A sub-grid with no solid voxel has
-//! no chunks, and lives on until it is despawned.
+//! A sub-grid shows through chunks of its own. The chunk tasks of the world
+//! build them, and the mesher, material and mesh cache of the world mesh them,
+//! so identical voxels in two grids share one mesh. Each commit spawns and
+//! retires them in place of the streaming policy. After the commit, the
+//! sub-grid has a chunk at LOD level 0 at every chunk position whose padded
+//! voxels hold one of its solid voxels, and no other. The voxels of such a
+//! chunk are the voxel edits of the sub-grid over air, so the voxel lookup
+//! delegate and fill hints of the world are never called for them. A sub-grid
+//! with no solid voxel has no chunks, and lives on until it is despawned.
 //!
-//! A sub-grid's chunks start their chunk tasks ahead of streamed chunks, as
-//! edited chunks do, and count towards the world's
+//! The chunks of a sub-grid start their chunk tasks ahead of streamed chunks,
+//! as edited chunks do. They count towards the
 //! [`max_active_chunk_threads`](crate::prelude::VoxelWorldConfig::max_active_chunk_threads)
-//! with the world's own. A commit's cost grows with the chunks its edits
-//! reach, not with the sub-grid's size. Moving the camera never retires them,
-//! and [`VoxelWorld::regenerate_chunks`] leaves them alone.
+//! of the world together with its own chunks. The cost of a commit grows with
+//! the chunks its edits reach, not with the size of the sub-grid. Moving the
+//! camera never retires these chunks, and [`VoxelWorld::regenerate_chunks`]
+//! leaves them alone.
 //!
 //! # Light
 //!
-//! In a world with light propagation, a sub-grid's voxels stay out of the
-//! world's light: they block none of its light and spread none into it.
-//! A sub-grid's emissive voxels light the sub-grid itself, with the world's
-//! voxel reach, precision and shape, and `GridVoxels::light_at` reads that
-//! light on top of the world's light where the sub-grid is. Its faces show
-//! the same: the shader reads the world's light at each face's world
-//! position, so a sub-grid darkens as it enters a cave and brightens as it
-//! passes the world's lamps. Only voxel edits to the sub-grid and changes
-//! of light settings solve its light again: moving it costs no solve.
+//! In a world with light propagation, the voxels of a sub-grid stay out of
+//! the light of the world: they block none of its light and spread none into
+//! it. The emissive voxels of a sub-grid light the sub-grid itself, with the
+//! voxel light reach, light precision and `LightShape` of the world.
+//! `GridVoxels::light_at` reads that light on top of the light of the world
+//! where the sub-grid is. The faces of the sub-grid show the same. The shader
+//! reads the light of the world at the world position of each face, so a
+//! sub-grid darkens as it enters a cave and brightens as it passes the
+//! emissive voxels of the world. Only voxel edits to the sub-grid and changes
+//! of light settings solve its light again, so moving it costs no solve.
 //!
-//! Each chunk is a child of the sub-grid's entity, placed by its chunk key as
-//! the world's chunks are under the world's root, so it moves with the
-//! sub-grid. The crate copies no component from the sub-grid to its chunks:
-//! `Visibility` inherits through the hierarchy, and a game gives the chunks
-//! `RenderLayers` or `NotShadowCaster` by putting Bevy's `Propagate` of them
-//! on the sub-grid. A sub-grid spawned under the world's root picks up a
-//! layer the root propagates, until the game gives the sub-grid another
-//! parent.
+//! Each chunk is a child of the sub-grid entity, placed by its chunk key as
+//! the chunks of the world are placed under the root of the world, so it
+//! moves with the sub-grid. The crate copies no component from the sub-grid
+//! to its chunks. `Visibility` inherits through the hierarchy. A game gives
+//! the chunks `RenderLayers` or `NotShadowCaster` by putting a Bevy
+//! `Propagate` of the component on the sub-grid. A sub-grid spawned under the
+//! root of the world picks up a layer the root propagates, until the game
+//! gives the sub-grid another parent.
 //!
-//! The meshing delegate and texture index mapper get a sub-grid chunk's
-//! position on the sub-grid's own grid, and aren't told which grid it is on,
-//! so a chunk meshes the same whichever grid holds its voxels.
+//! The meshing delegate and the texture index mapper get the position of a
+//! sub-grid chunk on the grid of the sub-grid, and aren't told which grid it
+//! is on. So a chunk meshes the same whichever grid holds its voxels.
 //!
-//! The chunk messages fire for a sub-grid's chunks with `grid` naming the
-//! sub-grid, and keys on its grid. A physics integration rebuilds a chunk's
-//! collider on [`ChunkPublished`](crate::prelude::ChunkPublished) by reading
-//! the chunk through its grid, which works for every grid:
+//! The chunk messages fire for the chunks of a sub-grid with `grid` naming the
+//! sub-grid, and with keys on its grid. A physics integration rebuilds the
+//! collider of a chunk on [`ChunkPublished`](crate::prelude::ChunkPublished)
+//! by reading the chunk through its grid, which works for every grid:
 //!
 //! ```
 //! use bevy::prelude::*;
@@ -100,74 +107,77 @@
 //!
 //! Voxels moving from one grid to another never show twice or not at all. A
 //! commit that gives a sub-grid its first solid voxel, or takes its last,
-//! lands as one handover: every chunk the commit spawns or makes stale, in
-//! every grid, keeps showing what it showed, its mesh and its published
-//! voxel data, until all of them have a finished chunk task that includes
-//! the commit. Then all of them publish in the same frame, and the
-//! sub-grid's chunks the commit retires despawn in that frame. So a system
-//! that fills a new sub-grid and sets the same voxels to air in the world
-//! shows them move in one frame, and colliders rebuilt on
-//! [`ChunkPublished`](crate::prelude::ChunkPublished) swap in that frame
-//! too. A commit that fills or empties no sub-grid publishes each chunk as
-//! its task finishes.
+//! lands as one handover. Every chunk the commit spawns or makes stale, in
+//! every grid, keeps showing what it showed, its mesh and its published voxel
+//! data, until all of them have a finished chunk task that includes the
+//! commit. Then all of them publish in the same frame, and the chunks of the
+//! sub-grid that the commit retires despawn in that frame. So a system that
+//! fills a new sub-grid and sets the same voxels to air in the world shows
+//! them move in one frame. Colliders rebuilt on
+//! [`ChunkPublished`](crate::prelude::ChunkPublished) swap in that frame too.
+//! A commit that fills or empties no sub-grid publishes each chunk as its task
+//! finishes.
 //!
-//! In a lit world, a handover also waits until the relights its commit
-//! starts have solved, in every grid: the new sub-grid chunks' first solves,
-//! the chunks around a lift's hole and those under a stamp. Then light
-//! changes with the meshes, in the same frame, so a lifted piece shows its
-//! lamps from its first frame and the hole's walls never flash dark. The
-//! relight ripple that light calls for isn't waited for: it starts as the
-//! handover lands, and lands later, as after any edit. So a lit handover
-//! lasts as long as its slowest relight, which grows with the world's light
-//! reach and with the light colours that relight runs: one for each colour
-//! of emissive voxel whose light reaches its chunk.
+//! In a lit world, a handover also waits until the relights its commit starts
+//! have solved, in every grid. These are the first solves of the new sub-grid
+//! chunks, and the relights of the chunks around the hole of a lift and of
+//! those under a stamp. Light then changes with the meshes, in the same frame.
+//! So a lifted piece shows the light of its emissive voxels from its first
+//! frame, and the walls of the hole never flash dark. The handover doesn't
+//! wait for the relight ripple that light calls for. The ripple starts as the
+//! handover lands, and lands later, as after any edit.
 //!
-//! A held chunk's state turns Ready when its task finishes, before its
-//! result publishes, so a game waits for `ChunkPublished` rather than for
-//! Ready to read it. An edit made every frame in a held chunk doesn't hold
-//! the handover, since the task it supersedes started after the commit.
+//! So a lit handover lasts as long as its slowest relight. That relight grows
+//! with the light reach of the world and with the light colours it runs: one
+//! run for each light colour of the emissive voxels within light reach of its
+//! chunk.
 //!
-//! Handovers that hold a chunk in common fold into one and land together.
-//! So lifting voxels from the same chunks every frame holds the folded
-//! handover until the lifting stops, and a sub-grid that flips between
-//! empty and not every frame, beside chunks edited every frame, keeps
-//! folding handovers and can hold its chunks back for as long. A grid
-//! despawned mid-handover drops out of it, and the other chunks land when
-//! they are ready.
+//! The state of a held chunk turns Ready when its task finishes, before its
+//! result publishes. So a game waits for `ChunkPublished` rather than for
+//! Ready to read the chunk. An edit made every frame in a held chunk doesn't
+//! hold the handover, since the task it supersedes started after the commit.
+//!
+//! Handovers that hold a chunk in common fold into one and land together. So
+//! lifting voxels from the same chunks every frame holds the folded handover
+//! until the lifting stops. A sub-grid that flips between empty and not every
+//! frame, beside chunks edited every frame, keeps folding handovers, and can
+//! hold its chunks back for as long. A grid despawned mid-handover drops out
+//! of it, and the other chunks land when they are ready.
 //! [`VoxelWorld::despawn_sub_grid`](crate::prelude::VoxelWorld::despawn_sub_grid)
-//! waits for the handover holding a sub-grid's chunks to land.
+//! waits for the handover holding the chunks of a sub-grid to land.
 //!
-//! A stamp's commit lands as one handover even when it fills or empties no
-//! sub-grid, as when one system lifts voxels out of a sub-grid and stamps
-//! the new sub-grid into the world: the new sub-grid is empty before the
-//! commit and after it. A world applying that commit from another world's
-//! edit deltas gets only the deltas of the grid lifted from and the grid
-//! stamped into, which fill or empty no sub-grid, so there the two grids'
-//! chunks can publish a frame apart.
+//! The commit of a stamp lands as one handover even when it fills or empties
+//! no sub-grid. That happens when one system lifts voxels out of a sub-grid
+//! and stamps the new sub-grid into the world, since the new sub-grid is
+//! empty before the commit and after it. A world applying that commit from
+//! the edit deltas of another world gets only the deltas of the grid lifted
+//! from and the grid stamped into. Those fill or empty no sub-grid, so there
+//! the chunks of the two grids can publish a frame apart.
 //!
-//! A handover's cost grows with the chunks it holds. Each one keeps its
+//! The cost of a handover grows with the chunks it holds. Each chunk keeps its
 //! newest finished chunk task until the handover lands.
 //!
 //! # Syncing and saving
 //!
-//! A sub-grid's voxel edits travel and save as the world's do: its commits
-//! write a [`SubGridEditsCommitted`](crate::prelude::SubGridEditsCommitted)
-//! per changed chunk, and [`GridVoxels::full_delta`],
+//! The voxel edits of a sub-grid travel and save as those of the world do. Its
+//! commits write a
+//! [`SubGridEditsCommitted`](crate::prelude::SubGridEditsCommitted) per
+//! changed chunk, and [`GridVoxels::full_delta`],
 //! [`GridVoxels::edited_chunks`] and [`GridVoxelsMut::apply_delta`] work on
 //! any grid. The [`edits`](crate::edits) module docs give the rules, how a
 //! lift and a stamp travel as their parts, and the order a load runs in.
 //!
 //! # Lifetime and pose
 //!
-//! The crate keeps a record of each world's live sub-grids, which a system
-//! reads at once, before its commands apply, so the system that spawns a
-//! sub-grid can fill it. As a sub-grid's entity despawns, or its
+//! The crate keeps a record of the live sub-grids of each world. A system
+//! reads the record at once, before its commands apply, so the system that
+//! spawns a sub-grid can fill it. As the entity of a sub-grid despawns, or its
 //! [`SubGrid<C>`] is removed, the sub-grid ends and its voxel edits go with
 //! it. Its chunks despawn in the next `PreUpdate`, each with its
 //! [`ChunkWillDespawn`](crate::prelude::ChunkWillDespawn).
 //!
-//! After transform propagation in `PostUpdate`, the crate keeps each
-//! sub-grid's pose against the world's root, which [`GridVoxels::pose`]
+//! After transform propagation in `PostUpdate`, the crate keeps the pose of
+//! each sub-grid against the root of the world, which [`GridVoxels::pose`]
 //! reads: the pose shown last frame.
 
 use std::{
@@ -841,29 +851,34 @@ impl<'a, C: VoxelWorldConfig> GridVoxels<'a, C> {
         }
     }
 
-    /// The light a face of this grid shows at the voxel at `position`, as
-    /// levels from 0 to 15.
+    /// Returns the light a face of this grid shows at the voxel at
+    /// `position`, as levels from 0 to 15.
     ///
     /// For the world, it reads what
-    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) does.
-    /// In a sub-grid, it reads the world's light at the world voxel holding
-    /// the voxel's centre, placed by [`pose`](Self::pose), with the
-    /// sub-grid's own voxel light, from its emissive voxels: the brighter of
-    /// the two levels, and their colours mixed as light of several colours
-    /// mixes anywhere. A lamp on a sub-grid lights only the sub-grid: the
-    /// world's light never shows it.
+    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) reads.
+    /// In a sub-grid, it reads the light of the world at the world voxel
+    /// holding the centre of the voxel, placed by [`pose`](Self::pose). It
+    /// adds the voxel light that the emissive voxels of the sub-grid give:
+    ///
+    /// - The voxel light level is the brighter of the two levels.
+    /// - The light colour is the two light colours mixed, as light of several
+    ///   colours mixes anywhere in the world.
+    ///
+    /// An emissive voxel on a sub-grid lights only the sub-grid. The light of
+    /// the world never shows it.
     ///
     /// Under [`SubGridSky::Enclosed`](crate::prelude::SubGridSky::Enclosed),
-    /// the sub-grid's enclosure caps the world's light at an open voxel: its
-    /// sky, and with sky light on its voxel light too. So a closed cabin's
-    /// inside reads no sky, and the world's lamps don't light it through its
-    /// walls. Where the sub-grid has no chunk, such as deep inside a hangar,
-    /// the voxel is open where a line along the sub-grid's axes from it
-    /// leaves the sub-grid, and closed in elsewhere, which is darker than the
-    /// truth within sky reach of an opening.
+    /// the enclosure of the sub-grid caps the light of the world at an open
+    /// voxel. It caps the sky light, and with sky light on it caps the voxel
+    /// light too. So the inside of a closed cabin reads no sky, and the
+    /// emissive voxels of the world don't light it through its walls. Where
+    /// the sub-grid has no chunk, such as deep inside a hangar, the voxel is
+    /// open where a line from it along an axis of the sub-grid leaves the
+    /// sub-grid. Elsewhere it is closed in, which reads darker than the truth
+    /// within sky light reach of an opening.
     ///
-    /// Returns `None` when the world has no light propagation, or where the
-    /// world's `light_at` says nothing of the world voxel.
+    /// Returns `None` when the world has no light propagation, or where
+    /// `VoxelWorld::light_at` says nothing of the world voxel.
     #[cfg(feature = "light_propagation")]
     pub fn light_at(&self, position: IVec3) -> Option<crate::light::LightLevels> {
         let light = self.light.as_ref()?;

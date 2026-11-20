@@ -56,7 +56,8 @@ fn exponential_to_black_fades_from_1_at_level_15_to_black_at_level_1() {
     assert_eq!(curve.at(0.0), 0.0);
     assert_eq!(curve.at(1.0), 0.0);
     assert!(close(curve.at(15.0), 1.0));
-    // (0.7^(15 - level) - 0.7^14) / (1 - 0.7^14), worked out by hand.
+    // The expected brightness is `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`,
+    // with each power of 0.7 worked out by hand.
     let floor = 0.006_782_231;
     for (level, power) in [(14.0, 0.7), (8.0, 0.082_354_3), (2.0, 0.009_688_901)] {
         let expected = (power - floor) / (1.0 - floor);

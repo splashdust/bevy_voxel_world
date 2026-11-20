@@ -221,8 +221,11 @@ fn visible_voxels(occupancy: &Occupancy) -> Vec<u32> {
     visible
 }
 
-/// Whether light changed between `old` and `new` at a voxel the chunk's own
-/// faces show: a level, or the light colour of voxel light.
+/// Whether light changed between `old` and `new` at a voxel that the faces of
+/// the chunk itself show.
+///
+/// A change counts if the sky light level, the voxel light level or the light
+/// colour of the voxel light differs there.
 fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
     let levels = old.sky != new.sky || old.voxel != new.voxel;
     let colors = old.color != new.color;
@@ -247,9 +250,11 @@ fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
     })
 }
 
-/// Whether the light colour of voxel light at the chunk's voxel `x`, `y`,
-/// `z` differs between `old` and `new`, where `new` has voxel light there.
-/// Without voxel light, no light colour shows.
+/// Whether the light colour of the voxel light at voxel `x`, `y`, `z` of the
+/// chunk differs between `old` and `new`.
+///
+/// It counts only where `new` has voxel light, since a voxel without voxel
+/// light shows no light colour.
 fn color_changed(
     old: &ChunkLight,
     new: &ChunkLight,
@@ -261,10 +266,13 @@ fn color_changed(
         && old.color.packed_at(x, y, z) != new.color.packed_at(x, y, z)
 }
 
-/// Whether light changed between `old`, `None` for none, and `new` at an
-/// open voxel on `face` in front of a solid voxel of the neighbour across
-/// it, whose occupancy is `solid`: a level, or the light colour of voxel
-/// light.
+/// Whether light changed between `old` and `new` at an open voxel on `face`
+/// that lies in front of a solid voxel of the neighbour across that face.
+///
+/// `solid` is the occupancy of that neighbour. A change counts if the sky
+/// light level, the voxel light level or the light colour of the voxel light
+/// differs there. With `old` as `None`, the levels before count as 0, and
+/// light colours aren't compared.
 fn shell_change_shows(
     old: Option<&ChunkLight>,
     new: &ChunkLight,

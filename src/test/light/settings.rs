@@ -268,8 +268,11 @@ fn changing_the_emissive_list_settles_on_the_reference_for_the_new_list_with_no_
     );
 }
 
-/// A stone at every fourth voxel along each axis, so every chunk holds both
-/// stone and air, with a lamp in the chunk at the origin.
+/// Returns the voxels of a world with a stone at every fourth voxel along
+/// each axis, and a lamp in the chunk at the origin.
+///
+/// Every chunk then has an open voxel beside a solid, so a settings relight
+/// takes in every spawned chunk.
 fn lattice(p: IVec3) -> WorldVoxel {
     if p == IVec3::new(17, 17, 17) {
         WorldVoxel::Solid(LAMP)
@@ -291,8 +294,9 @@ fn an_emissive_list_change_that_finds_the_same_emissive_voxels_relights_each_chu
     settle(&mut app, "the world to stream in");
     let chunks = spawned(&mut app).len() as u64;
     let relights = relights_started(&app);
-    // A material no voxel holds: every chunk finds its emissive voxels again
-    // and they are the ones it had, so no chunk's light changes.
+    // No voxel holds the new material. Each chunk relights once and finds the
+    // emissive voxels it had before. Its light stays the same, so the relight
+    // ripples no further.
     change(&mut app, |world| {
         world.emissive.push((STONE + 100, Emission::level(4.0)))
     });
@@ -382,7 +386,8 @@ pub(super) fn warnings() -> &'static Mutex<Vec<String>> {
                 warnings().lock().unwrap().push(message.0);
             }
         }
-        // Nothing else in the tests sets the global subscriber.
+        // No other code in the tests sets the global subscriber, so this call
+        // can't fail.
         bevy::log::tracing::subscriber::set_global_default(registry().with(Warnings))
             .expect("no other global subscriber");
         Mutex::new(Vec::new())

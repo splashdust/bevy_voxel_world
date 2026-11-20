@@ -256,27 +256,38 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         }
     }
 
-    /// The light at the voxel at `position`, from the finest published chunk
-    /// covering it whose light has landed. Where no chunk's has, a light
-    /// entry holding the voxel gives its light, and otherwise the fill hint
-    /// of its level-0 chunk. `None` if nothing says what is there.
+    /// Returns the light at the voxel at `position`, or `None` where nothing
+    /// says what is there.
+    ///
+    /// The light comes from the first of these that knows it:
+    ///
+    /// 1. The finest published chunk covering the voxel whose light has
+    ///    landed.
+    /// 2. A light entry holding the voxel.
+    /// 3. The fill hint of the level-0 chunk holding the voxel.
     ///
     /// A level-0 chunk reads its light in the world view and its published
-    /// voxels. A chunk of air with no solid in its padding takes no sky
-    /// fill, so its stored light can miss what the field's cell knows: it
-    /// reads the larger of the two.
+    /// voxels. A chunk of air with no solid in its padding takes no sky fill,
+    /// so its stored light can miss what the cell of the sky fill field
+    /// knows. Such a chunk reads the larger of the two.
     ///
-    /// A coarse chunk reads the cell holding the voxel in the copy of its
-    /// slot it keeps in `route`, or else the levels its tag holds, from
-    /// `work`. A solid cell reads the brightest of its six neighbours. A
-    /// coarse chunk with no voxels to mesh, and hinted air holding no light
-    /// entry, walk the column above the voxel on request: see [`request`].
+    /// A coarse chunk reads the cell holding the voxel in the copy of its slot
+    /// that `route` keeps. Without that copy, it reads the levels its tag
+    /// holds, from `work`. A solid cell reads the brightest of its six
+    /// neighbours. A coarse chunk with no voxels to mesh walks the column above
+    /// the voxel on request, and so does hinted air holding no light entry:
+    /// see [`request`].
     ///
-    /// A level-0 chunk and a light entry read the light colour they hold, and
-    /// an emissive voxel its own. A coarse chunk reads its cell's colour in
-    /// the copy of its colour slot, or else its entry's colour with a slot,
-    /// or its tag's without one, and a solid cell takes its brightest
-    /// neighbour's colour with its levels. Everything else reads white.
+    /// The light colour comes with the levels:
+    ///
+    /// - A level-0 chunk and a light entry read the light colour they hold at
+    ///   the voxel. An emissive voxel reads its own light colour.
+    /// - A coarse chunk with a colour slot reads the colour of its cell in the
+    ///   copy of the colour slot. With a slot but no colour slot, it reads the
+    ///   one colour that the entry of its slot holds, and without a slot, the
+    ///   colour of its tag. A solid cell takes the colour of its brightest
+    ///   neighbour along with the levels of that neighbour.
+    /// - Everything else reads white.
     #[allow(clippy::too_many_arguments)]
     pub fn light_at(
         &self,
@@ -496,8 +507,9 @@ pub(crate) struct LightReads<'a, C: VoxelWorldConfig> {
     pub route: Option<&'a route::LightRoute<C>>,
 }
 
-/// The brighter of `a` and `b` in sky light and in voxel light, with the
-/// light colour of the brighter voxel light, `a`'s on a tie.
+/// Returns the brighter of `a` and `b` in sky light, and separately the
+/// brighter in voxel light. The light colour is that of the brighter voxel
+/// light, or the colour of `a` on a tie.
 fn brighter(a: LightLevels, b: LightLevels) -> LightLevels {
     LightLevels {
         sky: a.sky.max(b.sky),
@@ -667,30 +679,37 @@ fn edit_systems<C: VoxelWorldConfig>() -> ScheduleConfigs<ScheduleSystem> {
         .after(crate::sub_grid::SubGrids::<C>::plan_chunks)
 }
 
-/// Compares world `C`'s light config and emissive list with what it last
-/// applied, on frames where the world's config resource changed, and does
-/// the least the difference needs.
+/// Compares the light config and emissive list of world `C` with what it
+/// last applied, on frames where the config resource of the world changed,
+/// and does the least the difference needs.
 ///
-/// A changed look is stored, for the world's material to write into its
-/// uniform on the same frame, and a changed sky record cap applies at once.
-/// A change of reach, shape, the sky rule, sky fill or the emissive list
-/// runs the settings relight: see [`relight_settings`]. A change to the
-/// emissive list of light colours alone runs the recolour relight instead,
-/// which relights only the chunks whose light box holds a recoloured
-/// material: see [`recolor`]. A change of precision
-/// or slot capacity also replaces the world's light texture (see
-/// [`LightRoute::replace_texture`](route::LightRoute::replace_texture)), and
-/// a change of precision relights every loaded chunk and solves every coarse
-/// chunk again, since every level is stored in steps of it. A change of sky fill
-/// or of the sky rule first builds the sky fill field again, at once, from
-/// the loaded chunks and the cells the sky record holds, so the relights
-/// read the new fill. A change of `sub_grid_sky` builds or drops the
-/// sub-grids' line records at once and relights every sub-grid chunk with
-/// an open voxel, nearest a camera first, and no world chunk: see
-/// [`enclosure::switch`](sub_grid::enclosure::switch). Values equal to those last applied start nothing.
+/// What each change does:
 ///
-/// `shown`, and returning `None` after `Some`, are read once at plugin
-/// build: changing them logs a warning once and changes nothing.
+/// - A changed look is stored, for the material of the world to write into
+///   its uniform on the same frame.
+/// - A changed sky record cap applies at once.
+/// - A change of reach, shape, the sky rule, sky fill or the emissive list
+///   runs the settings relight: see [`relight_settings`].
+/// - A change to the emissive list that changes only light colours runs the
+///   recolour relight instead, which relights only the chunks whose light box
+///   holds a recoloured material: see [`recolor`]. Either change to the
+///   emissive list solves again the coarse chunks holding a changed material.
+/// - A change of precision or slot capacity also replaces the light texture
+///   of the world: see
+///   [`LightRoute::replace_texture`](route::LightRoute::replace_texture).
+/// - A change of precision relights every loaded chunk and solves every
+///   coarse chunk again, since every level is stored in steps of it.
+/// - A change of sky fill or of the sky rule first builds the sky fill field
+///   again, at once, from the loaded chunks and the cells the sky record
+///   holds, so that the relights read the new fill.
+/// - A change of `sub_grid_sky` builds or drops the line records of the
+///   sub-grids at once. It relights every sub-grid chunk with an open voxel,
+///   nearest a camera first, and no world chunk: see
+///   [`enclosure::switch`](sub_grid::enclosure::switch).
+///
+/// Values equal to those last applied start nothing. `shown`, and returning
+/// `None` after `Some`, are read once at plugin build: changing them logs a
+/// warning once and changes nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_config<C: VoxelWorldConfig>(
     world: Res<C>,
@@ -722,14 +741,16 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     let emissive = clamped_emission(world.as_ref());
     let applied = &settings.config;
     let sky_changed = config.sky != applied.sky;
-    // A change of light colours alone takes the recolour relight instead.
+    // A change of light colours alone takes the recolour relight instead of
+    // the settings relight.
     let new_emission = (emissive != settings.emissive_materials)
         .then(|| color::EmissionTable::new(&emissive));
     let recolored = new_emission
         .as_ref()
         .and_then(|table| settings.task.emission.recolored(table));
     let emission_changed = new_emission.is_some() && recolored.is_none();
-    // Coarse chunks have no recolour relight, so any change solves them again.
+    // Coarse chunks have no recolour relight, so any change to the emissive
+    // list solves again those holding a changed material.
     let emission_differs = new_emission.is_some();
     // Sky reach changes nothing with sky light off.
     let sky_reach_changed =
@@ -759,7 +780,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
             .set_cap(config.sky_record_cap);
     }
     settings.config.wasm_relight_budget = config.wasm_relight_budget;
-    // It changes no light, so the next solves take it and nothing relights.
+    // Skipping unreached colours changes no light, so the next solves take
+    // the new value and nothing relights.
     if config.skip_unreached_colors != settings.config.skip_unreached_colors {
         settings.config.skip_unreached_colors = config.skip_unreached_colors;
         settings.task = Arc::new(LightTaskSettings {
@@ -791,8 +813,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
             settings.emissive_materials = emissive;
             let old = settings.task.clone();
             recolor(settings.as_mut(), &mut work, table, &changed);
-            // A white world given its first colour, or a coloured one made
-            // white, sets or clears its materials' `LIGHT_COLOR` def.
+            // A white world given its first colour sets the `LIGHT_COLOR` def
+            // of its materials, and a coloured world made white clears it.
             if let Some(route) = route.as_mut() {
                 route.set_light_colors(light_colors(&settings.task.emission));
             }
@@ -840,7 +862,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         )
     });
 
-    // A recolour that comes with a relighting change lands here too.
+    // A recolour that comes with a change that relights reaches the route
+    // here.
     if let (true, Some(route)) = (emission_differs, route.as_mut()) {
         route.set_light_colors(light_colors(&settings.task.emission));
     }
@@ -976,8 +999,10 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
             emission_changed,
         );
     }
-    // The settings relight may skip a chunk of air whose light changes only
-    // in colour, since a colour change alone ripples nowhere.
+    // The settings relight skips some chunks whose light changes only in
+    // colour, such as a chunk of air with no solid in its padding, and a
+    // change of colour alone ripples nowhere. So the chunks around each
+    // recoloured material are marked here too.
     if let Some(changed) = recolored.filter(|changed| !changed.is_empty()) {
         for key in holding_materials(&settings.view, &changed) {
             work.trigger_settings(key);
@@ -985,20 +1010,22 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
     }
 }
 
-/// The recolour relight, for a change to the emissive list that changed the
-/// light colours of the material indices `changed` and nothing else: the
-/// world's chunk tasks and relights solve with `table` from now on, and every
-/// chunk and light entry whose light box holds an emissive voxel of a changed
-/// material is marked for a relight with the settings relights, a sub-grid's
-/// chunks included. Old light shows until new light lands.
+/// Runs the recolour relight, for a change to the emissive list that changed
+/// the light colours of the material indices `changed` and nothing else.
 ///
-/// No level moves, so nothing ripples, and no other chunk's light can
-/// change. The chunks are found from each chunk's note of its emissive
-/// materials, so the cost grows with the chunks in the world view, and not
-/// with their voxels. A relight running for one of them lands, and another
-/// follows. A chunk task solved under the old light colours relights as it
-/// lands, if its light box held a changed material: see
-/// [`LightTaskSettings::recolored`].
+/// From now on the chunk tasks and relights of the world solve with `table`.
+/// Every chunk and light entry whose light box holds an emissive voxel of a
+/// changed material is marked for a relight with the settings relights, the
+/// chunks of sub-grids included. Old light shows until new light lands. With
+/// `changed` empty it does nothing, since the two tables give the same light.
+///
+/// No level moves, so nothing ripples, and the light of no other chunk can
+/// change. The chunks are found from the note each chunk keeps of its
+/// emissive materials, so the cost grows with the chunks in the world view,
+/// not with their voxels. A relight already running for one of them lands,
+/// and another follows it. A chunk task that solved under the old light
+/// colours relights as it lands, if its light box held a changed material:
+/// see [`LightTaskSettings::recolored`].
 fn recolor<C: VoxelWorldConfig>(
     settings: &mut LightSettings<C>,
     work: &mut LightWork<C>,
@@ -1035,10 +1062,14 @@ fn recolor<C: VoxelWorldConfig>(
     }
 }
 
-/// The chunks and light entries that hold, or lie beside, an emissive voxel
-/// of a material index in `materials`, as the notes of their emissive
-/// materials tell, hinted air's included: each holder's own chunk and the 26
-/// around it in its grid. A sub-grid's chunks count as the world's do.
+/// Returns the chunks and light entries that hold, or lie beside, an emissive
+/// voxel of a material index in `materials`. Those are the chunks and light
+/// entries at each holder and at the 26 chunk positions around it in its
+/// grid.
+///
+/// The holders are found from the note each one keeps of its emissive
+/// materials, and can be chunks, light entries or hinted air. The chunks of a
+/// sub-grid count as the chunks of the world do.
 fn holding_materials(view: &LightView, materials: &[u16]) -> Vec<GridKey> {
     let view = view.read();
     let mut holding = HashSet::new();
@@ -1078,19 +1109,19 @@ fn holding_materials(view: &LightView, materials: &[u16]) -> Vec<GridKey> {
     holding.into_iter().collect()
 }
 
-/// The settings relight: marks for a relight every world chunk with an open
-/// voxel touching a solid by a face, an edge or a corner, counting the solids
-/// in its padding, and every chunk whose direct sky changed. Old light shows
-/// until new light lands. A change of light colour alone doesn't run it: see
-/// [`recolor`].
+/// Runs the settings relight: marks for a relight every world chunk with an
+/// open voxel touching a solid by a face, an edge or a corner, counting the
+/// solids in its padding. It also marks every light entry, and every chunk
+/// whose direct sky changed. Old light shows until new light lands. A change
+/// of light colour alone runs [`recolor`] instead.
 ///
 /// A chunk with open and solid voxels always has such an open voxel, and a
 /// chunk of air has one exactly when a solid lies in its padding. A chunk of
-/// air with no solid in its padding keeps its light, which may then be a
-/// setting behind: within reach of nothing, only its direct sky could change,
-/// and that relights it. A solid chunk has no open voxel, and relights only
-/// when `emission_changed`, to find its emissive voxels again for its
-/// neighbours' solves.
+/// air with no solid in its padding keeps its light, which may then lag a
+/// setting behind. No face reads that light, and a change to its direct sky
+/// relights it. A solid chunk has no open voxel. It relights only when
+/// `emission_changed`, to find its emissive voxels again for the solves of
+/// its neighbours.
 ///
 /// Every sub-grid chunk with an open voxel relights too, and a solid one
 /// when `emission_changed`. A sub-grid has a chunk only where its padded
@@ -1155,8 +1186,10 @@ fn relight_settings<C: VoxelWorldConfig>(
     }
 }
 
-/// Makes `route` read the light colours of world `C`'s emissive materials,
-/// before [`build`] does.
+/// Makes `route` read the light colours of the emissive materials of world
+/// `C`. The material setup calls it before [`build`] runs, so a world that
+/// is coloured at startup makes its material with the `LIGHT_COLOR` shader
+/// def already set.
 pub(crate) fn read_light_colors<C: VoxelWorldConfig>(
     route: &mut route::LightRoute<C>,
     world: &C,
@@ -1165,8 +1198,8 @@ pub(crate) fn read_light_colors<C: VoxelWorldConfig>(
     route.set_light_colors(light_colors(&table));
 }
 
-/// The packed light colour of each material index of `emission`, for a
-/// world's route, or `None` where every one is white.
+/// Returns the packed light colour of each material index of `emission`, for
+/// the route of a world, or `None` where every one is white.
 fn light_colors<I>(emission: &color::EmissionTable<I>) -> Option<&[u16]> {
     emission.is_colored().then(|| emission.colors())
 }

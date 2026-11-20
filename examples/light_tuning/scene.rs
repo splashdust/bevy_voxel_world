@@ -1,10 +1,13 @@
-//! The world light is tuned in: a meadow at the foot of a mountain, with a
-//! place to see each kind of setting at work.
+//! The world of the example
 //!
-//! Every voxel is a pure function of its position, as sky light needs. The
-//! cabin hanging in the sky beside the floating island and the plinth in the
-//! deep chamber are the exceptions: they are sub-grids, built from edits at
-//! startup.
+//! This module builds the world that light is tuned in, a meadow at the foot
+//! of a mountain, and names a place to see each kind of setting at work.
+//!
+//! Every voxel of the world is a pure function of its position, as sky light
+//! needs: the world may generate a chunk position again only to learn which
+//! columns there hold a solid. The cabin hanging in the sky beside the
+//! floating island and the plinth in the deep chamber are the exceptions.
+//! They are sub-grids, built from voxel edits at startup.
 
 use std::sync::LazyLock;
 
@@ -66,8 +69,10 @@ pub fn texture_indices(material: u8) -> [u32; 3] {
         LEAVES => [TILE_SPRUCE_LEAVES; 3],
         BARK => [TILE_SPRUCE_BARK; 3],
         LANTERN => [TILE_LANTERN; 3],
-        // The crystals take the pale snow tile, so their faces glow near white
-        // in their own colour, and in their light colour under tinted glow.
+        // All three crystals use the pale snow tile, so their faces glow near
+        // white while tinted glow is off. With it on, a pale tile glows in the
+        // light colour of the crystal, where a coloured tile would darken
+        // under any other light colour.
         RED_CRYSTAL | GREEN_CRYSTAL | BLUE_CRYSTAL => [TILE_SNOW; 3],
         GRAVEL => [TILE_GRAVEL; 3],
         FLOOR => [TILE_FLOOR_PLANKS; 3],
@@ -135,8 +140,8 @@ impl Place {
             // Just inside the cave mouth, looking down the hall.
             Place::Cave => ([-10.0, 44.0, -48.0], [4.0, 36.0, -100.0]),
             // The deep chamber behind the narrow passage, lit by red, green
-            // and blue crystals, with the tilted plinth where their pools
-            // meet.
+            // and blue crystals, with the tilted plinth where their pools of
+            // light meet.
             Place::Chamber => ([4.0, 41.0, -130.0], [8.0, 32.0, -150.0]),
             // The floating island from the height of its underside: the
             // shade straight below it, and its sun shadow beyond, by the house.
@@ -554,15 +559,21 @@ fn build_well(b: &mut Blueprint) {
     }
 }
 
-/// Lanterns on posts along the cave hall's walls, outside the open cells
-/// sky fill passes through, one on the passage's floor where it opens into
-/// the deep chamber, out of sight of the cave's place, and clusters of red, green and blue crystals on the
-/// chamber's floor.
+/// Places the lamps of the cave: lanterns on posts along the walls of the
+/// hall, a lantern on the floor of the passage, and clusters of red, green
+/// and blue crystals on the floor of the deep chamber.
+///
+/// The posts stand outside the open cells that sky fill passes through. The
+/// passage lantern stands where the passage opens into the chamber, out of
+/// sight from `Place::Cave`.
 ///
 /// The crystal clusters stand around [`PLINTH`] at the corners of a
-/// triangle, close enough that each pair's pools meet and mix on the floor
-/// and walls between them. With the passage's white lantern, chunks of the
-/// chamber see four light colours, so `skip_unreached_colors` engages there.
+/// triangle. They are close enough that the pools of light of each pair meet
+/// and mix on the floor and walls between them. Together with the passage
+/// lantern, which is white by default, some chunks of the chamber have
+/// emissive voxels of four light colours within voxel reach. Four is the
+/// fewest at which `skip_unreached_colors` engages, so the chamber puts it
+/// to work.
 fn place_lamps(b: &mut Blueprint) {
     for (x, z) in [(-18, -62), (18, -76), (-18, -90)] {
         b.fill(
@@ -771,23 +782,26 @@ pub fn spawn_cabin(
 
 // --- The plinth ---------------------------------------------------------------
 
-/// Where the plinth's middle stands on the deep chamber's floor, where the
-/// crystals' pools meet.
+/// Where the middle of the plinth stands, on the floor of the deep chamber
+/// between the crystal clusters.
 const PLINTH: Vec3 = Vec3::new(7.5, GROUND as f32 + 1.2, -148.0);
-/// The plinth's size in voxels, under its lantern.
+/// The size of the plinth in voxels, not counting its lantern.
 const PLINTH_SIZE: IVec3 = IVec3::new(7, 1, 5);
 
-/// Where the plinth stands: its middle at [`PLINTH`], tipped over so its
-/// faces lie off the world's grid.
+/// Returns the pose of the plinth: its middle at [`PLINTH`], tipped so that
+/// its faces lie off the grid of the world.
 pub fn plinth_pose() -> Transform {
     let rotation = Quat::from_euler(EulerRot::XYZ, 0.3, 0.5, 0.2);
     let middle = PLINTH_SIZE.as_vec3() / 2.0;
     Transform::from_translation(PLINTH - rotation * middle).with_rotation(rotation)
 }
 
-/// The plinth's voxels on its own grid: a slab of cobblestone with a
-/// lantern on one corner, whose own light fades across the slab into the
-/// world's coloured light. They all lie in the sub-grid's first chunk.
+/// Returns the voxels of the plinth on its own grid: a slab of cobblestone
+/// with a lantern on one corner.
+///
+/// The light of that lantern fades across the slab into the coloured light
+/// of the world. All the voxels lie in the chunk of the sub-grid at its
+/// origin.
 pub fn plinth_voxels() -> Vec<(IVec3, u8)> {
     let mut voxels = Vec::new();
     for x in 0..PLINTH_SIZE.x {
@@ -801,8 +815,10 @@ pub fn plinth_voxels() -> Vec<(IVec3, u8)> {
     voxels
 }
 
-/// Spawns the plinth as a sub-grid of the world, so its own lantern's light
-/// mixes with the coloured light of the world's crystals on its faces.
+/// Spawns the plinth as a sub-grid of the world.
+///
+/// On the faces of the plinth, the light of its own lantern mixes with the
+/// coloured light of the crystals in the world.
 pub fn spawn_plinth(mut voxel_world: VoxelWorld<crate::TuningWorld>) {
     let plinth = voxel_world.spawn_sub_grid(plinth_pose());
     let mut grid = voxel_world

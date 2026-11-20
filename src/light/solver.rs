@@ -1,68 +1,104 @@
-//! The solver: works out a chunk's light from what is within light reach of
-//! it.
+//! Light solver
 //!
-//! A chunk's light is a pure function of the occupancy, direct sky and emissive
-//! voxels of the 3×3×3 chunks around it, read into a box for sky light and one
-//! for voxel light, each reaching that light's reach past each of the chunk's
-//! faces. It never reads a neighbour's light, so the order chunks arrive in
-//! can't change a chunk's light, and no light outlives what made it.
+//! This module works out the light of a level-0 chunk from what is within
+//! light reach of it. [`LightTask`] runs the first solve of a chunk in its
+//! chunk task, and [`relight`] runs the same solve again in a relight task.
+//! Both read the 3×3×3 chunks around the chunk from the
+//! [world view](super::view). [`solve_sky`] and [`solve_voxel`], or
+//! [`solve_voxel_colors`] in a world with light colours, each fill a light
+//! box from those chunks and run the [kernel](super::kernel) over it. The
+//! result is a [`Solved`], which holds the [`ChunkLight`] and what landing it
+//! needs.
 //!
-//! Sky light spreads from voxels with direct sky, each from its own chunk's
-//! column answer (see [`sky`](super::sky)). Voxel light spreads from emissive
-//! voxels. A kind of light with no source in its box does no work. A solve can
-//! instead be given its box's voxels with direct sky as [`DirectSky::Cells`],
-//! so sky can enter a voxel from any side, and can be told to take no sky fill.
+//! # Why a solve reads only voxels
+//!
+//! The light of a chunk is a pure function of the occupancy, direct sky and
+//! emissive voxels of the 3×3×3 chunks around it. A solve reads them into a
+//! light box for sky light and one for voxel light, each reaching the light
+//! reach of that light past each face of the chunk. It never reads the light
+//! of a neighbour. So the order chunks arrive in can't change the light of a
+//! chunk, and no light outlives what made it.
+//!
+//! Sky light spreads from voxels with direct sky, each taken from the column
+//! answer of its own chunk: see [`sky`](super::sky). Voxel light spreads from
+//! emissive voxels. Light with no source in its light box does no work. A
+//! solve can instead be given the voxels of its light box that have direct
+//! sky as [`DirectSky::Cells`], so sky can enter a voxel from any side. A
+//! solve can also be told to take no sky fill.
+//!
+//! # Which emissive voxels join a solve
 //!
 //! An emissive voxel joins a solve only if its light could reach the chunk in
-//! the rounds it has left, which the solve tells from how far outside the
-//! chunk it is along each axis. With [`LightShape::Diamond`] every round is
-//! one face step, so the sum of those distances bounds it. With
-//! [`LightShape::Round`] every even round moves light a voxel along every
-//! axis at once, so neither that sum nor a path distance bounds how far light
-//! gets. The solve counts the rounds instead: each even round left takes one
-//! off every distance, and the face steps of the other rounds must cover what
-//! is left. Where no emissive voxel passes, voxel light isn't spread at all.
-//! The check costs a few additions per emissive voxel in the box.
+//! the rounds it has left. The solve tells this from how far outside the chunk
+//! the emissive voxel is along each axis:
+//!
+//! - With [`LightShape::Diamond`], every round is one face step, so the light
+//!   gets there only if the sum of the three distances is no more than the
+//!   rounds left.
+//! - With [`LightShape::Round`], every even round moves light a voxel along
+//!   every axis at once, so that sum would drop emissive voxels whose light
+//!   does get there. The solve counts the rounds instead. Each even round left
+//!   takes one off every distance, and the face steps of the other rounds must
+//!   cover what is left.
+//!
+//! For example, light from an emissive voxel at level 15 has 14 rounds at
+//! reach 14. Five voxels outside the chunk along every axis, the emissive
+//! voxel is 15 face steps away, so with diamond spread its light never gets
+//! there. With round spread its light has 7 even rounds, which cover all
+//! three distances, so it does.
+//!
+//! Where no emissive voxel joins, voxel light isn't spread at all. This check,
+//! the cull, costs a few additions per emissive voxel in the light box.
+//!
+//! # Light colours
 //!
 //! In a light box of more than one light colour, voxel light runs once per
-//! colour, and a colour whose emissive voxels pass that check can still have
-//! its light kept from the chunk by solids. When four or more colours pass,
-//! and `skip_unreached_colors` is on, the solve first runs the reach run: the
-//! kernel's rounds backwards from the chunk's open voxels, through the light
-//! box's open voxels, which finds exactly the colours one of whose emissive
-//! voxels is reached in time for its level. Only those run. It costs about
-//! one run, whatever the number of colours, so it saves the most where
-//! solids keep many colours from the chunk, as in caves and rooms, and costs
-//! that run where every colour reaches. With fewer colours the runs it could
-//! skip cost less than it does. It never changes light.
+//! light colour: see [`color`](super::color) for why. The emissive voxels of a
+//! light colour can pass the cull and still have their light kept from the
+//! chunk by solids. So when [`REACH_RUN_COLORS`] or more light colours pass
+//! the cull, and `skip_unreached_colors` is on, the solve first runs the reach
+//! run,
+//! [`colors_reaching`]. The reach run runs the rounds of the kernel backwards
+//! from the open voxels of the chunk, through the open voxels of the light
+//! box. It finds exactly the light colours whose light reaches an open voxel
+//! of the chunk, and only those light colours run.
 //!
-//! A neighbour that isn't loaded reads as solid: no light passes through it
+//! The reach run costs about one run, whatever the number of light colours.
+//! It saves the most where solids keep many light colours from the chunk, as
+//! in caves and rooms. Where every light colour reaches, it costs that one run
+//! and saves nothing. With fewer light colours, the runs it could skip cost
+//! less than it does. It never changes light.
+//!
+//! # Chunks that aren't loaded
+//!
+//! A neighbour that isn't loaded reads as solid: no light passes through it,
 //! and it holds no sources. A solve can be told to read it as air instead,
-//! with [`Missing`]. Air a fill hint keeps from spawning reads as what its
-//! hint says: see [`hinted`](super::hinted). Every world solve reads missing
-//! neighbours as solid, takes its direct sky from column answers and takes sky
-//! fill where the world has it. Nothing is kept for chunks that have retired, so
-//! light beside a chunk that isn't loaded, whether it hasn't arrived yet or has
-//! retired, can be darker than the truth, never brighter. It is exact for a
-//! chunk whose whole box is loaded.
+//! with [`Missing`]. Air that a fill hint keeps from spawning reads as what
+//! its hint says: see [`hinted`](super::hinted). Every solve of a world chunk
+//! reads missing neighbours as solid, takes its direct sky from column
+//! answers, and takes sky fill where the world has it.
 //!
-//! A chunk's first solve runs in its chunk task, reading its neighbours from
-//! the [world view](super::view) as the task finds it. Neighbours arriving
-//! later relight it in a relight task, which runs the same solve: see
-//! [`relight`](super::relight).
+//! Nothing is kept for chunks that have retired. So the light beside a chunk
+//! that isn't loaded, whether it hasn't arrived yet or has retired, can be
+//! darker than the truth, but never brighter. The light of a chunk whose whole
+//! light box is loaded is exact.
+//!
+//! The first solve of a chunk reads its neighbours from the world view as its
+//! chunk task finds it. Neighbours that arrive later relight the chunk in a
+//! relight task: see [`relight`](super::relight).
 //!
 //! # References
 //!
-//! - [Veloren's terrain mesher](https://gitlab.com/veloren/veloren/-/blob/master/voxygen/src/mesh/terrain.rs):
-//!   works a chunk's light out again for each mesh, from the voxels in a halo
-//!   around the chunk.
-//! - [rustcraft's lighting notes](https://github.com/ArturTrumpfheller/rustcraft/blob/main/docs/LIGHTING.md):
-//!   works a region's light out again from a halo as wide as light's reach,
-//!   reading voxels it doesn't know as solid.
-//! - [tesserae's light propagation](https://github.com/mkappworks-dev/tesserae/pull/3):
-//!   found that solving a chunk again from its neighbours' light can't take
-//!   light away, since two chunks can hold each other's light up. So a solve
-//!   here reads only voxels.
+//! - [Veloren, terrain mesher](https://gitlab.com/veloren/veloren/-/blob/master/voxygen/src/mesh/terrain.rs)
+//!   works the light of a chunk out again for each mesh, from the voxels in a
+//!   halo around the chunk.
+//! - [rustcraft, lighting notes](https://github.com/ArturTrumpfheller/rustcraft/blob/main/docs/LIGHTING.md)
+//!   works the light of a region out again from a halo as wide as the reach of
+//!   light, reading voxels it doesn't know as solid.
+//! - [tesserae, light propagation](https://github.com/mkappworks-dev/tesserae/pull/3)
+//!   found that solving a chunk again from the light of its neighbours can't
+//!   take light away, since each of two chunks can hold up the light of the
+//!   other. So a solve here reads only voxels.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,9 +129,11 @@ use crate::voxel::WorldVoxel;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
 
-/// One kind of a chunk's light, sky or voxel, in steps of its precision: one
-/// level for every open voxel, or a level per voxel as one bit plane per bit of
-/// the level, 16 KiB at 16 levels and 32 KiB at 256.
+/// The sky light or the voxel light of a chunk, in steps of its precision.
+///
+/// It holds either one level for every open voxel, or a level per voxel as
+/// one bit plane per bit of the level. The planes take 16 KiB at 16 steps and
+/// 32 KiB at 256.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ChunkLevels {
     Uniform(u8),
@@ -124,8 +162,9 @@ pub(crate) struct ChunkLight {
     pub voxel: ChunkLevels,
     /// The light colour of its voxel light.
     pub color: ChunkColor,
-    /// Each light colour's levels on the faces where light of two or more
-    /// light colours lights its voxels, for its neighbours' arrivals.
+    /// The levels of each light colour on the faces where light of two or
+    /// more light colours lights the voxels of the chunk. The arrival
+    /// comparison, [`could_reach_sooner`], reads them.
     pub borders: BorderLevels,
     /// The precision its levels are steps of: the world's when it was
     /// solved, which a change of precision leaves behind until it relights.
@@ -143,7 +182,8 @@ impl ChunkLight {
     }
 
     /// Whether `other` is the [same light](Self::same_light) with the same
-    /// border levels, so landing it would change nothing its neighbours read.
+    /// border levels, so that landing `other` would change nothing the face
+    /// neighbours of the chunk read.
     pub fn same_light_and_borders(&self, other: &ChunkLight) -> bool {
         self.same_light(other) && self.borders == other.borders
     }
@@ -153,9 +193,9 @@ impl ChunkLight {
         self.color == ChunkColor::White && self.borders.is_empty()
     }
 
-    /// The light at the chunk's voxel `local`, which holds `voxel`. A solid
-    /// voxel holds no light, except an emissive one, which holds its level
-    /// and light colour.
+    /// Returns the light at the voxel `local` of the chunk, which holds
+    /// `voxel`. A solid voxel holds no light, except an emissive one, which
+    /// holds its own level and light colour.
     pub fn levels_at<I: Copy + PartialEq>(
         &self,
         local: UVec3,
@@ -170,7 +210,7 @@ impl ChunkLight {
         }
     }
 
-    /// The light at the chunk's open voxel `x`, `y`, `z`.
+    /// Returns the light at the open voxel `x`, `y`, `z` of the chunk.
     pub fn open_levels_at(&self, x: usize, y: usize, z: usize) -> LightLevels {
         LightLevels::of_steps(
             self.sky.at(x, y, z),
@@ -181,8 +221,9 @@ impl ChunkLight {
     }
 }
 
-/// The light at an emissive voxel giving off what `emitter` says, under the
-/// emissive list `emission`, or at a solid voxel that isn't emissive.
+/// Returns the light that a solid voxel holds when its material gives off
+/// `emitter`, with the light colour that `emission` names for it. A solid
+/// voxel that isn't emissive, with no `emitter`, holds no light.
 pub(crate) fn emitted<I: Copy + PartialEq>(
     emission: &EmissionTable<I>,
     emitter: Option<Emitter>,
@@ -216,18 +257,21 @@ pub(crate) struct LightTaskSettings<I> {
     /// The `generation` of the last change to the emissive list. A chunk's
     /// emissive voxels found before it are stale.
     pub emission_generation: u64,
-    /// Counts the world's changes to the emissive list that changed only
-    /// light colours, leaving every level alone.
+    /// Counts the changes to the emissive list of the world that changed only
+    /// light colours and left every level alone.
     pub color_generation: u64,
     /// For each material index of `emission`, the `color_generation` of the
-    /// last change to its light colour alone, or 0.
+    /// last change that changed only its light colour. It is 0 where no such
+    /// change came after the last change to the emissive list that moved a
+    /// level or a material.
     pub recolored: Arc<[u64]>,
     /// The cells of the world's sky fill field, with sky light and sky fill
     /// on.
     pub fill: Option<FillCells>,
-    /// Whether a solve whose light box holds four or more light colours runs
-    /// only the colours whose light reaches the chunk: see
-    /// [`colors_reaching`].
+    /// Whether a solve whose light box still holds [`REACH_RUN_COLORS`] or
+    /// more light colours after the cull first finds, with
+    /// [`colors_reaching`], which of them reach the chunk, and runs only
+    /// those.
     pub skip_unreached_colors: bool,
 }
 
@@ -237,19 +281,21 @@ pub(crate) struct LightCounters {
     /// Chunks whose voxels were scanned for emissive voxels.
     pub emissive_scans: AtomicU64,
     pub solves: AtomicU64,
-    /// Runs of voxel light, each of one light colour, on light boxes holding
-    /// two or more light colours. A light box of one colour runs as in a white
-    /// world, uncounted.
+    /// Runs of voxel light of one light colour each, in solves where the
+    /// chunks around the chunk note emissive materials of two or more light
+    /// colours. A solve with one light colour runs as in a white world, and
+    /// isn't counted.
     pub color_runs: AtomicU64,
-    /// Reach runs, each on a light box holding four or more light colours
-    /// after the cull, with `skip_unreached_colors` on.
+    /// Runs of [`colors_reaching`], each on a light box that still held
+    /// [`REACH_RUN_COLORS`] or more light colours after the cull, with
+    /// `skip_unreached_colors` on.
     pub reach_runs: AtomicU64,
-    /// Light colours reach runs found no light of reaching the chunk, whose
-    /// runs were skipped.
+    /// Light colours whose runs were skipped, because a reach run found that
+    /// none of their light reaches the chunk.
     pub colors_skipped: AtomicU64,
     /// Solves of voxel light that spread none, because no emissive voxel
-    /// around the chunk could light it, though some chunk around it held
-    /// emissive voxels.
+    /// around the chunk could light it. Only solves whose chunks around the
+    /// chunk hold an emissive voxel count.
     pub voxel_boxes_culled: AtomicU64,
     /// Time spent solving, in nanoseconds, summed over every chunk task.
     pub solve_nanos: AtomicU64,
@@ -399,9 +445,10 @@ pub(crate) fn neighbour_index(offset: IVec3) -> usize {
 pub(crate) struct Solved {
     pub light: Arc<ChunkLight>,
     pub faces: FaceHashes,
-    /// The version of each face neighbour's light the solve compared against,
-    /// by [`Face`], or `None` where it had no neighbour or compared nothing.
-    /// Only a world chunk's chunk task compares.
+    /// The version of the light of each face neighbour that the solve
+    /// compared against, by [`Face`]. It is `None` where the chunk had no
+    /// neighbour, or where the solve compared nothing: only the chunk task of
+    /// a world chunk compares.
     pub seen: [Option<u64>; 6],
     /// By [`Face`], whether the chunk's light could reach the neighbour sooner
     /// than the neighbour's light says, judged against the version in `seen`.
@@ -409,8 +456,8 @@ pub(crate) struct Solved {
     /// In a world showing its light, what the chunk's faces read from its
     /// own voxels.
     pub own: FacesSee,
-    /// In a world showing its light, what the solve worked out for the
-    /// chunk's slot.
+    /// In a world showing its light, what the solve worked out for the slot
+    /// of the chunk.
     pub slot: SlotParts,
     /// What a chunk task found out about the chunk's columns, with sky light
     /// on. A relight finds nothing.
@@ -494,8 +541,8 @@ impl<I: Copy + PartialEq> LightTask<I> {
         let seeding = seeding(settings, &inputs, key, take_fill);
         let snapshot = read_snapshot(&self.view, key, missing, settings);
         let direct = direct_sky_if_lit(settings, key, &snapshot, &inputs);
-        // Only a world chunk's arrival reads the comparison: a sub-grid's
-        // chunk relights none of its neighbours as its light lands.
+        // Only the arrival of a world chunk reads the comparison. A chunk of
+        // a sub-grid relights none of its neighbours as its light lands.
         let compare = key.is_world();
         let mut solved = solve(
             key,
@@ -537,7 +584,8 @@ pub(crate) struct KeptLight {
     /// In a world showing its light, what the chunk's faces read from its
     /// own voxels.
     pub own: FacesSee,
-    /// What the task worked out for the chunk's slot.
+    /// In a world showing its light, what the task worked out for the slot
+    /// of the chunk.
     pub slot: SlotParts,
     pub edit_frame: u64,
 }
@@ -583,9 +631,10 @@ pub(crate) fn relight<I: Copy + PartialEq>(
                     .fetch_add(1, Ordering::Relaxed);
             }
             let inputs = read.rescanned(key.position(), &rescan, &settings.emission);
-            // Inputs that found the same emissive voxels keep the ones the
-            // world view holds, so the solves around the chunk that read
-            // them don't count them as replaced as its light lands.
+            // A rescan that finds the same emissive voxels keeps the inputs
+            // the world view holds. The solves around the chunk read those
+            // inputs, and new ones would count as replaced when this light
+            // lands, which relights those chunks for nothing.
             let inputs = if inputs.emissive == read.emissive {
                 read.clone()
             } else {
@@ -664,13 +713,13 @@ fn read_snapshot<I>(
     snapshot
 }
 
-/// Solves the light of the chunk whose own inputs are `inputs`, among the
-/// chunks around it in `snapshot`, with its sky fill seeds `seeding` and its
-/// box's direct sky from `direct`. `key` is the chunk's.
+/// Solves the light of the chunk at `key`, whose own inputs are `inputs`,
+/// among the chunks around it in `snapshot`. `seeding` holds its sky fill
+/// seeds, and `direct` says where its light box finds direct sky.
 ///
-/// With `compare`, it also compares the light with its face neighbours', for
-/// an arrival: see [`Solved::reaches`]. A relight's landing never reads the
-/// comparison.
+/// With `compare`, it also compares the light with the light of each face
+/// neighbour, for the arrival of the chunk: see [`Solved::reaches`]. A relight
+/// doesn't compare, since its landing never reads the comparison.
 fn solve<I>(
     key: GridKey,
     mut snapshot: Snapshot,
@@ -706,8 +755,9 @@ fn solve<I>(
             settings.skip_unreached_colors,
             &settings.counters,
         );
-        // Only arrivals read border levels, and a sub-grid's chunk has none:
-        // an edit relights every chunk of its grid whose light can change.
+        // Only the arrival comparison reads border levels, and it never runs
+        // for a chunk of a sub-grid: an edit relights every chunk of the grid
+        // whose light can change.
         let borders = if key.is_world() {
             borders
         } else {
@@ -782,9 +832,9 @@ fn solve<I>(
     }
 }
 
-/// What a solve works out for the slot of the chunk lit by `light`, whose
-/// own voxels read `own`, in a world showing its light: nothing in any other
-/// world.
+/// Returns what a solve works out for the slot of the chunk lit by `light`,
+/// whose faces read `own` from its own voxels. In a world that doesn't show
+/// its light, it returns nothing.
 fn slot_parts<I>(
     settings: &LightTaskSettings<I>,
     light: &ChunkLight,
@@ -846,21 +896,25 @@ pub(crate) fn solve_voxel(
 /// light colour other than white. Returns its levels, face hashes, light
 /// colour and border levels.
 ///
-/// The light colours come from the notes of the emissive materials each
-/// chunk around it holds. With one, light is solved in one run, as in a
-/// white world. With more, it runs once per light colour, from that colour's
-/// emissive voxels alone, and runs that light no voxel of the chunk are
-/// dropped. A voxel's level is then the highest of the runs', which is the
-/// level one run of all of them gives, and its light colour the runs' colours
-/// at their levels, mixed by [`mix_weighted`].
+/// It finds the light colours around the chunk from the emissive materials
+/// that the chunks of `neighbours` note, without reading their emissive
+/// voxels:
 ///
-/// With `skip_unreached`, a light box still holding [`REACH_RUN_COLORS`] or
-/// more light colours after the cull first runs [`colors_reaching`], and
-/// runs only the colours it finds. The runs it skips would have been
-/// dropped, so it changes nothing the solve returns.
+/// - With one light colour or none, it solves in one run, as in a white world.
+/// - With more, it runs once per light colour, from the emissive voxels of
+///   that light colour alone, and drops the runs that light no voxel of the
+///   chunk. The level of a voxel is the highest level the runs give it, which
+///   is the level one run of all the emissive voxels would give. The light
+///   colour of a voxel mixes the light colours of the runs at their levels:
+///   see [`RunMixer`].
 ///
-/// The face hashes mix each run's, keyed by its light colour, with
-/// [`run_hashes`].
+/// With `skip_unreached`, a light box that still holds [`REACH_RUN_COLORS`]
+/// or more light colours after the cull first runs [`colors_reaching`]. Only
+/// the light colours it finds then run. Every run it skips would have been
+/// dropped, so skipping changes nothing the solve returns.
+///
+/// The face hashes mix the hashes of every run, each keyed by its light
+/// colour: see [`run_hashes`].
 pub(crate) fn solve_voxel_colors<I>(
     neighbours: &Neighbourhood,
     missing: Missing,
@@ -945,12 +999,12 @@ pub(crate) fn solve_voxel_colors<I>(
     }
 }
 
-/// The fewest light colours a light box must hold after the cull for a solve
-/// to run the reach run first. With fewer, the runs it could skip cost less
-/// than it does.
+/// The fewest light colours a light box must still hold after the cull for a
+/// solve to run [`colors_reaching`] first. With fewer, the runs it could skip
+/// cost less than the reach run does.
 const REACH_RUN_COLORS: usize = 4;
 
-/// One light colour's run over a light box.
+/// The run of one light colour over a light box.
 struct Run {
     /// The packed light colour of the emissive voxels it spread from.
     color: u16,
@@ -958,8 +1012,8 @@ struct Run {
     faces: [u64; 6],
 }
 
-/// The packed light colours of the emissive materials the chunks of
-/// `neighbours` note, each once, in order.
+/// Returns the packed light colours of the emissive materials that the
+/// chunks of `neighbours` note, each once, sorted.
 fn light_colors<I>(neighbours: &Neighbourhood, emission: &EmissionTable<I>) -> Vec<u16> {
     let mut colors = Vec::new();
     let materials = neighbours
@@ -985,15 +1039,17 @@ fn lights_any(planes: &[Plane], occupancy: &Occupancy) -> bool {
     })
 }
 
-/// The levels, face hashes, light colour and border levels of a chunk two or
-/// more of whose `runs` light its voxels, with levels in steps of
+/// Returns the levels, face hashes, light colour and border levels of a
+/// chunk whose voxels two or more of `runs` light, with levels in steps of
 /// `precision`.
 ///
-/// A voxel only one run lights takes that run's light colour as it is. The
-/// face hashes mix each run's with its light colour, so they change wherever
-/// a run's light crosses a face at another time. Its border levels hold each
-/// run's levels on the faces two or more runs light, whatever form its light
-/// colour takes.
+/// A voxel that only one run lights takes the light colour of that run as it
+/// is. The face hashes mix the hash of each run with its light colour, so
+/// they change wherever the light of a run crosses a face at another time.
+///
+/// The border levels hold the levels of each run on the faces that two or
+/// more runs light. They are kept even where every lit voxel of the chunk
+/// ends up with the same light colour.
 fn mixed(
     runs: &[Run],
     occupancy: &Occupancy,
@@ -1015,7 +1071,7 @@ fn mixed(
                 continue;
             };
             packed[index] = color;
-            // Whether every lit voxel has the one light colour.
+            // Whether every lit voxel so far has the same light colour.
             uniform &= *one.get_or_insert(packed[index]) == packed[index];
             for (bit, plane) in planes.iter_mut().enumerate() {
                 plane[column] |= ((top >> bit & 1) as u32) << z;
@@ -1037,7 +1093,7 @@ fn mixed(
     (chunk_levels(planes, occupancy), faces, color, borders)
 }
 
-/// The level in `planes` of each voxel of the chunk, at
+/// Returns the level in `planes` of each voxel of the chunk, at
 /// [`voxel_index`](super::color::voxel_index).
 fn voxel_levels(planes: &[Plane]) -> Vec<u8> {
     let mut levels = vec![0; CHUNK * CHUNK * CHUNK];
@@ -1239,9 +1295,10 @@ fn spread_in<R: Row>(
     })
 }
 
-/// The thread's box `cached` for light of `scale`'s reach, made if it holds
-/// none of that reach, with its open rows filled from `neighbours`, whose
-/// positions holding nothing read as `missing` says.
+/// Returns the box of the thread in `cached` for light at the reach of
+/// `scale`, with its open rows filled from `neighbours`. It makes a new box
+/// where `cached` holds none of that reach. The positions of `neighbours`
+/// that hold nothing read as `missing` says.
 fn open_box<'a, R: Row>(
     cached: &'a mut Option<LightBox<R>>,
     (neighbours, missing): (&Neighbourhood, Missing),
@@ -1265,14 +1322,13 @@ fn open_box<'a, R: Row>(
     light_box
 }
 
-/// The reach run: for each light colour's seeds in `seeded`, whether a run of
-/// them would light an open voxel of the chunk at the centre of
-/// `neighbours`, spreading in `shape`. The positions of `neighbours` that
-/// hold nothing read as `missing` says. Each colour's seeds must be sorted
-/// by their start, as [`seeds`] gives them.
+/// Returns, for the seeds of each light colour in `seeded`, whether a run of
+/// them in `shape` would light an open voxel of the chunk at the centre of
+/// `neighbours`. This is the reach run.
 ///
-/// It runs the kernel's rounds backwards from the chunk once for every
-/// colour: see [`LightBox::colors_reaching`].
+/// The positions of `neighbours` that hold nothing read as `missing` says.
+/// It runs the rounds of the kernel backwards from the chunk once, for all
+/// the light colours together: see [`LightBox::colors_reaching`].
 fn colors_reaching(
     neighbours: &Neighbourhood,
     missing: Missing,
@@ -1312,9 +1368,9 @@ fn reach_in<R: Row>(
     });
 }
 
-/// The emissive voxels whose light could reach the chunk, spreading in
-/// `shape`, as seeds in its box, sorted by where their light starts. Only the
-/// emissive voxels `keep` holds for count.
+/// Returns the emissive voxels whose light could reach the chunk, spreading
+/// in `shape`, as seeds in its light box, sorted by their start. Only the
+/// emissive voxels for which `keep` returns true count.
 fn seeds(
     neighbours: &Neighbourhood,
     scale: &LevelScale,
@@ -1366,13 +1422,20 @@ fn seeds(
 }
 
 /// Whether light from a source `outside` voxels outside the chunk along each
-/// axis, starting at step `start`, could reach a voxel of the chunk by the
-/// last lit round `last`, spreading in `shape`.
+/// axis, starting at step `start`, could reach a voxel of the chunk by round
+/// `last`, the last round whose level is above 0, spreading in `shape`.
 ///
-/// Light joins in the round after `start`. Of the rounds left, a round
-/// spreading by three passes moves light a voxel along every axis, and any
-/// other round a face step along one. So light gets there only if the face
-/// steps left cover what the three-pass rounds leave of each distance.
+/// The light joins in the round after `start`, so it has `last - start`
+/// rounds left. A round of three passes, each even round of round spread,
+/// moves light one voxel along every axis. Every other round moves it one
+/// face step along one axis. So the light gets there only if the face steps
+/// cover what the rounds of three passes leave of each distance.
+///
+/// For example, with `start` 0 and `last` 14, round spread has 7 rounds of
+/// three passes and 7 of face steps. A source 5 voxels outside the chunk along
+/// every axis has nothing left after the 7 rounds of three passes, so its
+/// light gets there. Diamond spread has 14 face steps, and the source is 15
+/// away, so its light doesn't.
 fn could_reach(outside: IVec3, start: i32, last: i32, shape: LightShape) -> bool {
     let rounds = last - start;
     let three_pass = match shape {
@@ -1739,9 +1802,9 @@ mod tests {
         assert!(seeding(&settings, &mixed, in_world(position), false).is_none());
     }
 
-    /// A neighbourhood holding only one lamp at `level`, at `position` in the
-    /// box of light of `reach` around the chunk, in the chunk position that
-    /// holds it.
+    /// Returns a neighbourhood holding only one lamp at `level`, at `position`
+    /// in the light box of `reach` around the chunk. Only the chunk position
+    /// that holds the lamp has inputs.
     fn lamp_at(position: IVec3, reach: i32, level: u8) -> Neighbourhood {
         let voxel = position - IVec3::splat(reach);
         let chunk = voxel.div_euclid(IVec3::splat(CHUNK_SIZE_I));
@@ -1756,9 +1819,9 @@ mod tests {
         around(&[(chunk, held)])
     }
 
-    /// Whether light from lamps at `positions` in the box, each starting at
-    /// `start`, reaches a voxel of the chunk, as the kernel spreads it
-    /// through a box of air.
+    /// Whether light from lamps at `positions` in the light box, each
+    /// starting at `start`, reaches a voxel of the chunk when the kernel
+    /// spreads it through a box of air.
     fn kernel_reaches(
         positions: &[IVec3],
         start: u8,
@@ -1788,8 +1851,9 @@ mod tests {
                 let scale = LevelScale::new(reach, precision);
                 for shape in [LightShape::Round, LightShape::Diamond] {
                     let side = CHUNK_SIZE_I + 2 * reach as i32;
-                    // The box and the kernel are the same mirrored along
-                    // each axis, so one corner of the box stands for all.
+                    // The box and the kernel look the same mirrored along
+                    // each axis, so one corner of the box stands for all
+                    // eight.
                     let half = side / 2;
                     for level in 1..=15 {
                         let Some(start) = scale.start(precision.of_whole(level)) else {
@@ -1835,8 +1899,8 @@ mod tests {
 
     #[test]
     fn the_cull_drops_a_lamp_past_a_corner_whose_light_cant_reach_the_chunk() {
-        // Five voxels outside the chunk along every axis: 15 face steps away,
-        // and the light of a lamp at level 15 takes 14.
+        // Five voxels outside the chunk along every axis, the lamp is 15 face
+        // steps away, and light from a lamp at level 15 takes only 14.
         let position = IVec3::splat(14 - 5);
         let neighbours = lamp_at(position, 14, 15);
 
@@ -1847,8 +1911,8 @@ mod tests {
             &scale(),
             LightShape::Diamond
         ));
-        // Round light moves along every axis at once in its even rounds, so
-        // it gets there.
+        // Round spread moves light along every axis at once in its even
+        // rounds, so the light gets there.
         assert_eq!(
             seeds(&neighbours, &scale(), LightShape::Round, |_| true).len(),
             1
@@ -1872,11 +1936,13 @@ mod tests {
         }
     }
 
-    /// A light box of `reach` around the chunk at the origin holding two
-    /// lamps of each of `colors` light colours, the light colour as the
-    /// lamp's material, at random places and levels. `walled`, it also has
-    /// a shell around the chunk and five walls across the box, each with
-    /// holes, and scattered solids. Otherwise it's air.
+    /// Returns a light box of `reach` around the chunk at the origin, holding
+    /// two lamps of each of `colors` light colours at random places and
+    /// levels. The material of each lamp is the index of its light colour.
+    ///
+    /// With `walled`, the box also holds a shell around the chunk, five walls
+    /// across the box, and scattered solids. The shell has a hole, and each
+    /// wall has three. Otherwise the box is air.
     fn random_box(
         random: &mut Random,
         reach: i32,
@@ -2021,14 +2087,14 @@ mod tests {
                 }
             }
         }
-        // The cases hold both colours the reach run keeps and colours it
-        // skips though the cull keeps them.
+        // The cases hold both light colours the reach run keeps and light
+        // colours it skips although the cull keeps them.
         assert!(kept > 20 && skipped > 20, "kept {kept}, skipped {skipped}");
     }
 
-    /// A chunk of air holding a lamp at level 15 of each of `colors` light
-    /// colours, the light colour as the lamp's material, and the emissive
-    /// list giving each its colour.
+    /// Returns a chunk of air holding a lamp at level 15 of each of `colors`
+    /// light colours, and the emissive list that gives each lamp its light
+    /// colour. The material of each lamp is the index of its light colour.
     fn lamps_of_colors(colors: u16) -> (Neighbourhood, EmissionTable<u16>) {
         let mut occupancy = Occupancy::Open;
         let lamps: Vec<EmissiveVoxel> = (0..colors)

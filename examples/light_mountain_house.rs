@@ -1,18 +1,18 @@
-//! A house on a mountain ledge at dusk, with a cave beside it, lit by light
-//! propagation together with Bevy's atmosphere and fog. Walk through it,
-//! and place and remove voxels to see the light follow.
+//! Lights a house on a mountain ledge at dusk, with a cave beside it, through
+//! light propagation together with the Bevy atmosphere and fog. Walk through
+//! it, and place and remove voxels to see the light follow.
 //!
 //! Light propagation decides where light can reach. Sky light falls in through
-//! the door, the windows and the cave mouth, and voxel light spreads from the
-//! lanterns, the hearth and the crystals, each in its own colour: the lanterns
-//! warm, the hearth a deeper orange, the crystals blue. Where their light meets,
-//! the colours mix. Some rooms have lamps, some only windows, and the cellar has
-//! neither and stays dark however bright the sky.
+//! the door, the windows and the cave mouth. Voxel light spreads from the
+//! lanterns, the hearth and the crystals, each in its own light colour: the
+//! lanterns warm, the hearth a deeper orange and the crystals blue. Where
+//! their light meets, the colours mix. Some rooms have lamps and some only
+//! windows. The cellar has neither, and stays dark however bright the sky.
 //!
-//! Bevy does the rest. The atmosphere draws the sky and lights the world through
-//! its environment map, which propagated light dims wherever sky light is weak.
-//! The sun shines only on faces with direct sky. Distance fog and a volume of
-//! mist add haze.
+//! Bevy does the rest. The atmosphere draws the sky and lights the world
+//! through its environment map, which propagated light dims wherever sky light
+//! is weak. The sun shines only on faces with direct sky. Distance fog and a
+//! volume of mist add haze.
 //!
 //! The trees can be felled. Remove a voxel of a trunk, and the tree above it
 //! is cut loose. The world asks the crate to lift such a piece into a
@@ -21,21 +21,24 @@
 //!
 //! Run with `cargo run --release --example light_mountain_house --features
 //! light_propagation,sub_grids,dislodged_fragments`.
-//! Walk with WASD, hold Shift to run, jump with Space and look with the mouse.
-//! A left click places a voxel against the face under the crosshair, a right
-//! click removes the voxel there or fells a tree, and 1 to 4 choose stone, timber, a lantern or
-//! a crystal to place. `[` and `]` lower and raise the sun, L carries a lantern
-//! into the dark, H hides the help, and Esc frees the mouse.
 //!
-//! The scene renders `RENDER_HEIGHT` pixels tall and is stretched over the
-//! window, so a larger window, or a high-density display, costs no more to draw.
+//! Walk with WASD, hold Shift to run, jump with Space and look with the mouse.
+//! A left click places a voxel against the face under the crosshair. A right
+//! click removes the voxel there, or fells a tree. The keys 1 to 4 choose
+//! stone, timber, a lantern or a crystal to place. `[` and `]` lower and raise
+//! the sun, L carries a lantern into the dark, H hides the help, and Esc frees
+//! the mouse.
+//!
+//! The scene renders `RENDER_HEIGHT` pixels tall, and is stretched over the
+//! window. So a larger window, or a high-density display, costs no more to
+//! draw.
 //!
 //! In the browser the example renders through WebGL2, which can't run the
-//! atmosphere or volumetric fog. The fog's colour and an ambient light stand in
-//! for the atmosphere, and the valley goes without its mist. The world ends a
-//! little way past the ledge, the house and the cave, in thicker fog, so that
-//! all of it spawns while the page loads. The website's live demo runs this
-//! example there.
+//! atmosphere or volumetric fog. The colour of the fog and an ambient light
+//! stand in for the atmosphere, and the valley goes without its mist. The
+//! world ends in thicker fog a little way past the ledge, the house and the
+//! cave, so that all of it spawns while the page loads. The live demo on the
+//! website runs this example in the browser.
 
 use std::sync::{Arc, LazyLock};
 
@@ -331,11 +334,13 @@ fn in_cave(position: IVec3) -> bool {
 // ---------------------------------------------------------------------------
 // Placed voxels: the house, the cave's supports and lamps, boulders and trees
 
-/// Voxels placed by hand, which replace the ground and the cave where they are.
+/// Voxels placed by hand, which replace the generated ground and cave where
+/// they are.
 #[derive(Default)]
 struct Blueprint {
     voxels: HashMap<IVec3, WorldVoxel>,
-    /// Added to every position given to `set` and `fill`.
+    /// Added to every position given to `set`, and so to every position given
+    /// to `fill`, `solid` and `air`.
     origin: IVec3,
 }
 
@@ -445,7 +450,7 @@ fn build_house(b: &mut Blueprint) {
     b.solid([4, 12, 1], [4, 12, d - 1], TIMBER);
     b.solid([14, 12, 1], [14, 12, d - 1], TIMBER);
 
-    // The front door, with a timber lintel and a lamp on each side.
+    // The front door, with a timber lintel and a lantern on each side.
     b.air([8, 1, 0], [10, 3, 0]);
     b.solid([8, 4, 0], [10, 4, 0], TIMBER);
     b.set([7, 3, -1], Solid(LANTERN));
@@ -1743,12 +1748,16 @@ fn choose_voxel(
 /// How far from the eye a click reaches, in voxels.
 const REACH: f32 = 8.0;
 
-/// While the mouse is captured, a left click places the chosen voxel against
-/// the face under the crosshair, and a right click removes the voxel there,
-/// in the world or in a felled tree.
+/// Places or removes a voxel at the crosshair on a click, while the mouse is
+/// captured.
 ///
-/// Light propagation relights the voxels around an edit on its own, in the
-/// colour of the lamps that reach them.
+/// A left click places the chosen voxel against the face under the
+/// crosshair, and a right click removes the voxel there. Either click works
+/// on the world and on a felled tree.
+///
+/// The example does no light work for an edit. Light propagation relights
+/// the voxels around the edit by itself, and a placed lantern or crystal
+/// lights them in its own light colour.
 fn edit_voxels(
     buttons: Res<ButtonInput<MouseButton>>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
@@ -1784,8 +1793,9 @@ fn edit_voxels(
     };
     let at = hit.position + normal;
     let (_, material, _) = PLACEABLE[placing.0];
-    // A hit on a felled tree is in the tree's own voxels, which aren't the
-    // world's, so only a hit on the world can be where the walker stands.
+    // The position of a hit on a felled tree is on the grid of the tree, and
+    // `walker.feet` is on the grid of the world. So only a voxel placed in
+    // the world is checked against the body of the walker.
     if hit.grid == Grid::World && body_hits(walker.feet, &|position| position == at) {
         return;
     }

@@ -402,17 +402,19 @@ pub struct LightStats {
     /// Chunks whose voxels were scanned for emissive voxels.
     pub emissive_scans: u64,
     pub solves: u64,
-    /// Runs of voxel light, each of one light colour, on light boxes holding
-    /// two or more light colours. A light box of one colour runs as in a white
-    /// world, uncounted.
+    /// Runs of the kernel for voxel light, one light colour each, on light
+    /// boxes holding two or more light colours. A light box of one light
+    /// colour takes one run, as in a white world, which this doesn't count.
     pub color_runs: u64,
-    /// Reach runs: runs finding which light colours reach the chunk, on light
-    /// boxes holding four or more light colours.
+    /// Reach runs, which find the light colours whose light reaches the
+    /// chunk. A solve makes one only with `skip_unreached_colors` on, for a
+    /// light box that still holds four or more light colours once the colours
+    /// with no seeds are dropped.
     pub reach_runs: u64,
-    /// Light colours whose runs reach runs skipped, as no light of theirs
-    /// reaches the chunk.
+    /// Light colours whose runs a reach run skipped, because no light of that
+    /// colour reaches the chunk.
     pub colors_skipped: u64,
-    /// Solves of voxel light that spread none, because no emissive voxel
+    /// Solves of voxel light that spread no light, because no emissive voxel
     /// around the chunk could light it, though some chunk around it held
     /// emissive voxels.
     pub voxel_boxes_culled: u64,
@@ -462,7 +464,8 @@ pub struct LightStats {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
-    /// Colour shell planes written alone, after a neighbour's light changed.
+    /// Colour shell planes written alone, after the light of a neighbour
+    /// changed.
     pub color_plane_writes: u64,
     /// Colour slots written whole.
     pub color_full_writes: u64,
@@ -491,10 +494,12 @@ pub struct LightStats {
     /// The bytes coarse chunks keep now as copies of their slots and colour
     /// slots.
     pub coarse_copy_bytes: u64,
-    /// The bytes level-0 chunks keep now as copies of their shell planes.
+    /// The bytes level-0 chunks keep now as copies of the shell planes in
+    /// their slots and colour slots.
     pub shell_copy_bytes: u64,
-    /// Shell planes and colour shell planes built on the main thread from a
-    /// neighbour's light, rather than taken from a solve or a copy.
+    /// Shell planes and colour shell planes that the main thread built from
+    /// the light of a neighbour, rather than taking them from a solve or a
+    /// kept copy.
     pub planes_built: u64,
     /// Solves that seeded sky fill.
     pub fill_seeded: u64,
@@ -522,22 +527,23 @@ pub struct LightStats {
     /// Light entries in the world view now.
     pub entries: u64,
     /// What the light entries in the world view now keep: their face hashes,
-    /// sky light's and voxel light's bit planes where each isn't one level, and
-    /// occupancy where an edit gave them a solid.
+    /// the bit planes of sky light and of voxel light where each isn't one
+    /// level, and occupancy where an edit gave them a solid.
     pub entry_bytes: u64,
     /// Hinted air holding no light entry that the world view keeps now.
     pub air_positions: u64,
     /// The most slots chunks held at once.
     pub peak_slots: u64,
-    /// Colour slots given to chunks, counting late ones and evictions.
+    /// Colour slots given to chunks, counting those taken from a farther
+    /// chunk.
     pub color_allocations: u64,
-    /// Times the colour texture grew after the GPU had it, copying its
-    /// colours into the new one there.
+    /// Times a larger colour texture replaced one the render world already
+    /// had, so the GPU copied the old colours into it.
     pub color_growth_copies: u64,
     /// Chunks needing a slot that have none now.
     pub starved: u64,
-    /// What level-0 chunks' light keeps on the CPU now: sky light's and voxel
-    /// light's bit planes where each isn't one level.
+    /// What the light of level-0 chunks keeps on the CPU now: the bit planes of
+    /// sky light and of voxel light where each isn't one level.
     pub light_bytes: u64,
     /// Level-0 chunks in the world view now with both open and solid voxels.
     pub mixed_chunks: u64,
@@ -547,16 +553,18 @@ pub struct LightStats {
     pub request_lookups: u64,
     /// The bytes the cache of those walks' answers holds now.
     pub walk_cache_bytes: u64,
-    /// Relight landings that changed the level of a voxel, of sky light or
-    /// voxel light. A relight lands when its light is written into the world
-    /// view, or when it's found equal to the light there; light held for a
-    /// chunk's new mesh lands when it's released.
+    /// Relight landings that changed the sky light or voxel light level of
+    /// some voxel.
+    ///
+    /// A relight lands when its light is written into the world view, or when
+    /// it is found equal to the light already there. Light held back for the
+    /// new mesh of a chunk lands when it is released.
     pub landed_changing_levels: u64,
-    /// Relight landings that left every voxel's levels as they were but
-    /// changed the light colour of its voxel light.
+    /// Relight landings that left the levels of every voxel as they were, but
+    /// changed the light colour of the voxel light of some voxel.
     pub landed_changing_colors: u64,
-    /// Relight landings that left every voxel's levels and light colour as
-    /// they were.
+    /// Relight landings that left the levels and the light colour of every
+    /// voxel as they were.
     pub landed_changing_nothing: u64,
 }
 
@@ -690,23 +698,26 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
 pub struct FreshSolve {
     /// Chunks and light entries solved again.
     pub checked: usize,
-    /// The positions of those whose light differs from a fresh solve's, on
-    /// their own grid, each with whether it's a light entry.
+    /// The positions of those whose light differs from the light of the fresh
+    /// solve, each on its own grid and paired with whether it is a light
+    /// entry.
     pub stale: Vec<(IVec3, bool)>,
-    /// Of those, how many hold the fresh solve's levels and differ only in
-    /// light colour.
+    /// How many of those hold the levels of the fresh solve and differ only
+    /// in light colour.
     pub colors_only: usize,
 }
 
-/// Solves every chunk and light entry in world `C`'s world view again, as a
-/// relight would, and compares the light each holds with the fresh solve's,
-/// voxel by voxel: levels exactly, and light colours within a step of their
-/// packing. In a world whose light has settled, a chunk that differs
-/// holds light that some relight it needed never brought.
+/// Solves every chunk and light entry in the world view of world `C` again,
+/// as a relight would, and compares the light each holds with the light of
+/// the fresh solve, voxel by voxel. Levels must match exactly, and light
+/// colours within one step of their packing.
 ///
-/// A chunk whose emissive voxels were found under an older emissive list
+/// In a world whose light has settled, a chunk that differs holds light that
+/// some relight it needed never brought.
+///
+/// A chunk whose emissive voxels were found under an older emission table
 /// counts as stale without a solve. The solves count in [`light_stats`] as
-/// the world's own, so read those first.
+/// the solves of the world, so read `light_stats` before calling this.
 pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
     let Some(settings) = world.get_resource::<LightSettings<C>>() else {
         return FreshSolve::default();
@@ -745,8 +756,9 @@ pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
     found
 }
 
-/// Whether `held` holds the light colour of `fresh`, each component within a
-/// step of the packing, in every open voxel where `fresh` has voxel light.
+/// Returns whether `held` holds the light colour of `fresh` in every open
+/// voxel where `fresh` has voxel light. Each component may differ by up to one
+/// step of the packing, 1/127.
 fn same_colors(held: &ChunkLight, fresh: &ChunkLight) -> bool {
     if held.color == fresh.color {
         return true;
@@ -768,8 +780,8 @@ fn same_colors(held: &ChunkLight, fresh: &ChunkLight) -> bool {
     })
 }
 
-/// Whether `held` holds the same levels as `fresh` in every open voxel of
-/// `fresh`'s inputs.
+/// Returns whether `held` holds the same levels as `fresh`, at the same
+/// precision, in every open voxel of the inputs of `fresh`.
 fn same_levels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
     if held.precision != fresh.precision {
         return false;

@@ -99,18 +99,26 @@ impl Occupancy {
     }
 }
 
-/// An emissive voxel of a chunk: where it is in the chunk, its level and its
-/// material's index in the world's [`EmissionTable`], packed into 32 bits.
+/// An emissive voxel of a chunk, packed into 32 bits: where it is in the
+/// chunk, its level, and the index of its material in the [`EmissionTable`] of
+/// the world.
 ///
-/// Its position takes 5 bits per axis, from bit 0 for x, its level 4 bits
-/// from bit 15, and the index 13 bits from bit 19. An emissive voxel is
-/// always one of its chunk's own voxels, never one of its padding.
+/// The bits hold these fields:
+///
+/// - Bits 0 to 14 hold the position, 5 bits per axis, with x lowest.
+/// - Bits 15 to 18 hold the level.
+/// - Bits 19 to 31 hold the material index.
+///
+/// An emissive voxel is always one of the voxels of its chunk, never one of
+/// its padding, so 5 bits cover each axis. Packing keeps an emissive voxel at
+/// 4 bytes with room for the material index. That size matters for a chunk
+/// filled with one emissive material, whose list holds every voxel.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EmissiveVoxel(u32);
 
 impl EmissiveVoxel {
-    /// The voxel at `x`, `y`, `z` of its chunk, each below 32, giving off
-    /// what `emitter` says.
+    /// Returns the emissive voxel at `x`, `y`, `z` of its chunk, each below
+    /// 32, giving off the level and material of `emitter`.
     #[inline]
     pub fn new(x: u8, y: u8, z: u8, emitter: Emitter) -> Self {
         debug_assert!(x < 32 && y < 32 && z < 32 && emitter.level < 16);
@@ -139,19 +147,20 @@ impl EmissiveVoxel {
         (self.0 >> 10 & 31) as u8
     }
 
-    /// Where it is in its chunk.
+    /// Returns where the voxel is in its chunk.
     #[inline]
     pub fn at(self) -> (u8, u8, u8) {
         (self.x(), self.y(), self.z())
     }
 
-    /// Its level, as a whole level from 0 to 15.
+    /// Returns the level of the voxel, a whole level from 0 to 15.
     #[inline]
     pub fn level(self) -> u8 {
         (self.0 >> 15 & 15) as u8
     }
 
-    /// Its material's index in the world's [`EmissionTable`].
+    /// Returns the index of its material in the [`EmissionTable`] of the
+    /// world.
     #[inline]
     pub fn material(self) -> u16 {
         (self.0 >> 19) as u16
@@ -168,20 +177,23 @@ impl std::fmt::Debug for EmissiveVoxel {
     }
 }
 
-/// A chunk's emissive voxels, and a note of the emissive materials among them
-/// by their index in the world's [`EmissionTable`].
+/// The emissive voxels of a chunk, and the material indices of the emissive
+/// materials among them, from the [`EmissionTable`] of the world.
 ///
-/// A solve reads the notes of the chunks around its chunk to find the light
-/// colours that could reach it, without reading their emissive voxels.
+/// A solve reads the material indices of the chunks around its chunk to find
+/// the light colours that could reach it, without reading their emissive
+/// voxels. A change to the light colour of a material finds the chunks to
+/// relight from the material indices in the same way.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct Emissive {
     voxels: Vec<EmissiveVoxel>,
-    /// The distinct material indices of `voxels`, in order.
+    /// The material indices of `voxels`, each once, in ascending order.
     materials: Box<[u16]>,
 }
 
 impl Emissive {
-    /// The material indices of the emissive voxels, each once, in order.
+    /// Returns the material indices of the emissive voxels, each once, in
+    /// ascending order.
     #[inline]
     pub fn materials(&self) -> &[u16] {
         &self.materials
@@ -494,8 +506,8 @@ fn find_emissive<I: Copy + PartialEq>(
     }
 }
 
-/// What `voxel` gives off under the emissive list `emission`, if it's
-/// emissive.
+/// Returns what `voxel` gives off under the emission table `emission`, or
+/// `None` if the voxel isn't emissive.
 pub(crate) fn uniform_emission<I: Copy + PartialEq>(
     voxel: WorldVoxel<I>,
     emission: &EmissionTable<I>,
