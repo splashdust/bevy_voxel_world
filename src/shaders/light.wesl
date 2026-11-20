@@ -1,72 +1,106 @@
-// Propagated light for chunk faces. Import it as `bevy_voxel_world::light`.
+// Propagated light for chunk faces
 //
-// A lit world's material holds the world's light texture and its look, at
-// bindings 200 and 201. The crate's vertex shaders output each face's local
-// position and local normal in every world, and the chunk's tag under the
-// `VOXEL_LIGHT` shader def. A fragment shader reads a face's light with
-// `sample_face_light` and applies it to Bevy's PBR input with
-// `apply_voxel_light`, the one place light meets the PBR calculation. A
-// shader without PBR can use `sky_brightness` and `voxel_brightness` instead.
+// This module reads the light of a lit world for chunk faces, and applies it
+// to the PBR input of Bevy. Import it as `bevy_voxel_world::light`. The
+// material of a lit world holds the light texture of the world at binding 200
+// and the look of the world at binding 201. The vertex shaders of the crate
+// output the local position and local normal of each face in every world,
+// and the tag of the chunk under the `VOXEL_LIGHT` shader def. A fragment
+// shader reads the light of a face with `sample_face_light`, and applies it
+// to the PBR input with `apply_voxel_light`, the one place light meets the
+// PBR calculation. A shader without PBR can use `sky_brightness` and
+// `voxel_brightness` instead.
 //
-// Light is read from a face's position and normal alone, so it reaches any
-// mesh: a cube face reads the voxel in front of it, and a face off the voxel
-// grid the 8 voxels around the point in front of it (see `read_front`).
-// A custom vertex shader outputs what the crate's do: the centroid-sampled
-// local position at location 9 and the local normal at 10 in every world,
-// the flat tag at 11 under `VOXEL_LIGHT`, and the centroid-sampled position
-// in the world's grid at 12 under `SUB_GRIDS`. The crate's `rendering` module
-// docs list every output and its space.
+// Light is read from the position and normal of a face alone, so it reaches
+// any mesh. A cube face reads the voxel in front of it, and a face off the
+// voxel grid reads the 8 voxels around the point in front of it (see
+// `read_front`). A custom vertex shader outputs what the vertex shaders of
+// the crate do. In every world it outputs the centroid-sampled local position
+// at location 9 and the local normal at location 10. Under `VOXEL_LIGHT` it
+// outputs the flat tag at location 11, and under `SUB_GRIDS` the
+// centroid-sampled position in the grid of the world at location 12. The
+// docs of the `rendering` module of the crate list every output and its
+// space.
 //
-// The tag is the chunk's `MeshTag`. With bit 31 set, bits 0-23 name the
-// chunk's slot in the texture: 34 texels a side, the chunk's voxels in its
-// padded local coordinates, with texel rows along z. Without it, the low bits
-// hold the one level of each channel every face of the chunk sees.
+// The tag is the `MeshTag` of the chunk. With bit 31 set, bits 0-23 name the
+// slot of the chunk in the light texture. A slot is 34 texels a side and
+// holds the voxels of the chunk in its padded local coordinates, with texel
+// rows along z. Without bit 31, the low bits hold the one sky light level and
+// the one voxel light level that every face of the chunk sees.
 //
-// The look's `steps_256` says how levels are stored. At 16 levels a texel is
-// one `R8Uint` byte, sky light in its low nibble and voxel light in its high
-// one, and a tag with no slot holds them the same way in bits 0-7. At 256
-// levels a texel is `Rg8Uint`, sky light in red and voxel light in green, and
-// a tag with no slot holds sky light in bits 0-7 and voxel light in bits 8-15.
-// Levels at 256 are read on the 0 to 15 scale, in steps of 1/17. A lamp's own
-// cell holds the top level, 15 or 255, in its voxel half and its declared
-// level in its sky half.
+// The `steps_256` of the look says how levels are stored:
+//
+// - At 16 levels a texel is one `R8Uint` byte, with sky light in its low
+//   nibble and voxel light in its high one. A tag with no slot holds them the
+//   same way in bits 0-7.
+// - At 256 levels a texel is `Rg8Uint`, with sky light in red and voxel light
+//   in green. A tag with no slot holds sky light in bits 0-7 and voxel light
+//   in bits 8-15.
+//
+// Levels at 256 are read on the 0 to 15 scale, in steps of 1/17. The cell of
+// an emissive voxel holds the top level, 15 or 255, in its voxel light half,
+// and the level the voxel gives off in its sky light half.
 //
 // A chunk above LOD level 0 with a slot holds its LOD level L in bits 24-27.
-// Its slot's cells are `1 << L` voxels wide, so its local position is divided
-// by that width, keeping the corner of its first cell at (1, 1, 1).
+// The cells of its slot are `1 << L` voxels wide, so its local position is
+// divided by that width, keeping the corner of its first cell at (1, 1, 1).
 //
-// Bit 30 marks a sub-grid's chunk, with or without a slot, and bits 28 and 29
-// are clear. Every read of a field masks it to its width, so a sub-grid's tag
-// reads the same slot, LOD level and levels it would without bit 30.
+// Bit 30 marks the chunk of a sub-grid, with or without a slot. A tag with a
+// slot sets bit 29 when the entry of the slot in the colour texture holds a
+// light colour other than white, or names a colour slot. A tag with no slot
+// holds its light colour in bits 16-29. Every read of a field masks the field
+// to its width, so a tag reads the same slot, LOD level and levels whatever
+// its colour bits and sub-grid bit hold.
 //
-// With the crate's `sub_grids` feature, a lit world sets the `SUB_GRIDS`
-// shader def, and its material holds the world's tag map at binding 202: a
-// hash table from a level-0 world chunk position to the tag the world shows
-// there, for the world chunks around its sub-grids. `sample_face_light`
-// lights a sub-grid's face with the world's light where the face is, read
-// through the tag map by `world_light`, as well as with the sub-grid's own.
-// It reads the face's position in the world's grid from Bevy's world
-// position, so it assumes the world's `WorldRoot` is at the identity. A
-// shader that still calls `sample_light` lights a sub-grid's faces from the
-// sub-grid's own light alone: they don't darken in a cave or brighten by a
-// lamp of the world. Each fragment of a sub-grid's face costs one lookup in
-// the tag map and one more read's cells; a world chunk's face costs nothing
-// more.
+// A world with an emissive material whose light colour isn't white sets the
+// `LIGHT_COLOR` shader def, and its material holds the colour texture of the
+// world at binding 203. The colour texture holds one `R16Uint` texel per
+// slot, the entry of that slot, at the place of the slot in the grid of
+// slots. Past the entries along z lie the colour slots. An entry holds the
+// packed light colour of its chunk, or names the colour slot of the chunk. A
+// colour slot holds a packed light colour per cell, laid out as a slot is.
+//
+// Only under `LIGHT_COLOR` does the shader read colours, in `color_entry` and
+// `cell_color`, and mix them, in `mix_color` and `blend_color`. Without it
+// every colour is white, so the shader of a white world reads and mixes no
+// colours. In a coloured world, the extra cost of a face depends on its
+// chunk:
+//
+// - A chunk with no slot, or with a slot and a tag that says white, costs a
+//   little arithmetic on its tag.
+// - A chunk whose entry holds its light colour costs one more texture read.
+// - A chunk with a colour slot costs that read, and one more read for each
+//   cell whose voxel light the face reads.
+//
+// With the `sub_grids` feature of the crate, a lit world sets the `SUB_GRIDS`
+// shader def, and its material holds the tag map of the world at binding
+// 202. The tag map is a hash table from a level-0 world chunk position to the
+// tag the world shows there, for the world chunks around its sub-grids.
+// `sample_face_light` lights a face of a sub-grid with the light of the world
+// where the face is, read through the tag map by `world_light`, as well as
+// with the light of the sub-grid itself. It reads the position of the face in
+// the grid of the world from the world position Bevy gives it, so it assumes
+// that the `WorldRoot` of the world is at the identity. A shader that still
+// calls `sample_light` lights the faces of a sub-grid from the light of the
+// sub-grid alone: they don't darken in a cave or brighten beside a lamp of
+// the world. Each fragment of a face of a sub-grid costs one lookup in the
+// tag map, and one more `read_front` with its cell reads. A face of a world
+// chunk costs nothing more.
 //
 // References:
 //
-// - Terasology's `BlockMeshPart`, which lights a vertex from 8 points around
+// - `BlockMeshPart` in Terasology, which lights a vertex from 8 points around
 //   it, so a vertex anywhere gets light:
 //   https://github.com/MovingBlocks/Terasology/blob/develop/engine/src/main/java/org/terasology/engine/world/block/shapes/BlockMeshPart.java
-// - Cubyz's lighting, which blends the light of the 8 cells around a vertex
-//   off the grid:
+// - The lighting of Cubyz, which blends the light of the 8 cells around a
+//   vertex off the grid:
 //   https://github.com/PixelGuys/Cubyz/blob/master/src/renderer/lighting.zig
-// - Luanti's smooth lighting, which averages the cells around a corner,
+// - The smooth lighting of Luanti, which averages the cells around a corner,
 //   leaving out cells that don't carry light:
 //   https://github.com/luanti-org/luanti/blob/master/src/client/content_mapblock.cpp
-// - tesserae's light propagation, where sky light scales Bevy's occlusion
-//   terms and `directional_shadow_factor`, and voxel light adds through the
-//   emissive channel:
+// - The light propagation of tesserae, where sky light scales the occlusion
+//   terms of Bevy and `directional_shadow_factor`, and voxel light adds
+//   through the emissive output:
 //   https://github.com/mkappworks-dev/tesserae/pull/3
 
 import bevy_pbr::render::{
@@ -98,6 +132,9 @@ struct LightLook {
     // 1 when a sub-grid's enclosure caps the world's voxel light its faces
     // show, as it caps the world's sky: see `sample_face_light`.
     enclosure_caps_voxel: u32,
+    // 1 when the faces of an emissive voxel glow tinted by its light colour:
+    // see `glow_color`.
+    tinted_glow: u32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(200)
@@ -111,11 +148,25 @@ var<uniform> light_look: LightLook;
 @group(constants::MATERIAL_BIND_GROUP) @binding(202)
 var tag_map: texture_2d<u32>;
 
+// The colour texture of the world, under `LIGHT_COLOR`, which `color_entry`
+// and `cell_color` read.
+@if(LIGHT_COLOR)
+@group(constants::MATERIAL_BIND_GROUP) @binding(203)
+var light_colors: texture_3d<u32>;
+
 const HAS_SLOT: u32 = 0x80000000u;
 const SLOT_SIDE: u32 = 34u;
 
 // Bit 30 of a tag: the chunk is a sub-grid's.
 const SUB_GRID: u32 = 0x40000000u;
+
+// Bit 29 of a tag with a slot: the entry of the slot holds a light colour
+// other than white, or names a colour slot.
+const COLORED: u32 = 0x20000000u;
+
+// The lowest of the tag bits that hold the light colour of a chunk with no
+// slot.
+const COLOR_SHIFT: u32 = 16u;
 
 // The tag of an empty entry of the tag map.
 const EMPTY: u32 = 0xFFFFFFFFu;
@@ -131,12 +182,209 @@ const SKY_TABLE: u32 = 0u;
 const VOXEL_TABLE: u32 = 1u;
 const SUN_TABLE: u32 = 2u;
 
-// The light a face sees, as levels from 0 to 15. `own_voxel` is the level of
-// the lamp behind the face, or 0 if the voxel behind it isn't a lamp.
+// The light a face sees.
+//
+// `sky` and `voxel` are the levels, from 0 to 15, of the light in front of
+// the face. `voxel_color` is the light colour of that voxel light, with its
+// brightest component 1. `own_voxel` is the level of the emissive voxel
+// behind the face, or 0 if the voxel behind it isn't emissive.
+// `own_voxel_color` is the light colour of that emissive voxel. Without
+// `LIGHT_COLOR`, both colours are white.
 struct LightLevels {
     sky: f32,
-    voxel: vec3<f32>,
-    own_voxel: vec3<f32>,
+    voxel: f32,
+    own_voxel: f32,
+    voxel_color: vec3<f32>,
+    own_voxel_color: vec3<f32>,
+}
+
+// Returns the light colour that `packed` holds, packed as `light::color` in
+// the crate packs it, with `bits` bits a component.
+//
+// The 2 bits above the components name the brightest component, from 0 for
+// red to 2 for blue, and that component reads 1. The next `bits` bits, and
+// then the lowest `bits` bits, say how far each of the other two components,
+// in order, falls short of 1, in steps of 1 / `steps`. A value of 3 in the
+// top bits names no colour and reads white. An entry packs a colour in 7 bits
+// a component with steps of 1/127, and a tag with no slot in 6 bits with
+// steps of 1/63.
+fn unpack_color(packed: u32, bits: u32, steps: f32) -> vec3<f32> {
+    let top = (packed >> (2u * bits)) & 3u;
+    let mask = (1u << bits) - 1u;
+    let first = 1.0 - f32((packed >> bits) & mask) / steps;
+    let second = 1.0 - f32(packed & mask) / steps;
+    if top == 0u {
+        return vec3<f32>(1.0, first, second);
+    } else if top == 1u {
+        return vec3<f32>(first, 1.0, second);
+    } else if top == 2u {
+        return vec3<f32>(first, second, 1.0);
+    }
+    return vec3<f32>(1.0);
+}
+
+// Returns the one light colour that a chunk shows on every face, from its
+// tag:
+//
+// - For a tag with no slot, it is the colour in bits 16-29, cut to 6 bits a
+//   component.
+// - For a tag with a slot, it is white, or the colour in the entry of the
+//   slot when bit 29 is set.
+// - Without `LIGHT_COLOR`, it is white.
+fn chunk_color(tag: u32) -> vec3<f32> {
+    @if(LIGHT_COLOR) {
+        if (tag & HAS_SLOT) == 0u {
+            return unpack_color((tag >> COLOR_SHIFT) & 0x3FFFu, 6u, 63.0);
+        }
+        if (tag & COLORED) == 0u {
+            return vec3<f32>(1.0);
+        }
+        // An entry with the spare value 3 in its top bits names a colour
+        // slot, not a colour, and `unpack_color` reads it as white.
+        return unpack_color(color_entry(tag), 7u, 127.0);
+    }
+    @else {
+        return vec3<f32>(1.0);
+    }
+}
+
+// Returns the entry of the slot that `tag` names: a packed light colour, or
+// the name of a colour slot. The entry is the texel of the colour texture at
+// the place of the slot in the grid of slots. Until the colour texture is
+// made, the material binds a placeholder of one white texel, and every entry
+// reads that texel.
+@if(LIGHT_COLOR)
+fn color_entry(tag: u32) -> u32 {
+    let slot = vec3<u32>(slot_origin(tag)) / SLOT_SIDE;
+    let entry = min(slot, textureDimensions(light_colors) - vec3<u32>(1u));
+    return textureLoad(light_colors, entry, 0).r;
+}
+
+// Where the light colours of the cells of a slot come from. When `slotted`
+// is 1, they come from the colour slot whose rows begin at `origin`.
+// Otherwise every cell has `color`, the one light colour of the chunk.
+struct CellColors {
+    origin: vec3<i32>,
+    slotted: u32,
+    color: vec3<f32>,
+}
+
+// Returns where the light colours of the cells of the slot that `tag` names
+// come from. Only a chunk whose entry names a colour slot reads colours cell
+// by cell. Every other chunk shows its one light colour on every face.
+fn cell_colors(tag: u32) -> CellColors {
+    @if(LIGHT_COLOR) {
+        if (tag & HAS_SLOT) != 0u && (tag & COLORED) != 0u {
+            let entry = color_entry(tag);
+            if (entry >> 14u) == 3u {
+                let slots = textureDimensions(light_texture) / SLOT_SIDE;
+                let origin = color_slot_place(entry & 0x3FFFu) * SLOT_SIDE
+                    + vec3<u32>(0u, 0u, slots.z);
+                return CellColors(vec3<i32>(origin), 1u, vec3<f32>(1.0));
+            }
+            return CellColors(vec3<i32>(0), 0u, unpack_color(entry, 7u, 127.0));
+        }
+    }
+    return CellColors(vec3<i32>(0), 0u, chunk_color(tag));
+}
+
+// Returns where the colour slot `index` lies among the colour slots of the
+// colour texture, counted in colour slots along each axis. The bits of the
+// index are dealt to x, y and z in turn, as `color_slot_place` in the crate
+// deals them, so index 5, `0b101`, lies at (1, 0, 1). An index holds 14
+// bits.
+@if(LIGHT_COLOR)
+fn color_slot_place(index: u32) -> vec3<u32> {
+    var place = vec3<u32>(0u);
+    for (var bit = 0u; bit < 14u; bit++) {
+        place[bit % 3u] |= ((index >> bit) & 1u) << (bit / 3u);
+    }
+    return place;
+}
+
+// Returns the light colour of the cell at `cell`, in the padded local
+// coordinates of the chunk. The texels of a colour slot are laid out as the
+// texels of a slot are. A cell with no voxel light reads white.
+@if(LIGHT_COLOR)
+fn cell_color(colors: CellColors, cell: vec3<i32>) -> vec3<f32> {
+    if colors.slotted == 0u {
+        return colors.color;
+    }
+    let inside = clamp(cell, vec3<i32>(0), vec3<i32>(i32(SLOT_SIDE) - 1));
+    let packed = textureLoad(light_colors, colors.origin + inside.zxy, 0).r;
+    return unpack_color(packed, 7u, 127.0);
+}
+
+// Light colours mixing where they meet.
+//
+// `mix_color`, `mixed_color` and `mixing_weight` mirror `mix_weighted` and
+// `mixing_weight` in `light::color` of the crate, so a change to that rule
+// changes them too. Each component is the max over the colours of colour
+// times weight, scaled back so the brightest component is 1. Where every
+// weight is 0, each colour weighs 1 instead.
+//
+// The weight of a colour is its `mixing_weight` at its level, times the share
+// it is given. `weighted` holds what the colours times their weights come to
+// so far. `even` holds what the colours times their shares come to.
+//
+// A face that blends the cells in front of it adds their colours with
+// `blend_color` instead, which sums in place of the max, and gives each cell
+// its blend weight as its share. The max would show the colour of each cell
+// across most of its face and step at the edges of the cells, since the
+// blend weight of a cell outweighs those of its neighbours until their edge.
+// Scaling the sum back still keeps red and green cells from averaging to a
+// dark yellow.
+struct ColorMix {
+    weighted: vec3<f32>,
+    even: vec3<f32>,
+}
+
+// The value of `0.7^(15 - level)` at level 1, which is 0.7 to the 14th.
+// `mixing_weight` subtracts it so that level 1 weighs 0.
+const MIXING_FLOOR: f32 = 0.0067822307;
+
+// Returns the weight of a light colour at `level` where colours meet, under
+// the fixed mixing curve `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`. The
+// weight is 1 at level 15, about 0.70 at level 14, and 0 at level 1 and
+// below, whatever the voxel falloff of the look.
+@if(LIGHT_COLOR)
+fn mixing_weight(level: f32) -> f32 {
+    return max((pow(0.7, 15.0 - level) - MIXING_FLOOR) / (1.0 - MIXING_FLOOR), 0.0);
+}
+
+// Returns `mix` with the light colour `color` added at `level`, with the
+// share `share`.
+@if(LIGHT_COLOR)
+fn mix_color(mix: ColorMix, color: vec3<f32>, level: f32, share: f32) -> ColorMix {
+    return ColorMix(
+        max(mix.weighted, color * (share * mixing_weight(level))),
+        max(mix.even, color * share),
+    );
+}
+
+// Returns `mix` with the light colour `color` of a cell blended in at
+// `level`, with the blend weight `share` of the cell as its share.
+@if(LIGHT_COLOR)
+fn blend_color(mix: ColorMix, color: vec3<f32>, level: f32, share: f32) -> ColorMix {
+    return ColorMix(
+        mix.weighted + color * (share * mixing_weight(level)),
+        mix.even + color * share,
+    );
+}
+
+// Returns the light colour that the colours added to `mix` mix to, or white
+// if none was added.
+@if(LIGHT_COLOR)
+fn mixed_color(mix: ColorMix) -> vec3<f32> {
+    var mixed = mix.weighted;
+    if max(mixed.x, max(mixed.y, mixed.z)) <= 0.0 {
+        mixed = mix.even;
+    }
+    let brightest = max(mixed.x, max(mixed.y, mixed.z));
+    if brightest <= 0.0 {
+        return vec3<f32>(1.0);
+    }
+    return mixed / brightest;
 }
 
 // The texel of the slot `tag` names where its rows begin.
@@ -170,32 +418,58 @@ fn load_cell(origin: vec3<i32>, cell: vec3<i32>) -> vec3<f32> {
     return vec3<f32>(f32(sky), f32(voxel), 0.0) / per_level;
 }
 
-// Blends one channel of the cell in front of a face with its neighbours in the
-// face's plane, `du` and `dv` along each. A zero reads as a wall and is left
-// out, and the diagonal is left out when both cells beside it are, so no light
-// passes through a corner between two solids.
-fn blend(front: f32, side_u: f32, side_v: f32, diagonal: f32, du: f32, dv: f32) -> f32 {
-    var total = front * (1.0 - du) * (1.0 - dv);
-    var weight = step(0.01, front) * (1.0 - du) * (1.0 - dv);
-    let w_u = step(0.01, side_u) * du * (1.0 - dv);
-    let w_v = step(0.01, side_v) * (1.0 - du) * dv;
-    total += side_u * w_u + side_v * w_v;
-    weight += w_u + w_v;
-    if side_u > 0.01 || side_v > 0.01 {
-        let w_d = step(0.01, diagonal) * du * dv;
-        total += diagonal * w_d;
-        weight += w_d;
+// The light in front of a face. `sky` and `voxel` are levels from 0 to 15.
+// `color` is the light colour of the voxel light, with its brightest
+// component 1.
+struct FrontLight {
+    sky: f32,
+    voxel: f32,
+    color: vec3<f32>,
+}
+
+// Returns the blend weights of the cell in front of a face and of its
+// neighbours in the plane of the face. `levels` holds the sky light or the
+// voxel light of the front cell, the cell along u, the cell along v and the
+// diagonal cell, in that order. `du` and `dv` are how far the point read lies
+// from the middle of the front cell along u and v.
+//
+// A level of zero reads as a wall and weighs 0. The diagonal also weighs 0
+// when both cells beside it are zero, so no light passes through a corner
+// between two solids.
+fn blend_weights(levels: vec4<f32>, du: f32, dv: f32) -> vec4<f32> {
+    let w_front = step(0.01, levels.x) * (1.0 - du) * (1.0 - dv);
+    let w_u = step(0.01, levels.y) * du * (1.0 - dv);
+    let w_v = step(0.01, levels.z) * (1.0 - du) * dv;
+    var w_d = 0.0;
+    if levels.y > 0.01 || levels.z > 0.01 {
+        w_d = step(0.01, levels.w) * du * dv;
     }
+    return vec4<f32>(w_front, w_u, w_v, w_d);
+}
+
+// Returns the weighted mean of `levels` under `weights` from
+// `blend_weights`, or 0 if every weight is 0.
+fn blend(levels: vec4<f32>, weights: vec4<f32>) -> f32 {
+    let weight = weights.x + (weights.y + weights.z) + weights.w;
     if weight <= 0.0 {
         return 0.0;
     }
+    let total = levels.x * weights.x + (levels.y * weights.y + levels.z * weights.z)
+        + levels.w * weights.w;
     return total / weight;
 }
 
-// The sky and voxel light at `front`, the middle of the voxel in front of a
-// face on the grid, blended with its three nearest neighbours in the face's
-// plane.
-fn smoothed_read(origin: vec3<i32>, front: vec3<f32>, axis: vec3<f32>) -> vec2<f32> {
+// Returns the sky light and voxel light at `front`, the point half a voxel in
+// front of a face on the grid, blended over the voxel there and its three
+// nearest neighbours in the plane of the face. In a chunk with a colour slot,
+// the light colour blends over the cells whose voxel light counts, each
+// weighing its blend weight times its `mixing_weight`.
+fn smoothed_read(
+    origin: vec3<i32>,
+    colors: CellColors,
+    front: vec3<f32>,
+    axis: vec3<f32>,
+) -> FrontLight {
     let cell = vec3<i32>(floor(front));
     let f = fract(front) - vec3<f32>(0.5);
     var u = vec3<i32>(1, 0, 0);
@@ -211,21 +485,39 @@ fn smoothed_read(origin: vec3<i32>, front: vec3<f32>, axis: vec3<f32>) -> vec2<f
     }
     let su = u * i32(sign(fu) + select(0.0, 1.0, fu == 0.0));
     let sv = v * i32(sign(fv) + select(0.0, 1.0, fv == 0.0));
-    let l0 = load_cell(origin, cell);
-    let l1 = load_cell(origin, cell + su);
-    let l2 = load_cell(origin, cell + sv);
-    let l3 = load_cell(origin, cell + su + sv);
+    var cells = array<vec3<i32>, 4>(cell, cell + su, cell + sv, cell + su + sv);
+    let l0 = load_cell(origin, cells[0]);
+    let l1 = load_cell(origin, cells[1]);
+    let l2 = load_cell(origin, cells[2]);
+    let l3 = load_cell(origin, cells[3]);
     let du = abs(fu);
     let dv = abs(fv);
-    return vec2<f32>(
-        blend(l0.x, l1.x, l2.x, l3.x, du, dv),
-        blend(l0.y, l1.y, l2.y, l3.y, du, dv),
+    let sky = vec4<f32>(l0.x, l1.x, l2.x, l3.x);
+    let voxel = vec4<f32>(l0.y, l1.y, l2.y, l3.y);
+    let voxel_weights = blend_weights(voxel, du, dv);
+    var color = colors.color;
+    @if(LIGHT_COLOR) {
+        if colors.slotted == 1u {
+            var mix = ColorMix(vec3<f32>(0.0), vec3<f32>(0.0));
+            for (var i = 0u; i < 4u; i++) {
+                if voxel_weights[i] > 0.0 {
+                    let cell_light = cell_color(colors, cells[i]);
+                    mix = blend_color(mix, cell_light, voxel[i], voxel_weights[i]);
+                }
+            }
+            color = mixed_color(mix);
+        }
+    }
+    return FrontLight(
+        blend(sky, blend_weights(sky, du, dv)),
+        blend(voxel, voxel_weights),
+        color,
     );
 }
 
-// Which of the 8 voxels of a 2x2x2 block in `mask` are joined to those in
-// `start` through voxels in `mask`, by faces. Bit i is the voxel at
-// (i & 1, (i >> 1) & 1, (i >> 2) & 1) of the block.
+// Returns which of the 8 voxels of a 2x2x2 block in `mask` are joined to
+// those in `start` through voxels in `mask`, by faces. Bit `i` is the voxel
+// at `block_voxel(i)` of the block.
 fn joined_to(mask: u32, start: u32) -> u32 {
     var reached = start;
     // No voxel of the block is more than 3 steps from another.
@@ -238,12 +530,20 @@ fn joined_to(mask: u32, start: u32) -> u32 {
     return reached;
 }
 
-// One channel of a 2x2x2 block of voxels, from each voxel's level and weight.
-// A zero reads as a wall and is left out, and a voxel counts only if it's
-// joined through counted voxels to `nearest`, the voxel of the most weight,
-// which joins its neighbours even when it reads zero. Smoothed light takes the
-// weighted mean of the counted voxels, and stepped light the nearest of them.
-fn blend_eight(levels: array<f32, 8>, weights: array<f32, 8>, nearest: u32) -> f32 {
+// Returns the voxel that bit `i` names in a 2x2x2 block,
+// `(i & 1, (i >> 1) & 1, (i >> 2) & 1)`. Bit 5 names (1, 0, 1).
+fn block_voxel(i: u32) -> vec3<i32> {
+    return vec3<i32>(vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u));
+}
+
+// Returns, as bits, which voxels of a 2x2x2 block count toward its sky light
+// or voxel light, from the level and weight of each voxel.
+//
+// A level of zero reads as a wall and is left out, and so is a weight of 0.
+// A voxel counts only if it is joined through counted voxels to `nearest`,
+// the bit of the voxel of the most weight. That voxel joins its neighbours
+// even when its level is zero.
+fn counted_voxels(levels: array<f32, 8>, weights: array<f32, 8>, nearest: u32) -> u32 {
     // Copies, since a function's arguments can't be indexed by a variable.
     var l = levels;
     var w = weights;
@@ -253,33 +553,81 @@ fn blend_eight(levels: array<f32, 8>, weights: array<f32, 8>, nearest: u32) -> f
             lit |= 1u << i;
         }
     }
-    let counted = joined_to(lit | nearest, nearest) & lit;
+    return joined_to(lit | nearest, nearest) & lit;
+}
+
+// Returns the voxel of the most weight among those in `counted`, as a bit
+// index.
+fn nearest_counted(weights: array<f32, 8>, counted: u32) -> u32 {
+    var w = weights;
+    var best = 0.0;
+    var nearest = 0u;
+    for (var i = 0u; i < 8u; i++) {
+        if (counted & (1u << i)) != 0u && w[i] > best {
+            best = w[i];
+            nearest = i;
+        }
+    }
+    return nearest;
+}
+
+// Returns the sky light or voxel light of a 2x2x2 block of voxels, from the
+// voxels in `counted` (see `counted_voxels`). Smoothed light takes the
+// weighted mean of their levels. Stepped light takes the level of the
+// nearest of them.
+fn blend_eight(levels: array<f32, 8>, weights: array<f32, 8>, counted: u32) -> f32 {
     if counted == 0u {
         return 0.0;
     }
+    var l = levels;
+    var w = weights;
+    if light_look.smoothed == 0u {
+        return l[nearest_counted(weights, counted)];
+    }
     var total = 0.0;
     var weight = 0.0;
-    var best = 0.0;
-    var best_level = 0.0;
     for (var i = 0u; i < 8u; i++) {
         if (counted & (1u << i)) != 0u {
             total += l[i] * w[i];
             weight += w[i];
-            if w[i] > best {
-                best = w[i];
-                best_level = l[i];
-            }
         }
-    }
-    if light_look.smoothed == 0u {
-        return best_level;
     }
     return total / weight;
 }
 
+// Returns the light colour of the voxel light of a 2x2x2 block whose first
+// voxel is `base`, from the voxels in `counted`. Smoothed light mixes their
+// colours, each weighing its weight times its `mixing_weight`. Stepped light
+// takes the colour of the nearest of them. With no voxel counted, the colour
+// is white.
+@if(LIGHT_COLOR)
+fn blend_eight_colors(
+    colors: CellColors,
+    base: vec3<i32>,
+    levels: array<f32, 8>,
+    weights: array<f32, 8>,
+    counted: u32,
+) -> vec3<f32> {
+    if counted == 0u {
+        return vec3<f32>(1.0);
+    }
+    if light_look.smoothed == 0u {
+        return cell_color(colors, base + block_voxel(nearest_counted(weights, counted)));
+    }
+    var l = levels;
+    var w = weights;
+    var mix = ColorMix(vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var i = 0u; i < 8u; i++) {
+        if (counted & (1u << i)) != 0u {
+            mix = blend_color(mix, cell_color(colors, base + block_voxel(i)), l[i], w[i]);
+        }
+    }
+    return mixed_color(mix);
+}
+
 // The sky and voxel light at `front`, read from the 8 voxels around it,
 // weighted by their distance from it, for a face off the grid.
-fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
+fn eight_read(origin: vec3<i32>, colors: CellColors, front: vec3<f32>) -> FrontLight {
     let q = front - vec3<f32>(0.5);
     let base = floor(q);
     var t = q - base;
@@ -293,8 +641,7 @@ fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
     var nearest = 0u;
     var most = -1.0;
     for (var i = 0u; i < 8u; i++) {
-        let o = vec3<u32>(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
-        let along = mix(vec3<f32>(1.0) - t, t, vec3<f32>(o));
+        let along = mix(vec3<f32>(1.0) - t, t, vec3<f32>(block_voxel(i)));
         let w = along.x * along.y * along.z;
         weights[i] = w;
         if w > most {
@@ -302,19 +649,27 @@ fn eight_read(origin: vec3<i32>, front: vec3<f32>) -> vec2<f32> {
             nearest = 1u << i;
         }
         if w > 0.0 {
-            let cell = load_cell(origin, vec3<i32>(base) + vec3<i32>(o));
+            let cell = load_cell(origin, vec3<i32>(base) + block_voxel(i));
             sky[i] = cell.x;
             voxel[i] = cell.y;
         }
     }
-    return vec2<f32>(
-        blend_eight(sky, weights, nearest),
-        blend_eight(voxel, weights, nearest),
+    let voxel_counted = counted_voxels(voxel, weights, nearest);
+    var color = colors.color;
+    @if(LIGHT_COLOR) {
+        if colors.slotted == 1u {
+            color = blend_eight_colors(colors, vec3<i32>(base), voxel, weights, voxel_counted);
+        }
+    }
+    return FrontLight(
+        blend_eight(sky, weights, counted_voxels(sky, weights, nearest)),
+        blend_eight(voxel, weights, voxel_counted),
+        color,
     );
 }
 
-// The one level of each channel that every face of a chunk sees, from the
-// chunk's tag when it names no slot.
+// Returns the one sky light level and voxel light level that every face of a
+// chunk sees, from the tag of the chunk when it names no slot.
 fn tag_levels(tag: u32) -> LightLevels {
     var sky = f32(tag & 15u);
     var voxel = f32((tag >> 4u) & 15u);
@@ -322,7 +677,7 @@ fn tag_levels(tag: u32) -> LightLevels {
         sky = f32(tag & 255u) / 17.0;
         voxel = f32((tag >> 8u) & 255u) / 17.0;
     }
-    return LightLevels(sky, vec3<f32>(voxel), vec3<f32>(0.0));
+    return LightLevels(sky, voxel, 0.0, chunk_color(tag), vec3<f32>(1.0));
 }
 
 // How many voxels wide the cells of the slot `tag` names are: `1 << L` for a
@@ -337,49 +692,83 @@ fn unit_normal(normal: vec3<f32>) -> vec3<f32> {
     return normal / max(length(normal), 1e-4);
 }
 
-// The sky and voxel light in front of a face at `local`, in the cells of the
-// slot whose rows begin at `origin`, with `n` its unit normal.
+// Returns the sky light and voxel light in front of a face at `local`, in the
+// cells of the slot whose rows begin at `origin`, with `n` its unit normal.
 //
-// A face on the grid, with its normal on an axis and its position on a plane
-// between cells, reads the cell in front of it, at `local + n / 2`, and with
-// smoothed light its three nearest neighbours in the face's plane. Any other
-// face, such as a slope, may cut into a solid voxel, so the cell at
-// `local + n / 2` may be solid. It reads the 8 cells around that point
-// instead, leaving out those with no light and those not joined to the
-// nearest of the 8. On a cube face that would read the same as the read on
-// the grid, which costs less.
-fn read_front(origin: vec3<i32>, local: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+// A face on the grid has its normal on an axis and its position on a plane
+// between cells. It reads the cell in front of it, at `local + n / 2`, and
+// with smoothed light also the three nearest neighbours of that cell in the
+// plane of the face. Any other face, such as a slope, may cut into a solid
+// voxel, so the cell at `local + n / 2` may be solid. Such a face reads the 8
+// cells around that point instead, leaving out those with no light and those
+// not joined to the nearest of the 8. On a cube face that would read the same
+// as the read on the grid, which costs less.
+//
+// The light colour comes from `colors`. A chunk with a colour slot blends the
+// colours of the cells whose voxel light it reads, and with stepped light
+// takes the colour of the nearest one. Any other chunk reads no colours, and
+// its one light colour holds for every face.
+fn read_front(
+    origin: vec3<i32>,
+    colors: CellColors,
+    local: vec3<f32>,
+    n: vec3<f32>,
+) -> FrontLight {
     let front = local + n * 0.5;
     let axis = abs(n);
     let along = dot(local, step(vec3<f32>(0.999), axis));
     let on_grid = max(axis.x, max(axis.y, axis.z)) >= 0.999
         && abs(along - round(along)) <= 0.01;
     if !on_grid {
-        return eight_read(origin, front);
+        return eight_read(origin, colors, front);
     } else if light_look.smoothed == 1u {
-        return smoothed_read(origin, front, axis);
+        return smoothed_read(origin, colors, front, axis);
     }
-    return load_cell(origin, vec3<i32>(floor(front))).xy;
+    let cell = vec3<i32>(floor(front));
+    let levels = load_cell(origin, cell);
+    var color = colors.color;
+    @if(LIGHT_COLOR) {
+        if colors.slotted == 1u && levels.y > 0.0 {
+            color = cell_color(colors, cell);
+        }
+    }
+    return FrontLight(levels.x, levels.y, color);
 }
 
-// The light a chunk face sees, from the chunk's tag and the face's position
-// and normal in the chunk's padded local coordinates.
+// Returns the light a chunk face sees, from the tag of the chunk and the
+// position and normal of the face in the padded local coordinates of the
+// chunk.
 //
-// A tag with no slot gives its levels. Otherwise the face reads the slot's
-// cells in front of it, as `read_front` says, and glows if the cell behind
-// it is a lamp's. A chunk above LOD level 0 reads its cells, `1 << L` voxels
-// wide, after dividing the face's offset from the chunk's first voxel by
-// that width.
+// A tag with no slot gives its levels. Otherwise the face reads the cells of
+// the slot in front of it, as `read_front` says, and glows if the cell behind
+// it is emissive. A chunk above LOD level 0 reads its cells, `1 << L` voxels
+// wide, after dividing the offset of the face from the first voxel of the
+// chunk by that width.
+//
+// The light colour of the emissive voxel behind the face is read where its
+// level is, at the cell behind the face. It comes from the colour slot of the
+// chunk if the chunk has one. Otherwise it is the one light colour of the
+// chunk, which counts the colours of its emissive voxels. Only `glow_color`
+// uses this colour, so the colour slot is read only when the `tinted_glow` of
+// the look is on.
 fn sample_light(tag: u32, chunk_local: vec3<f32>, normal: vec3<f32>) -> LightLevels {
     if (tag & HAS_SLOT) == 0u {
         return tag_levels(tag);
     }
     let local = (chunk_local - vec3<f32>(1.0)) / cell_width(tag) + vec3<f32>(1.0);
     let origin = slot_origin(tag);
+    let colors = cell_colors(tag);
     let n = unit_normal(normal);
-    let behind = load_cell(origin, vec3<i32>(floor(local - n * 0.5)));
-    let levels = read_front(origin, local, n);
-    return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(behind.z));
+    let behind_cell = vec3<i32>(floor(local - n * 0.5));
+    let behind = load_cell(origin, behind_cell);
+    let front = read_front(origin, colors, local, n);
+    var own_color = colors.color;
+    @if(LIGHT_COLOR) {
+        if colors.slotted == 1u && behind.z > 0.0 && light_look.tinted_glow == 1u {
+            own_color = cell_color(colors, behind_cell);
+        }
+    }
+    return LightLevels(front.sky, front.voxel, behind.z, front.color, own_color);
 }
 
 // The tag map's hash of the level-0 world chunk position `position`, the
@@ -444,7 +833,7 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
     let chunk = nearest >> vec3<u32>(CHUNK_SHIFT);
     let tag = tag_map_tag(chunk);
     if tag == EMPTY {
-        return LightLevels(15.0, vec3<f32>(0.0), vec3<f32>(0.0));
+        return LightLevels(15.0, 0.0, 0.0, vec3<f32>(1.0), vec3<f32>(1.0));
     }
     if (tag & HAS_SLOT) == 0u {
         return tag_levels(tag);
@@ -455,24 +844,28 @@ fn world_light(world_position: vec3<f32>, world_normal: vec3<f32>) -> LightLevel
     let corner = (chunk >> level) << level;
     let offset = world_position - vec3<f32>(corner) * f32(1u << CHUNK_SHIFT);
     let local = offset / cell_width(tag) + vec3<f32>(1.0);
-    let levels = read_front(slot_origin(tag), local, n);
-    return LightLevels(levels.x, vec3<f32>(levels.y), vec3<f32>(0.0));
+    let front = read_front(slot_origin(tag), cell_colors(tag), local, n);
+    return LightLevels(front.sky, front.voxel, 0.0, front.color, vec3<f32>(1.0));
 }
 
-// The light any chunk face shows, a world chunk's or a sub-grid's: the light
-// a fragment shader of a lit world reads. It takes the chunk's tag, the
-// face's position and normal in the chunk's padded local coordinates, and
-// its position and normal in the world's grid.
+// Returns the light that any chunk face shows, on a world chunk or on a
+// sub-grid: the light a fragment shader of a lit world reads. It takes the
+// tag of the chunk, the position and normal of the face in the padded local
+// coordinates of the chunk, and the position and normal of the face in the
+// grid of the world.
 //
-// A world chunk's face reads as `sample_light` reads it, and the world's
-// position and normal are unused. Under the `SUB_GRIDS` shader def, a
-// sub-grid chunk's face, whose tag has bit 30 set, also reads the world's
-// light with `world_light`. Its own sky is its enclosure, so the smaller of
-// the world's sky and its own caps the world's sky by how closed in the face
-// is. When `light_look.enclosure_caps_voxel` is set, the world's voxel light
-// is capped the same way, so the world's lamps don't shine through a closed
-// cabin's walls. The face then shows the larger of that and its own lamps'
-// light. Its glow is its own.
+// A face of a world chunk reads as `sample_light` reads it, and the position
+// and normal in the grid of the world go unused. Under the `SUB_GRIDS` shader
+// def, a face of a sub-grid chunk, whose tag has bit 30 set, also reads the
+// light of the world with `world_light`. The sky light of the sub-grid itself
+// is its enclosure, so the smaller of the two sky levels caps the sky of the
+// world by how closed in the face is. When `light_look.enclosure_caps_voxel`
+// is set, the voxel light of the world is capped the same way, so the lamps
+// of the world don't shine through the walls of a closed cabin. The face then
+// shows the larger of that voxel light and the voxel light of the sub-grid.
+// Its light colour is the colour the two mix to, each weighing its
+// `mixing_weight` at its level. The glow of the face comes from the sub-grid
+// alone.
 fn sample_face_light(
     tag: u32,
     local_position: vec3<f32>,
@@ -486,12 +879,25 @@ fn sample_face_light(
             let world = world_light(world_position, world_normal);
             var world_voxel = world.voxel;
             if light_look.enclosure_caps_voxel == 1u {
-                world_voxel = min(world_voxel, vec3<f32>(own.sky));
+                world_voxel = min(world_voxel, own.sky);
+            }
+            var color = world.voxel_color;
+            @if(LIGHT_COLOR) {
+                var mix = ColorMix(vec3<f32>(0.0), vec3<f32>(0.0));
+                if world_voxel > 0.0 {
+                    mix = mix_color(mix, world.voxel_color, world_voxel, 1.0);
+                }
+                if own.voxel > 0.0 {
+                    mix = mix_color(mix, own.voxel_color, own.voxel, 1.0);
+                }
+                color = mixed_color(mix);
             }
             return LightLevels(
                 min(world.sky, own.sky),
                 max(world_voxel, own.voxel),
                 own.own_voxel,
+                color,
+                own.own_voxel_color,
             );
         }
     }
@@ -522,12 +928,15 @@ fn falloff(table: u32, level: f32) -> f32 {
     return mix(a, b, l - floor(l));
 }
 
-fn voxel_falloff(levels: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        falloff(VOXEL_TABLE, levels.x),
-        falloff(VOXEL_TABLE, levels.y),
-        falloff(VOXEL_TABLE, levels.z),
-    );
+fn voxel_falloff(level: f32) -> f32 {
+    return falloff(VOXEL_TABLE, level);
+}
+
+// Returns the light colour that tints the glow of a face: the light colour
+// of its emissive voxel when the `tinted_glow` of the look is on, and white
+// otherwise.
+fn glow_color(levels: LightLevels) -> vec3<f32> {
+    return select(vec3<f32>(1.0), levels.own_voxel_color, light_look.tinted_glow == 1u);
 }
 
 // How much of Bevy's directional lights reaches a face at sky light `level`,
@@ -546,32 +955,33 @@ fn sky_brightness(level: f32) -> f32 {
     return max(falloff(SKY_TABLE, level), light_look.minimum_brightness);
 }
 
-// The voxel light a face shows, as light to multiply by its diffuse colour:
-// the light around it, and its glow if it's a lamp's face. Includes the view's
-// exposure.
+// Returns the voxel light a face shows, as light to multiply by its diffuse
+// colour: the light around it in its light colour, and its glow if the face
+// belongs to an emissive voxel. It includes the exposure of the view.
 fn voxel_brightness(levels: LightLevels) -> vec3<f32> {
-    let around = voxel_falloff(levels.voxel);
-    let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel);
+    let around = voxel_falloff(levels.voxel) * levels.voxel_color;
+    let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel) * glow_color(levels);
     return (around + glow) * light_look.voxel_brightness * view_bindings::view.exposure;
 }
 
-// Applies a face's light to Bevy's PBR input. Light is never baked into the
-// base colour.
+// Applies the light of a face to the PBR input of Bevy. Light is never baked
+// into the base colour.
 //
-// Sky light scales Bevy's ambient light and environment map through the
-// occlusion terms, and its directional lights through
+// Sky light scales the ambient light and environment map of Bevy through the
+// occlusion terms, and the directional lights of Bevy through
 // `directional_shadow_factor`. Bevy applies that factor only to a directional
 // light with a shadow map, so a shader calling this must also call
-// `remove_unshadowed_sun` on the colour Bevy's lighting returns. Voxel light
-// and a lamp's glow add through the
-// emissive channel, in the forward pass only, so no other pass counts them
-// twice.
+// `remove_unshadowed_sun` on the colour that the lighting of Bevy returns.
+// Voxel light, in its light colour, and the glow of an emissive voxel add
+// through the emissive output, in the forward pass only, so no other pass
+// counts them twice. The glow takes the light colour of the emissive voxel
+// only when the `tinted_glow` of the look is on.
 //
-// `ao` is the face's ambient occlusion, from 0 to 1, applied as the look's
-// `ao` says: by default it darkens ambient light and voxel light, and leaves
-// the base colour and the sun alone. With `AO_BASE_COLOR` it darkens the base
-// colour instead, and with `AO_OFF` it's ignored. A lamp's glow is never
-// darkened.
+// `face_ao` is the ambient occlusion of the face, from 0 to 1, applied as the
+// `ao` of the look says. By default it darkens ambient light and voxel light,
+// and leaves the base colour and the sun alone. With `AO_BASE_COLOR` it
+// darkens the base colour instead, and with `AO_OFF` it's ignored. The glow
+// of an emissive voxel is never darkened.
 fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, face_ao: f32) {
     var ao = face_ao;
     if light_look.ao == AO_BASE_COLOR {
@@ -594,8 +1004,8 @@ fn apply_voxel_light(pbr_input: ptr<function, PbrInput>, levels: LightLevels, fa
             material.specular_transmission,
             material.diffuse_transmission,
         );
-        let around = voxel_falloff(levels.voxel) * ao;
-        let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel);
+        let around = voxel_falloff(levels.voxel) * ao * levels.voxel_color;
+        let glow = light_look.emissive_glow * voxel_falloff(levels.own_voxel) * glow_color(levels);
         let exposure = view_bindings::view.exposure;
         let light = (around + glow) * light_look.voxel_brightness * exposure;
         // Bevy multiplies emissive light by the exposure as far as the

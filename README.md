@@ -214,7 +214,7 @@ $ cargo run -r --example light_tuning --features light_propagation,sub_grids
 
 ### Light demo
 
-The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature together with Bevy's atmosphere, fog and point lights, and let's the player ad and remove regular and emissive voxels to see how lighting propagates. Its trees can be felled, which uses the `sub_grids` and `dislodged_fragments` features too.
+The [`light_mountain_house` example](https://github.com/splashdust/bevy_voxel_world/blob/main/examples/light_mountain_house.rs) demoes the `light_propagation` feature, with coloured light from its lanterns, hearth and crystals, together with Bevy's atmosphere and fog, and let's the player ad and remove regular and emissive voxels to see how lighting propagates. Its trees can be felled, which uses the `sub_grids` and `dislodged_fragments` features too.
 
 <img width="800" height="445" alt="" src="https://raw.githubusercontent.com/splashdust/bevy_voxel_world/main/assets/readme/house.webp" />
 

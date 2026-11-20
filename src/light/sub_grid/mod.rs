@@ -1,78 +1,98 @@
-//! A sub-grid's own light: the light its emissive voxels give its chunks.
-//! Compiled only with the `sub_grids` feature.
+//! Light of sub-grids
 //!
-//! A sub-grid's voxels never enter the world's light. They change neither
-//! the world's occupancy nor its sky record, and spread no light into it.
-//! Instead each sub-grid chunk holds light of its own, which its faces show.
-//! Its chunks join the [world view](super::view) under their grid's keys,
-//! beside the world's chunks, and the world's [solver](super::solver)
-//! solves them chunk by chunk, with the world's voxel reach, precision and
-//! shape. No world solve reads them, since a world solve finds the chunks
-//! around it by the world's keys.
+//! This module gives each sub-grid light of its own: the light its emissive
+//! voxels give its chunks. It is compiled only with the `sub_grids` feature.
+//!
+//! The voxels of a sub-grid never enter the light of the world. They change
+//! neither the occupancy of the world nor its sky record, and spread no light
+//! into it. Instead each sub-grid chunk holds light of its own, which its
+//! faces show. The chunks of a sub-grid join the [world view](super::view)
+//! under the keys of their grid, beside the chunks of the world. The
+//! [solver](super::solver) of the world solves them chunk by chunk, with the
+//! voxel light reach, light precision and `LightShape` of the world. No world
+//! solve reads them, since a world solve finds the chunks around it by the
+//! keys of the world.
+//!
+//! The voxel light of a sub-grid chunk has light colours, as the voxel light
+//! of a world chunk does. Its solve runs once per light colour in its light
+//! box, and mixes the colours whose light reaches the chunk. The faces of the
+//! chunk and `grid(g).light_at` mix the light of the world with that light by
+//! the same rule. The enclosure of a sub-grid is sky light, which has no
+//! colour.
 //!
 //! # Inputs from the commit
 //!
-//! A commit writes the occupancy and emissive voxels of each sub-grid chunk
-//! whose voxels it changed, and of each sub-grid chunk it spawns, into the
-//! world view straight from the sub-grid's voxel edits. So every chunk of a
-//! sub-grid solves with all of its grid's chunks around it present, one
-//! spawned by the same commit included. A new chunk's first solve is a
-//! relight the commit starts, ahead of the pool budget, rather than part of
-//! its chunk task: its chunk task keeps the light the world view holds, and
-//! the relight's light waits for the chunk's mesh, so
-//! [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled) waits
-//! for it.
+//! A commit writes the occupancy and emissive voxels of two kinds of sub-grid
+//! chunk into the world view, straight from the voxel edits of the sub-grid:
+//! each chunk whose voxels it changed, and each chunk it spawns. So every
+//! chunk of a sub-grid solves with all the chunks of its grid around it
+//! present, including one spawned by the same commit.
 //!
-//! A sub-grid's solve reads a chunk position of its grid that holds no chunk
-//! as air: light passes through it and nothing starts there. Under
-//! [`SubGridSky::Enclosed`] its own sky is its enclosure: sky spreads, with
-//! the world's sky reach, precision and shape, from each open voxel with a
-//! line along one of the sub-grid's axes that leaves the sub-grid without
-//! meeting a solid: see [`enclosure`]. Under
-//! [`SubGridSky::World`], every open
-//! voxel has direct sky, so its own sky is the top level everywhere.
+//! The first solve of a new chunk is a relight the commit starts, ahead of the
+//! pool budget, rather than part of its chunk task. Its chunk task keeps the
+//! light the world view holds, and the light of the relight waits for the mesh
+//! of the chunk. So [`light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
+//! waits for it.
+//!
+//! A solve of a sub-grid chunk reads a chunk position of its grid that holds
+//! no chunk as air: light passes through it and nothing starts there. Under
+//! [`SubGridSky::Enclosed`], the sky of the sub-grid is its enclosure. Sky
+//! spreads, with the sky light reach, light precision and `LightShape` of the
+//! world, from each open voxel that has a line along one of the axes of the
+//! sub-grid that leaves the sub-grid without meeting a solid: see
+//! [`enclosure`]. Under [`SubGridSky::World`], every open voxel has direct
+//! sky, so the sky of the sub-grid is the top level everywhere.
 //!
 //! # What relights
 //!
-//! A voxel edit relights every chunk of the sub-grid whose solve box, the
-//! chunk and the world's reach past each face, holds a voxel the edit
-//! changed. Under `Enclosed` the reach is the longer of sky reach and voxel
-//! reach, and under `World` voxel reach alone. Under `Enclosed` the edit
-//! also relights every chunk whose solve box holds a voxel whose line test it
-//! flipped, however far from the edit. A solve reads only its box and the
-//! line record, so no other chunk's light can change, and these relights
-//! relight nothing further when they land. A commit that leaves a sub-grid
-//! with no solid voxel, as a stamp does, relights none of its chunks, which
-//! all retire with it. Switching `sub_grid_sky`
-//! relights every sub-grid chunk with an open voxel, and no world chunk. A
-//! settings relight relights the sub-grid's chunks too, nearest a camera
-//! first, placed by each sub-grid's last pose. Nothing else solves a
-//! sub-grid's light again: moving or turning a sub-grid, world edits and
-//! changes of the world's light start nothing. A sub-grid chunk that
-//! despawns, as every chunk of a despawned sub-grid and a chunk gone all air
-//! do, drops its light.
+//! A voxel edit relights every chunk of the sub-grid whose solve box holds a
+//! voxel the edit changed. The solve box is the chunk and the reach of the
+//! world past each face. Under `Enclosed` the reach is the longer of the sky
+//! light reach and the voxel light reach, and under `World` it is the voxel
+//! light reach alone. Under `Enclosed` the edit also relights every chunk
+//! whose solve box holds a voxel whose line test it flipped, however far from
+//! the edit. A solve reads only its box and the line record, so the light of
+//! no other chunk can change, and these relights relight nothing further when
+//! they land. A commit that leaves a sub-grid with no solid voxel, as a stamp
+//! does, relights none of its chunks, which all retire with it.
+//!
+//! These changes also relight sub-grid chunks:
+//!
+//! - Switching `sub_grid_sky` relights every sub-grid chunk with an open
+//!   voxel, and no world chunk.
+//! - A settings relight relights the chunks of sub-grids too, nearest a camera
+//!   first, each placed by the last pose of its sub-grid.
+//! - A change to the light colour of an emissive material relights, in the
+//!   same way, only the sub-grid chunks whose solve box holds an emissive
+//!   voxel of that material.
+//!
+//! Nothing else solves the light of a sub-grid again. Moving or turning a
+//! sub-grid, world edits and changes of the light of the world start nothing.
+//! A sub-grid chunk that despawns drops its light, as every chunk of a
+//! despawned sub-grid does, and so does a chunk that has become all air.
 //!
 //! # Cost
 //!
-//! A sub-grid chunk's solve grows with reach, as a world chunk's does. An
-//! edit's cost grows with the sub-grid chunks within reach of the voxels it
-//! changed, and a burst of lifts with the chunks lifted. On the main thread,
-//! an edit updates the light inputs of each sub-grid chunk it changed from
-//! the voxels it changed, and its emissive voxels, and builds them from all
-//! of the chunk's voxel edits only for a chunk it spawned or whose edits it
-//! replaced. Moving a sub-grid costs no solve.
+//! The solve of a sub-grid chunk grows with reach and with the light colours
+//! whose light reaches it, as the solve of a world chunk does. The cost of an
+//! edit grows with the sub-grid chunks within reach of the voxels it changed,
+//! and the cost of a burst of lifts grows with the chunks lifted. On the main
+//! thread, an edit updates the light inputs of each sub-grid chunk it changed
+//! from the voxels it changed, and their emissive voxels. It builds the inputs
+//! from all the voxel edits of the chunk only for a chunk it spawned or whose
+//! edits it replaced. Moving a sub-grid costs no solve.
 //!
 //! Enclosure adds to that, and `World` skips all of it:
 //!
-//! - A solve's sky grows with sky reach, and ends at once for a chunk whose
-//!   open voxels all have direct sky. Finding the direct voxels grows with
-//!   the voxels of the 3×3×3 chunks around it and with the sub-grid's extent
-//!   in chunks.
-//! - An edit also follows the three lines through each edited voxel across
-//!   the sub-grid's extent, and relights the chunks around the voxels whose
+//! - The sky light of a solve grows with the sky light reach, and ends at once
+//!   for a chunk whose open voxels all have direct sky. Finding the voxels with
+//!   direct sky grows with the voxels of the 3×3×3 chunks around the chunk,
+//!   and with the extent of the sub-grid in chunks.
+//! - An edit also follows the three lines through each edited voxel across the
+//!   extent of the sub-grid. It relights the chunks around the voxels whose
 //!   line test flipped.
-//! - The line record's memory grows with the sub-grid's chunks.
-//! - Switching to `Enclosed` builds every sub-grid's line record, which
+//! - The memory of the line record grows with the chunks of the sub-grid.
+//! - Switching to `Enclosed` builds the line record of every sub-grid, which
 //!   grows with their voxel edits.
 
 use std::marker::PhantomData;
@@ -88,6 +108,7 @@ pub(crate) mod handover;
 pub(crate) mod line_record;
 pub(crate) mod tag_map;
 
+use super::color::{unpack, ChunkColor, EmissionTable};
 use super::config::SubGridSky;
 use super::edit::{reach_of, within_reach, within_reach_of_box};
 use super::faces::FaceHashes;
@@ -95,7 +116,7 @@ use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::levels::LightLevels;
 use super::relight::LightWork;
 use super::sky::ColumnAnswer;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::ViewChunk;
 use super::LightSettings;
 use crate::chunk::{chunk_containing, CHUNK_SIZE_I};
@@ -245,6 +266,8 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                     inputs,
                     sky: chunk.light.sky.clone(),
                     voxel: chunk.light.voxel.clone(),
+                    color: chunk.light.color.clone(),
+                    borders: chunk.light.borders.clone(),
                     precision: chunk.light.precision,
                 });
                 chunk.edits = stamp;
@@ -260,8 +283,10 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 entity: Entity::PLACEHOLDER,
                 light: Arc::new(ChunkLight {
                     inputs,
-                    sky: ChannelLight::Uniform(sky),
-                    voxel: ChannelLight::Uniform(0),
+                    sky: ChunkLevels::Uniform(sky),
+                    voxel: ChunkLevels::Uniform(0),
+                    color: ChunkColor::White,
+                    borders: Default::default(),
                     precision: task.precision,
                 }),
                 faces: FaceHashes::default(),
@@ -362,7 +387,7 @@ pub(crate) fn name_new_chunks<C: VoxelWorldConfig>(
 fn inputs_of<I: Copy + PartialEq>(
     bucket: Option<EditBucket<I>>,
     position: IVec3,
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
 ) -> LightInputs {
     let mut occupancy = Occupancy::Open;
     let mut emissive = Vec::new();
@@ -374,19 +399,14 @@ fn inputs_of<I: Copy + PartialEq>(
         let local = (at - min).as_uvec3();
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         occupancy.set(x, y, z, true);
-        if let Some(level) = emission_of(emission, material) {
-            emissive.push(EmissiveVoxel {
-                x: x as u8,
-                y: y as u8,
-                z: z as u8,
-                level,
-            });
+        if let Some(emitter) = emission.get(material) {
+            emissive.push(EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter));
         }
     }
     occupancy.normalize();
     LightInputs {
         occupancy,
-        emissive,
+        emissive: emissive.into(),
         columns: ColumnAnswer::none(),
         ring: false,
     }
@@ -409,7 +429,7 @@ fn inputs_updated<I: Copy + PartialEq>(
     old: &LightInputs,
     position: IVec3,
     voxels: &[VoxelChange<I>],
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
 ) -> LightInputs {
     let mut occupancy = old.occupancy.clone();
     let min = position * CHUNK_SIZE_I;
@@ -430,37 +450,31 @@ fn inputs_updated<I: Copy + PartialEq>(
     let mut emissive: Vec<EmissiveVoxel> = old
         .emissive
         .iter()
-        .filter(|emitter| !placed.contains_key(&(emitter.x, emitter.y, emitter.z)))
+        .filter(|emitter| !placed.contains_key(&emitter.at()))
         .copied()
         .collect();
     for ((x, y, z), material) in placed {
-        if let Some(level) = material.and_then(|material| emission_of(emission, material))
-        {
-            emissive.push(EmissiveVoxel { x, y, z, level });
+        if let Some(emitter) = material.and_then(|material| emission.get(material)) {
+            emissive.push(EmissiveVoxel::new(x, y, z, emitter));
         }
     }
     LightInputs {
         occupancy,
-        emissive,
+        emissive: emissive.into(),
         columns: ColumnAnswer::none(),
         ring: false,
     }
 }
 
-/// The level `material` emits at under the emissive list `emission`, if it
-/// is emissive.
-fn emission_of<I: PartialEq>(emission: &[(I, u8)], material: I) -> Option<u8> {
-    emission
-        .iter()
-        .find(|(emissive, _)| *emissive == material)
-        .map(|(_, level)| *level)
-}
-
 impl<C: VoxelWorldConfig> LightSettings<C> {
-    /// The light the voxel at `position` of the sub-grid `grid` holds of its
-    /// own, from its chunk's light in the world view: a solid voxel holds no
-    /// light, except an emissive one, which holds its level. `None` where the
-    /// sub-grid has no chunk.
+    /// Returns the light of its own that the voxel at `position` of the
+    /// sub-grid `grid` holds, from the light of its chunk in the world view, or
+    /// `None` where the sub-grid has no chunk there.
+    ///
+    /// - A solid voxel holds no light, except an emissive voxel, which holds
+    ///   its level and its light colour as voxel light.
+    /// - An open voxel holds the levels its chunk holds for it, and its voxel
+    ///   light has the light colour the chunk holds for it.
     pub fn own_light_at(&self, grid: GridId, position: IVec3) -> Option<LightLevels> {
         let chunk = chunk_containing(position);
         let light = self
@@ -474,19 +488,17 @@ impl<C: VoxelWorldConfig> LightSettings<C> {
         let (x, y, z) = (local.x as usize, local.y as usize, local.z as usize);
         let inputs = &light.inputs;
         if inputs.occupancy.is_solid(x, y, z) {
-            let level = inputs
+            let emitter = inputs
                 .emissive
                 .iter()
-                .find(|emitter| {
-                    (emitter.x, emitter.y, emitter.z) == (x as u8, y as u8, z as u8)
-                })
-                .map_or(0, |emitter| emitter.level);
-            return Some(LightLevels::new(0, level));
+                .find(|emitter| emitter.at() == (x as u8, y as u8, z as u8));
+            return Some(match emitter {
+                Some(emitter) => LightLevels::new(0, emitter.level()).with_voxel_color(
+                    unpack(self.task.emission.color(emitter.material())),
+                ),
+                None => LightLevels::new(0, 0),
+            });
         }
-        Some(LightLevels::of_steps(
-            light.sky.at(x, y, z),
-            light.voxel.at(x, y, z),
-            light.precision,
-        ))
+        Some(light.open_levels_at(x, y, z))
     }
 }

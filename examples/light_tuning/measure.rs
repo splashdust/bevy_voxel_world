@@ -10,7 +10,7 @@ use bevy_voxel_world::prelude::*;
 
 use crate::{
     add_lights, camera_transform,
-    scene::{spawn_cabin, Place},
+    scene::{spawn_cabin, spawn_plinth, Place},
     settings::{setting_named, Tuning, SETTINGS},
     settling, Chunks, TuningWorld,
 };
@@ -65,7 +65,7 @@ pub fn measure() {
         )
         .add_plugins(VoxelWorldPlugin::with_config(TuningWorld::default()))
         .init_resource::<Measuring>()
-        .add_systems(Startup, (setup_measure, spawn_cabin))
+        .add_systems(Startup, (setup_measure, spawn_cabin, spawn_plinth))
         .add_systems(Update, change_and_measure)
         .run();
 }

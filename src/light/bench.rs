@@ -16,15 +16,15 @@ use super::faces::{Face, FaceHashes};
 use super::fill::seed::{CellsAround, Seeding};
 use super::fill::{PositionCells, SkyFillField};
 use super::inputs::LightInputs;
-use super::inputs::{EmissiveVoxel, Occupancy};
+use super::inputs::Occupancy;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
 use super::levels::LevelScale;
 use super::relight::LightWork;
 use super::route::LightRoute;
 use super::sky::ColumnAnswer;
-use super::slot::{border_plane, slot_bytes, write_shell};
+use super::slot::{border_plane, slot_bytes, texel_bytes, write_shell};
 use super::solver::{empty_planes, neighbour_index, solve_sky, solve_voxel, DirectSky};
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{relight, ChunkLevels, ChunkLight};
 use super::view::{in_world, Missing, Snapshot};
 use super::LightSettings;
 use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_U, PADDED_CHUNK_SIZE};
@@ -343,12 +343,14 @@ impl SlotBox {
             ChunkLight {
                 inputs: Arc::new(LightInputs {
                     occupancy: Occupancy::Mixed(solid),
-                    emissive: Vec::<EmissiveVoxel>::new(),
+                    emissive: Default::default(),
                     columns: ColumnAnswer::none(),
                     ring: true,
                 }),
-                sky: ChannelLight::Uniform(precision.top()),
-                voxel: ChannelLight::Planes(kernel_box.planes.clone()),
+                sky: ChunkLevels::Uniform(precision.top()),
+                voxel: ChunkLevels::Planes(kernel_box.planes.clone()),
+                color: Default::default(),
+                borders: Default::default(),
                 precision,
             }
         };
@@ -371,7 +373,7 @@ impl SlotBox {
             let precision = self.light.precision;
             let neighbour = &self.neighbours[face as usize];
             let plane = border_plane(neighbour, face.opposite(), precision);
-            write_shell(bytes, face, Some(&plane), precision);
+            write_shell(bytes, face, Some(&plane), texel_bytes(precision));
         }
     }
 }
@@ -387,7 +389,8 @@ pub fn emissive_scan<I: Copy + PartialEq + std::hash::Hash>(
     let mut chunk = ChunkData::new();
     chunk.fill_type = FillType::Mixed;
     chunk.voxels = Some(voxels.clone());
-    LightInputs::of(&chunk, emission, ColumnAnswer::none())
+    let emission = super::color::EmissionTable::white(emission);
+    LightInputs::of(&chunk, &emission, ColumnAnswer::none())
         .0
         .emissive
         .len()
@@ -399,6 +402,22 @@ pub struct LightStats {
     /// Chunks whose voxels were scanned for emissive voxels.
     pub emissive_scans: u64,
     pub solves: u64,
+    /// Runs of the kernel for voxel light, one light colour each, on light
+    /// boxes holding two or more light colours. A light box of one light
+    /// colour takes one run, as in a white world, which this doesn't count.
+    pub color_runs: u64,
+    /// Reach runs, which find the light colours whose light reaches the
+    /// chunk. A solve makes one only with `skip_unreached_colors` on, for a
+    /// light box that still holds four or more light colours once the colours
+    /// with no seeds are dropped.
+    pub reach_runs: u64,
+    /// Light colours whose runs a reach run skipped, because no light of that
+    /// colour reaches the chunk.
+    pub colors_skipped: u64,
+    /// Solves of voxel light that spread no light, because no emissive voxel
+    /// around the chunk could light it, though some chunk around it held
+    /// emissive voxels.
+    pub voxel_boxes_culled: u64,
     /// Time spent solving in chunk tasks, summed over them, in milliseconds.
     pub solve_ms: f64,
     /// Time spent reading the world view before solving, summed over chunk
@@ -445,6 +464,11 @@ pub struct LightStats {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
+    /// Colour shell planes written alone, after the light of a neighbour
+    /// changed.
+    pub color_plane_writes: u64,
+    /// Colour slots written whole.
+    pub color_full_writes: u64,
     /// Sky probes started.
     pub probes: u64,
     /// Voxel lookups sky probes made.
@@ -467,8 +491,16 @@ pub struct LightStats {
     pub coarse_solve_ms: f64,
     /// Voxel lookups coarse chunks' walks made.
     pub coarse_lookups: u64,
-    /// The bytes coarse chunks keep now as copies of their slots.
+    /// The bytes coarse chunks keep now as copies of their slots and colour
+    /// slots.
     pub coarse_copy_bytes: u64,
+    /// The bytes level-0 chunks keep now as copies of the shell planes in
+    /// their slots and colour slots.
+    pub shell_copy_bytes: u64,
+    /// Shell planes and colour shell planes that the main thread built from
+    /// the light of a neighbour, rather than taking them from a solve or a
+    /// kept copy.
+    pub planes_built: u64,
     /// Solves that seeded sky fill.
     pub fill_seeded: u64,
     /// Time solves spent seeding sky fill, in milliseconds.
@@ -495,17 +527,23 @@ pub struct LightStats {
     /// Light entries in the world view now.
     pub entries: u64,
     /// What the light entries in the world view now keep: their face hashes,
-    /// each channel's bit planes where it isn't one level, and occupancy
-    /// where an edit gave them a solid.
+    /// the bit planes of sky light and of voxel light where each isn't one
+    /// level, and occupancy where an edit gave them a solid.
     pub entry_bytes: u64,
     /// Hinted air holding no light entry that the world view keeps now.
     pub air_positions: u64,
     /// The most slots chunks held at once.
     pub peak_slots: u64,
+    /// Colour slots given to chunks, counting those taken from a farther
+    /// chunk.
+    pub color_allocations: u64,
+    /// Times a larger colour texture replaced one the render world already
+    /// had, so the GPU copied the old colours into it.
+    pub color_growth_copies: u64,
     /// Chunks needing a slot that have none now.
     pub starved: u64,
-    /// What level-0 chunks' light keeps on the CPU now: each channel's bit
-    /// planes where it isn't one level.
+    /// What the light of level-0 chunks keeps on the CPU now: the bit planes of
+    /// sky light and of voxel light where each isn't one level.
     pub light_bytes: u64,
     /// Level-0 chunks in the world view now with both open and solid voxels.
     pub mixed_chunks: u64,
@@ -515,6 +553,19 @@ pub struct LightStats {
     pub request_lookups: u64,
     /// The bytes the cache of those walks' answers holds now.
     pub walk_cache_bytes: u64,
+    /// Relight landings that changed the sky light or voxel light level of
+    /// some voxel.
+    ///
+    /// A relight lands when its light is written into the world view, or when
+    /// it is found equal to the light already there. Light held back for the
+    /// new mesh of a chunk lands when it is released.
+    pub landed_changing_levels: u64,
+    /// Relight landings that left the levels of every voxel as they were, but
+    /// changed the light colour of the voxel light of some voxel.
+    pub landed_changing_colors: u64,
+    /// Relight landings that left the levels and the light colour of every
+    /// voxel as they were.
+    pub landed_changing_nothing: u64,
 }
 
 /// The light work world `C` has done, or `None` if it has no light.
@@ -532,6 +583,10 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
     };
     let ms = |nanos: &AtomicU64| nanos.load(Ordering::Relaxed) as f64 / 1e6;
     let route = world.get_resource::<LightRoute<C>>();
+    let landed = world
+        .get_resource::<LightWork<C>>()
+        .map(|work| work.landed)
+        .unwrap_or_default();
     let slots = route.map(|route| route.counters).unwrap_or_default();
     let (entries, entry_bytes, air_positions) = {
         let view = settings.view.read();
@@ -541,8 +596,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
             entries += 1;
             bytes += size_of::<FaceHashes>();
             let light = &chunk.light;
-            for channel in [&light.sky, &light.voxel] {
-                if let ChannelLight::Planes(planes) = channel {
+            for levels in [&light.sky, &light.voxel] {
+                if let ChunkLevels::Planes(planes) = levels {
                     bytes += size_of_val(&**planes);
                 }
             }
@@ -558,8 +613,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         let mut mixed = 0;
         for chunk in view.chunks.values().filter(|chunk| !chunk.is_entry()) {
             let light = &chunk.light;
-            for channel in [&light.sky, &light.voxel] {
-                if let ChannelLight::Planes(planes) = channel {
+            for levels in [&light.sky, &light.voxel] {
+                if let ChunkLevels::Planes(planes) = levels {
                     bytes += size_of_val(&**planes);
                 }
             }
@@ -572,10 +627,17 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         late_allocations: slots.late_allocations,
         slots_given_back: slots.given_back,
         evictions: slots.evictions,
+        planes_built: slots.planes_built + slots.color_planes_built,
         plane_writes: slots.plane_writes,
         full_writes: slots.full_writes,
+        color_plane_writes: slots.color_plane_writes,
+        color_full_writes: slots.color_full_writes,
         emissive_scans: counters.emissive_scans.load(Ordering::Relaxed),
         solves: counters.solves.load(Ordering::Relaxed),
+        color_runs: counters.color_runs.load(Ordering::Relaxed),
+        reach_runs: counters.reach_runs.load(Ordering::Relaxed),
+        colors_skipped: counters.colors_skipped.load(Ordering::Relaxed),
+        voxel_boxes_culled: counters.voxel_boxes_culled.load(Ordering::Relaxed),
         solve_ms: ms(&counters.solve_nanos),
         snapshot_ms: ms(&counters.snapshot_nanos),
         relights: counters.relights.load(Ordering::Relaxed),
@@ -601,6 +663,7 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         coarse_solve_ms: ms(&counters.coarse_nanos),
         coarse_lookups: counters.coarse_lookups.load(Ordering::Relaxed),
         coarse_copy_bytes: route.map_or(0, |route| route.coarse_copy_bytes() as u64),
+        shell_copy_bytes: route.map_or(0, |route| route.shell_copy_bytes() as u64),
         fill_seeded: counters.fill_seeded.load(Ordering::Relaxed),
         fill_seed_ms: ms(&counters.fill_seed_nanos),
         fill_relights: counters.fill_relights.load(Ordering::Relaxed),
@@ -616,13 +679,125 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         entry_bytes,
         air_positions,
         peak_slots: slots.peak_held,
+        color_allocations: slots.color_allocations,
+        color_growth_copies: slots.color_growth_copies,
         starved: route.map_or(0, |route| route.starved_count() as u64),
         light_bytes,
         mixed_chunks,
         request_walks: counters.requests.walks.load(Ordering::Relaxed),
         request_lookups: counters.requests.lookups.load(Ordering::Relaxed),
         walk_cache_bytes: settings.walks.lock().unwrap().bytes() as u64,
+        landed_changing_levels: landed.changed_levels,
+        landed_changing_colors: landed.changed_colors,
+        landed_changing_nothing: landed.changed_nothing,
     })
+}
+
+/// What [`fresh_solve_check`] found.
+#[derive(Clone, Debug, Default)]
+pub struct FreshSolve {
+    /// Chunks and light entries solved again.
+    pub checked: usize,
+    /// The positions of those whose light differs from the light of the fresh
+    /// solve, each on its own grid and paired with whether it is a light
+    /// entry.
+    pub stale: Vec<(IVec3, bool)>,
+    /// How many of those hold the levels of the fresh solve and differ only
+    /// in light colour.
+    pub colors_only: usize,
+}
+
+/// Solves every chunk and light entry in the world view of world `C` again,
+/// as a relight would, and compares the light each holds with the light of
+/// the fresh solve, voxel by voxel. Levels must match exactly, and light
+/// colours within one step of their packing.
+///
+/// In a world whose light has settled, a chunk that differs holds light that
+/// some relight it needed never brought.
+///
+/// A chunk whose emissive voxels were found under an older emission table
+/// counts as stale without a solve. The solves count in [`light_stats`] as
+/// the solves of the world, so read `light_stats` before calling this.
+pub fn fresh_solve_check<C: VoxelWorldConfig>(world: &World) -> FreshSolve {
+    let Some(settings) = world.get_resource::<LightSettings<C>>() else {
+        return FreshSolve::default();
+    };
+    let task = &settings.task;
+    let held: Vec<_> = settings
+        .view
+        .read()
+        .chunks
+        .iter()
+        .map(|(key, chunk)| {
+            let current = chunk.emission == task.emission_generation;
+            (*key, chunk.is_entry(), current, chunk.light.clone())
+        })
+        .collect();
+    let mut found = FreshSolve {
+        checked: held.len(),
+        stale: Vec::new(),
+        colors_only: 0,
+    };
+    for (key, entry, current, light) in held {
+        let fresh = current
+            .then(|| relight(task, &settings.view, key, None, None))
+            .flatten();
+        let Some(fresh) = fresh else {
+            found.stale.push((key.position(), entry));
+            continue;
+        };
+        if !same_levels(&light, &fresh.light) {
+            found.stale.push((key.position(), entry));
+        } else if !same_colors(&light, &fresh.light) {
+            found.stale.push((key.position(), entry));
+            found.colors_only += 1;
+        }
+    }
+    found
+}
+
+/// Returns whether `held` holds the light colour of `fresh` in every open
+/// voxel where `fresh` has voxel light. Each component may differ by up to one
+/// step of the packing, 1/127.
+fn same_colors(held: &ChunkLight, fresh: &ChunkLight) -> bool {
+    if held.color == fresh.color {
+        return true;
+    }
+    const STEP: f32 = 1.0 / 127.0 + 1e-5;
+    let occupancy = &fresh.inputs.occupancy;
+    (0..CHUNK).all(|z| {
+        (0..CHUNK).all(|y| {
+            (0..CHUNK).all(|x| {
+                if occupancy.is_solid(x, y, z) || fresh.voxel.at(x, y, z) == 0 {
+                    return true;
+                }
+                let (a, b) = (held.color.at(x, y, z), fresh.color.at(x, y, z));
+                (a.red - b.red).abs() <= STEP
+                    && (a.green - b.green).abs() <= STEP
+                    && (a.blue - b.blue).abs() <= STEP
+            })
+        })
+    })
+}
+
+/// Returns whether `held` holds the same levels as `fresh`, at the same
+/// precision, in every open voxel of the inputs of `fresh`.
+fn same_levels(held: &ChunkLight, fresh: &ChunkLight) -> bool {
+    if held.precision != fresh.precision {
+        return false;
+    }
+    let occupancy = &fresh.inputs.occupancy;
+    let same = |a: &ChunkLevels, b: &ChunkLevels| {
+        a == b
+            || (0..CHUNK).all(|z| {
+                (0..CHUNK).all(|y| {
+                    (0..CHUNK).all(|x| {
+                        occupancy.is_solid(x, y, z) || a.at(x, y, z) == b.at(x, y, z)
+                    })
+                })
+            })
+    };
+    same(&held.sky, &fresh.sky) && same(&held.voxel, &fresh.voxel)
 }
 
 /// Whether world `C` has no relight queued, running or waiting to land.
@@ -685,6 +860,7 @@ pub fn solve_published_serially<C: VoxelWorldConfig>(world: &World) -> (usize, f
             Missing::Solid,
             &task.voxel_scale,
             task.shape,
+            &task.counters,
         ));
     }
     (boxes.len(), start.elapsed().as_secs_f64() * 1000.0)

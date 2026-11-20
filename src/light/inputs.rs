@@ -7,6 +7,7 @@ use crate::chunk::{ChunkData, FillType, CHUNK_SIZE_I, CHUNK_SIZE_U, PADDED_CHUNK
 use crate::voxel::WorldVoxel;
 use crate::voxel_edits::EditBucket;
 
+use super::color::{EmissionTable, Emitter, MAX_EMISSIVE_MATERIALS};
 use super::kernel::Plane;
 use super::sky::{ColumnAnswer, Columns};
 
@@ -98,20 +99,151 @@ impl Occupancy {
     }
 }
 
-/// An emissive voxel of a chunk: where it is in the chunk, and its level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EmissiveVoxel {
-    pub x: u8,
-    pub y: u8,
-    pub z: u8,
-    pub level: u8,
+/// An emissive voxel of a chunk, packed into 32 bits: where it is in the
+/// chunk, its level, and the index of its material in the [`EmissionTable`] of
+/// the world.
+///
+/// The bits hold these fields:
+///
+/// - Bits 0 to 14 hold the position, 5 bits per axis, with x lowest.
+/// - Bits 15 to 18 hold the level.
+/// - Bits 19 to 31 hold the material index.
+///
+/// An emissive voxel is always one of the voxels of its chunk, never one of
+/// its padding, so 5 bits cover each axis. Packing keeps an emissive voxel at
+/// 4 bytes with room for the material index. That size matters for a chunk
+/// filled with one emissive material, whose list holds every voxel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmissiveVoxel(u32);
+
+impl EmissiveVoxel {
+    /// Returns the emissive voxel at `x`, `y`, `z` of its chunk, each below
+    /// 32, giving off the level and material of `emitter`.
+    #[inline]
+    pub fn new(x: u8, y: u8, z: u8, emitter: Emitter) -> Self {
+        debug_assert!(x < 32 && y < 32 && z < 32 && emitter.level < 16);
+        debug_assert!((emitter.material as usize) < MAX_EMISSIVE_MATERIALS);
+        Self(
+            x as u32
+                | (y as u32) << 5
+                | (z as u32) << 10
+                | (emitter.level as u32) << 15
+                | (emitter.material as u32) << 19,
+        )
+    }
+
+    #[inline]
+    pub fn x(self) -> u8 {
+        (self.0 & 31) as u8
+    }
+
+    #[inline]
+    pub fn y(self) -> u8 {
+        (self.0 >> 5 & 31) as u8
+    }
+
+    #[inline]
+    pub fn z(self) -> u8 {
+        (self.0 >> 10 & 31) as u8
+    }
+
+    /// Returns where the voxel is in its chunk.
+    #[inline]
+    pub fn at(self) -> (u8, u8, u8) {
+        (self.x(), self.y(), self.z())
+    }
+
+    /// Returns the level of the voxel, a whole level from 0 to 15.
+    #[inline]
+    pub fn level(self) -> u8 {
+        (self.0 >> 15 & 15) as u8
+    }
+
+    /// Returns the index of its material in the [`EmissionTable`] of the
+    /// world.
+    #[inline]
+    pub fn material(self) -> u16 {
+        (self.0 >> 19) as u16
+    }
+}
+
+impl std::fmt::Debug for EmissiveVoxel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmissiveVoxel")
+            .field("at", &self.at())
+            .field("level", &self.level())
+            .field("material", &self.material())
+            .finish()
+    }
+}
+
+/// The emissive voxels of a chunk, and the material indices of the emissive
+/// materials among them, from the [`EmissionTable`] of the world.
+///
+/// A solve reads the material indices of the chunks around its chunk to find
+/// the light colours that could reach it, without reading their emissive
+/// voxels. A change to the light colour of a material finds the chunks to
+/// relight from the material indices in the same way.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct Emissive {
+    voxels: Vec<EmissiveVoxel>,
+    /// The material indices of `voxels`, each once, in ascending order.
+    materials: Box<[u16]>,
+}
+
+impl Emissive {
+    /// Returns the material indices of the emissive voxels, each once, in
+    /// ascending order.
+    #[inline]
+    pub fn materials(&self) -> &[u16] {
+        &self.materials
+    }
+}
+
+impl From<Vec<EmissiveVoxel>> for Emissive {
+    fn from(voxels: Vec<EmissiveVoxel>) -> Self {
+        let mut materials: Vec<u16> = Vec::new();
+        let mut last = None;
+        for voxel in &voxels {
+            let material = voxel.material();
+            if last != Some(material) {
+                last = Some(material);
+                if !materials.contains(&material) {
+                    materials.push(material);
+                }
+            }
+        }
+        materials.sort_unstable();
+        Self {
+            voxels,
+            materials: materials.into_boxed_slice(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Emissive {
+    type Item = &'a EmissiveVoxel;
+    type IntoIter = std::slice::Iter<'a, EmissiveVoxel>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.voxels.iter()
+    }
+}
+
+impl std::ops::Deref for Emissive {
+    type Target = [EmissiveVoxel];
+
+    #[inline]
+    fn deref(&self) -> &[EmissiveVoxel] {
+        &self.voxels
+    }
 }
 
 /// What a chunk's neighbours read of it when they solve.
 #[derive(Debug)]
 pub(crate) struct LightInputs {
     pub occupancy: Occupancy,
-    pub emissive: Vec<EmissiveVoxel>,
+    pub emissive: Emissive,
     /// Which columns sky light enters at the chunk's top.
     ///
     /// Its `sky` is kept current. Its `provisional` is as of the last time
@@ -133,7 +265,7 @@ impl LightInputs {
     /// `chunk` must be a level-0 chunk with the default data shape.
     pub fn of<I: Copy + PartialEq>(
         chunk: &ChunkData<I>,
-        emission: &[(I, u8)],
+        emission: &EmissionTable<I>,
         columns: ColumnAnswer,
     ) -> (Self, bool) {
         let scanned = !emission.is_empty();
@@ -142,7 +274,7 @@ impl LightInputs {
                 return (
                     Self {
                         occupancy: Occupancy::Open,
-                        emissive: Vec::new(),
+                        emissive: Emissive::default(),
                         columns,
                         ring: false,
                     },
@@ -156,13 +288,13 @@ impl LightInputs {
                     Occupancy::Open
                 };
                 let emissive = match uniform_emission(*voxel, emission) {
-                    Some(level) => every_voxel(level),
+                    Some(emitter) => every_voxel(emitter),
                     None => Vec::new(),
                 };
                 return (
                     Self {
                         occupancy,
-                        emissive,
+                        emissive: emissive.into(),
                         columns,
                         ring: voxel.is_solid(),
                     },
@@ -199,7 +331,7 @@ impl LightInputs {
         (
             Self {
                 occupancy,
-                emissive,
+                emissive: emissive.into(),
                 columns,
                 ring: true,
             },
@@ -227,7 +359,7 @@ impl LightInputs {
         &self,
         position: IVec3,
         rescan: &Rescan<I>,
-        emission: &[(I, u8)],
+        emission: &EmissionTable<I>,
     ) -> Self {
         let mut emissive = scan_emissive(&rescan.data, emission);
         if let (Some(edits), false) = (&rescan.edits, emission.is_empty()) {
@@ -235,15 +367,15 @@ impl LightInputs {
             for (at, voxel) in edits.iter() {
                 let local = at - min;
                 let (x, y, z) = (local.x as u8, local.y as u8, local.z as u8);
-                emissive.retain(|emitter| (emitter.x, emitter.y, emitter.z) != (x, y, z));
-                if let Some(level) = uniform_emission(voxel, emission) {
-                    emissive.push(EmissiveVoxel { x, y, z, level });
+                emissive.retain(|emitter| emitter.at() != (x, y, z));
+                if let Some(emitter) = uniform_emission(voxel, emission) {
+                    emissive.push(EmissiveVoxel::new(x, y, z, emitter));
                 }
             }
         }
         Self {
             occupancy: self.occupancy.clone(),
-            emissive,
+            emissive: emissive.into(),
             columns: self.columns.clone(),
             ring: self.ring,
         }
@@ -319,7 +451,7 @@ impl LightInputs {
 /// shape, under the emissive list `emission`.
 fn scan_emissive<I: Copy + PartialEq>(
     chunk: &ChunkData<I>,
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
 ) -> Vec<EmissiveVoxel> {
     if emission.is_empty() {
         return Vec::new();
@@ -328,7 +460,7 @@ fn scan_emissive<I: Copy + PartialEq>(
         (FillType::Empty, _) => return Vec::new(),
         (FillType::Uniform(voxel), _) => {
             return match uniform_emission(*voxel, emission) {
-                Some(level) => every_voxel(level),
+                Some(emitter) => every_voxel(emitter),
                 None => Vec::new(),
             };
         }
@@ -349,58 +481,49 @@ fn scan_emissive<I: Copy + PartialEq>(
 #[inline]
 fn find_emissive<I: Copy + PartialEq>(
     row: &[WorldVoxel<I>],
-    emission: &[(I, u8)],
+    emission: &EmissionTable<I>,
     y: usize,
     z: usize,
     found: &mut Vec<EmissiveVoxel>,
 ) {
     // Materials come in runs, so the last one's answer is kept.
-    let mut last: Option<(I, Option<u8>)> = None;
+    let mut last: Option<(I, Option<Emitter>)> = None;
     for (x, voxel) in row.iter().enumerate() {
         let WorldVoxel::Solid(material) = *voxel else {
             continue;
         };
-        let level = match last {
-            Some((seen, level)) if seen == material => level,
+        let emitter = match last {
+            Some((seen, emitter)) if seen == material => emitter,
             _ => {
-                let level = emission
-                    .iter()
-                    .find(|(emissive, _)| *emissive == material)
-                    .map(|(_, level)| *level);
-                last = Some((material, level));
-                level
+                let emitter = emission.get(material);
+                last = Some((material, emitter));
+                emitter
             }
         };
-        if let Some(level) = level {
-            found.push(EmissiveVoxel {
-                x: x as u8,
-                y: y as u8,
-                z: z as u8,
-                level,
-            });
+        if let Some(emitter) = emitter {
+            found.push(EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter));
         }
     }
 }
 
-fn uniform_emission<I: Copy + PartialEq>(
+/// Returns what `voxel` gives off under the emission table `emission`, or
+/// `None` if the voxel isn't emissive.
+pub(crate) fn uniform_emission<I: Copy + PartialEq>(
     voxel: WorldVoxel<I>,
-    emission: &[(I, u8)],
-) -> Option<u8> {
+    emission: &EmissionTable<I>,
+) -> Option<Emitter> {
     let WorldVoxel::Solid(material) = voxel else {
         return None;
     };
-    emission
-        .iter()
-        .find(|(emissive, _)| *emissive == material)
-        .map(|(_, level)| *level)
+    emission.get(material)
 }
 
-fn every_voxel(level: u8) -> Vec<EmissiveVoxel> {
+fn every_voxel(emitter: Emitter) -> Vec<EmissiveVoxel> {
     let mut voxels = Vec::with_capacity(CHUNK * CHUNK * CHUNK);
     for z in 0..CHUNK as u8 {
         for y in 0..CHUNK as u8 {
             for x in 0..CHUNK as u8 {
-                voxels.push(EmissiveVoxel { x, y, z, level });
+                voxels.push(EmissiveVoxel::new(x, y, z, emitter));
             }
         }
     }

@@ -1,65 +1,91 @@
-//! Handovers: how voxels move between grids without a frame that shows them
-//! twice or not at all.
+//! Handovers
 //!
-//! A commit that gives a sub-grid its first solid voxel or takes its last,
-//! or one an operation marks with [`ChunkRequests::mark_handover`](crate::chunk_lifecycle::ChunkRequests::mark_handover), lands as
-//! one handover. It holds every chunk the commit spawns or makes stale, in
-//! every grid, padding neighbours included. A held chunk keeps showing what
-//! it showed: its old mesh and published voxel data, or nothing for a chunk
-//! the commit spawned. A held chunk the commit retires keeps showing too,
-//! rather than retiring at once.
+//! This module lands handovers: how voxels move between grids without a frame
+//! that shows them twice or not at all. A handover holds the chunks a commit
+//! touches, keeps each one showing what it showed, and publishes them all in
+//! one frame once every one of them is ready.
 //!
-//! Each held chunk waits for a finished chunk task that includes the commit:
-//! one started after it. The task already running at the commit is
-//! superseded by it, so the chunk waits for that task's follow-up. A task
-//! superseded by a later edit started after the commit, so it counts, and an
-//! edit made every frame can't hold a handover. The newest finished task of
-//! each held chunk is kept unpublished. Once every chunk of a handover has
-//! one, they all publish in the same frame, and the chunks it retires
-//! despawn in that frame at once, with their `ChunkWillDespawn`. Colliders
-//! rebuilt on `ChunkPublished` and removed on `ChunkWillDespawn` swap in one
-//! frame.
+//! These commits land as one handover:
+//!
+//! - A commit that gives a sub-grid its first solid voxel, or takes its last.
+//! - A commit that an operation marks with
+//!   [`ChunkRequests::mark_handover`](crate::chunk_lifecycle::ChunkRequests::mark_handover).
+//!
+//! The handover holds every chunk the commit spawns or makes stale, in every
+//! grid, including padding neighbours. A held chunk keeps showing what it
+//! showed: its old mesh and published voxel data, or nothing for a chunk the
+//! commit spawned. A held chunk the commit retires keeps showing too, rather
+//! than retiring at once.
+//!
+//! # Landing
+//!
+//! Each held chunk waits for a finished chunk task that includes the commit,
+//! which is one started after the commit. The commit supersedes the task
+//! already running at the commit, so the chunk waits for the task that
+//! follows it. A task superseded by a later edit started after the commit, so
+//! it counts. So an edit made every frame can't hold a handover.
+//!
+//! The newest finished task of each held chunk is kept unpublished. Once
+//! every chunk of a handover has one, they all publish in the same frame. The
+//! chunks the handover retires despawn at once in that frame, with their
+//! `ChunkWillDespawn`. So colliders rebuilt on `ChunkPublished` and removed on
+//! `ChunkWillDespawn` swap in one frame.
 //!
 //! A handover lands only in a frame where no other thread holds the chunk
-//! map, such as a task reading voxels, so its chunks' data is readable in
-//! the frame their meshes show. The frame never waits for that thread: the
-//! handover waits for a later frame instead.
+//! map, such as a task reading voxels. So the data of its chunks is readable
+//! in the frame their meshes show. The frame never waits for that thread, and
+//! the handover waits for a later frame instead.
+//!
+//! # Light
 //!
 //! In a lit world, a handover also waits until the relights its commit
-//! started have solved, in every grid: the first solves of the sub-grid
-//! chunks it spawns, and the relights of the chunks within reach of the
-//! voxels it changed, around a lift's hole and under a stamp. The light of
-//! those chunks and of the chunks it holds is held until it lands, and
-//! lands in the frame its chunks publish, so meshes and light change
-//! together, a relit chunk with no new mesh included. It doesn't wait for
-//! the relight ripple that light calls for, which starts as it lands and
-//! lands later, as after any edit. So a lit handover lasts as long as its
-//! slowest relight, which grows with reach. A relight superseded by a later
-//! edit counts once it has solved, as a superseded task does. See the light
-//! module's `handover` module.
+//! started have solved, in every grid. These are the first solves of the
+//! sub-grid chunks it spawns, and the relights of the chunks within reach of
+//! the voxels it changed, around the hole of a lift and under a stamp. The
+//! light of those chunks and of the chunks the handover holds is held back.
+//! It lands in the frame the chunks publish, so meshes and light change
+//! together, even for a relit chunk with no new mesh.
 //!
-//! Handovers that hold a chunk in common fold into one and land together.
-//! So lifting from the same chunks every frame holds the folded handover
-//! until the lifts stop. A sub-grid that flips between empty and not every
-//! frame, beside chunks edited every frame, keeps folding handovers too.
+//! The handover doesn't wait for the relight ripple that light calls for. The
+//! ripple starts as the handover lands, and lands later, as after any edit. So
+//! a lit handover lasts as long as its slowest relight. That relight grows
+//! with reach and with the light colours it runs. A relight superseded by a
+//! later edit counts once it has solved, as a superseded task does. See the
+//! `handover` module of the light module.
 //!
-//! A chunk that leaves mid-handover drops out of it, and the others land
-//! when they are ready: a despawned grid's chunks, a world chunk the
-//! streaming policy retires, a chunk a game despawns.
+//! # Folding and leaving
+//!
+//! Handovers that hold a chunk in common fold into one and land together. So
+//! lifting from the same chunks every frame holds the folded handover until
+//! the lifts stop. A sub-grid that flips between empty and not every frame,
+//! beside chunks edited every frame, keeps folding handovers too.
+//!
+//! A chunk that leaves mid-handover drops out of it, and the others land when
+//! they are ready. These chunks leave:
+//!
+//! - The chunks of a despawned grid.
+//! - A world chunk the streaming policy retires.
+//! - A chunk a game despawns.
+//!
+//! # Lift and stamp messages
 //!
 //! A handover carries the [`Lifted`] or [`Stamped`] message of each lift and
-//! stamp whose commit it holds, and folded handovers carry them all. They
-//! are written once it lands, leaving out those whose sub-grid is gone by
-//! then, and each stamped sub-grid despawns in that frame's `PostUpdate`.
+//! stamp whose commit it holds, and folded handovers carry them all. The
+//! messages are written once the handover lands, leaving out those whose
+//! sub-grid is gone by then. Each stamped sub-grid despawns in the
+//! `PostUpdate` of that frame.
 //!
 //! A stamp marks its commit, since a lift and a stamp of the new sub-grid in
 //! one frame leave it as empty after the commit as before. A world applying
-//! another world's edit deltas gets no such mark: it sees only the deltas of
-//! the grid lifted from and the grid stamped into, which fill or empty no
-//! sub-grid, so there the two grids' chunks can publish a frame apart.
+//! the edit deltas of another world gets no such mark. It sees only the
+//! deltas of the grid lifted from and the grid stamped into, which fill or
+//! empty no sub-grid. So in that world the chunks of the two grids can publish
+//! a frame apart.
 //!
-//! A world with no handover in flight pays a check per lifecycle system for
-//! it. A handover's cost grows with the chunks it holds.
+//! # Cost
+//!
+//! A world with no handover in flight pays a check for it in each lifecycle
+//! system. The cost of a handover grows with the chunks it holds.
 
 use std::sync::Mutex;
 

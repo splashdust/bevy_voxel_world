@@ -4,10 +4,7 @@
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 
-use crate::{
-    scene::{CRYSTAL, LANTERN},
-    settings::{curves, preset_of, Tuning},
-};
+use crate::settings::{curves, preset_of, Tuning, LIGHT_COLORS};
 
 /// Each line of `text` indented by four spaces.
 fn indent(text: &str) -> String {
@@ -111,6 +108,7 @@ fn look_rust(look: &LightLook) -> String {
         sun => sun_rust,
         voxel_brightness => debug,
         emissive_glow => debug,
+        tinted_glow => debug,
         ao => |ao| format!("LightAo::{ao:?}"),
         minimum_brightness => debug,
     );
@@ -136,6 +134,7 @@ pub fn light_rust(light: &LightPropagation) -> String {
         sky_record_cap => bytes_rust,
         wasm_relight_budget => duration_rust,
         sub_grid_sky => |sky| format!("SubGridSky::{sky:?}"),
+        skip_unreached_colors => debug,
     );
     literal("LightPropagation", fields)
 }
@@ -143,13 +142,22 @@ pub fn light_rust(light: &LightPropagation) -> String {
 /// The two config methods a world pastes into its `VoxelWorldConfig`, and
 /// the app's ambient light.
 pub fn config_rust(tuning: &Tuning) -> String {
-    let lamps = [(LANTERN, tuning.lantern), (CRYSTAL, tuning.crystal)]
-        .map(|(material, level)| format!("({material}, Emission::level({level:?}))"))
-        .join(", ");
+    let lamps: String = tuning
+        .lamps()
+        .map(|(material, level, color)| {
+            let color = match LIGHT_COLORS[color].1 {
+                None => String::new(),
+                Some([r, g, b]) => {
+                    format!(".with_color(Color::srgb({r:?}, {g:?}, {b:?}))")
+                }
+            };
+            format!("        ({material}, Emission::level({level:?}){color}),\n")
+        })
+        .concat();
     format!(
         "// In your world's `impl VoxelWorldConfig`:\n\
          fn light_propagation(&self) -> Option<LightPropagation> {{\n{}}}\n\n\
-         fn emissive_materials(&self) -> Vec<(u8, Emission)> {{\n    vec![{lamps}]\n}}\n\n\
+         fn emissive_materials(&self) -> Vec<(u8, Emission)> {{\n    vec![\n{lamps}    ]\n}}\n\n\
          // In your app: GlobalAmbientLight {{ brightness: {:?}, ..default() }}",
         indent(&format!("Some({})", light_rust(&tuning.light()))),
         tuning.ambient,
@@ -181,6 +189,14 @@ mod tests {
         assert_eq!(
             curve_rust(&LevelCurve::from_table(table)),
             "LevelCurve::gamma(2.2)"
+        );
+    }
+
+    #[test]
+    fn the_default_voxel_falloff_prints_as_itself() {
+        assert_eq!(
+            curve_rust(&LightLook::default().voxel_falloff),
+            "LevelCurve::exponential_to_black(0.7)"
         );
     }
 
@@ -244,6 +260,51 @@ mod tests {
         ] {
             assert_eq!(without_spaces(&light_rust(&light)), without_spaces(rust));
         }
+    }
+
+    #[test]
+    fn a_changed_light_colour_prints_as_the_emissive_list_that_builds_it() {
+        let mut tuning = Tuning::default();
+        let row = &SETTINGS[crate::settings::setting_named("Lantern colour")];
+        let crate::settings::Control::Choice { options, set, .. } = &row.control else {
+            panic!("a colour row is a choice");
+        };
+        set(
+            &mut tuning,
+            options
+                .iter()
+                .position(|option| *option == "Magenta")
+                .unwrap(),
+        );
+        let (lamps, rust) = code!(vec![
+            (
+                10,
+                Emission::level(15.0).with_color(Color::srgb(1.0, 0.0, 1.0))
+            ),
+            (
+                11,
+                Emission::level(15.0).with_color(Color::srgb(1.0, 0.0, 0.0))
+            ),
+            (
+                14,
+                Emission::level(15.0).with_color(Color::srgb(0.0, 1.0, 0.0))
+            ),
+            (
+                15,
+                Emission::level(15.0).with_color(Color::srgb(0.0, 0.0, 1.0))
+            ),
+        ]);
+        assert_eq!(tuning.emissive_materials(), lamps);
+        assert!(
+            without_spaces(&config_rust(&tuning)).contains(&without_spaces(rust)),
+            "{}",
+            config_rust(&tuning)
+        );
+    }
+
+    #[test]
+    fn a_white_lamp_prints_without_a_colour() {
+        assert!(config_rust(&Tuning::default()).contains("(10, Emission::level(15.0)),"));
     }
 
     #[test]

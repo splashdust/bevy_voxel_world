@@ -359,10 +359,33 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The materials whose voxels give off light, and how much. Empty by
     /// default, and then no chunk looks for light sources among its voxels.
     ///
-    /// Relights on change, like a change of reach: every chunk with a solid
-    /// looks for its emissive voxels again in a relight task on the task
-    /// pool, and its neighbours relight again where its emissive voxels
-    /// changed.
+    /// Relights on change. A change to the level of a material, or a material
+    /// added or dropped, relights like a change of reach: every chunk with a
+    /// solid looks for its emissive voxels again, in a relight task on the
+    /// task pool. The neighbours of such a chunk then relight again where its
+    /// emissive voxels changed.
+    ///
+    /// Each [`Emission`] can give its light a colour. A change of colour alone
+    /// changes no level, so it relights fewer chunks: only those that hold an
+    /// emissive voxel of a recoloured material, or have one in the 26 chunks
+    /// around them. They relight nearest the camera first, and show their old
+    /// light until the new light lands. Two colours that are the same once
+    /// [`Emission::with_color`] scales them give the same light, so a change
+    /// from one to the other relights nothing.
+    ///
+    /// Either kind of change also solves again, on the task pool, each chunk
+    /// above LOD level 0 that holds a changed material. Such a chunk shows its
+    /// old light until then.
+    ///
+    /// Up to 8,192 emissive materials can each have a light colour of their
+    /// own. A world declaring more warns once, and gives each material past
+    /// the 8,192nd the light colour of the earlier material nearest its own.
+    ///
+    /// The first time a running world switches between emissive materials
+    /// that are all white and emissive materials with another colour, its
+    /// chunk shaders compile for the new case, and that frame waits for them.
+    /// A later switch waits only for shaders that haven't compiled for the new
+    /// case yet, such as those of a camera added since.
     ///
     /// Used only by a world whose
     /// [`light_propagation`](Self::light_propagation) returns a config.

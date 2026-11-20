@@ -21,20 +21,21 @@ use std::fmt::Display;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use bevy::color::{Color, LinearRgba};
 use bevy::log::{warn, warn_once};
 use bevy::reflect::Reflect;
 
 /// Light propagation for one world.
 ///
 /// A world opts in by returning `Some` from
-/// [`VoxelWorldConfig::light_propagation`](crate::prelude::VoxelWorldConfig::light_propagation),
-/// and returning `None`, the default, costs nothing: no memory, no chunk task
+/// [`VoxelWorldConfig::light_propagation`](crate::prelude::VoxelWorldConfig::light_propagation).
+/// Returning `None`, the default, costs nothing: no memory, no chunk task
 /// time, no mesh attribute, no texture binding and no shader change.
 ///
-/// Light spreads from its sources through the world's open voxels, `Air` and
-/// `Unset`, and stops at `Solid` ones. A voxel with no open path to a source is
-/// pitch black, however close it is to the surface. There are two kinds of
-/// light, each a level from 0 to 15 at every voxel:
+/// Light spreads from its sources through the open voxels of the world, `Air`
+/// and `Unset`, and stops at `Solid` ones. A voxel with no open path to a
+/// source is pitch black, however close it is to the surface. There are two
+/// kinds of light, each a level from 0 to 15 at every voxel:
 ///
 /// - **Sky light** enters from the open sky and falls straight down, with no
 ///   loss, to the first solid voxel. Past that it spreads sideways and down,
@@ -43,7 +44,7 @@ use bevy::reflect::Reflect;
 ///   [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials),
 ///   and spreads the same way.
 ///
-/// Each world has its own light: one world's solids never shadow another
+/// Each world has its own light: the solids of one world never shadow another
 /// world. Up is +Y in every world.
 ///
 /// Every field says when a change to it takes effect, as one of: read once at
@@ -57,7 +58,7 @@ use bevy::reflect::Reflect;
 /// can hold together with [`VoxelWorld`](crate::prelude::VoxelWorld). On
 /// frames where the config changed, the crate compares the new settings and
 /// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials)
-/// with those it last applied and does the least the difference needs, so a
+/// with those it last applied, and does the least the difference needs. A
 /// value set equal to the current one costs nothing, and settings at rest
 /// cost no work per chunk. Out-of-range values set at runtime are clamped, as
 /// at plugin build.
@@ -65,16 +66,23 @@ use bevy::reflect::Reflect;
 /// A change that relights solves again every chunk with an open voxel beside a
 /// solid, counting the solids just past its faces, so its cost grows with how
 /// many such chunks are loaded. The relights run on the task pool after chunk
-/// tasks, so streaming goes on at its usual pace, and their light lands over
-/// the next few frames, nearest the camera first, with a brief seam between
-/// old and new light.
+/// tasks, so streaming goes on at its usual pace. Their light lands over the
+/// next few frames, nearest the camera first, with a brief seam between old
+/// and new light.
 /// [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
 /// is false until every relight has landed.
+///
+/// A change to the light colour of an emissive material alone relights fewer
+/// chunks: only those that hold an emissive voxel of that material, or have
+/// one in the 26 chunks around them. See
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials).
 ///
 /// A chunk of air with no solid beside it isn't relit, so
 /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) there can
 /// read light from the old settings. A chunk above LOD level 0 takes the new
-/// settings only when its chunk task runs again.
+/// settings only when its chunk task runs again, with two exceptions. A change
+/// of precision solves it again, and so does a change to the emissive list
+/// where the chunk holds a changed material.
 ///
 /// Whether `light_propagation` returns `None`, and [`shown`](Self::shown), are
 /// read once at plugin build: changing either later logs a warning once and
@@ -91,52 +99,131 @@ use bevy::reflect::Reflect;
 /// number of voxels set, and with the columns the change opens to the sky,
 /// whose falling sky light it follows down.
 ///
-/// The chunks the change's light reaches then relight on the task pool,
-/// starting at once rather than queuing behind chunk tasks, so a single voxel
-/// edit's light lands within 2 frames while streaming leaves the pool room.
-/// Landing relit light takes at most about 1 ms of the main thread per frame,
-/// so an edit whose light reaches many chunks lands over a few more frames.
-/// An edit where no light is, such as in a dark cave, relights nothing.
+/// The chunks that the light of the change reaches then relight on the task
+/// pool. They start at once rather than queuing behind chunk tasks, so the
+/// light of a single voxel edit lands within 2 frames while streaming leaves
+/// the pool room. Near where chunks meet at an edge or a corner, the relight
+/// reaches some of those chunks only through the others, taking a frame for
+/// each step. So an edit there can take a frame longer, or two frames longer
+/// where its light has several colours. Landing relit light takes at most
+/// about 1 ms of the main thread per frame, so an edit whose light reaches
+/// many chunks lands over a few more frames. An edit where no light is, such
+/// as in a dark cave, relights nothing.
+///
+/// # Light colour
+///
+/// An emissive material can give its light a colour, with
+/// [`Emission::with_color`]. Where light of several colours reaches a voxel,
+/// each of red, green and blue takes the most that any one of those lights
+/// brings there. So a red and a green emissive voxel light the voxels between
+/// them yellow, no brighter than either. Sky light has no colour of its own:
+/// it takes the colour of the Bevy ambient light, environment map and sun.
+///
+/// A world whose emissive materials are all white does no colour work. It
+/// solves, holds and shows its light as it would if light had no colour. Its
+/// chunk materials bind a one-texel placeholder for the colour texture, as
+/// they would for any binding the world doesn't use.
+///
+/// In a world with colours other than white, a chunk whose voxel light is all
+/// one colour solves as a white chunk does, and keeps one colour for all its
+/// voxels. A chunk that light of two or more colours reaches costs more, in
+/// four ways:
+///
+/// - **Solving** grows with the light colours among the emissive voxels
+///   within voxel reach of the chunk, since its voxel light is solved once
+///   for each colour. The colours around each chunk count, not how many the
+///   world declares. See [`skip_unreached_colors`](Self::skip_unreached_colors).
+/// - **Memory** grows with the chunks that light of two or more colours
+///   reaches. Each of them holds a light colour for every voxel, 64 KiB a
+///   chunk. A chunk above LOD level 0 that holds a colour slot also keeps a
+///   copy of it, so that `light_at` can read its colours.
+/// - **GPU memory** grows with the most chunks at once whose faces see more
+///   than one light colour, since each of them holds a colour slot: see
+///   [`slot_capacity`](Self::slot_capacity).
+/// - **Shader work** grows with the faces of chunks whose light isn't all
+///   white, which read a colour beside each level they blend.
+///
+/// A chunk above LOD level 0 solves once per light colour among its own
+/// emissive voxels. It shows no light colour that comes from beyond its own
+/// voxels.
 ///
 /// # WASM
 ///
 /// Light runs in the browser on WebGL2, with no compute shaders. With no
-/// threads to run tasks on, relights run on the main thread within
-/// [`wasm_relight_budget`](Self::wasm_relight_budget) each frame, and at most
-/// one sky probe starts per frame, so a big edit costs time instead of a
-/// hitch. A single voxel edit's light still lands within 2 frames.
+/// threads to run tasks on, relights run on the main thread, within
+/// [`wasm_relight_budget`](Self::wasm_relight_budget) each frame. At most one
+/// sky probe starts per frame. So a big edit costs time instead of a hitch.
+/// The light of a single voxel edit still lands as quickly as on native: see
+/// [Voxel edits](#voxel-edits). A chunk with emissive voxels of two or more
+/// light colours within voxel reach solves once for each colour, so its
+/// relight uses up the budget faster. A big edit among coloured light then
+/// lands over more frames.
 ///
-/// A WASM application should choose a [`sky_reach`](Self::sky_reach) of 16,
-/// the last before the rows the solver spreads light along go from one
-/// 64-bit word to two, which makes every solve of sky light cheaper. WASM
-/// doesn't set any default: the defaults are chosen for native. The light
-/// texture is clamped to what the device holds, which on WebGL2 is at least
-/// 343 slots: see [`slot_capacity`](Self::slot_capacity).
+/// A WASM application should choose a [`sky_reach`](Self::sky_reach) of 16.
+/// It is the largest reach at which each row of voxels that sky light spreads
+/// along fits in one 64-bit word, which makes every solve of sky light
+/// cheaper. WASM doesn't set any default: the defaults are chosen for native.
+/// The light texture is clamped to what the device holds, which on WebGL2 is
+/// at least 343 slots: see [`slot_capacity`](Self::slot_capacity).
+///
+/// WebGL2 allows a pipeline 16 textures. With the `sub_grids` feature, the
+/// bindings of the crate take three of them in every chunk material: the
+/// light texture, the tag map and the colour texture. Without the feature
+/// they take two, with no tag map. Each is bound from the start, as a
+/// placeholder until the world needs it, whatever light colours the world
+/// uses. The textures of the material itself and of the camera share the
+/// rest. `StandardMaterial` takes six, whether or not they're set. The camera
+/// takes textures such as shadow maps, the tonemapping lookup table and an
+/// environment map. So what's left for the textures of a game depends on its
+/// material and its camera. A pipeline over the limit fails to build, and the
+/// default render error handler of Bevy then quits the app.
+///
+/// Light colour works on WebGL2 too. To keep the light of a world white
+/// there, return white emissions from
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials)
+/// under `cfg(target_arch = "wasm32")`:
+///
+/// ```
+/// # use bevy::prelude::*;
+/// # use bevy_voxel_world::prelude::*;
+/// # #[derive(Resource, Clone, Default)]
+/// # struct MyWorld;
+/// # impl VoxelWorldConfig for MyWorld {
+/// #     type MaterialIndex = u8;
+/// #     type ChunkUserBundle = ();
+/// fn emissive_materials(&self) -> Vec<(u8, Emission)> {
+///     let torch = Emission::level(15.0);
+///     #[cfg(not(target_arch = "wasm32"))]
+///     let torch = torch.with_color(LinearRgba::rgb(1.0, 0.6, 0.2));
+///     vec![(3, torch)]
+/// }
+/// # }
+/// ```
 ///
 /// # Showing light
 ///
-/// With [`shown`](Self::shown) on, the crate draws the world's chunks with its
-/// material wrapped in
+/// With [`shown`](Self::shown) on, the crate draws the chunks of the world
+/// with the world material wrapped in
 /// [`VoxelWorldBindings`](crate::rendering::VoxelWorldBindings), and:
 ///
 /// - The crate owns the `MeshTag` of every chunk in the world, and overwrites
-///   any tag the world's own systems set.
+///   any tag that other systems set.
 /// - Lit chunk materials are forward only: voxel light is added in the forward
 ///   pass, so a chunk drawn in a deferred pass shows none.
 /// - Exact black is zero light before tonemapping. Where neither kind of light
-///   reaches, a face is exactly black, which Bevy's default tonemapper maps to
-///   1/255, with dither noise of up to 1/255.
+///   reaches, a face is exactly black. The default Bevy tonemapper maps that
+///   to 1/255, with dither noise of up to 1/255.
 ///
-/// Propagated light scales Bevy's ambient light down in shade, so a lit world
-/// wants a [`GlobalAmbientLight`](bevy::light::GlobalAmbientLight) of about
-/// 600, where an unlit one looks right nearer 100. Caves stay black at any
-/// value.
+/// Propagated light scales the Bevy ambient light down in shade, so a lit
+/// world wants a [`GlobalAmbientLight`](bevy::light::GlobalAmbientLight) of
+/// about 600, where an unlit one looks right nearer 100. Caves stay black at
+/// any value.
 ///
-/// Propagated light shades chunks only. Other entities keep Bevy's lighting,
-/// so a character walking into a dark cave stays fully lit unless the game
-/// dims it: read the light at its position with
-/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) and scale
-/// its colour by the look's curves, as [`LevelCurve::at`] describes. The
+/// Propagated light shades chunks only. Other entities keep the usual Bevy
+/// lighting, so a character walking into a dark cave stays fully lit unless
+/// the game dims it. To dim it, read the light at its position with
+/// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and scale
+/// its colour by the curves of the look, as [`LevelCurve::at`] describes. The
 /// `light_tuning` example does this.
 ///
 /// # Limits
@@ -145,22 +232,23 @@ use bevy::reflect::Reflect;
 ///   follow the sun. So under [`SkyFill::Paths`], a floating solid shows a
 ///   straight-down shade on the ground below it as well as its sun shadow.
 ///   [`SkyFill::Openness`] removes that shade where a place sees most of the
-///   sky. Bevy's shadow cascades stop 150 voxels from the camera by default,
+///   sky. The Bevy shadow cascades stop 150 voxels from the camera by default,
 ///   and past them the sun casts no shadow at all.
 /// - **A shadow ends about the sky clearance below what casts it,** in a
-///   flat line on a chunk boundary, and a sealed space taller than the
-///   clearance lights up on its floor: see [`Sky::Clearance`].
-/// - **Lookups must be deterministic.** With sky light on, the world's voxel
-///   lookup must return the same voxel for a position every time. After
+///   flat line on a chunk boundary. A sealed space taller than the clearance
+///   lights up on its floor: see [`Sky::Clearance`].
+/// - **Lookups must be deterministic.** With sky light on, the voxel lookup
+///   of the world must return the same voxel for a position every time. After
 ///   changing what lookups return, call
 ///   [`VoxelWorld::reset_light`](crate::prelude::VoxelWorld::reset_light).
-/// - **A chunk's light can change after it appears.** Its first light reads
-///   the chunks around it that aren't loaded yet as solid, so it gets
-///   brighter as they arrive; a face on its boundary shows the light in
-///   front of it only once the neighbour's light has landed; and a column
-///   nothing has proved blocked shows direct sky until a sky probe proves
-///   otherwise, so a cave can show sky light for a moment before going dark.
-///   Most of these last a frame or two, sky probes longer after a stream, and
+/// - **The light of a chunk can change after the chunk appears.** Its first
+///   light reads the chunks around it that aren't loaded yet as solid, so it
+///   gets brighter as they arrive. A face on its boundary shows the light in
+///   front of it only once the light of the neighbour has landed. A column
+///   that nothing has proved blocked shows direct sky until a sky probe
+///   proves otherwise, so a cave can show sky light for a moment before going
+///   dark. Most of these last a frame or two, and sky probes last longer
+///   after a stream.
 ///   [`VoxelWorld::light_is_settled`](crate::prelude::VoxelWorld::light_is_settled)
 ///   says when they're over. Light beside a chunk that isn't loaded can be
 ///   darker than the truth, never brighter.
@@ -168,18 +256,18 @@ use bevy::reflect::Reflect;
 ///   distance nothing is drawn, so a gap at the end of a dark cave shows
 ///   whatever the camera draws behind the world, often a bright clear colour.
 ///   A larger spawning distance, or LOD levels, move that edge further away.
-///   Fog, the clear colour and any skybox belong to the application, which
-///   can tie them to `light_at` at the camera, at the cost of black sky when
+///   Fog, the clear colour and any skybox belong to the application. It can
+///   tie them to `light_at` at the camera, at the cost of black sky when
 ///   looking out of a cave mouth or from shade.
 /// - **Sky fill has limits of its own**, such as a cave behind a narrow
 ///   opening staying black past its pool of light: see [`SkyFill`].
-/// - **Slots are capped per world.** A chunk that loses its slot looks flat
+/// - **Slots are capped per world.** A chunk that loses its slot looks flat,
 ///   and its lamps lose their glow: see [`slot_capacity`](Self::slot_capacity).
-/// - **`light_at` reads what has landed,** and coarse chunks plausibly rather
-///   than exactly: see
+/// - **`light_at` reads what has landed,** and reads chunks above LOD level 0
+///   plausibly rather than exactly: see
 ///   [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at).
 /// - **Light comes from voxels, not meshes,** so a custom mesh must use the
-///   chunk's padded local coordinates: see
+///   padded local coordinates of the chunk: see
 ///   [`VoxelWorldBindings`](crate::rendering::VoxelWorldBindings).
 ///
 /// ```
@@ -284,44 +372,57 @@ pub struct LightPropagation {
     /// How many light levels each voxel holds. Levels read from 0 to 15
     /// either way, in steps of 1/17 at 256 levels.
     ///
-    /// At 16 levels plain surfaces show a faint terrace one level high
-    /// wherever light loses a level. 256 levels smooths them away and lets
-    /// sky fill's fractional levels reach the voxels it lights. It costs 2
-    /// bytes per voxel of light on the CPU, where 16 levels cost 1, and twice
-    /// the GPU memory per slot: see [`slot_capacity`](Self::slot_capacity).
+    /// At 16 levels, plain surfaces show a faint terrace one level high
+    /// wherever light loses a level. 256 levels smooth the terraces away, and
+    /// let the fractional levels of sky fill reach the voxels it lights. They
+    /// cost 2 bytes per voxel of light on the CPU, where 16 levels cost 1, and
+    /// twice the GPU memory per slot: see [`slot_capacity`](Self::slot_capacity).
     ///
-    /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, every loaded chunk
-    /// relights, coarse chunks included, and the new texture is made when a
-    /// chunk next needs a slot. Chunks look flat until their light lands
-    /// again, which takes longer than other relights.
+    /// Replaces the texture on change. Every chunk with a slot drops to one
+    /// sky light level and one voxel light level, and the old texture is
+    /// released. Every loaded chunk then relights, chunks above LOD level 0
+    /// included, and the new texture is made when a chunk next needs a slot.
+    /// Chunks look flat until their light lands again, which takes longer than
+    /// other relights.
     ///
     /// Defaults to [`LightPrecision::Steps16`].
     pub precision: LightPrecision,
 
-    /// How many chunks the world's light texture holds at once, at least 1.
+    /// How many chunks the light texture of the world holds at once, at least
+    /// 1.
     ///
     /// A chunk takes a slot in the texture when its faces see more than one
-    /// level of light. Each slot costs about 38 KiB of GPU memory at 16
-    /// levels and 77 KiB at 256, so the default of 1,024 slots takes about
-    /// 38 MiB or 77 MiB. The texture is made when the first chunk needs a
-    /// slot, so a world where every chunk's faces see one level costs
-    /// nothing.
+    /// level of light, or more than one light colour. Each slot costs about
+    /// 38 KiB of GPU memory at 16 levels and 77 KiB at 256, so the default of
+    /// 1,024 slots takes about 38 MiB or 77 MiB. The texture is made when the
+    /// first chunk needs a slot, so a world where the faces of every chunk see
+    /// one level and one light colour costs nothing.
     ///
-    /// The count is clamped to what the device's largest 3D texture holds,
-    /// with a warning: WebGL2 guarantees 256 texels a side, which is 343
-    /// slots.
+    /// In a world with light colours other than white, a chunk whose faces see
+    /// more than one light colour also takes a colour slot, in a second
+    /// texture. A colour slot costs about 77 KiB more, at either precision. The
+    /// second texture is made when the first chunk needs a colour slot. It
+    /// grows as more chunks need one at once, up to this count and at most
+    /// 16,384 colour slots, and it never shrinks. So its GPU memory grows with
+    /// the most chunks at once whose faces see more than one light colour.
+    ///
+    /// The count is clamped to what the largest 3D texture of the device
+    /// holds, with a warning. WebGL2 guarantees 256 texels a side, which is
+    /// 343 slots.
     ///
     /// When every slot is taken, the chunks farthest from the camera give
-    /// theirs to nearer ones, and the world logs a warning once. A chunk
-    /// with no slot shows one level of each kind of light on all its faces:
-    /// it looks flat, losing its shadows, and its lamps' faces lose their
-    /// glow. Raise the count if that warning appears.
+    /// theirs to nearer ones, and the world logs a warning once. A chunk with
+    /// no slot shows one level of each kind of light on all its faces. It
+    /// looks flat, losing its shadows, and the faces of its lamps lose their
+    /// glow. It also shows one light colour, the most common one among its
+    /// voxels at the level it shows. Colour slots give way in the same way.
+    /// Raise the count if that warning appears.
     ///
-    /// Replaces the texture on change: every chunk with a slot drops to one
-    /// level per channel, the old texture is released, the settings relight
-    /// runs, and the new texture is made when a chunk next needs a slot. Chunks
-    /// look flat until they take slots again.
+    /// Replaces the texture on change. Every chunk with a slot drops to one
+    /// sky light level and one voxel light level, and the old texture is
+    /// released. The settings relight then runs, and the new texture is made
+    /// when a chunk next needs a slot. Chunks look flat until they take slots
+    /// again.
     ///
     /// Defaults to 1,024.
     pub slot_capacity: u32,
@@ -367,6 +468,24 @@ pub struct LightPropagation {
     /// Defaults to 4 ms.
     pub wasm_relight_budget: Duration,
 
+    /// Whether a chunk with emissive voxels of four or more light colours
+    /// within voxel reach first works out which of those colours can light it
+    /// through open voxels, and then solves only those colours.
+    ///
+    /// The voxel light of a chunk is solved once for each light colour among
+    /// the emissive voxels within voxel reach of it. A colour whose light is
+    /// kept from the chunk by solids costs a whole solve and lights nothing.
+    /// Working out which colours reach costs about one more solve. So it saves
+    /// time where solids keep colours apart, as in caves and rooms, and costs
+    /// a little where every colour reaches, as on open ground.
+    ///
+    /// It never changes the light, so a change to it applies to the next
+    /// solves and relights nothing. It does nothing in a world whose emissive
+    /// voxels are all white.
+    ///
+    /// Defaults to `true`.
+    pub skip_unreached_colors: bool,
+
     /// What sky a sub-grid's faces show: the world's sky capped by the
     /// sub-grid's enclosure, or the world's sky alone. The enclosure caps
     /// the world's voxel light too. See [`SubGridSky`].
@@ -392,6 +511,7 @@ impl Default for LightPropagation {
             look: LightLook::default(),
             sky_record_cap: 16 * 1024 * 1024,
             wasm_relight_budget: Duration::from_millis(4),
+            skip_unreached_colors: true,
             #[cfg(feature = "sub_grids")]
             sub_grid_sky: SubGridSky::default(),
         }
@@ -775,8 +895,14 @@ pub struct LightLook {
     /// The brightness of each voxel light level, as a share of
     /// `voxel_brightness`.
     ///
+    /// Where light of several colours meets, the colours mix in the
+    /// proportions of the default curve, whatever this curve is. So changing
+    /// this curve never relights. A curve whose level 1 isn't black, such as
+    /// [`LevelCurve::linear`], ends each pool of light in a faint step.
+    ///
     /// Shows on the next frame, for one uniform write. Defaults to
-    /// `0.7^(15 - level)`, with level 0 exactly black.
+    /// [`LevelCurve::exponential_to_black(0.7)`](LevelCurve::exponential_to_black),
+    /// with levels 0 and 1 exactly black.
     pub voxel_falloff: LevelCurve,
     /// Where Bevy's directional lights shine.
     ///
@@ -794,6 +920,16 @@ pub struct LightLook {
     ///
     /// Shows on the next frame, for one uniform write. Defaults to 6.
     pub emissive_glow: f32,
+    /// Whether the faces of an emissive voxel glow in their base colour tinted
+    /// by the light colour of the voxel, rather than in their base colour
+    /// alone.
+    ///
+    /// Off, the material alone sets the colour of the glow. A white emissive
+    /// voxel glows the same either way. On, the faces of an emissive voxel
+    /// where several light colours meet read one more texture value.
+    ///
+    /// Shows on the next frame, for one uniform write. Defaults to `false`.
+    pub tinted_glow: bool,
     /// What the mesh's ambient occlusion darkens.
     ///
     /// Shows on the next frame, for one uniform write. Defaults to
@@ -812,10 +948,11 @@ impl Default for LightLook {
         Self {
             smoothing: LightSmoothing::default(),
             sky_falloff: LevelCurve::default(),
-            voxel_falloff: LevelCurve::default(),
+            voxel_falloff: LevelCurve::exponential_to_black(0.7),
             sun: SunGate::default(),
             voxel_brightness: 1000.0,
             emissive_glow: 6.0,
+            tinted_glow: false,
             ao: LightAo::default(),
             minimum_brightness: 0.0,
         }
@@ -885,7 +1022,11 @@ pub struct LevelCurve {
 }
 
 impl Default for LevelCurve {
-    /// `0.7^(15 - level)`, so each level is 70% as bright as the one above it.
+    /// Returns `0.7^(15 - level)`, so each level is 70% as bright as the one
+    /// above it. This is the default [`sky_falloff`](LightLook::sky_falloff).
+    /// The default [`voxel_falloff`](LightLook::voxel_falloff) is
+    /// [`exponential_to_black(0.7)`](Self::exponential_to_black) instead,
+    /// which also makes level 1 black.
     fn default() -> Self {
         Self::exponential(0.7)
     }
@@ -900,6 +1041,29 @@ impl LevelCurve {
         // this way `exponential(0.7) == exponential(0.7)` wherever each is
         // built.
         Self::from_fn(|level| (level..15).fold(1.0, |brightness, _| brightness * base))
+    }
+
+    /// Returns `(base^(15 - level) - base^14) / (1 - base^14)`: the curve of
+    /// [`exponential`](Self::exponential), shifted and scaled so that level 1
+    /// is black and level 15 is 1.
+    ///
+    /// A pool of light then fades out at its edge, instead of ending in a
+    /// faint step. For example, at a `base` of 0.7, level 14 is about 0.70,
+    /// level 10 about 0.16 and level 2 about 0.003. At a `base` of 1 the curve
+    /// is linear, from black at level 1 to 1 at level 15.
+    pub fn exponential_to_black(base: f32) -> Self {
+        let exponential = Self::exponential(base);
+        let floor = exponential.brightness[1];
+        if (1.0 - floor).abs() <= f32::EPSILON {
+            return Self::from_fn(|level| level.saturating_sub(1) as f32 / 14.0);
+        }
+        Self::from_fn(|level| {
+            if level == 0 {
+                0.0
+            } else {
+                (exponential.brightness[level as usize] - floor) / (1.0 - floor)
+            }
+        })
     }
 
     /// `(level / 15)^gamma`, so level 15 is 1. `gamma(2.2)` spreads the levels
@@ -926,16 +1090,20 @@ impl LevelCurve {
         Self { brightness }
     }
 
-    /// The brightness of `level`, as the shader reads it: 0 at level 0 or
-    /// below, the entry at a whole level, between the two entries around a
-    /// level between whole levels, and level 15's above 15.
+    /// Returns the brightness of `level`, as the shader reads it:
     ///
-    /// Gameplay code can dim its own entities the way voxels dim: read the
-    /// light at the entity's voxel with
-    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and
-    /// scale the entity's colour by `sky_falloff.at(levels.sky)` for the
-    /// ambient light it gets and `voxel_falloff.at(levels.voxel)` times
-    /// `voxel_brightness` for voxel light, using the world's [`LightLook`].
+    /// - At level 0 or below, the brightness is 0.
+    /// - At a whole level, it is the entry for that level.
+    /// - Between whole levels, it lies between the two entries around `level`.
+    /// - Above 15, it is the entry for level 15.
+    ///
+    /// Gameplay code can dim its own entities the way voxels dim. Read the
+    /// light at the voxel of the entity with
+    /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at), and use
+    /// the [`LightLook`] of the world. Scale the colour of the entity by
+    /// `sky_falloff.at(levels.sky)` for the ambient light it gets. For voxel
+    /// light, scale it by `voxel_falloff.at(levels.voxel)` times
+    /// `voxel_brightness` times `levels.voxel_color`.
     pub fn at(&self, level: f32) -> f32 {
         if level.is_nan() || level <= 0.0 {
             return 0.0;
@@ -1007,24 +1175,61 @@ pub enum LightAo {
     Off,
 }
 
-/// The light an emissive material gives off.
+/// The light an emissive material gives off: a level, and a light colour.
 ///
-/// Built with [`Emission::level`].
+/// Build one with [`Emission::level`], which gives white light, and colour it
+/// with [`with_color`](Self::with_color).
 #[derive(Reflect, Clone, Copy, PartialEq, Debug)]
 pub struct Emission {
     level: f32,
+    /// The light colour, scaled so that its brightest component is 1, or black
+    /// for no light.
+    color: LinearRgba,
 }
 
 impl Emission {
-    /// Light at `level`, from 0 to 15. A voxel at level 8 lights about half as
-    /// far as one at 15.
+    /// Returns white light at `level`, from 0 to 15. A voxel at level 8 lights
+    /// about half as far as one at 15.
     pub fn level(level: f32) -> Self {
-        Self { level }
+        Self {
+            level,
+            color: LinearRgba::WHITE,
+        }
     }
 
-    /// The level as a whole level from 0 to 15.
+    /// Returns this emission with its light in `color`.
+    ///
+    /// Only the hue and saturation of the colour count. The colour is scaled
+    /// so that its brightest component is 1, so `Color::srgb(0.5, 0.0, 0.0)`
+    /// gives the same light as `Color::srgb(1.0, 0.0, 0.0)`, and grey gives
+    /// white. The level alone sets how bright the light is and how far it
+    /// reaches.
+    ///
+    /// Black gives no light, as level 0 does. Alpha is ignored. A negative
+    /// component is read as 0, and logs a warning once.
+    pub fn with_color(self, color: impl Into<Color>) -> Self {
+        let (color, negative) = super::color::scaled(color.into().to_linear());
+        if negative {
+            warn_once!(
+                "light propagation: an emission colour has a negative component, \
+                 which is read as 0"
+            );
+        }
+        Self { color, ..self }
+    }
+
+    /// Returns the level as a whole level from 0 to 15, or 0 for black light.
     pub(crate) fn whole_level(&self) -> u8 {
+        if self.color == LinearRgba::BLACK {
+            return 0;
+        }
         self.level.round().clamp(0.0, 15.0) as u8
+    }
+
+    /// Returns the light colour, with its brightest component 1, or black for
+    /// no light.
+    pub(crate) fn color(&self) -> LinearRgba {
+        self.color
     }
 
     /// This emission with its level clamped to 0 to 15, logging a warning once
@@ -1032,6 +1237,7 @@ impl Emission {
     pub(crate) fn clamped(self) -> Self {
         Self {
             level: clamp_setting(self.level, 0.0, 15.0, "emission level"),
+            ..self
         }
     }
 }

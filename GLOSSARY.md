@@ -18,7 +18,7 @@ How coarsely a chunk samples the voxel world. Level 0 samples every voxel; each 
 _Avoid_: stride, resolution, detail level
 
 **Coarse chunk**:
-A chunk above LOD level 0. Its light is plausible rather than exact, and changes only when its chunk task reruns. A level-0 chunk with a non-default `chunk_data_shape` takes the same light path.
+A chunk above LOD level 0. Its light is plausible rather than exact. It changes only when its chunk task reruns, when the world's light precision changes, or when a material it holds changes the light it gives off. A level-0 chunk with a non-default `chunk_data_shape` takes the same light path.
 
 **Chunk lifecycle**:
 The sequence of states a chunk moves through from being requested to being despawned, and the rules for moving between them.
@@ -184,8 +184,12 @@ _Avoid_: attenuation (a light level dropping as it spreads, which falloff doesn'
 How many voxels light spreads from a source before its light level reaches zero. Sky light and voxel light each have their own, and a world chooses them. It doesn't apply to direct sky, which falls any distance.
 _Avoid_: radius, range
 
+**Light box**:
+The voxels a chunk's solve reads: a cube centred on the chunk, reaching light reach past each of its faces, so every source whose light could reach the chunk is inside it. Sky light and voxel light each have their own, at their own reach.
+_Avoid_: box (on its own), neighbourhood (the 27 chunks the box is cut from)
+
 **Light precision**:
-How finely a channel divides the scale of light levels, which a world chooses. 16 steps holds whole levels and 256 steps holds fractions of one. A format is named by what it holds: 4+4 is 16 steps each for sky light and voxel light, and 8+8 is 256 each.
+How finely sky light and voxel light each divide the scale of light levels, which a world chooses. 16 steps holds whole levels and 256 steps holds fractions of one. A format is named by what it holds: 4+4 is 16 steps each for sky light and voxel light, and 8+8 is 256 each.
 _Avoid_: bit depth, light quality
 
 **Provisional light**:
@@ -217,11 +221,11 @@ Working out a chunk's light again after something it depends on changed, without
 _Avoid_: light update, re-solve
 
 **Relight ripple**:
-A relight that starts at the chunks whose own voxels or direct sky changed, and goes on to a neighbour only where light reached their shared face differently.
+A relight that starts at the chunks whose own voxels or direct sky changed, and goes on to a neighbour only where sky light, or the voxel light of some light colour, reached their shared face differently.
 _Avoid_: wave, cascade, flood
 
 **Settings relight**:
-The relight a change of light settings starts: every chunk and light entry with an open voxel touching a solid, nearest the camera first, after chunk tasks. Old light shows until the new light lands.
+The relight a change of light settings starts: every chunk and light entry with an open voxel touching a solid, nearest the camera first, after chunk tasks. A change of light colours alone relights only the chunks and light entries whose light box holds an emissive voxel it recolours. Old light shows until the new light lands.
 _Avoid_: full relight, rebuild
 
 **World view**:
@@ -237,7 +241,7 @@ The one way a world works out a chunk's light: from the occupancy, direct sky, e
 _Avoid_: propagator, light engine
 
 **Kernel**:
-The part of the solver that spreads light from its sources through open voxels, for one channel at a time. Sky light and voxel light, first solves and relights all use the same one.
+The part of the solver that spreads light from its sources through open voxels: sky light or voxel light, one at a time, and voxel light one light colour at a time. Sky light and voxel light, first solves and relights all use the same one.
 _Avoid_: solver (which also gathers the kernel's inputs), flood fill
 
 **Voxel light**:
@@ -248,12 +252,20 @@ _Avoid_: block light, artificial light
 A voxel whose material a world declares to be a source of voxel light.
 _Avoid_: light block, torch
 
+**Light colour**:
+The colour of voxel light. An emissive voxel gives off the one declared with its material, white unless declared, and the light at any voxel has the colour that the light colours reaching it mix to.
+_Avoid_: tint, hue
+
 **Slot**:
-Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces, or the faces of a sub-grid passing through it, see more than one light level in a channel.
+Room for one chunk's light in the light texture of its world: a light level for each of the chunk's voxels and for each voxel just past its faces. A world has a fixed number of slots, and a chunk takes one only when its faces, or the faces of a sub-grid passing through it, see more than one sky light level, more than one voxel light level or more than one light colour.
 _Avoid_: page, atlas entry
 
+**Colour slot**:
+Room for one chunk's light colours beside its slot: a light colour for each of the chunk's voxels and for each voxel just past its faces. A chunk takes one only when its faces see more than one light colour, so a world whose lamps are all white holds none.
+_Avoid_: colour page, tint slot
+
 **Tag**:
-The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one light level per channel that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
+The value a chunk's mesh carries to tell the shader where its light is: which slot holds it or, for a chunk with no slot, the one sky light level, voxel light level and light colour that its faces all see. Above LOD level 0 it also holds the chunk's LOD level, and on a sub-grid's chunk it says the chunk is a sub-grid's.
 _Avoid_: mesh tag (the Bevy component that carries it), light index
 
 **Tag map**:
@@ -261,7 +273,7 @@ A world's map from a chunk position to that chunk's tag, held for the chunks aro
 _Avoid_: light index, lookup table
 
 **Shell**:
-The layer one voxel deep around a chunk's voxels in its slot, holding copies of its face neighbours' border planes, so a face on the chunk's boundary reads the light in front of it. It's only for display and never feeds back into light.
+The layer one voxel deep around a chunk's voxels in its slot, and in its colour slot if it has one, holding copies of its face neighbours' border planes, so a face on the chunk's boundary reads the light in front of it. It's only for display and never feeds back into light.
 _Avoid_: padding (the voxels a chunk's data holds past its faces)
 
 **Look**:

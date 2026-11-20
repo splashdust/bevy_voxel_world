@@ -50,6 +50,37 @@ fn level_curve_at_matches_the_named_curves() {
 }
 
 #[test]
+fn exponential_to_black_fades_from_1_at_level_15_to_black_at_level_1() {
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+    let curve = LevelCurve::exponential_to_black(0.7);
+    assert_eq!(curve.at(0.0), 0.0);
+    assert_eq!(curve.at(1.0), 0.0);
+    assert!(close(curve.at(15.0), 1.0));
+    // The expected brightness is `(0.7^(15 - level) - 0.7^14) / (1 - 0.7^14)`,
+    // with each power of 0.7 worked out by hand.
+    let floor = 0.006_782_231;
+    for (level, power) in [(14.0, 0.7), (8.0, 0.082_354_3), (2.0, 0.009_688_901)] {
+        let expected = (power - floor) / (1.0 - floor);
+        assert!(close(curve.at(level), expected), "level {level}");
+    }
+    assert!(close(curve.at(2.0), 0.002_926_519));
+
+    let linear = LevelCurve::exponential_to_black(1.0);
+    for level in 0..16 {
+        let expected = (level as f32 - 1.0).max(0.0) / 14.0;
+        let at = linear.at(level as f32);
+        assert!(at.is_finite() && close(at, expected), "level {level}: {at}");
+    }
+}
+
+#[test]
+fn the_default_voxel_falloff_fades_to_black_and_the_sky_falloff_keeps_its_step() {
+    let look = LightLook::default();
+    assert_eq!(look.voxel_falloff, LevelCurve::exponential_to_black(0.7));
+    assert_eq!(look.sky_falloff, LevelCurve::exponential(0.7));
+}
+
+#[test]
 fn a_level_curves_entry_0_reads_0_whatever_the_table_says() {
     let mut table = [1.0; 16];
     table[0] = 0.5;
@@ -178,16 +209,18 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
     let mut app = settled(floor_with_lamp(LightLook::default()));
     assert_eq!(chunk_look(&mut app).voxel_brightness, 1000.0);
 
-    let changes: [fn(&mut LightLook); 9] = [
+    let changes: [fn(&mut LightLook); 11] = [
         |look| look.smoothing = LightSmoothing::Stepped,
         |look| look.sky_falloff = LevelCurve::linear(),
         |look| look.voxel_falloff = LevelCurve::gamma(2.2),
+        |look| look.voxel_falloff = LevelCurve::exponential_to_black(0.8),
         |look| look.sun = SunGate::ByLevel(LevelCurve::linear()),
         |look| look.voxel_brightness = 250.0,
         |look| look.emissive_glow = 2.0,
         |look| look.ao = LightAo::BaseColor,
         |look| look.ao = LightAo::Off,
         |look| look.minimum_brightness = 0.05,
+        |look| look.tinted_glow = true,
     ];
     let mut look = LightLook::default();
     for (index, change) in changes.iter().enumerate() {
@@ -213,6 +246,7 @@ fn changing_any_look_setting_starts_no_relight_and_light_is_settled_stays_true()
     assert_eq!(uniform.emissive_glow, 2.0);
     assert_eq!(uniform.ao, 2);
     assert_eq!(uniform.minimum_brightness, 0.05);
+    assert_eq!(uniform.tinted_glow, 1);
     assert!((uniform.sky_falloff[1].y - 5.0 / 15.0).abs() < 1e-6);
 
     // Frames after the change find nothing more to do.

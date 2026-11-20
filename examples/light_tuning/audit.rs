@@ -1,13 +1,24 @@
-//! The `audit` mode: checks that every setting that relights changes the
-//! light where the panel says it shows best.
+//! The audit mode
 //!
-//! It renders offscreen and casts rays through each place's view to find the
-//! open voxels in front of what the camera sees. Then it sets each
-//! relighting setting to its lowest and highest value, or to each other
-//! option, waits for the light to settle, and prints what share of its
-//! place's voxels changed by a level or more, and which place changed most.
-//! A setting changing less than [`SHOWS`] of its place's view at every value
-//! is listed at the end: the world or the place needs changing.
+//! This module checks that every setting that relights changes the light
+//! where the panel says it shows best.
+//!
+//! The audit renders offscreen. It casts rays through the view of each place
+//! to find the open voxels in front of what the camera sees. Then it sets
+//! each relighting setting to its lowest and highest value, or to each of its
+//! other options, and waits for the light to settle. For each value, it
+//! prints what share of the voxels at the place of the setting changed, and
+//! which place changed most. A voxel counts as changed when its sky light or
+//! voxel light moves by a level or more, or when one component of its light
+//! colour moves by [`COLOR_SHOWS`] or more. At the end, the audit lists each
+//! setting that changes less than [`SHOWS`] of the view from its place at
+//! every value. Such a setting needs a change to the world or to its place.
+//!
+//! Last, the audit checks that `skip_unreached_colors` changes no light.
+//! Turning the setting off relights nothing, so the audit turns it off
+//! together with a change of shape, which relights every chunk. The light
+//! under each shape with the setting off must then match the light under the
+//! same shape with the setting on, at every voxel in view.
 //!
 //! Levels change more than a picture does: a level of sky light in shade is
 //! a small change of a dark colour. Look at a setting flagged as showing
@@ -16,11 +27,11 @@
 //! Settings that apply only under one sky fill model are audited with that
 //! model picked.
 //!
-//! The world's places are traced through the world's voxel lookup before
-//! the app starts. The cabin is a sub-grid, which `raycast` and the voxel
-//! lookup don't see, so its place is traced with `raycast_grids` once it has
-//! spawned, and its open voxels are read through `grid(g).light_at` on the
-//! cabin's grid.
+//! The places of the world are traced through the voxel lookup of the world
+//! before the app starts. The cabin is a sub-grid, which `raycast` and the
+//! voxel lookup don't see. So the place of the cabin is traced with
+//! `raycast_grids` once the cabin has spawned, and its open voxels are read
+//! through `grid(g).light_at` on the grid of the cabin.
 
 use bevy::{
     camera::RenderTarget, platform::collections::HashSet, prelude::*,
@@ -30,8 +41,8 @@ use bevy_voxel_world::prelude::*;
 
 use crate::{
     add_lights, camera_transform,
-    scene::{spawn_cabin, Cabin, Place, Scene},
-    settings::{Applies, Control, FillModel, Tuning, Value, SETTINGS},
+    scene::{spawn_cabin, spawn_plinth, Cabin, Place, Scene},
+    settings::{setting_named, Applies, Control, FillModel, Tuning, Value, SETTINGS},
     settling, Chunks, TuningWorld,
 };
 
@@ -40,6 +51,10 @@ use crate::{
 /// view, such as the middle of the shade under the island, which is about 4%
 /// of its voxels.
 const SHOWS: f32 = 0.03;
+
+/// How far one component of the light colour of a voxel must move for the
+/// voxel to count as changed, when neither of its levels moves by a level.
+const COLOR_SHOWS: f32 = 0.1;
 
 /// Frames the world must stay settled before its light is read.
 const QUIET_FRAMES: u32 = 90;
@@ -52,7 +67,14 @@ struct Run {
     tuning: Tuning,
     /// The run whose light this one is compared with.
     base: usize,
+    /// Whether the light of this run must match the light of its base
+    /// exactly, rather than show a change.
+    same_light: bool,
 }
+
+/// The light at a voxel as the audit compares it: the sky light level, the
+/// voxel light level and the light colour.
+type Light = (f32, f32, LinearRgba);
 
 #[derive(Resource)]
 struct Auditing {
@@ -63,11 +85,13 @@ struct Auditing {
     /// Each place's open voxels in view, on the grid they are read from.
     /// The cabin's are added once it has spawned.
     samples: Vec<(Place, Grid, IVec3)>,
-    /// The sky and voxel levels at each sample, by run.
-    levels: Vec<Vec<(f32, f32)>>,
+    /// The light at each sample, by run.
+    levels: Vec<Vec<Light>>,
     /// The settings that barely show at their place, and the most of it
     /// they change.
     unseen: Vec<(usize, f32)>,
+    /// The labels of the settings that must never change the light, but did.
+    changed_light: Vec<&'static str>,
 }
 
 pub fn audit() {
@@ -103,8 +127,9 @@ pub fn audit() {
             samples,
             levels: Vec::new(),
             unseen: Vec::new(),
+            changed_light: Vec::new(),
         })
-        .add_systems(Startup, (setup_audit, spawn_cabin))
+        .add_systems(Startup, (setup_audit, spawn_cabin, spawn_plinth))
         .add_systems(Update, change_and_compare)
         .run();
 }
@@ -183,11 +208,13 @@ fn runs() -> Vec<Run> {
             setting: None,
             tuning: Tuning::default(),
             base: 0,
+            same_light: false,
         },
         Run {
             setting: None,
             tuning: openness.clone(),
             base: 1,
+            same_light: false,
         },
     ];
     for (index, setting) in SETTINGS.iter().enumerate() {
@@ -215,10 +242,59 @@ fn runs() -> Vec<Run> {
                 setting: Some(index),
                 tuning: changed,
                 base,
+                same_light: false,
             });
         }
     }
+    // Runs that check that `skip_unreached_colors` changes no light. The
+    // first lights the world in diamonds with the setting on, as a baseline.
+    // The setting relights nothing, so each run after it has the setting off
+    // and the other shape, which relights every chunk. The run back to round
+    // must match the default run, and the run to diamonds again must match
+    // the baseline.
+    let diamond = Tuning {
+        light: LightPropagation {
+            shape: LightShape::Diamond,
+            ..Tuning::default().light
+        },
+        ..default()
+    };
+    let skip_off = |tuning: &Tuning| {
+        let mut off = tuning.clone();
+        off.light.skip_unreached_colors = false;
+        off
+    };
+    let skip = setting_named("Skip colours");
+    let diamond_run = runs.len();
+    runs.extend([
+        Run {
+            setting: None,
+            tuning: diamond.clone(),
+            base: diamond_run,
+            same_light: false,
+        },
+        Run {
+            setting: Some(skip),
+            tuning: skip_off(&Tuning::default()),
+            base: 0,
+            same_light: true,
+        },
+        Run {
+            setting: Some(skip),
+            tuning: skip_off(&diamond),
+            base: diamond_run,
+            same_light: true,
+        },
+    ]);
     runs
+}
+
+/// Returns whether two readings of the light at a voxel differ by a level
+/// or more, in sky light or voxel light. A move of [`COLOR_SHOWS`] or more in
+/// one component of the light colour counts too.
+fn shows(a: Light, b: Light) -> bool {
+    let colour = (a.2.to_vec3() - b.2.to_vec3()).abs().max_element();
+    (a.0 - b.0).abs().max((a.1 - b.1).abs()) >= 1.0 || colour >= COLOR_SHOWS
 }
 
 fn setup_audit(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
@@ -258,18 +334,45 @@ fn change_and_compare(
             .samples
             .extend(in_cabin.into_iter().map(|at| (Place::Cabin, cabin, at)));
     }
-    let levels: Vec<(f32, f32)> = auditing
+    let levels: Vec<Light> = auditing
         .samples
         .iter()
         .map(|&(_, grid, at)| {
             voxel_world
                 .grid(grid)
                 .and_then(|grid| grid.light_at(at))
-                .map_or((0.0, 0.0), |levels| (levels.sky, levels.voxel))
+                .map_or((0.0, 0.0, LinearRgba::WHITE), |levels| {
+                    (levels.sky, levels.voxel, levels.voxel_color)
+                })
         })
         .collect();
     let run = &auditing.runs[auditing.run];
-    if let Some(index) = run.setting {
+    if run.same_light {
+        let base = &auditing.levels[run.base];
+        let differ = levels
+            .iter()
+            .zip(base)
+            .filter(|(light, base)| light != base)
+            .count();
+        let setting = &SETTINGS[run.setting.expect("a run checks a setting")];
+        let shape = format!("{:?}", run.tuning.light.shape);
+        if differ == 0 {
+            report!(
+                "audit: {} = {} under {shape}: the same light at all {} voxels",
+                setting.label,
+                setting.show(&run.tuning),
+                levels.len()
+            );
+        } else {
+            report!(
+                "audit: {} = {} under {shape}: different light at {differ} of {} voxels",
+                setting.label,
+                setting.show(&run.tuning),
+                levels.len()
+            );
+            auditing.changed_light.push(setting.label);
+        }
+    } else if let Some(index) = run.setting {
         let setting = &SETTINGS[index];
         let base = &auditing.levels[run.base];
         let share = |place: Place| {
@@ -279,9 +382,7 @@ fn change_and_compare(
                     continue;
                 }
                 count += 1;
-                let (sky, voxel) = levels[sample];
-                let (base_sky, base_voxel) = base[sample];
-                if (sky - base_sky).abs().max((voxel - base_voxel).abs()) >= 1.0 {
+                if shows(levels[sample], base[sample]) {
                     changed += 1;
                 }
             }
@@ -342,6 +443,12 @@ fn change_and_compare(
             report!(
                 "audit: these barely show at their place: {}",
                 unseen.join(", ")
+            );
+        }
+        if !auditing.changed_light.is_empty() {
+            report!(
+                "audit: these changed the light, which they never should: {}",
+                auditing.changed_light.join(", ")
             );
         }
         exit.write(AppExit::Success);

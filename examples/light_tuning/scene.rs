@@ -1,9 +1,13 @@
-//! The world light is tuned in: a meadow at the foot of a mountain, with a
-//! place to see each kind of setting at work.
+//! The world of the example
 //!
-//! Every voxel is a pure function of its position, as sky light needs. The
-//! cabin hanging in the sky beside the floating island is the exception: it
-//! is a sub-grid, built from edits at startup.
+//! This module builds the world that light is tuned in, a meadow at the foot
+//! of a mountain, and names a place to see each kind of setting at work.
+//!
+//! Every voxel of the world is a pure function of its position, as sky light
+//! needs: the world may generate a chunk position again only to learn which
+//! columns there hold a solid. The cabin hanging in the sky beside the
+//! floating island and the plinth in the deep chamber are the exceptions.
+//! They are sub-grids, built from voxel edits at startup.
 
 use std::sync::LazyLock;
 
@@ -23,9 +27,11 @@ pub const ROOF: u8 = 7;
 pub const LEAVES: u8 = 8;
 pub const BARK: u8 = 9;
 pub const LANTERN: u8 = 10;
-pub const CRYSTAL: u8 = 11;
+pub const RED_CRYSTAL: u8 = 11;
 pub const GRAVEL: u8 = 12;
 pub const FLOOR: u8 = 13;
+pub const GREEN_CRYSTAL: u8 = 14;
+pub const BLUE_CRYSTAL: u8 = 15;
 
 /// The texture the materials' tiles come from, which the
 /// `light_mountain_house` example uses too, and how many tiles it holds.
@@ -47,7 +53,6 @@ const TILE_ROOF: u32 = 10;
 const TILE_SPRUCE_LEAVES: u32 = 11;
 const TILE_SPRUCE_BARK: u32 = 12;
 const TILE_LANTERN: u32 = 13;
-const TILE_CRYSTAL: u32 = 14;
 const TILE_GRAVEL: u32 = 15;
 const TILE_FLOOR_PLANKS: u32 = 16;
 
@@ -64,7 +69,11 @@ pub fn texture_indices(material: u8) -> [u32; 3] {
         LEAVES => [TILE_SPRUCE_LEAVES; 3],
         BARK => [TILE_SPRUCE_BARK; 3],
         LANTERN => [TILE_LANTERN; 3],
-        CRYSTAL => [TILE_CRYSTAL; 3],
+        // All three crystals use the pale snow tile, so their faces glow near
+        // white while tinted glow is off. With it on, a pale tile glows in the
+        // light colour of the crystal, where a coloured tile would darken
+        // under any other light colour.
+        RED_CRYSTAL | GREEN_CRYSTAL | BLUE_CRYSTAL => [TILE_SNOW; 3],
         GRAVEL => [TILE_GRAVEL; 3],
         FLOOR => [TILE_FLOOR_PLANKS; 3],
         _ => [TILE_STONE; 3],
@@ -130,8 +139,10 @@ impl Place {
             Place::Meadow => ([36.0, 58.0, 92.0], [0.0, 42.0, -40.0]),
             // Just inside the cave mouth, looking down the hall.
             Place::Cave => ([-10.0, 44.0, -48.0], [4.0, 36.0, -100.0]),
-            // The deep chamber behind the narrow passage, lit by crystals.
-            Place::Chamber => ([4.0, 39.0, -129.0], [9.0, 33.0, -150.0]),
+            // The deep chamber behind the narrow passage, lit by red, green
+            // and blue crystals, with the tilted plinth where their pools of
+            // light meet.
+            Place::Chamber => ([4.0, 41.0, -130.0], [8.0, 32.0, -150.0]),
             // The floating island from the height of its underside: the
             // shade straight below it, and its sun shadow beyond, by the house.
             Place::Island => ([150.0, 74.0, 134.0], [72.0, 66.0, 58.0]),
@@ -548,9 +559,21 @@ fn build_well(b: &mut Blueprint) {
     }
 }
 
-/// Lanterns on posts along the cave hall's walls, outside the open cells
-/// sky fill passes through, and clusters of crystals on the deep chamber's
-/// floor.
+/// Places the lamps of the cave: lanterns on posts along the walls of the
+/// hall, a lantern on the floor of the passage, and clusters of red, green
+/// and blue crystals on the floor of the deep chamber.
+///
+/// The posts stand outside the open cells that sky fill passes through. The
+/// passage lantern stands where the passage opens into the chamber, out of
+/// sight from `Place::Cave`.
+///
+/// The crystal clusters stand around [`PLINTH`] at the corners of a
+/// triangle. They are close enough that the pools of light of each pair meet
+/// and mix on the floor and walls between them. Together with the passage
+/// lantern, which is white by default, some chunks of the chamber have
+/// emissive voxels of four light colours within voxel reach. Four is the
+/// fewest at which `skip_unreached_colors` engages, so the chamber puts it
+/// to work.
 fn place_lamps(b: &mut Blueprint) {
     for (x, z) in [(-18, -62), (18, -76), (-18, -90)] {
         b.fill(
@@ -560,22 +583,28 @@ fn place_lamps(b: &mut Blueprint) {
         );
         b.set(IVec3::new(x, GROUND + 2, z), LANTERN);
     }
-    for (x, z, height) in [
-        (0, -150, 3),
-        (1, -150, 2),
-        (0, -151, 1),
-        (12, -142, 2),
-        (13, -141, 1),
-        (8, -154, 2),
-        (16, -150, 1),
-        (15, -149, 2),
-        (-2, -144, 1),
+    b.set(IVec3::new(-1, GROUND, -127), LANTERN);
+    for (material, columns) in [
+        (
+            RED_CRYSTAL,
+            [(0, -148, 3), (1, -148, 2), (0, -149, 1), (-1, -147, 1)],
+        ),
+        (
+            GREEN_CRYSTAL,
+            [(14, -145, 2), (15, -144, 1), (13, -144, 1), (14, -146, 1)],
+        ),
+        (
+            BLUE_CRYSTAL,
+            [(7, -156, 3), (8, -156, 2), (6, -155, 1), (7, -155, 1)],
+        ),
     ] {
-        b.fill(
-            IVec3::new(x, GROUND, z),
-            IVec3::new(x, GROUND + height - 1, z),
-            CRYSTAL,
-        );
+        for (x, z, height) in columns {
+            b.fill(
+                IVec3::new(x, GROUND, z),
+                IVec3::new(x, GROUND + height - 1, z),
+                material,
+            );
+        }
     }
 }
 
@@ -751,6 +780,55 @@ pub fn spawn_cabin(
     commands.insert_resource(Cabin(cabin));
 }
 
+// --- The plinth ---------------------------------------------------------------
+
+/// Where the middle of the plinth stands, on the floor of the deep chamber
+/// between the crystal clusters.
+const PLINTH: Vec3 = Vec3::new(7.5, GROUND as f32 + 1.2, -148.0);
+/// The size of the plinth in voxels, not counting its lantern.
+const PLINTH_SIZE: IVec3 = IVec3::new(7, 1, 5);
+
+/// Returns the pose of the plinth: its middle at [`PLINTH`], tipped so that
+/// its faces lie off the grid of the world.
+pub fn plinth_pose() -> Transform {
+    let rotation = Quat::from_euler(EulerRot::XYZ, 0.3, 0.5, 0.2);
+    let middle = PLINTH_SIZE.as_vec3() / 2.0;
+    Transform::from_translation(PLINTH - rotation * middle).with_rotation(rotation)
+}
+
+/// Returns the voxels of the plinth on its own grid: a slab of cobblestone
+/// with a lantern on one corner.
+///
+/// The light of that lantern fades across the slab into the coloured light
+/// of the world. All the voxels lie in the chunk of the sub-grid at its
+/// origin.
+pub fn plinth_voxels() -> Vec<(IVec3, u8)> {
+    let mut voxels = Vec::new();
+    for x in 0..PLINTH_SIZE.x {
+        for y in 0..PLINTH_SIZE.y {
+            for z in 0..PLINTH_SIZE.z {
+                voxels.push((IVec3::new(x, y, z), COBBLESTONE));
+            }
+        }
+    }
+    voxels.push((IVec3::new(0, PLINTH_SIZE.y, 0), LANTERN));
+    voxels
+}
+
+/// Spawns the plinth as a sub-grid of the world.
+///
+/// On the faces of the plinth, the light of its own lantern mixes with the
+/// coloured light of the crystals in the world.
+pub fn spawn_plinth(mut voxel_world: VoxelWorld<crate::TuningWorld>) {
+    let plinth = voxel_world.spawn_sub_grid(plinth_pose());
+    let mut grid = voxel_world
+        .grid_mut(Grid::SubGrid(plinth))
+        .expect("a sub-grid is live as it spawns");
+    for (at, material) in plinth_voxels() {
+        grid.set_voxel(at, WorldVoxel::Solid(material));
+    }
+}
+
 // --- The world ----------------------------------------------------------------
 
 /// Looks up the world's voxels, keeping each column of ground it works out.
@@ -885,6 +963,27 @@ mod tests {
     }
 
     #[test]
+    fn the_plinth_lies_in_one_sub_grid_chunk_in_the_chamber() {
+        for (at, _) in plinth_voxels() {
+            assert!(at.cmpge(IVec3::ZERO).all() && at.cmplt(IVec3::splat(32)).all());
+        }
+        assert!(in_cave(PLINTH.floor().as_ivec3()));
+    }
+
+    #[test]
+    fn the_crystals_stand_on_the_chamber_floor() {
+        let mut scene = Scene::default();
+        let crystals = [RED_CRYSTAL, GREEN_CRYSTAL, BLUE_CRYSTAL];
+        for (position, voxel) in BLUEPRINT.iter() {
+            if crystals.iter().any(|c| *voxel == WorldVoxel::Solid(*c)) {
+                let below = *position - IVec3::Y;
+                assert!(scene.voxel(below).is_solid(), "{position}");
+                assert!(in_cave(*position), "{position}");
+            }
+        }
+    }
+
+    #[test]
     fn the_passage_joins_the_hall_and_the_chamber() {
         assert!(in_hall(PASSAGE.0));
         assert!(in_ellipsoid(PASSAGE.1, CHAMBER_CENTRE, CHAMBER_RADII));
@@ -922,7 +1021,10 @@ mod tests {
     fn the_lamps_stand_in_the_cave() {
         let mut scene = Scene::default();
         for (position, voxel) in BLUEPRINT.iter() {
-            let lamp = matches!(voxel, WorldVoxel::Solid(LANTERN | CRYSTAL));
+            let lamp = matches!(
+                voxel,
+                WorldVoxel::Solid(LANTERN | RED_CRYSTAL | GREEN_CRYSTAL | BLUE_CRYSTAL)
+            );
             if lamp && position.z < -40 {
                 assert!(in_cave(*position), "{position}");
             }

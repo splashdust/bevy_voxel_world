@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use bevy::prelude::*;
 use bevy_voxel_world::prelude::*;
 
-use crate::scene::{Place, CRYSTAL, LANTERN};
+use crate::scene::{Place, BLUE_CRYSTAL, GREEN_CRYSTAL, LANTERN, RED_CRYSTAL};
 
 /// Which model of sky fill the world uses, if any. Each model keeps its own
 /// settings in [`Tuning`], so switching back and forth doesn't lose them.
@@ -29,6 +29,10 @@ pub struct Tuning {
     /// The levels the lanterns and crystals are declared at.
     pub lantern: f32,
     pub crystal: f32,
+    /// The light colours of the lanterns, and of the red, green and blue
+    /// crystals in that order, each an index into [`LIGHT_COLORS`].
+    pub lantern_color: usize,
+    pub crystal_colors: [usize; 3],
     /// The brightness of the app's `GlobalAmbientLight`, which isn't a light
     /// setting.
     pub ambient: f32,
@@ -45,7 +49,9 @@ impl Default for Tuning {
             paths: PathFill::default(),
             openness: OpenFill::default(),
             lantern: 15.0,
-            crystal: 13.0,
+            crystal: 15.0,
+            lantern_color: WHITE,
+            crystal_colors: [RED, GREEN, BLUE],
             ambient: 600.0,
         }
     }
@@ -64,13 +70,64 @@ impl Tuning {
         }
     }
 
-    pub fn emissive_materials(&self) -> Vec<(u8, Emission)> {
-        vec![
-            (LANTERN, Emission::level(self.lantern)),
-            (CRYSTAL, Emission::level(self.crystal)),
+    /// Returns each lamp material with its level and the index of its light
+    /// colour in [`LIGHT_COLORS`].
+    pub fn lamps(&self) -> [(u8, f32, usize); 4] {
+        let [red, green, blue] = self.crystal_colors;
+        [
+            (LANTERN, self.lantern, self.lantern_color),
+            (RED_CRYSTAL, self.crystal, red),
+            (GREEN_CRYSTAL, self.crystal, green),
+            (BLUE_CRYSTAL, self.crystal, blue),
         ]
     }
+
+    /// Returns the emissive materials for the world config.
+    ///
+    /// A white lamp gets no `Emission::with_color`, as in the Rust that
+    /// "Print as Rust" prints.
+    pub fn emissive_materials(&self) -> Vec<(u8, Emission)> {
+        self.lamps()
+            .into_iter()
+            .map(|(material, level, color)| {
+                let emission = Emission::level(level);
+                let emission = match LIGHT_COLORS[color].1 {
+                    None => emission,
+                    Some([r, g, b]) => emission.with_color(Color::srgb(r, g, b)),
+                };
+                (material, emission)
+            })
+            .collect()
+    }
 }
+
+/// The light colours that the colour rows of the lamps pick from.
+///
+/// Each colour has a name and the sRGB components for `Color::srgb`, or
+/// `None` for white.
+pub const LIGHT_COLORS: [(&str, Option<[f32; 3]>); 8] = [
+    ("White", None),
+    ("Warm", Some([1.0, 0.7, 0.4])),
+    ("Red", Some([1.0, 0.0, 0.0])),
+    ("Yellow", Some([1.0, 1.0, 0.0])),
+    ("Green", Some([0.0, 1.0, 0.0])),
+    ("Cyan", Some([0.0, 1.0, 1.0])),
+    ("Blue", Some([0.0, 0.0, 1.0])),
+    ("Magenta", Some([1.0, 0.0, 1.0])),
+];
+const WHITE: usize = 0;
+pub const RED: usize = 2;
+const GREEN: usize = 4;
+const BLUE: usize = 6;
+const LIGHT_COLOR_NAMES: [&str; 8] = {
+    let mut names = [""; 8];
+    let mut index = 0;
+    while index < names.len() {
+        names[index] = LIGHT_COLORS[index].0;
+        index += 1;
+    }
+    names
+};
 
 /// The panel's tabs, each a group of settings about one thing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -116,6 +173,9 @@ pub enum Applies {
     NewTexture,
     /// It caps what the world may use, and changes nothing on screen.
     Limit,
+    /// It changes what solving costs from the next solve on. It never
+    /// changes the light, so it relights nothing.
+    Cost,
     /// It belongs to the app, not to light propagation.
     App,
 }
@@ -127,6 +187,7 @@ impl Applies {
             Applies::Relights => "Relights",
             Applies::NewTexture => "New texture",
             Applies::Limit => "Limit",
+            Applies::Cost => "Cost only",
             Applies::App => "Bevy setting",
         }
     }
@@ -137,6 +198,7 @@ impl Applies {
             Applies::Relights => Color::srgb(0.66, 0.45, 0.12),
             Applies::NewTexture => Color::srgb(0.70, 0.27, 0.22),
             Applies::Limit => Color::srgb(0.35, 0.38, 0.45),
+            Applies::Cost => Color::srgb(0.42, 0.36, 0.52),
             Applies::App => Color::srgb(0.25, 0.42, 0.68),
         }
     }
@@ -296,8 +358,12 @@ const SKY_LABELS: [&str; 10] = [
 
 /// The level curves the curve settings pick from, each with the Rust that
 /// makes it.
-pub fn curves() -> [(&'static str, LevelCurve); 5] {
+pub fn curves() -> [(&'static str, LevelCurve); 6] {
     [
+        (
+            "LevelCurve::exponential_to_black(0.7)",
+            LevelCurve::exponential_to_black(0.7),
+        ),
         ("LevelCurve::exponential(0.6)", LevelCurve::exponential(0.6)),
         ("LevelCurve::exponential(0.7)", LevelCurve::exponential(0.7)),
         ("LevelCurve::exponential(0.8)", LevelCurve::exponential(0.8)),
@@ -306,7 +372,8 @@ pub fn curves() -> [(&'static str, LevelCurve); 5] {
     ]
 }
 
-const CURVE_LABELS: [&str; 5] = [
+const CURVE_LABELS: [&str; 6] = [
+    "x 0.7, to black",
     "x 0.6 per level",
     "x 0.7 per level",
     "x 0.8 per level",
@@ -331,8 +398,9 @@ fn curve(index: usize) -> LevelCurve {
     curves()[index].1.clone()
 }
 
-const SUN_LABELS: [&str; 6] = [
+const SUN_LABELS: [&str; 7] = [
     "Direct sky only",
+    "By level, x 0.7 to black",
     "By level, x 0.6",
     "By level, x 0.7",
     "By level, x 0.8",
@@ -646,11 +714,28 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             shown: always,
         },
         Setting {
+            label: "Lantern colour",
+            rust: "Emission::with_color",
+            tab: Tab::Lamps,
+            applies: Applies::Relights,
+            about: "The lanterns' light colour. Only its hue counts: the level \
+                    alone sets how bright and far the light is, so saturated \
+                    blue reads darker than red at the same level.",
+            place: Place::Cave,
+            control: Control::Choice {
+                options: &LIGHT_COLOR_NAMES,
+                get: |t| t.lantern_color,
+                set: |t, index| t.lantern_color = index,
+            },
+            shown: always,
+        },
+        Setting {
             label: "Crystal level",
             rust: "emissive_materials",
             tab: Tab::Lamps,
             applies: Applies::Relights,
-            about: "The level the crystals in the deep chamber give off.",
+            about: "The level the red, green and blue crystals in the deep \
+                    chamber give off.",
             place: Place::Chamber,
             control: Control::Slider {
                 min: 0.0,
@@ -659,6 +744,57 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 decimals: 0,
                 get: |t| t.crystal,
                 set: |t, value| t.crystal = value,
+            },
+            shown: always,
+        },
+        Setting {
+            label: "Red crystal",
+            rust: "Emission::with_color",
+            tab: Tab::Lamps,
+            applies: Applies::Relights,
+            about: "The light colour of the crystals on the west of the deep \
+                    chamber's floor. Where two colours' pools meet they mix: \
+                    red and green into yellow, green and blue into cyan, blue \
+                    and red into magenta.",
+            place: Place::Chamber,
+            control: Control::Choice {
+                options: &LIGHT_COLOR_NAMES,
+                get: |t| t.crystal_colors[0],
+                set: |t, index| t.crystal_colors[0] = index,
+            },
+            shown: always,
+        },
+        Setting {
+            label: "Green crystal",
+            rust: "Emission::with_color",
+            tab: Tab::Lamps,
+            applies: Applies::Relights,
+            about: "The light colour of the crystals on the east of the deep \
+                    chamber's floor. Where two colours' pools meet they mix: \
+                    red and green into yellow, green and blue into cyan, blue \
+                    and red into magenta.",
+            place: Place::Chamber,
+            control: Control::Choice {
+                options: &LIGHT_COLOR_NAMES,
+                get: |t| t.crystal_colors[1],
+                set: |t, index| t.crystal_colors[1] = index,
+            },
+            shown: always,
+        },
+        Setting {
+            label: "Blue crystal",
+            rust: "Emission::with_color",
+            tab: Tab::Lamps,
+            applies: Applies::Relights,
+            about: "The light colour of the crystals on the south of the deep \
+                    chamber's floor. Where two colours' pools meet they mix: \
+                    red and green into yellow, green and blue into cyan, blue \
+                    and red into magenta.",
+            place: Place::Chamber,
+            control: Control::Choice {
+                options: &LIGHT_COLOR_NAMES,
+                get: |t| t.crystal_colors[2],
+                set: |t, index| t.crystal_colors[2] = index,
             },
             shown: always,
         },
@@ -699,11 +835,29 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             shown: always,
         },
         Setting {
+            label: "Tinted glow",
+            rust: "look.tinted_glow",
+            tab: Tab::Lamps,
+            applies: Applies::Instant,
+            about: "Off, a lamp's own faces glow in their texture's colour, so \
+                    the crystals glow white. On, in that colour tinted by the \
+                    lamp's light colour.",
+            place: Place::Chamber,
+            control: Control::Choice {
+                options: &["Off", "On"],
+                get: |t| t.light.look.tinted_glow as usize,
+                set: |t, index| t.light.look.tinted_glow = index == 1,
+            },
+            shown: always,
+        },
+        Setting {
             label: "Falloff",
             rust: "look.voxel_falloff",
             tab: Tab::Lamps,
             applies: Applies::Instant,
-            about: "How quickly voxel light dims from one level to the next.",
+            about: "How quickly voxel light dims from one level to the next. \
+                    To black fades each lamp's pool out at its edge; the others \
+                    end it in a faint step.",
             place: Place::Cave,
             control: Control::Choice {
                 options: &CURVE_LABELS,
@@ -838,6 +992,22 @@ pub static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 options: &["64", "128", "256", "343", "512", "1024", "2048", "4096"],
                 get: |t| index_of(&SLOT_CAPACITIES, &t.light.slot_capacity),
                 set: |t, index| t.light.slot_capacity = SLOT_CAPACITIES[index],
+            },
+            shown: always,
+        },
+        Setting {
+            label: "Skip colours",
+            rust: "skip_unreached_colors",
+            tab: Tab::Memory,
+            applies: Applies::Cost,
+            about: "Where four or more light colours shine near a chunk, first \
+                    work out which reach it through open voxels and solve only \
+                    those. It changes what a solve costs, and never the light.",
+            place: Place::Overview,
+            control: Control::Choice {
+                options: &["Off", "On"],
+                get: |t| t.light.skip_unreached_colors as usize,
+                set: |t, index| t.light.skip_unreached_colors = index == 1,
             },
             shown: always,
         },

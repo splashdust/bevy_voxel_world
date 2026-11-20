@@ -13,8 +13,8 @@ use bevy::prelude::*;
 
 use super::edits::{assert_matches, cavern, relights_started, settle};
 use super::reference::Reference;
-use super::sky_light::{light_is_settled, sky_light};
-use super::voxel_light::{app, LampWorld, DIM_LAMP, LAMP};
+use super::sky_light::{light_is_settled, sky_light, spawned};
+use super::voxel_light::{app, lit, LampWorld, DIM_LAMP, LAMP, STONE};
 use crate::light::LightSettings;
 use crate::light_bench::light_stats;
 use crate::prelude::*;
@@ -268,6 +268,42 @@ fn changing_the_emissive_list_settles_on_the_reference_for_the_new_list_with_no_
     );
 }
 
+/// Returns the voxels of a world with a stone at every fourth voxel along
+/// each axis, and a lamp in the chunk at the origin.
+///
+/// Every chunk then has an open voxel beside a solid, so a settings relight
+/// takes in every spawned chunk.
+fn lattice(p: IVec3) -> WorldVoxel {
+    if p == IVec3::new(17, 17, 17) {
+        WorldVoxel::Solid(LAMP)
+    } else if p.rem_euclid(IVec3::splat(4)) == IVec3::ZERO {
+        WorldVoxel::Solid(STONE)
+    } else {
+        WorldVoxel::Air
+    }
+}
+
+#[test]
+fn an_emissive_list_change_that_finds_the_same_emissive_voxels_relights_each_chunk_once()
+{
+    let mut app = app(LampWorld {
+        scene: Arc::new(lattice),
+        light: Some(lit(LightShape::Round)),
+        ..default()
+    });
+    settle(&mut app, "the world to stream in");
+    let chunks = spawned(&mut app).len() as u64;
+    let relights = relights_started(&app);
+    // No voxel holds the new material. Each chunk relights once and finds the
+    // emissive voxels it had before. Its light stays the same, so the relight
+    // ripples no further.
+    change(&mut app, |world| {
+        world.emissive.push((STONE + 100, Emission::level(4.0)))
+    });
+    settle(&mut app, "light to settle after the change");
+    assert_eq!(relights_started(&app) - relights, chunks);
+}
+
 #[test]
 fn a_lamp_on_a_sunlit_surface_relights_after_a_change_of_voxel_reach() {
     let mut app = app(world());
@@ -324,7 +360,7 @@ fn sky_reach_with_sky_light_off_starts_no_relight() {
 }
 
 /// The warnings logged anywhere in the test process since it started.
-fn warnings() -> &'static Mutex<Vec<String>> {
+pub(super) fn warnings() -> &'static Mutex<Vec<String>> {
     static WARNINGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     WARNINGS.get_or_init(|| {
         struct Warnings;
@@ -350,14 +386,15 @@ fn warnings() -> &'static Mutex<Vec<String>> {
                 warnings().lock().unwrap().push(message.0);
             }
         }
-        // Only this test sets the global subscriber.
+        // No other code in the tests sets the global subscriber, so this call
+        // can't fail.
         bevy::log::tracing::subscriber::set_global_default(registry().with(Warnings))
             .expect("no other global subscriber");
         Mutex::new(Vec::new())
     })
 }
 
-fn warned(about: &str) -> usize {
+pub(super) fn warned(about: &str) -> usize {
     warnings()
         .lock()
         .unwrap()

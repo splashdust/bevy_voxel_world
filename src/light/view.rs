@@ -252,7 +252,7 @@ mod tests {
     fn chunk(occupancy: Occupancy) -> ViewChunk {
         let inputs = Arc::new(LightInputs {
             occupancy,
-            emissive: Vec::new(),
+            emissive: Default::default(),
             columns: ColumnAnswer::none(),
             ring: false,
         });

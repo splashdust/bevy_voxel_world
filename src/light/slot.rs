@@ -1,34 +1,57 @@
-//! What goes into a chunk's slot, and whether a chunk needs one.
+//! What goes into a slot
 //!
-//! A chunk's faces read light from the open voxels in front of them: its own
-//! voxels, and through the slot's shell its six face neighbours' border voxels.
-//! A chunk needs a slot unless every open voxel touching one of its solid
-//! voxels by a face, an edge or a corner holds one level per channel. Edges
-//! and corners count because a face off the voxel grid, from a mesher other
-//! than cubes, reads the voxels around it and not only the one in front.
-//!
-//! An emissive voxel touching an open voxel always needs a slot, since only a
-//! slot holds the lamp's own cell, which makes its faces glow.
-//!
-//! A slot's format follows the world's precision, and is chosen in one place,
-//! [`texel_bytes`] and [`texture_format`]: at 16 levels a texel is one
-//! `R8Uint` byte, sky light in its low nibble and voxel light in its high
-//! one; at 256 levels two bytes of `Rg8Uint`, sky light then voxel light.
-//!
-//! A solve works out what the chunk's own voxels show its faces, as
-//! [`own_faces_see`]. Landing works out what each loaded face neighbour's
-//! border shows them, as [`across`], whenever either chunk's light changes. A
+//! This module builds the light a chunk shows its faces through its slot and
+//! its colour slot, and decides whether the chunk needs either. A solve works
+//! out what the voxels of its own chunk show the faces of the chunk, as
+//! [`own_faces_see`], and builds what the slot needs, as [`SlotParts`].
+//! Landing works out what the border of each loaded face neighbour shows
+//! those faces, as [`across`], whenever the light of either chunk changes. A
 //! neighbour that isn't loaded shows them nothing.
+//!
+//! The faces of a chunk read light from the open voxels in front of them.
+//! Those are the voxels of the chunk itself, and, through the shell of its
+//! slot, the border voxels of its six face neighbours. A chunk needs a slot
+//! unless every open voxel touching one of its solid voxels by a face, an
+//! edge or a corner holds one sky light level, one voxel light level and one
+//! light colour. Edges and corners count because a face off the voxel grid,
+//! from a mesher other than cubes, reads the voxels around it and not only
+//! the one in front.
+//!
+//! A chunk with an emissive voxel touching an open voxel always needs a slot.
+//! Only a slot holds the cell of the emissive voxel itself, which makes its
+//! faces glow.
+//!
+//! # Formats
+//!
+//! The format of a slot follows the light precision of the world, and is
+//! chosen in one place, [`texel_bytes`] and [`texture_format`]:
+//!
+//! - At 16 levels, a texel is one `R8Uint` byte, with sky light in its low
+//!   nibble and voxel light in its high one.
+//! - At 256 levels, a texel is two bytes of `Rg8Uint`, sky light then voxel
+//!   light.
+//!
+//! A colour slot is laid out as a slot is, and each of its texels holds one
+//! packed light colour in [`COLOR_TEXEL_BYTES`] bytes. A chunk takes a colour
+//! slot, beside its slot, only where its faces see more than one light
+//! colour.
 
+use std::cell::RefCell;
+use std::hash::BuildHasher;
+use std::sync::Arc;
+
+use bevy::platform::collections::HashMap;
+use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
+use super::color::ChunkColor;
 use super::config::LightPrecision;
 use super::faces::Face;
 use super::inputs::{EmissiveVoxel, LightInputs, Occupancy};
 use super::kernel::Plane;
 use super::levels::LightLevels;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use crate::chunk::CHUNK_SIZE_U;
 
 const CHUNK: usize = CHUNK_SIZE_U as usize;
@@ -162,18 +185,19 @@ const SPREAD: [u64; 256] = {
     table
 };
 
-/// What some open voxels hold of one channel: no voxel at all, one level, or
-/// more than one.
+/// What some voxels hold of one kind of light: no voxel at all, one value,
+/// or more than one value. The value is a level of sky light or voxel light,
+/// or a packed light colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Seen {
+pub(crate) enum Seen<T = u8> {
     #[default]
     Nothing,
-    One(u8),
+    One(T),
     Mixed,
 }
 
-impl Seen {
-    pub fn join(self, other: Seen) -> Seen {
+impl<T: Copy + PartialEq> Seen<T> {
+    pub fn join(self, other: Seen<T>) -> Seen<T> {
         match (self, other) {
             (Seen::Nothing, seen) | (seen, Seen::Nothing) => seen,
             (Seen::One(a), Seen::One(b)) if a == b => Seen::One(a),
@@ -189,6 +213,11 @@ pub(crate) struct FacesSee {
     pub voxel: Seen,
     /// Whether an emissive voxel of the chunk touches one of these voxels.
     pub lamp: bool,
+    /// The packed light colours of the voxel light of these voxels, and of
+    /// the emissive voxels of the chunk touching them. Only the chunks of a
+    /// coloured world read light colours. In any other world this is
+    /// [`Seen::Nothing`].
+    pub color: Seen<u16>,
 }
 
 impl FacesSee {
@@ -197,11 +226,27 @@ impl FacesSee {
             sky: self.sky.join(other.sky),
             voxel: self.voxel.join(other.voxel),
             lamp: self.lamp || other.lamp,
+            color: self.color.join(other.color),
         }
     }
 
+    /// Whether the chunk needs a slot, which it does in any of three cases:
+    ///
+    /// - Its faces see more than one sky light level or voxel light level.
+    /// - An emissive voxel of its own touches one of these voxels.
+    /// - It needs a colour slot, since a chunk with a colour slot also takes
+    ///   a slot.
     pub fn needs_slot(&self) -> bool {
-        self.lamp || self.sky == Seen::Mixed || self.voxel == Seen::Mixed
+        self.lamp
+            || self.sky == Seen::Mixed
+            || self.voxel == Seen::Mixed
+            || self.needs_color_slot()
+    }
+
+    /// Whether the chunk needs a colour slot, which it does when its faces see
+    /// more than one light colour.
+    pub fn needs_color_slot(&self) -> bool {
+        self.color == Seen::Mixed
     }
 }
 
@@ -219,12 +264,337 @@ pub(crate) fn own_faces_see(light: &ChunkLight) -> FacesSee {
             .emissive
             .iter()
             .any(|lamp| touches_open(solid, lamp)),
+        color: Seen::Nothing,
     }
+}
+
+/// What a solve works out off the main thread for the slot of its chunk, so
+/// that landing only has to place it.
+#[derive(Default)]
+pub(crate) struct SlotParts {
+    /// The bytes of the slot, with the shell at 0: see [`slot_bytes`]. A
+    /// solve builds them only where the voxels of the chunk itself call for
+    /// a slot, by [`own_faces_see`].
+    pub bytes: Option<Box<[u8]>>,
+    /// In a coloured world, the light colours of the voxels of the chunk
+    /// itself.
+    pub own_colors: Option<OwnColors>,
+    /// The border planes of the chunk, for the shells of its face neighbours.
+    pub borders: Option<ChunkBorders>,
+}
+
+/// A shell plane with its hash, shared between the solve that built it and
+/// the slots that copy it.
+#[derive(Clone)]
+pub(crate) struct BorderPlane {
+    pub plane: Arc<ShellPlane>,
+    pub hash: u64,
+}
+
+impl BorderPlane {
+    pub fn new(plane: Box<ShellPlane>) -> Self {
+        let hash = plane_hash(&plane);
+        Self {
+            plane: plane.into(),
+            hash,
+        }
+    }
+}
+
+/// Returns the hash of the bytes of a shell plane, which tells a changed
+/// plane from an unchanged one.
+pub(crate) fn plane_hash(plane: &ShellPlane) -> u64 {
+    FixedHasher.hash_one(plane)
+}
+
+/// The planes that the light of a chunk puts into the shells of the chunks
+/// across its faces, each with its hash, indexed by [`Face`].
+///
+/// Every face has a border plane. In a coloured world, every face also has
+/// a colour shell plane of border colours. The precision of the planes is
+/// that of the light they were built from.
+///
+/// A solve builds the planes off the main thread. Landing the light then
+/// hands them to the shells of the neighbours and compares hashes, and
+/// builds nothing on the main thread.
+pub(crate) struct ChunkBorders {
+    pub precision: LightPrecision,
+    pub levels: [BorderPlane; 6],
+    pub colors: Option<[BorderPlane; 6]>,
+}
+
+thread_local! {
+    /// The border planes of this thread that hold one texel throughout,
+    /// keyed by precision and by the sky light and voxel light of that
+    /// texel. Each is built once and shared.
+    static UNIFORM_PLANES: RefCell<HashMap<(bool, u8, u8), BorderPlane>> =
+        RefCell::new(HashMap::default());
+    /// The colour shell plane of this thread that holds white throughout,
+    /// built once and shared.
+    static WHITE_COLORS: BorderPlane =
+        BorderPlane::new(vec![0; PLANE_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice());
+}
+
+impl ChunkBorders {
+    /// Returns the border planes of `light`. Border colours come with them
+    /// when `colors`, the packed light colour of each emissive material
+    /// index, is given.
+    ///
+    /// Some faces hold one texel throughout, such as a face of a solid or
+    /// unlit chunk, or of an open chunk lit evenly. Where such a face has no
+    /// emissive voxel on it, it shares a plane built once, so a world of many
+    /// such chunks doesn't build and hold six planes for each of them.
+    pub fn of(light: &ChunkLight, colors: Option<&[u16]>) -> Self {
+        let lamps = Face::ALL.map(|face| {
+            let mut on = false;
+            for_lamps_on(&light.inputs.emissive, face, |_, _, _| on = true);
+            on
+        });
+        let uniform = match (&light.inputs.occupancy, &light.sky, &light.voxel) {
+            (Occupancy::Solid, _, _) => Some((0, 0)),
+            (_, ChunkLevels::Uniform(0), ChunkLevels::Uniform(0)) => Some((0, 0)),
+            (Occupancy::Open, ChunkLevels::Uniform(sky), ChunkLevels::Uniform(voxel)) => {
+                Some((*sky, *voxel))
+            }
+            _ => None,
+        };
+        let levels = Face::ALL.map(|face| match uniform {
+            Some((sky, voxel)) if !lamps[face as usize] => {
+                let key = (light.precision == LightPrecision::Steps256, sky, voxel);
+                UNIFORM_PLANES.with_borrow_mut(|planes| {
+                    planes
+                        .entry(key)
+                        .or_insert_with(|| {
+                            BorderPlane::new(border_plane(light, face, light.precision))
+                        })
+                        .clone()
+                })
+            }
+            _ => BorderPlane::new(border_plane(light, face, light.precision)),
+        });
+        let white = matches!(light.voxel, ChunkLevels::Uniform(0))
+            || light.color == ChunkColor::White;
+        let colors = colors.map(|colors| {
+            let lamp_color = |material: u16| {
+                colors
+                    .get(material as usize)
+                    .copied()
+                    .unwrap_or(super::color::WHITE)
+            };
+            Face::ALL.map(|face| {
+                if white && !lamps[face as usize] {
+                    WHITE_COLORS.with(BorderPlane::clone)
+                } else {
+                    BorderPlane::new(border_colors(light, face, lamp_color))
+                }
+            })
+        });
+        Self {
+            precision: light.precision,
+            levels,
+            colors,
+        }
+    }
+}
+
+/// What a solve in a coloured world works out about the light colours of the
+/// voxels of its chunk itself, so that landing the light doesn't have to.
+pub(crate) struct OwnColors {
+    /// The light colours the faces of the chunk read from its own voxels:
+    /// see [`own_colors_seen`].
+    pub seen: Seen<u16>,
+    /// The bytes of the colour slot, with the shell at 0: see
+    /// [`color_slot_bytes`]. They are built only when the voxels of the chunk
+    /// itself see more than one light colour.
+    pub bytes: Option<Box<[u8]>>,
+}
+
+impl OwnColors {
+    /// Returns what the chunk lit by `light` reads of its own light colours.
+    /// `colors` gives the packed light colour of each emissive material
+    /// index.
+    pub fn of(light: &ChunkLight, colors: &[u16]) -> Self {
+        let lamp_color = |material: u16| {
+            colors
+                .get(material as usize)
+                .copied()
+                .unwrap_or(super::color::WHITE)
+        };
+        let seen = own_colors_seen(light, lamp_color);
+        let bytes = (seen == Seen::Mixed).then(|| color_slot_bytes(light, lamp_color));
+        Self { seen, bytes }
+    }
+}
+
+/// Returns the packed light colours that the faces of the chunk lit by
+/// `light` read from its own voxels.
+///
+/// Those are the light colours of two kinds of voxel:
+///
+/// - The voxel light of each open voxel touching one of the solid voxels of
+///   the chunk.
+/// - Each emissive voxel of the chunk touching an open voxel, whose light
+///   colour `lamp_color` gives from its material index.
+///
+/// Its cost grows with the columns of the chunk. Where light of several
+/// light colours reaches the chunk, it also grows with the lit voxels.
+pub(crate) fn own_colors_seen(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    let Occupancy::Mixed(solid) = &light.inputs.occupancy else {
+        return Seen::Nothing;
+    };
+    let seen = colors_seen(light, &touching_open(solid));
+    lamps_seen(light, solid, seen, lamp_color)
+}
+
+/// Returns the packed light colours of the voxel light of every open voxel
+/// in the chunk lit by `light`, and of each emissive voxel of the chunk
+/// touching an open voxel.
+///
+/// Unlike [`own_colors_seen`], it reads open voxels far from any solid too.
+pub(crate) fn open_colors_seen(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    let Some(open) = open_voxels(&light.inputs.occupancy) else {
+        return Seen::Nothing;
+    };
+    let seen = colors_seen(light, &open);
+    match &light.inputs.occupancy {
+        Occupancy::Mixed(solid) => lamps_seen(light, solid, seen, lamp_color),
+        _ => seen,
+    }
+}
+
+/// Returns `seen` joined with the packed light colour of each emissive voxel
+/// touching an open voxel, in the chunk lit by `light` whose solid voxels are
+/// `solid`.
+fn lamps_seen(
+    light: &ChunkLight,
+    solid: &Plane,
+    mut seen: Seen<u16>,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Seen<u16> {
+    for lamp in light.inputs.emissive.iter() {
+        if seen == Seen::Mixed {
+            break;
+        }
+        if touches_open(solid, lamp) {
+            seen = seen.join(Seen::One(lamp_color(lamp.material())));
+        }
+    }
+    seen
+}
+
+/// Returns the packed light colours of the voxel light at the voxels set in
+/// `voxels`, in the chunk lit by `light`. A voxel with no voxel light has no
+/// light colour, so it adds none.
+pub(crate) fn colors_seen(light: &ChunkLight, voxels: &Plane) -> Seen<u16> {
+    let lit = lit_voxels(&light.voxel, voxels, None);
+    let mut seen = Seen::Nothing;
+    for_each_voxel(&lit, |x, y, z| {
+        seen = seen.join(Seen::One(light.color.packed_at(x, y, z)));
+        // A chunk held in one light colour has it at every lit voxel, so the
+        // first lit voxel is enough.
+        !matches!(light.color, ChunkColor::Mixed(_)) || seen == Seen::Mixed
+    });
+    seen
+}
+
+/// Calls `visit` with the x, y and z of each voxel set in `voxels`, and stops
+/// once `visit` returns true.
+fn for_each_voxel(voxels: &Plane, mut visit: impl FnMut(usize, usize, usize) -> bool) {
+    for (column, &these) in voxels.iter().enumerate() {
+        let mut these = these;
+        while these != 0 {
+            let z = these.trailing_zeros() as usize;
+            these &= these - 1;
+            if visit(column % CHUNK, column / CHUNK, z) {
+                return;
+            }
+        }
+    }
+}
+
+/// Adds to `counts` how many of the voxels set in `voxels`, in the chunk lit
+/// by `light`, have voxel light of each packed light colour.
+///
+/// With `level`, a step of the precision of the light, it counts only the
+/// voxels whose voxel light is at that level.
+pub(crate) fn count_colors(
+    light: &ChunkLight,
+    voxels: &Plane,
+    level: Option<u8>,
+    counts: &mut Vec<(u16, u32)>,
+) {
+    let lit = lit_voxels(&light.voxel, voxels, level);
+    let mut add = |packed: u16, count: u32| match counts
+        .iter_mut()
+        .find(|(color, _)| *color == packed)
+    {
+        Some((_, counted)) => *counted += count,
+        None => counts.push((packed, count)),
+    };
+    match &light.color {
+        ChunkColor::Mixed(_) => for_each_voxel(&lit, |x, y, z| {
+            add(light.color.packed_at(x, y, z), 1);
+            false
+        }),
+        held => {
+            let count: u32 = lit.iter().map(|column| column.count_ones()).sum();
+            if count > 0 {
+                add(held.packed_at(0, 0, 0), count);
+            }
+        }
+    }
+}
+
+/// Returns the voxels set in `voxels` that hold voxel light in `levels`, as
+/// columns along z like a [`Plane`].
+///
+/// Without `level`, any level above 0 counts. With `level`, only that level
+/// counts, and level 0 gives no voxels, since a voxel at 0 holds no voxel
+/// light.
+fn lit_voxels(levels: &ChunkLevels, voxels: &Plane, level: Option<u8>) -> Box<Plane> {
+    let mut lit: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    if level == Some(0) {
+        return lit;
+    }
+    match levels {
+        ChunkLevels::Uniform(held) => {
+            if *held != 0 && level.is_none_or(|level| level == *held) {
+                lit.copy_from_slice(voxels);
+            }
+        }
+        ChunkLevels::Planes(planes) => {
+            for (column, lit) in lit.iter_mut().enumerate() {
+                if voxels[column] == 0 {
+                    continue;
+                }
+                let at = match level {
+                    None => planes.iter().fold(0, |lit, plane| lit | plane[column]),
+                    Some(level) => {
+                        planes.iter().enumerate().fold(!0, |at, (bit, plane)| {
+                            if level >> bit & 1 == 1 {
+                                at & plane[column]
+                            } else {
+                                at & !plane[column]
+                            }
+                        })
+                    }
+                };
+                *lit = at & voxels[column];
+            }
+        }
+    }
+    lit
 }
 
 /// The open voxels of a chunk touching one of its `solid` voxels by a face,
 /// an edge or a corner, as columns along z like `solid`'s.
-fn touching_open(solid: &Plane) -> Box<Plane> {
+pub(crate) fn touching_open(solid: &Plane) -> Box<Plane> {
     let mut along_z: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
     for (spread, column) in along_z.iter_mut().zip(solid.iter()) {
         *spread = column | column << 1 | column >> 1;
@@ -246,7 +616,7 @@ fn touching_open(solid: &Plane) -> Box<Plane> {
 
 /// Whether the emissive voxel `lamp` touches an open voxel of its own chunk.
 fn touches_open(solid: &Plane, lamp: &EmissiveVoxel) -> bool {
-    let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+    let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
     let around = ((0b111u64 << z) >> 1) as u32;
     (y.saturating_sub(1)..(y + 2).min(CHUNK)).any(|ny| {
         (x.saturating_sub(1)..(x + 2).min(CHUNK))
@@ -254,16 +624,16 @@ fn touches_open(solid: &Plane, lamp: &EmissiveVoxel) -> bool {
     })
 }
 
-/// What one channel holds in the voxels set in `voxels`.
-fn seen_over(channel: &ChannelLight, voxels: &Plane) -> Seen {
+/// Returns what `levels` hold in the voxels set in `voxels`.
+fn seen_over(levels: &ChunkLevels, voxels: &Plane) -> Seen {
     let mut seen = Seen::Nothing;
-    match channel {
-        ChannelLight::Uniform(level) => {
+    match levels {
+        ChunkLevels::Uniform(level) => {
             if voxels.iter().any(|column| *column != 0) {
                 seen = Seen::One(*level);
             }
         }
-        ChannelLight::Planes(planes) => {
+        ChunkLevels::Planes(planes) => {
             for (column, &these) in voxels.iter().enumerate() {
                 if these == 0 {
                     continue;
@@ -324,9 +694,9 @@ pub(crate) fn slot_bytes(light: &ChunkLight) -> Box<[u8]> {
         }
     }
     for lamp in &light.inputs.emissive {
-        let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+        let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
         let texel = (z + 1) + (x + 1) * SIDE + (y + 1) * SIDE * SIDE;
-        put_lamp(&mut bytes, texel, lamp.level, precision);
+        put_lamp(&mut bytes, texel, lamp.level(), precision);
     }
     bytes
 }
@@ -340,13 +710,13 @@ fn every_other_byte(bytes: u64) -> u128 {
     (wide | wide << 8) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF
 }
 
-/// The levels of one channel at 8 voxels of a column from `shift` up, one in
-/// each byte. Only the voxels set in `open` get a level.
+/// Returns the levels in `light` at 8 voxels of a column, from `shift` up,
+/// one level in each byte. Only the voxels set in `open` get a level.
 #[inline]
-fn levels(channel: &ChannelLight, column: usize, shift: usize, open: usize) -> u64 {
-    match channel {
-        ChannelLight::Uniform(level) => SPREAD[open] * *level as u64,
-        ChannelLight::Planes(planes) => {
+fn levels(light: &ChunkLevels, column: usize, shift: usize, open: usize) -> u64 {
+    match light {
+        ChunkLevels::Uniform(level) => SPREAD[open] * *level as u64,
+        ChunkLevels::Planes(planes) => {
             let mut texels = 0;
             for (bit, plane) in planes.iter().enumerate() {
                 let levels = (plane[column] >> shift) as usize & open;
@@ -377,60 +747,400 @@ pub(crate) fn cell_index(cell: UVec3) -> usize {
     cell.z as usize + cell.x as usize * SIDE + cell.y as usize * SIDE * SIDE
 }
 
-/// Writes `plane` into the shell of `bytes` on `face`, or zeros with no plane,
-/// both in the format of `precision`.
+/// Writes `plane` into the shell of `bytes` on `face`, or writes zeros there
+/// with no plane.
+///
+/// Both have `wide` bytes a texel: [`texel_bytes`] for a slot, or
+/// [`COLOR_TEXEL_BYTES`] for a colour slot.
 pub(crate) fn write_shell(
     bytes: &mut [u8],
     face: Face,
     plane: Option<&ShellPlane>,
-    precision: LightPrecision,
+    wide: usize,
 ) {
-    let wide = texel_bytes(precision);
+    match wide {
+        1 => write_shell_texels::<1>(bytes, face, plane),
+        2 => write_shell_texels::<2>(bytes, face, plane),
+        _ => unreachable!("a texel is 1 or 2 bytes"),
+    }
+}
+
+/// Does what [`write_shell`] does, for texels of `W` bytes, so each texel is
+/// copied at a size known when compiling.
+///
+/// It starts at the shell cell in front of the voxel of the face at `u` 0 and
+/// `v` 0, and steps from cell to cell. That is cheaper than working out each
+/// cell with [`shell_cell`], which matters because the main thread writes a
+/// shell plane each time the light of a neighbour lands.
+fn write_shell_texels<const W: usize>(
+    bytes: &mut [u8],
+    face: Face,
+    plane: Option<&ShellPlane>,
+) {
+    let edge = if face as usize & 1 == 1 { SIDE - 1 } else { 0 };
+    // The index of the first cell, and the steps to the next cell along u
+    // and along v.
+    let (first, along_u, along_v) = match face {
+        Face::NegX | Face::PosX => (1 + edge * SIDE + SIDE * SIDE, SIDE * SIDE, 1),
+        Face::NegY | Face::PosY => (1 + SIDE + edge * SIDE * SIDE, SIDE, 1),
+        Face::NegZ | Face::PosZ => (edge + SIDE + SIDE * SIDE, SIDE, SIDE * SIDE),
+    };
     for v in 0..CHUNK {
         for u in 0..CHUNK {
-            let to = cell_index(shell_cell(face, u, v)) * wide;
-            let from = (u + v * CHUNK) * wide;
-            match plane {
+            let to = (first + u * along_u + v * along_v) * W;
+            let texel: [u8; W] = match plane {
                 Some(plane) => {
-                    bytes[to..to + wide].copy_from_slice(&plane[from..from + wide])
+                    let from = (u + v * CHUNK) * W;
+                    plane[from..from + W].try_into().unwrap()
                 }
-                None => bytes[to..to + wide].fill(0),
-            }
+                None => [0; W],
+            };
+            bytes[to..to + W].copy_from_slice(&texel);
         }
     }
 }
 
-/// The light a chunk's voxels on `face` hold, as a slot of `precision` holds
-/// them: the plane that goes into the shell of the neighbour across `face`.
+/// Returns the light that the voxels of a chunk on `face` hold, as a slot of
+/// `precision` holds it. This is the plane that goes into the shell of the
+/// neighbour across `face`.
+///
+/// It reads levels 8 voxels at a time into a `u64`, as [`slot_bytes`] does.
+/// On faces across x and y, those 8 voxels lie along a column. On faces
+/// across z, a column holds only one voxel of the face, so the 8 voxels lie
+/// along a row gathered from 32 columns. Light of another precision is
+/// converted voxel by voxel instead, by [`converted_border_plane`].
 pub(crate) fn border_plane(
     light: &ChunkLight,
     face: Face,
     precision: LightPrecision,
 ) -> Box<ShellPlane> {
+    if light.precision != precision {
+        return converted_border_plane(light, face, precision);
+    }
     let mut plane = vec![0; PLANE_TEXELS * texel_bytes(precision)].into_boxed_slice();
     let occupancy = &light.inputs.occupancy;
-    let from = light.precision;
-    for v in 0..CHUNK {
-        for u in 0..CHUNK {
-            let (x, y, z) = face.voxel(u, v);
-            if !occupancy.is_solid(x, y, z) {
-                let sky = precision.convert(light.sky.at(x, y, z), from);
-                let voxel = precision.convert(light.voxel.at(x, y, z), from);
-                put_texel(&mut plane, u + v * CHUNK, sky, voxel, precision);
+    let side = if face as usize & 1 == 1 { CHUNK - 1 } else { 0 };
+    // Puts 8 texels from `sky` and `voxel`, which hold a level in each byte.
+    // The first goes at `texel`, and each next one `step` texels further on.
+    let mut put = |texel: usize, step: usize, sky: u64, voxel: u64| {
+        for i in 0..8 {
+            let (sky, voxel) = ((sky >> (8 * i)) as u8, (voxel >> (8 * i)) as u8);
+            put_texel(&mut plane, texel + i * step, sky, voxel, precision);
+        }
+    };
+    match face {
+        Face::NegX | Face::PosX | Face::NegY | Face::PosY => {
+            // A column along z runs along v on these faces, so its texels lie
+            // `CHUNK` apart in the plane.
+            for u in 0..CHUNK {
+                let (x, y) = match face {
+                    Face::NegX | Face::PosX => (side, u),
+                    _ => (u, side),
+                };
+                let column = x + y * CHUNK;
+                let open = !occupancy.solid_column(x, y);
+                for shift in (0..CHUNK).step_by(8) {
+                    let open = (open >> shift) as usize & 0xFF;
+                    let sky = levels(&light.sky, column, shift, open);
+                    let voxel = levels(&light.voxel, column, shift, open);
+                    put(u + shift * CHUNK, CHUNK, sky, voxel);
+                }
+            }
+        }
+        Face::NegZ | Face::PosZ => {
+            // Each column holds only one voxel of these faces. So the voxels
+            // of a row of the plane are gathered from 32 columns into the
+            // bits of a `u32`, the way a column holds its voxels, and read as
+            // a column is.
+            for y in 0..CHUNK {
+                let row = y * CHUNK;
+                let open = (0..CHUNK).fold(0u32, |open, x| {
+                    open | ((!occupancy.solid_column(x, y) >> side) & 1) << x
+                });
+                let sky = gathered(&light.sky, row, side);
+                let voxel = gathered(&light.voxel, row, side);
+                for shift in (0..CHUNK).step_by(8) {
+                    let open = (open >> shift) as usize & 0xFF;
+                    put(
+                        row + shift,
+                        1,
+                        row_levels(&sky, shift, open),
+                        row_levels(&voxel, shift, open),
+                    );
+                }
             }
         }
     }
     for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
-        put_lamp(&mut plane, u + v * CHUNK, lamp.level, precision);
+        put_lamp(&mut plane, u + v * CHUNK, lamp.level(), precision);
     });
     plane
 }
 
-/// What the faces of a chunk whose voxels are `own` read across `face` from
-/// the neighbour there, lit by `neighbour`: the neighbour's open border voxels
-/// touching one of the chunk's solid voxels, with levels in steps of
-/// `precision`.
+/// Does what [`border_plane`] does for light of another precision than
+/// `precision`, converting each level on its own.
+fn converted_border_plane(
+    light: &ChunkLight,
+    face: Face,
+    precision: LightPrecision,
+) -> Box<ShellPlane> {
+    let mut plane = vec![0; PLANE_TEXELS * texel_bytes(precision)].into_boxed_slice();
+    let from = light.precision;
+    for_border_voxels(light, face, false, |texel, x, y, z| {
+        let sky = precision.convert(light.sky.at(x, y, z), from);
+        let voxel = precision.convert(light.voxel.at(x, y, z), from);
+        put_texel(&mut plane, texel, sky, voxel, precision);
+    });
+    for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
+        put_lamp(&mut plane, u + v * CHUNK, lamp.level(), precision);
+    });
+    plane
+}
+
+/// The levels of one row of the voxels of a chunk, across 32 columns, as
+/// [`gathered`] gives them.
+enum Row {
+    /// One level at every voxel.
+    Uniform(u8),
+    /// Bit planes of the row. Bit `x` of plane `b` is bit `b` of the level in
+    /// column `x` of the row.
+    Planes([u32; 8]),
+}
+
+/// Returns the levels of `levels` at the voxels with z coordinate `z` in the
+/// 32 columns from `row` on. Those voxels make one row of the chunk along x.
+fn gathered(levels: &ChunkLevels, row: usize, z: usize) -> Row {
+    match levels {
+        ChunkLevels::Uniform(level) => Row::Uniform(*level),
+        ChunkLevels::Planes(planes) => {
+            let mut bits = [0u32; 8];
+            for (bits, plane) in bits.iter_mut().zip(planes.iter()) {
+                *bits = (0..CHUNK)
+                    .fold(0, |row_bits, x| row_bits | ((plane[row + x] >> z) & 1) << x);
+            }
+            Row::Planes(bits)
+        }
+    }
+}
+
+/// Returns the levels at 8 voxels of `row`, from `shift` up, one level in
+/// each byte. Only the voxels set in `open` get a level.
+#[inline]
+fn row_levels(row: &Row, shift: usize, open: usize) -> u64 {
+    match row {
+        Row::Uniform(level) => SPREAD[open] * *level as u64,
+        Row::Planes(bits) => bits.iter().enumerate().fold(0, |texels, (bit, bits)| {
+            texels | SPREAD[(*bits >> shift) as usize & open] << bit
+        }),
+    }
+}
+
+/// Calls `visit` with each open voxel on `face` of the chunk lit by `light`,
+/// giving the texel of the voxel in a shell plane and its x, y and z. With
+/// `lit`, it skips the voxels that hold no voxel light.
+///
+/// It reads the voxels of the chunk a column along z at a time. On the faces
+/// across z, each column holds one voxel of the face. On the other faces,
+/// each column holds 32.
+fn for_border_voxels(
+    light: &ChunkLight,
+    face: Face,
+    lit: bool,
+    mut visit: impl FnMut(usize, usize, usize, usize),
+) {
+    let side = if face as usize & 1 == 1 { CHUNK - 1 } else { 0 };
+    let lit_in = |column: usize| match &light.voxel {
+        _ if !lit => !0,
+        ChunkLevels::Uniform(0) => 0,
+        ChunkLevels::Uniform(_) => !0,
+        ChunkLevels::Planes(planes) => {
+            planes.iter().fold(0, |lit, plane| lit | plane[column])
+        }
+    };
+    let occupancy = &light.inputs.occupancy;
+    let mut column = |x: usize, y: usize, on_face: u32| {
+        let mut voxels = on_face & !occupancy.solid_column(x, y);
+        if voxels != 0 {
+            voxels &= lit_in(x + y * CHUNK);
+        }
+        while voxels != 0 {
+            let z = voxels.trailing_zeros() as usize;
+            voxels &= voxels - 1;
+            let (u, v) = match face {
+                Face::NegX | Face::PosX => (y, z),
+                Face::NegY | Face::PosY => (x, z),
+                Face::NegZ | Face::PosZ => (x, y),
+            };
+            visit(u + v * CHUNK, x, y, z);
+        }
+    };
+    match face {
+        Face::NegX | Face::PosX => (0..CHUNK).for_each(|y| column(side, y, !0)),
+        Face::NegY | Face::PosY => (0..CHUNK).for_each(|x| column(x, side, !0)),
+        Face::NegZ | Face::PosZ => {
+            for y in 0..CHUNK {
+                for x in 0..CHUNK {
+                    column(x, y, 1 << side);
+                }
+            }
+        }
+    }
+}
+
+/// How many bytes a texel of a colour slot has. A texel holds one packed
+/// light colour, in little-endian order.
+pub(crate) const COLOR_TEXEL_BYTES: usize = 2;
+
+/// Writes the packed light colour `packed` into the texel at `texel` of
+/// `bytes`, which is a colour slot or a colour shell plane.
+#[inline]
+pub(crate) fn put_color(bytes: &mut [u8], texel: usize, packed: u16) {
+    let at = texel * COLOR_TEXEL_BYTES;
+    bytes[at..at + COLOR_TEXEL_BYTES].copy_from_slice(&packed.to_le_bytes());
+}
+
+/// Returns the packed light colour in the texel at `texel` of `bytes`, which
+/// is a colour slot or a colour shell plane.
+#[inline]
+pub(crate) fn color_texel_at(bytes: &[u8], texel: usize) -> u16 {
+    let at = texel * COLOR_TEXEL_BYTES;
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+/// Returns the packed light colours that the colour slot of the chunk lit by
+/// `light` holds for its own voxels, in the layout of a slot, with the shell
+/// at 0.
+///
+/// An open voxel holds the light colour of its voxel light, or 0 where it has
+/// no voxel light. White packs to 0 as well. A solid voxel holds 0, apart
+/// from each emissive voxel, which holds its own light colour. `lamp_color`
+/// gives that light colour from the material index of the emissive voxel.
+///
+/// Its cost grows with the lit voxels of the chunk.
+pub(crate) fn color_slot_bytes(
+    light: &ChunkLight,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Box<[u8]> {
+    let mut bytes = vec![0u8; SLOT_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
+    if let Some(open) = open_voxels(&light.inputs.occupancy) {
+        let lit = lit_voxels(&light.voxel, &open, None);
+        for_each_voxel(&lit, |x, y, z| {
+            let cell = UVec3::new(x as u32 + 1, y as u32 + 1, z as u32 + 1);
+            put_color(&mut bytes, cell_index(cell), light.color.packed_at(x, y, z));
+            false
+        });
+    }
+    for lamp in &light.inputs.emissive {
+        let cell = UVec3::new(lamp.x() as u32, lamp.y() as u32, lamp.z() as u32) + 1;
+        put_color(&mut bytes, cell_index(cell), lamp_color(lamp.material()));
+    }
+    bytes
+}
+
+/// Returns the packed light colours that the voxels of a chunk on `face`
+/// hold, as a colour slot holds them. This is the colour shell plane that
+/// goes into the colour slot of the chunk across `face`.
+///
+/// `lamp_color` gives the packed light colour of an emissive voxel from its
+/// material index.
+pub(crate) fn border_colors(
+    light: &ChunkLight,
+    face: Face,
+    lamp_color: impl Fn(u16) -> u16,
+) -> Box<ShellPlane> {
+    let mut plane = vec![0; PLANE_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice();
+    // White packs to 0, which the plane already holds, so an unlit or white
+    // chunk writes only its emissive voxels.
+    let unlit = matches!(light.voxel, ChunkLevels::Uniform(0));
+    if !unlit && light.color != ChunkColor::White {
+        for_border_voxels(light, face, true, |texel, x, y, z| {
+            put_color(&mut plane, texel, light.color.packed_at(x, y, z));
+        });
+    }
+    for_lamps_on(&light.inputs.emissive, face, |u, v, lamp| {
+        put_color(&mut plane, u + v * CHUNK, lamp_color(lamp.material()));
+    });
+    plane
+}
+
+/// Returns what the faces of a chunk whose voxels are `own` read across
+/// `face` from the neighbour there, which is lit by `neighbour`.
+///
+/// The faces read the open border voxels of the neighbour that touch one of
+/// the solid voxels of the chunk, with levels in steps of `precision`. With
+/// `colored`, the faces read the light colours of those voxels too.
 pub(crate) fn across(
+    own: &LightInputs,
+    face: Face,
+    neighbour: &ChunkLight,
+    precision: LightPrecision,
+    colored: bool,
+) -> FacesSee {
+    let mut seen = across_levels(own, face, neighbour, precision);
+    if colored {
+        seen.color = colors_seen(neighbour, &across_voxels(own, face, &neighbour.inputs));
+    }
+    seen
+}
+
+/// Returns the voxels that the faces of a chunk whose voxels are `own` read
+/// from the neighbour across `face`, whose voxels are `neighbour`.
+///
+/// Those are the open border voxels of the neighbour that touch one of the
+/// solid voxels of the chunk. They come as columns along z like a [`Plane`],
+/// in the coordinates of the neighbour.
+pub(crate) fn across_voxels(
+    own: &LightInputs,
+    face: Face,
+    neighbour: &LightInputs,
+) -> Box<Plane> {
+    let back = face.opposite();
+    let solid = rows(|u, v| {
+        let (x, y, z) = face.voxel(u, v);
+        own.occupancy.is_solid(x, y, z)
+    });
+    let mut voxels: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    if solid.iter().all(|row| *row == 0) {
+        return voxels;
+    }
+    let near = spread(solid);
+    for (v, near) in near.iter().enumerate() {
+        let mut cells = *near;
+        while cells != 0 {
+            let u = cells.trailing_zeros() as usize;
+            cells &= cells - 1;
+            let (x, y, z) = back.voxel(u, v);
+            if !neighbour.occupancy.is_solid(x, y, z) {
+                voxels[x + y * CHUNK] |= 1 << z;
+            }
+        }
+    }
+    voxels
+}
+
+/// Returns the open voxels on `face` of a chunk whose voxels are `inputs`, as
+/// columns along z like a [`Plane`].
+pub(crate) fn border_voxels(inputs: &LightInputs, face: Face) -> Box<Plane> {
+    let mut voxels: Box<Plane> = Box::new([0; CHUNK * CHUNK]);
+    if let Occupancy::Solid = inputs.occupancy {
+        return voxels;
+    }
+    for v in 0..CHUNK {
+        for u in 0..CHUNK {
+            let (x, y, z) = face.voxel(u, v);
+            if !inputs.occupancy.is_solid(x, y, z) {
+                voxels[x + y * CHUNK] |= 1 << z;
+            }
+        }
+    }
+    voxels
+}
+
+/// Returns what [`across`] returns without light colours: the levels that
+/// the faces of a chunk whose voxels are `own` read across `face` from
+/// `neighbour`. It also notes whether an emissive voxel of the chunk on the
+/// face touches one of the voxels the faces read.
+fn across_levels(
     own: &LightInputs,
     face: Face,
     neighbour: &ChunkLight,
@@ -461,8 +1171,8 @@ pub(crate) fn across(
             let u = cells.trailing_zeros() as usize;
             cells &= cells - 1;
             let (x, y, z) = back.voxel(u, v);
-            let level = |channel: &ChannelLight| {
-                Seen::One(precision.convert(channel.at(x, y, z), neighbour.precision))
+            let level = |levels: &ChunkLevels| {
+                Seen::One(precision.convert(levels.at(x, y, z), neighbour.precision))
             };
             seen.sky = seen.sky.join(level(&neighbour.sky));
             seen.voxel = seen.voxel.join(level(&neighbour.voxel));
@@ -476,21 +1186,21 @@ pub(crate) fn across(
     seen
 }
 
-/// The most common level per channel among the open voxels touching a solid
-/// voxel of the chunk lit by `light`, as sky and voxel light in steps of the
-/// light's precision.
+/// Returns the most common sky light level and voxel light level among the
+/// open voxels touching a solid voxel of the chunk lit by `light`. Both are
+/// in steps of the precision of the light.
 pub(crate) fn most_common(light: &ChunkLight) -> (u8, u8) {
     let touching = match &light.inputs.occupancy {
         Occupancy::Mixed(solid) => Some(touching_open(solid)),
         _ => None,
     };
-    let level = |channel| most_common_over(channel, touching.as_deref(), light.precision);
+    let level = |levels| most_common_over(levels, touching.as_deref(), light.precision);
     (level(&light.sky), level(&light.voxel))
 }
 
 /// The open voxels of a chunk of `occupancy`, as columns along z like a
 /// [`Plane`], or `None` for a chunk with none.
-fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
+pub(crate) fn open_voxels(occupancy: &Occupancy) -> Option<Box<Plane>> {
     match occupancy {
         Occupancy::Open => Some(Box::new([!0; CHUNK * CHUNK])),
         Occupancy::Solid => None,
@@ -523,8 +1233,8 @@ pub(crate) fn border_sees(
     if let Occupancy::Solid = occupancy {
         return (sky, voxel);
     }
-    let level = |channel: &ChannelLight, (x, y, z)| {
-        Seen::One(precision.convert(channel.at(x, y, z), light.precision))
+    let level = |levels: &ChunkLevels, (x, y, z)| {
+        Seen::One(precision.convert(levels.at(x, y, z), light.precision))
     };
     for v in 0..CHUNK {
         for u in 0..CHUNK {
@@ -543,35 +1253,56 @@ pub(crate) fn border_sees(
     (sky, voxel)
 }
 
-/// The most common level per channel among every open voxel of the chunk lit
-/// by `light`, as sky and voxel light in steps of the light's precision.
+/// Returns the most common sky light level and voxel light level among every
+/// open voxel of the chunk lit by `light`. Both are in steps of the precision
+/// of the light.
 ///
-/// Unlike [`most_common`], it counts open voxels far from any solid too, so
-/// an open chunk lit voxel by voxel gets its own most common level and not 0.
-/// Its cost grows with the chunk's open voxels.
+/// Unlike [`most_common`], it counts open voxels far from any solid too. So
+/// an open chunk lit voxel by voxel gets its own most common level, and not
+/// 0. Its cost grows with the open voxels of the chunk.
 pub(crate) fn most_common_open(light: &ChunkLight) -> (u8, u8) {
     let open = open_voxels(&light.inputs.occupancy);
-    let level = |channel| most_common_over(channel, open.as_deref(), light.precision);
+    let level = |levels| most_common_over(levels, open.as_deref(), light.precision);
     (level(&light.sky), level(&light.voxel))
 }
 
-/// The most common level of `channel`, steps of `precision`, among the voxels
-/// set in `voxels`. With no voxels, a channel held as planes gives 0.
+/// Returns the most common packed light colour among the open voxels of the
+/// chunk lit by `light` whose voxel light is at `level`, a step of the
+/// precision of the light. Where no open voxel is at `level`, it returns
+/// white.
+///
+/// Its cost grows with the open voxels of the chunk.
+#[cfg(feature = "sub_grids")]
+pub(crate) fn most_common_open_color(light: &ChunkLight, level: u8) -> u16 {
+    use super::color::WHITE;
+    let Some(open) = open_voxels(&light.inputs.occupancy) else {
+        return WHITE;
+    };
+    let mut counts = Vec::new();
+    count_colors(light, &open, Some(level), &mut counts);
+    counts
+        .into_iter()
+        .max_by_key(|(color, count)| (*count, std::cmp::Reverse(*color)))
+        .map_or(WHITE, |(color, _)| color)
+}
+
+/// Returns the most common level of `levels`, in steps of `precision`, among
+/// the voxels set in `voxels`. With no voxels, levels held as planes give 0.
 fn most_common_over(
-    channel: &ChannelLight,
+    levels: &ChunkLevels,
     voxels: Option<&Plane>,
     precision: LightPrecision,
 ) -> u8 {
-    match (channel, voxels) {
-        (ChannelLight::Uniform(level), _) => *level,
-        (ChannelLight::Planes(_), Some(voxels)) => {
+    match (levels, voxels) {
+        (ChunkLevels::Uniform(level), _) => *level,
+        (ChunkLevels::Planes(_), Some(voxels)) => {
             let mut counts = [0u32; 256];
             for (column, &these) in voxels.iter().enumerate() {
                 let mut voxels = these;
                 while voxels != 0 {
                     let z = voxels.trailing_zeros() as usize;
                     voxels &= voxels - 1;
-                    let level = channel.at(column % CHUNK, column / CHUNK, z);
+                    let level = levels.at(column % CHUNK, column / CHUNK, z);
                     counts[level as usize] += 1;
                 }
             }
@@ -579,7 +1310,7 @@ fn most_common_over(
                 .max_by_key(|level| counts[*level])
                 .unwrap_or(0) as u8
         }
-        (ChannelLight::Planes(_), None) => 0,
+        (ChunkLevels::Planes(_), None) => 0,
     }
 }
 
@@ -607,7 +1338,7 @@ fn for_lamps_on(
 ) {
     let side = if face as usize & 1 == 1 { CHUNK - 1 } else { 0 };
     for lamp in emissive {
-        let (x, y, z) = (lamp.x as usize, lamp.y as usize, lamp.z as usize);
+        let (x, y, z) = (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize);
         let (on, u, v) = match face {
             Face::NegX | Face::PosX => (x, y, z),
             Face::NegY | Face::PosY => (y, x, z),
@@ -622,6 +1353,48 @@ fn for_lamps_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn border_planes_shared_between_chunks_hold_what_each_chunks_own_would() {
+        let precision = LightPrecision::default();
+        let light = |occupancy: Occupancy, sky: u8, voxel: u8| ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Default::default(),
+                columns: crate::light::sky::ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Uniform(sky),
+            voxel: ChunkLevels::Uniform(voxel),
+            color: ChunkColor::White,
+            borders: Default::default(),
+            precision,
+        };
+        let mut mixed = Occupancy::Open;
+        mixed.set(0, 0, 0, true);
+        mixed.normalize();
+        for light in [
+            light(Occupancy::Solid, 15, 3),
+            light(Occupancy::Open, 15, 3),
+            light(Occupancy::Open, 9, 0),
+            light(mixed, 0, 0),
+        ] {
+            // The first pass builds the shared planes, and the second takes
+            // them.
+            for _ in 0..2 {
+                let borders = ChunkBorders::of(&light, Some(&[]));
+                for face in Face::ALL {
+                    let own = border_plane(&light, face, precision);
+                    assert_eq!(*borders.levels[face as usize].plane, *own);
+                    assert_eq!(borders.levels[face as usize].hash, plane_hash(&own));
+                    let colors =
+                        border_colors(&light, face, |_| super::super::color::WHITE);
+                    let shared = &borders.colors.as_ref().unwrap()[face as usize];
+                    assert_eq!(*shared.plane, *colors);
+                }
+            }
+        }
+    }
 
     #[test]
     fn each_shell_cell_lies_in_front_of_its_border_voxel() {
@@ -640,23 +1413,26 @@ mod tests {
 
     use crate::light::sky::ColumnAnswer;
 
-    /// The light of a chunk of `occupancy` at 16 levels whose sky channel is
-    /// `sky` and whose voxel light is `voxel` everywhere.
-    fn light(occupancy: Occupancy, sky: ChannelLight, voxel: u8) -> ChunkLight {
+    /// Returns the light of a chunk of `occupancy` at 16 levels, with sky
+    /// light `sky`, and with voxel light `voxel` at every voxel.
+    fn light(occupancy: Occupancy, sky: ChunkLevels, voxel: u8) -> ChunkLight {
         ChunkLight {
             inputs: Arc::new(LightInputs {
                 occupancy,
-                emissive: Vec::new(),
+                emissive: Default::default(),
                 columns: ColumnAnswer::none(),
                 ring: false,
             }),
             sky,
-            voxel: ChannelLight::Uniform(voxel),
+            voxel: ChunkLevels::Uniform(voxel),
+            color: Default::default(),
+            borders: Default::default(),
             precision: LightPrecision::Steps16,
         }
     }
 
-    /// A channel at 16 levels holding `level` at every voxel, as planes.
+    /// Returns levels at 16 steps that hold `level` at every voxel, as
+    /// planes.
     fn planes_of(level: u8) -> Box<[Plane]> {
         (0..4)
             .map(|bit| [if level >> bit & 1 == 1 { !0 } else { 0 }; CHUNK * CHUNK])
@@ -671,6 +1447,170 @@ mod tests {
         }
     }
 
+    /// Returns a number for the voxel at `x`, `y`, `z` that looks random.
+    fn scatter(x: usize, y: usize, z: usize) -> u32 {
+        let h = (x as u32).wrapping_mul(0x8da6_b343)
+            ^ (y as u32).wrapping_mul(0xd816_3841)
+            ^ (z as u32).wrapping_mul(0xcb1a_b31f);
+        h ^ h >> 13
+    }
+
+    /// Returns the light of a chunk of scattered solids, with emissive voxels
+    /// on two of its faces. Its open voxels hold scattered levels of sky light
+    /// and voxel light, and scattered light colours.
+    fn scattered() -> ChunkLight {
+        let lamps = [(0, 3, 4), (5, 6, 31)];
+        let mut occupancy = Occupancy::Open;
+        let (mut sky, mut voxel) = (planes_of(0), planes_of(0));
+        let mut colors = vec![0; CHUNK * CHUNK * CHUNK];
+        for (x, y, z) in (0..CHUNK).flat_map(|z| {
+            (0..CHUNK).flat_map(move |y| (0..CHUNK).map(move |x| (x, y, z)))
+        }) {
+            let h = scatter(x, y, z);
+            if h.is_multiple_of(3) || lamps.contains(&(x, y, z)) {
+                occupancy.set(x, y, z, true);
+                continue;
+            }
+            set_level(&mut sky, (x, y, z), (h >> 4) as u8 & 15);
+            let level = (h >> 8) as u8 & 15;
+            set_level(&mut voxel, (x, y, z), level);
+            if level > 0 {
+                colors[crate::light::color::voxel_index(x, y, z)] = (h >> 12) as u16 | 1;
+            }
+        }
+        occupancy.normalize();
+        let emissive: Vec<EmissiveVoxel> = lamps
+            .iter()
+            .enumerate()
+            .map(|(material, &(x, y, z))| {
+                let emitter = crate::light::color::Emitter {
+                    level: 12,
+                    material: material as u16,
+                };
+                EmissiveVoxel::new(x as u8, y as u8, z as u8, emitter)
+            })
+            .collect();
+        ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: emissive.into(),
+                columns: ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Planes(sky),
+            voxel: ChunkLevels::Planes(voxel),
+            color: ChunkColor::Mixed(colors.into()),
+            borders: Default::default(),
+            precision: LightPrecision::Steps16,
+        }
+    }
+
+    #[test]
+    fn a_shell_plane_lands_in_the_cells_in_front_of_its_face() {
+        for face in Face::ALL {
+            for wide in [1, 2] {
+                let plane: Vec<u8> = (0..PLANE_TEXELS * wide)
+                    .map(|i| (i % 251) as u8 + 1)
+                    .collect();
+                let mut bytes = vec![0u8; SLOT_TEXELS * wide];
+                write_shell(&mut bytes, face, Some(&plane), wide);
+                for v in 0..CHUNK {
+                    for u in 0..CHUNK {
+                        let to = cell_index(shell_cell(face, u, v)) * wide;
+                        let from = (u + v * CHUNK) * wide;
+                        assert_eq!(
+                            bytes[to..to + wide],
+                            plane[from..from + wide],
+                            "{face:?}"
+                        );
+                    }
+                }
+                let written = bytes.iter().filter(|byte| **byte != 0).count();
+                assert_eq!(
+                    written,
+                    PLANE_TEXELS * wide,
+                    "{face:?} wrote only its shell"
+                );
+                write_shell(&mut bytes, face, None, wide);
+                assert!(bytes.iter().all(|byte| *byte == 0), "{face:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_white_or_one_colour_chunks_border_colours_hold_its_colour_at_lit_voxels_and_its_lamps_own(
+    ) {
+        let scattered = scattered();
+        let lamp_color = |material: u16| 0x7000 + material;
+        let orange = 0x1234;
+        for (color, lit) in [(ChunkColor::White, 0), (ChunkColor::One(orange), orange)] {
+            let light = ChunkLight {
+                inputs: scattered.inputs.clone(),
+                sky: scattered.sky.clone(),
+                voxel: scattered.voxel.clone(),
+                color,
+                borders: Default::default(),
+                precision: scattered.precision,
+            };
+            for face in Face::ALL {
+                let colors = border_colors(&light, face, lamp_color);
+                for v in 0..CHUNK {
+                    for u in 0..CHUNK {
+                        let (x, y, z) = face.voxel(u, v);
+                        let lamp = light.inputs.emissive.iter().find(|lamp| {
+                            (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize)
+                                == (x, y, z)
+                        });
+                        let expected = if let Some(lamp) = lamp {
+                            lamp_color(lamp.material())
+                        } else if light.inputs.occupancy.is_solid(x, y, z)
+                            || (scatter(x, y, z) >> 8) & 15 == 0
+                        {
+                            0
+                        } else {
+                            lit
+                        };
+                        let texel = color_texel_at(&colors, u + v * CHUNK);
+                        assert_eq!(texel, expected, "{face:?} at {x}, {y}, {z}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn border_planes_hold_the_light_and_colours_of_each_border_voxel() {
+        let light = scattered();
+        let lamp_color = |material: u16| 0x7000 + material;
+        for face in Face::ALL {
+            let plane = border_plane(&light, face, LightPrecision::Steps16);
+            let colors = border_colors(&light, face, lamp_color);
+            for v in 0..CHUNK {
+                for u in 0..CHUNK {
+                    let (x, y, z) = face.voxel(u, v);
+                    let texel = u + v * CHUNK;
+                    let lamp = light.inputs.emissive.iter().find(|lamp| {
+                        (lamp.x() as usize, lamp.y() as usize, lamp.z() as usize)
+                            == (x, y, z)
+                    });
+                    let h = scatter(x, y, z);
+                    let (levels, color) = if let Some(lamp) = lamp {
+                        (12 | 15 << 4, lamp_color(lamp.material()))
+                    } else if light.inputs.occupancy.is_solid(x, y, z) {
+                        (0, 0)
+                    } else {
+                        let voxel = (h >> 8) & 15;
+                        let color = if voxel > 0 { (h >> 12) as u16 | 1 } else { 0 };
+                        ((h >> 4 & 15 | voxel << 4) as u8, color)
+                    };
+                    let at = format!("{face:?} at {x}, {y}, {z}");
+                    assert_eq!(plane[texel], levels, "{at}");
+                    assert_eq!(color_texel_at(&colors, texel), color, "{at}");
+                }
+            }
+        }
+    }
+
     /// One solid voxel at the chunk's middle.
     fn one_solid() -> Occupancy {
         let mut occupancy = Occupancy::Open;
@@ -681,12 +1621,12 @@ mod tests {
 
     #[test]
     fn a_chunk_whose_open_voxels_hold_one_level_reports_it() {
-        let held_whole = light(Occupancy::Open, ChannelLight::Uniform(9), 4);
+        let held_whole = light(Occupancy::Open, ChunkLevels::Uniform(9), 4);
         assert_eq!(open_voxels_see(&held_whole), (Seen::One(9), Seen::One(4)));
         assert_eq!(most_common_open(&held_whole), (9, 4));
 
         for occupancy in [Occupancy::Open, one_solid()] {
-            let planes = light(occupancy, ChannelLight::Planes(planes_of(9)), 4);
+            let planes = light(occupancy, ChunkLevels::Planes(planes_of(9)), 4);
             assert_eq!(open_voxels_see(&planes), (Seen::One(9), Seen::One(4)));
             assert_eq!(most_common_open(&planes), (9, 4));
         }
@@ -696,7 +1636,7 @@ mod tests {
     fn one_open_voxel_at_another_level_makes_the_chunk_mixed() {
         let mut planes = planes_of(9);
         set_level(&mut planes, (3, 30, 7), 8);
-        let light = light(one_solid(), ChannelLight::Planes(planes), 4);
+        let light = light(one_solid(), ChunkLevels::Planes(planes), 4);
 
         assert_eq!(open_voxels_see(&light), (Seen::Mixed, Seen::One(4)));
         assert_eq!(most_common_open(&light).0, 9);
@@ -714,7 +1654,7 @@ mod tests {
                 }
             }
         }
-        let light = light(one_solid(), ChannelLight::Planes(planes), 0);
+        let light = light(one_solid(), ChunkLevels::Planes(planes), 0);
 
         assert_eq!(most_common(&light).0, 5);
         assert_eq!(most_common_open(&light).0, 9);
@@ -722,7 +1662,7 @@ mod tests {
 
     #[test]
     fn a_solid_chunk_has_no_open_voxel_to_report() {
-        let light = light(Occupancy::Solid, ChannelLight::Planes(planes_of(9)), 0);
+        let light = light(Occupancy::Solid, ChunkLevels::Planes(planes_of(9)), 0);
         assert_eq!(open_voxels_see(&light), (Seen::Nothing, Seen::Nothing));
     }
 
@@ -731,6 +1671,6 @@ mod tests {
         assert_eq!(Seen::Nothing.join(Seen::One(3)), Seen::One(3));
         assert_eq!(Seen::One(3).join(Seen::One(3)), Seen::One(3));
         assert_eq!(Seen::One(3).join(Seen::One(4)), Seen::Mixed);
-        assert_eq!(Seen::Mixed.join(Seen::Nothing), Seen::Mixed);
+        assert_eq!(Seen::<u8>::Mixed.join(Seen::Nothing), Seen::Mixed);
     }
 }

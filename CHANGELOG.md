@@ -10,10 +10,6 @@ A sub-grid is a set of voxels on a grid of its own, which a game moves freely ag
 
 Sub-grids can be created either from scratch, by creating an empty subgrid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
 
-### Sub-grid lighting
-
-Light propagation works withing sub-grids, where a emissive voxel in the grid lights that grid. Sub-grids will also pick up light from the sky and from the parent world, but will not currently light the world or other sub-grids. Regular Bevy lights can be used for that purpose instead.
-
 ### Dislodged fragments
 
 Another off-by-default feature called `dislodged_fragments` finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`.
@@ -22,23 +18,18 @@ When a dislodged fragment is detected, a `FragmentDislodged<C>` message is sent,
 
 When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to automatically turn dislodged fragments into sub-grids.
 
-### Examples
+### Light colour
 
-- `sub_grids`: A walkthrough of sub-grids on a few pillars and rods, which can be cut, built on, and stamped back into the world.
+Voxel light can now take a colour. An emissive material declares it with `Emission::with_color`, and where light of several colours meets, the colours mix. A world whose emissive materials are all white does no colour computation, so performance should not be impacted unless colour is used.
 
-- `light_mountain_house`: Trees can now be felled. It needs `sub_grids` and `dislodged_fragments` as well.
+The computational cost of coloured light grows mainly with these factors:
 
-- `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature.
-
-- `multiplayer_loopback` updated for brevity, and now also shows how sub-grid edits may be sent over network. Need the `sub_grids` feature.
-
-- `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
+- The number of colours within propagation reach of each chunk (solving)
+- The number of chunks where colours mix (memory)
 
 ### Other changes
 
 - Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
-- The `rendering` module docs list every vertex output and its space.
-- `raycast` and `raycast_fn` now document what they cast through: the world's voxels only, not sub-grids.
 
 ### Bug fixes
 
@@ -72,9 +63,9 @@ A lit world's vertex shaders now also output `world_grid_position`, the centroid
 out.world_grid_position = out.world_position.xyz;
 ```
 
-#### 3. `LightPropagation` has a new field
+#### 3. `LightPropagation` and `LightLook` have new fields
 
-With `sub_grids` and `light_propagation` both on, `LightPropagation` gains `sub_grid_sky`. A `LightPropagation` written out in full needs it, or `..default()`:
+`LightPropagation` gains `skip_unreached_colors`, and with `sub_grids` also `sub_grid_sky`. `LightLook` gains `tinted_glow`. A `LightPropagation` or `LightLook` written out in full needs them, or `..default()`:
 
 ```rust
 // now
@@ -82,6 +73,18 @@ LightPropagation {
     sky_reach: 15,
     ..default()
 }
+```
+
+#### 4. The shader's `LightLevels` holds levels as `f32`, and light colours
+
+A custom shader that builds a `LightLevels` or reads its levels as `vec3` must change. `voxel` and `own_voxel` are now `f32`, and `LightLevels` gains `voxel_color` and `own_voxel_color`, each with its brightest component 1, and white without `LIGHT_COLOR`. The shader's `voxel_falloff` takes and returns an `f32`.
+
+```wesl
+// 0.19.3: a vec3 of three equal levels
+let around = voxel_falloff(levels.voxel);
+
+// now: an f32 level, times its light colour
+let around = voxel_falloff(levels.voxel) * levels.voxel_color;
 ```
 
 ## 0.19.3

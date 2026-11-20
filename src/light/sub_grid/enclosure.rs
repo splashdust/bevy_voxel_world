@@ -443,7 +443,7 @@ mod tests {
         occupancy.normalize();
         Arc::new(LightInputs {
             occupancy,
-            emissive: Vec::new(),
+            emissive: Default::default(),
             columns: ColumnAnswer::none(),
             ring: false,
         })

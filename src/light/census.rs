@@ -23,7 +23,7 @@ use bevy::prelude::*;
 
 use super::faces::Face;
 use super::inputs::Occupancy;
-use super::solver::{ChannelLight, ChunkLight};
+use super::solver::{ChunkLevels, ChunkLight};
 use super::view::ViewMaps;
 use crate::chunk::CHUNK_SIZE_U;
 use crate::grid::GridKey;
@@ -129,7 +129,7 @@ impl ChangeCensus {
                 }
             }
             Some(old) => {
-                if old.same_levels(new) {
+                if old.same_light(new) {
                     return;
                 }
                 self.counts.changed_relights += 1;
@@ -221,44 +221,68 @@ fn visible_voxels(occupancy: &Occupancy) -> Vec<u32> {
     visible
 }
 
-/// Whether light changed between `old` and `new` at a voxel the chunk's own
-/// faces show.
+/// Whether light changed between `old` and `new` at a voxel that the faces of
+/// the chunk itself show.
+///
+/// A change counts if the sky light level, the voxel light level or the light
+/// colour of the voxel light differs there.
 fn own_change_shows(old: &ChunkLight, new: &ChunkLight) -> bool {
+    let levels = old.sky != new.sky || old.voxel != new.voxel;
+    let colors = old.color != new.color;
+    if !levels && !colors {
+        return false;
+    }
     let visible = visible_voxels(&new.inputs.occupancy);
-    let channels = [(&old.sky, &new.sky), (&old.voxel, &new.voxel)];
-    channels
-        .into_iter()
-        .filter(|(old, new)| old != new)
-        .any(|(old, new)| {
-            visible.iter().enumerate().any(|(column, bits)| {
-                let (x, y) = (column % CHUNK, column / CHUNK);
-                let mut bits = *bits;
-                while bits != 0 {
-                    let z = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    if old.at(x, y, z) != new.at(x, y, z) {
-                        return true;
-                    }
-                }
-                false
-            })
-        })
+    visible.iter().enumerate().any(|(column, bits)| {
+        let (x, y) = (column % CHUNK, column / CHUNK);
+        let mut bits = *bits;
+        while bits != 0 {
+            let z = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if old.sky.at(x, y, z) != new.sky.at(x, y, z)
+                || old.voxel.at(x, y, z) != new.voxel.at(x, y, z)
+                || (colors && color_changed(old, new, x, y, z))
+            {
+                return true;
+            }
+        }
+        false
+    })
 }
 
-/// Whether light changed between `old`, `None` for none, and `new` at an
-/// open voxel on `face` in front of a solid voxel of the neighbour across
-/// it, whose occupancy is `solid`.
+/// Whether the light colour of the voxel light at voxel `x`, `y`, `z` of the
+/// chunk differs between `old` and `new`.
+///
+/// It counts only where `new` has voxel light, since a voxel without voxel
+/// light shows no light colour.
+fn color_changed(
+    old: &ChunkLight,
+    new: &ChunkLight,
+    x: usize,
+    y: usize,
+    z: usize,
+) -> bool {
+    new.voxel.at(x, y, z) != 0
+        && old.color.packed_at(x, y, z) != new.color.packed_at(x, y, z)
+}
+
+/// Whether light changed between `old` and `new` at an open voxel on `face`
+/// that lies in front of a solid voxel of the neighbour across that face.
+///
+/// `solid` is the occupancy of that neighbour. A change counts if the sky
+/// light level, the voxel light level or the light colour of the voxel light
+/// differs there. With `old` as `None`, the levels before count as 0, and
+/// light colours aren't compared.
 fn shell_change_shows(
     old: Option<&ChunkLight>,
     new: &ChunkLight,
     face: Face,
     solid: &Occupancy,
 ) -> bool {
-    let level =
-        |light: &ChunkLight, channel: fn(&ChunkLight) -> &ChannelLight, x, y, z| {
-            channel(light).at(x, y, z)
-        };
-    let channels: [fn(&ChunkLight) -> &ChannelLight; 2] =
+    let level = |light: &ChunkLight, kind: fn(&ChunkLight) -> &ChunkLevels, x, y, z| {
+        kind(light).at(x, y, z)
+    };
+    let kinds: [fn(&ChunkLight) -> &ChunkLevels; 2] =
         [|light| &light.sky, |light| &light.voxel];
     (0..CHUNK).any(|v| {
         (0..CHUNK).any(|u| {
@@ -267,10 +291,10 @@ fn shell_change_shows(
             if new.inputs.occupancy.is_solid(x, y, z) || !solid.is_solid(ax, ay, az) {
                 return false;
             }
-            channels.iter().any(|channel| {
-                let before = old.map_or(0, |old| level(old, *channel, x, y, z));
-                before != level(new, *channel, x, y, z)
-            })
+            kinds.iter().any(|kind| {
+                let before = old.map_or(0, |old| level(old, *kind, x, y, z));
+                before != level(new, *kind, x, y, z)
+            }) || old.is_some_and(|old| color_changed(old, new, x, y, z))
         })
     })
 }

@@ -1,6 +1,12 @@
-//! Tests of light as it runs on WASM, where relights run on the main thread
-//! within the world's `wasm_relight_budget` each frame and at most one sky
-//! probe starts a frame. They turn that mode on in a native app.
+//! Light as it runs on WASM
+//!
+//! This module turns on the WASM mode of light in a native app. In that mode,
+//! relights run on the main thread within the `wasm_relight_budget` of the
+//! world each frame, and at most one sky probe starts a frame.
+//!
+//! Each check of relights runs twice: in a white world, and in a world lit by
+//! emissive voxels of several light colours. A solve in the coloured world
+//! runs the kernel once for each light colour, so its relights cost more.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -11,8 +17,9 @@ use super::edits::{
     assert_matches, dig, edited, framed_update, place, reference, set_voxels, settle,
     world,
 };
+use super::mixing::{assert_on_the_reference, Scene, BLUE_LAMP, GREEN_LAMP, RED_LAMP};
 use super::sky_light::{settled_but, sky_light};
-use super::voxel_light::{app, LampWorld};
+use super::voxel_light::{app, LampWorld, STONE};
 use crate::light::LightSettings;
 use crate::prelude::*;
 
@@ -106,6 +113,103 @@ fn a_big_edit_relights_within_the_budget_each_frame_give_or_take_one_relight() {
         &reference(&[IVec3::ZERO], edited(&bomb)),
         "after the bomb",
     );
+}
+
+/// Returns stone below y = 0, with a red, a green and a blue lamp on it. Each
+/// lamp stands 10 voxels from the origin, where 8 chunks meet.
+fn three_colours_on_stone() -> Scene {
+    Scene {
+        lamps: vec![
+            (IVec3::new(-10, 0, 0), RED_LAMP),
+            (IVec3::new(10, 0, 0), GREEN_LAMP),
+            (IVec3::new(0, 0, -10), BLUE_LAMP),
+        ],
+        wall: |position| position.y < 0,
+        edits: Vec::new(),
+    }
+}
+
+const COLOURED_REACH: (u8, LightShape, LightPrecision) =
+    (14, LightShape::Round, LightPrecision::Steps16);
+
+/// Returns an app of `scene` whose light runs as on WASM, with `budget` as its
+/// relight budget for each frame.
+fn coloured_main_thread_app(scene: &Scene, budget: Duration) -> App {
+    let (reach, shape, precision) = COLOURED_REACH;
+    let mut world = LampWorld {
+        spawning_distance: 3,
+        ..scene.world(reach, shape, precision)
+    };
+    world.light = world.light.map(|light| LightPropagation {
+        wasm_relight_budget: budget,
+        ..light
+    });
+    main_thread_app(world)
+}
+
+#[test]
+fn a_single_voxel_edits_coloured_light_lands_within_2_frames() {
+    let scene = three_colours_on_stone();
+    let mut app = coloured_main_thread_app(&scene, Duration::from_millis(4));
+    settle(&mut app, "the world to stream in");
+    for _ in 0..5 {
+        framed_update(&mut app);
+    }
+    // Place a block on the stone where the light of the green lamp meets the
+    // light of the blue lamp.
+    let edit = [(IVec3::new(5, 0, 0), WorldVoxel::Solid(STONE))];
+    set_voxels(&mut app, &edit);
+    app.update();
+    let mut frames = 0;
+    while !settled_but(&mut app, None) {
+        frames += 1;
+        assert!(frames <= 2, "the edit's light hasn't landed by frame 2");
+        framed_update(&mut app);
+    }
+    let (reach, shape, precision) = COLOURED_REACH;
+    assert_on_the_reference(&mut app, &scene.edited(&edit), reach, shape, precision);
+}
+
+#[test]
+fn a_big_edit_in_coloured_light_relights_within_the_budget_each_frame_give_or_take_one_relight(
+) {
+    let budget = Duration::from_micros(500);
+    let scene = three_colours_on_stone();
+    let mut app = coloured_main_thread_app(&scene, budget);
+    settle(&mut app, "the world to stream in");
+    let relights = counter(&app, |c| c.relights.load(Ordering::Relaxed));
+
+    // Dig a ball out of the stone where 8 chunks meet, between the lamps. The
+    // edit then relights each of those chunks in each light colour.
+    let centre = IVec3::ZERO;
+    let bomb: Vec<(IVec3, WorldVoxel)> = (-8..=8)
+        .flat_map(|z| {
+            (-8..=8).flat_map(move |y| (-8..=8).map(move |x| IVec3::new(x, y, z)))
+        })
+        .filter(|offset| offset.length_squared() <= 64)
+        .map(|offset| dig(centre + offset))
+        .collect();
+    set_voxels(&mut app, &bomb);
+    app.update();
+    let mut frames = 1;
+    while !settled_but(&mut app, None) {
+        frames += 1;
+        assert!(frames < 1000, "the bomb's light never settled");
+        app.update();
+    }
+
+    let started = counter(&app, |c| c.relights.load(Ordering::Relaxed)) - relights;
+    let max_frame = counter(&app, |c| c.max_relight_frame_nanos.load(Ordering::Relaxed));
+    let longest = counter(&app, |c| c.max_relight_nanos.load(Ordering::Relaxed));
+    assert!(started > 1, "the bomb started {started} relights");
+    assert!(longest > 0, "no relight ran on the main thread");
+    assert!(
+        max_frame <= budget.as_nanos() as u64 + longest,
+        "relights took {max_frame} ns in a frame, over the budget of {budget:?} \
+         and one relight of at most {longest} ns"
+    );
+    let (reach, shape, precision) = COLOURED_REACH;
+    assert_on_the_reference(&mut app, &scene.edited(&bomb), reach, shape, precision);
 }
 
 #[test]

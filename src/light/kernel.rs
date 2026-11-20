@@ -1,39 +1,51 @@
-//! The kernel: spreads one channel of light from its sources through the open
-//! voxels of a box around a chunk, by bit dilation.
+//! Light kernel
+//!
+//! This module spreads one kind of light, sky light or voxel light, from its
+//! sources through the open voxels of a box around a chunk, by bit dilation.
+//! A [`LightBox`] holds the box as rows of bits. [`LightBox::spread`] runs the
+//! rounds of spreading forward and writes the level of each voxel of the
+//! chunk. [`LightBox::colors_reaching`] runs them backwards to find which
+//! light colours reach the chunk at all, without spreading any light.
 //!
 //! The box is `32 + 2 × reach` voxels on a side, centred on the chunk, so it
-//! holds every voxel light can come from. Each row of the box runs along z, bit
-//! `z` for the voxel at `z`. A row is one `u64` up to reach 16, and two, as a
-//! `u128`, up to reach 32, where the box still fits in the 3×3×3 chunks around
-//! the chunk. A round of spreading ORs each reached row with its neighbours,
-//! shifted along z and taken from the rows beside it along x and y, and keeps
-//! only open voxels.
+//! holds every voxel light can come from. Each row of the box runs along z,
+//! with bit `z` for the voxel at `z`. Up to reach 16 a row is one `u64`. Up to
+//! reach 32 a row is a [`Wide`] of two `u64`s, and the box still fits in the
+//! 3×3×3 chunks around the chunk. A round of spreading ORs each reached row
+//! with its neighbours, shifted along z and taken from the rows beside it
+//! along x and y, and keeps only open voxels.
 //!
-//! Light starts from two kinds of source. Seeds are single voxels, such as
-//! emissive voxels, that join the light in the round their level says. Lit
-//! voxels, such as voxels with direct sky, hold full light before the first
-//! round.
+//! Light starts from three kinds of source:
+//!
+//! - Seeds are single voxels, such as emissive voxels, that join the light in
+//!   the round their level says.
+//! - Lit voxels, such as voxels with direct sky, hold full light before the
+//!   first round.
+//! - Sky fill seeds are voxels, given as rows of the box, that join the light
+//!   at the end of their round.
 //!
 //! Round `d` only matters within `reach - d` voxels of the chunk, since light
 //! has `reach - d` rounds left to get there. A round moves light at most one
 //! voxel along each axis, so each round works on a box one voxel smaller on
 //! every side than the last.
 //!
-//! The kernel knows nothing about which channel it spreads. More channels, such
-//! as coloured voxel light, are more runs of it.
+//! The kernel knows nothing about which light it spreads. Sky light, voxel
+//! light, and the voxel light of each light colour are separate runs of it.
 //!
-//! A run also hashes, for each of the chunk's six faces, when light reached
-//! each voxel on that face: see [`FaceHashes`](super::faces::FaceHashes).
+//! A run also hashes, for each of the six faces of the chunk, when light
+//! reached each voxel on that face: see [`FaceHashes`](super::faces::FaceHashes).
 //!
 //! # References
 //!
-//! - [Atrufulgium, "SIMD flood fill"](https://atrufulgium.net/2024/08/21/simd-flood-fill):
-//!   flood fill over 32³ chunks held as rows of bits, one bit per voxel.
-//! - [Chess Programming Wiki, "Dumb7Fill"](https://www.chessprogramming.org/Dumb7Fill):
-//!   a fill that shifts what it has reached and keeps only where it may go, as
-//!   a round of spreading does here.
-//! - [Roblox, "Voxel terrain physics"](https://about.roblox.com/newsroom/2018/01/voxel-terrain-physics):
-//!   shift-and-OR dilation over chunks of voxels with a one-voxel border.
+//! - [Atrufulgium, "SIMD flood fill"](https://atrufulgium.net/2024/08/21/simd-flood-fill)
+//!   describes a flood fill over 32³ chunks held as rows of bits, one bit per
+//!   voxel.
+//! - [Chess Programming Wiki, "Dumb7Fill"](https://www.chessprogramming.org/Dumb7Fill)
+//!   describes a fill that shifts what it has reached and keeps only where it
+//!   may go, as a round of spreading does here.
+//! - [Roblox, "Voxel terrain physics"](https://about.roblox.com/newsroom/2018/01/voxel-terrain-physics)
+//!   describes shift-and-OR dilation over chunks of voxels with a one-voxel
+//!   border.
 
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Shl, Shr};
 
@@ -418,6 +430,248 @@ impl<R: Row> LightBox<R> {
                 break;
             }
         }
+    }
+
+    /// Sets the entry of `reaching` for each light colour whose light lights
+    /// an open voxel of the chunk, without spreading any light. This is the
+    /// reach run.
+    ///
+    /// `seeds` holds the seeds of every light colour, sorted by their start.
+    /// `colors` holds, for each seed, the index of its light colour in
+    /// `reaching`. A light colour reaches the chunk when a run of its seeds
+    /// alone, in `shape`, would light an open voxel of the chunk by round
+    /// `last`, the last round whose level is above 0. The open rows must be
+    /// filled, with the voxel of every seed closed. An entry already set
+    /// stays set, and the seeds of its light colour aren't checked.
+    ///
+    /// It runs the rounds of the kernel backwards, from round `last` down to
+    /// the first round in which a seed joins. Before the step back from round
+    /// `r`, the reached voxels are those from which light at the end of round
+    /// `r` gets to an open voxel of the chunk by the end of round `last`. Before
+    /// the step back from round `last`, they are the open voxels of the chunk
+    /// themselves. A seed that joins in round `r` lights the chunk exactly when
+    /// the step of round `r` from its voxel lands on a reached voxel. Rounds
+    /// reverse easily: a face step is its own reverse, and three passes along
+    /// x, y and z reverse as passes along z, y and x.
+    ///
+    /// It costs about one run, since a round back costs what a round forward
+    /// does. It returns as soon as every light colour reaches. Once a face
+    /// step back reaches no new voxel, no later round back can reach one
+    /// either, so from then on it only checks the remaining seeds.
+    pub fn colors_reaching(
+        &mut self,
+        seeds: &[Seed],
+        colors: &[usize],
+        shape: LightShape,
+        last: usize,
+        reaching: &mut [bool],
+    ) {
+        debug_assert!(seeds.windows(2).all(|pair| pair[0].start <= pair[1].start));
+        debug_assert_eq!(seeds.len(), colors.len());
+        debug_assert!(last <= self.reach);
+        let mut left = reaching.iter().filter(|reaches| !**reaches).count();
+        let Some(first) = seeds.first() else {
+            return;
+        };
+        let first_round = first.start as usize + 1;
+        if left == 0 || first_round > last {
+            return;
+        }
+        let (reach, side) = (self.reach, self.side);
+        self.reached.fill(R::ZERO);
+        self.next.fill(R::ZERO);
+        self.pass.fill(R::ZERO);
+        let chunk_bits = ones::<R>(reach, CHUNK);
+        for y in reach..reach + CHUNK {
+            let i = reach + y * side;
+            for (reached, &open) in self.reached[i..i + CHUNK]
+                .iter_mut()
+                .zip(&self.open[i..i + CHUNK])
+            {
+                *reached = open & chunk_bits;
+            }
+        }
+        // The seeds below `unchecked` are still to be checked. The seeds are
+        // sorted by start and the rounds run backwards, so they are checked
+        // from the last seed down.
+        let mut unchecked = seeds.len();
+        // Whether the reached voxels have stopped growing. From then on no
+        // round steps back. Each seed is then checked with a face step, which
+        // finds what three passes would.
+        let mut settled = false;
+        for round in (first_round..=last).rev() {
+            let three = !settled && shape == LightShape::Round && round % 2 == 0;
+            // The reached voxels lie within `last - round` voxels of the chunk
+            // along each axis, and a step back reaches one voxel further, so
+            // the rows from `low` to `high` hold all it can reach. From round
+            // 2 up, `low` is at least 1, so a step back reads no row outside
+            // the box.
+            let low = (reach + round).saturating_sub(last + 1);
+            let high = side - low;
+            if three {
+                self.back_along_z_and_y(low, high);
+            }
+            while unchecked > 0 && seeds[unchecked - 1].start as usize + 1 == round {
+                unchecked -= 1;
+                let color = colors[unchecked];
+                if reaching[color] {
+                    continue;
+                }
+                let seed = seeds[unchecked];
+                let lights = if three {
+                    self.three_passes_reach(seed)
+                } else {
+                    self.face_step_reaches(seed)
+                };
+                if lights {
+                    reaching[color] = true;
+                    left -= 1;
+                    if left == 0 {
+                        return;
+                    }
+                }
+            }
+            if round == first_round || settled {
+                continue;
+            }
+            let changed = if three {
+                self.back_along_x(low, high)
+            } else {
+                self.face_step_back(low, high)
+            };
+            std::mem::swap(&mut self.reached, &mut self.next);
+            // After a face step back that reaches no new voxel, every open
+            // voxel next to a reached voxel is reached. Three passes move
+            // light only between such neighbours, so they can't add any
+            // either.
+            settled = changed == R::ZERO && !three;
+        }
+    }
+
+    /// Whether `rows` set the bit of the voxel `x`, `y`, `z` of the box. A
+    /// voxel outside the box reads as clear.
+    fn holds(&self, rows: &[R], x: isize, y: isize, z: isize) -> bool {
+        let side = self.side as isize;
+        if [x, y, z].iter().any(|axis| !(0..side).contains(axis)) {
+            return false;
+        }
+        (rows[(x + y * side) as usize] >> z as usize).low_u32() & 1 == 1
+    }
+
+    /// Whether a face step from the voxel of `seed` lands on a reached voxel.
+    fn face_step_reaches(&self, seed: Seed) -> bool {
+        let (x, y, z) = (seed.x as isize, seed.y as isize, seed.z as isize);
+        let reached = &self.reached;
+        [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ]
+        .iter()
+        .any(|(dx, dy, dz)| self.holds(reached, x + dx, y + dy, z + dz))
+    }
+
+    /// Whether three passes from the voxel of `seed` land on a reached voxel.
+    /// It reads the rows that [`back_along_z_and_y`](Self::back_along_z_and_y)
+    /// wrote for the round.
+    ///
+    /// The voxel of a seed is open in the round it joins, so light can stay
+    /// on it through the first passes and leave it in the pass along y or z.
+    fn three_passes_reach(&self, seed: Seed) -> bool {
+        let (x, y, z) = (seed.x as isize, seed.y as isize, seed.z as isize);
+        let (reached, after_z, after_y) = (&self.reached, &self.next, &self.pass);
+        self.holds(after_y, x - 1, y, z)
+            || self.holds(after_y, x + 1, y, z)
+            || self.holds(after_z, x, y - 1, z)
+            || self.holds(after_z, x, y + 1, z)
+            || self.holds(reached, x, y, z - 1)
+            || self.holds(reached, x, y, z + 1)
+    }
+
+    /// Steps back one face step from the reached voxels into `next`, over
+    /// rows `low..high` along x and y, keeping only open voxels. Returns the
+    /// bits newly reached.
+    fn face_step_back(&mut self, low: usize, high: usize) -> R {
+        let side = self.side;
+        let width = high - low;
+        let mut changed = R::ZERO;
+        for y in low..high {
+            let i = low + y * side;
+            let rows = self.reached[i..i + width]
+                .iter()
+                .zip(&self.reached[i - 1..i - 1 + width])
+                .zip(&self.reached[i + 1..i + 1 + width])
+                .zip(&self.reached[i - side..i - side + width])
+                .zip(&self.reached[i + side..i + side + width])
+                .zip(&self.open[i..i + width]);
+            for (out, (((((&c, &xm), &xp), &ym), &yp), &open)) in
+                self.next[i..i + width].iter_mut().zip(rows)
+            {
+                let row = (c | c << 1 | c >> 1 | xm | xp | ym | yp) & open;
+                *out = row;
+                changed |= row & !c;
+            }
+        }
+        changed
+    }
+
+    /// Runs the first two of three passes back, over rows `low..high` along x
+    /// and y. The pass along z goes from the reached voxels into `next`, and
+    /// the pass along y from `next` into `pass`. Each keeps only open voxels.
+    fn back_along_z_and_y(&mut self, low: usize, high: usize) {
+        let side = self.side;
+        let width = high - low;
+        for y in low..high {
+            let i = low + y * side;
+            for (out, (&c, &open)) in self.next[i..i + width].iter_mut().zip(
+                self.reached[i..i + width]
+                    .iter()
+                    .zip(&self.open[i..i + width]),
+            ) {
+                *out = (c | c << 1 | c >> 1) & open;
+            }
+        }
+        for y in low..high {
+            let i = low + y * side;
+            let rows = self.next[i..i + width]
+                .iter()
+                .zip(&self.next[i - side..i - side + width])
+                .zip(&self.next[i + side..i + side + width])
+                .zip(&self.open[i..i + width]);
+            for (out, (((&c, &ym), &yp), &open)) in
+                self.pass[i..i + width].iter_mut().zip(rows)
+            {
+                *out = (c | ym | yp) & open;
+            }
+        }
+    }
+
+    /// Runs the last of three passes back, along x from `pass` into `next`,
+    /// over rows `low..high` along x and y. Returns the bits newly reached.
+    fn back_along_x(&mut self, low: usize, high: usize) -> R {
+        let side = self.side;
+        let width = high - low;
+        let mut changed = R::ZERO;
+        for y in low..high {
+            let i = low + y * side;
+            let rows = self.pass[i..i + width]
+                .iter()
+                .zip(&self.pass[i - 1..i - 1 + width])
+                .zip(&self.pass[i + 1..i + 1 + width])
+                .zip(&self.open[i..i + width])
+                .zip(&self.reached[i..i + width]);
+            for (out, ((((&c, &xm), &xp), &open), &old)) in
+                self.next[i..i + width].iter_mut().zip(rows)
+            {
+                let row = (c | xm | xp) & open;
+                *out = row;
+                changed |= row & !old;
+            }
+        }
+        changed
     }
 
     /// Adds the open voxels of `rows` to the voxels this round reached, over

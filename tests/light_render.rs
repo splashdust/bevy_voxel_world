@@ -15,6 +15,9 @@
 //!   than one at the top level.
 //! - With sky light off, a sun with no shadow map leaves the lamp room as it
 //!   was with the shadow map.
+//! - With sky light off, under the default voxel falloff, the lamp's pool of
+//!   light on the lamp room's floor fades to black at its edge, where a
+//!   falloff whose level 1 isn't black ends it in a step.
 //! - In a sealed pocket with no lamp in reach, with sky light on and sky fill
 //!   off, every pixel is exactly black, with no tonemapping, with and without
 //!   the sun's shadow map, and still after a change to 256 levels at runtime.
@@ -35,18 +38,54 @@
 //!   and off in turn, so their chunks take and give back the same slot, while
 //!   every frame of the dark room beside one of them stays black.
 //!
+//! - In a world coloured from startup, with sky light off, sealed rooms each
+//!   lit by a red, a green, a blue or a white lamp, each with a closet of
+//!   another light colour in its chunk, so that the chunk takes a colour slot:
+//!   - every chunk draws from the first frame every chunk is ready and Bevy
+//!     has compiled its own pipelines, which the red room's picture shows by
+//!     holding no pixel of the blue clear colour;
+//!   - a red lamp's pool shows exactly 0 green and blue, a green one's 0 red
+//!     and blue, and a blue one's 0 red and green;
+//!   - `tinted_glow` tints the green lamp's own faces on the next frame, and
+//!     leaves the white lamp's glow as it was;
+//!   - where a red and a green lamp's pools meet on grey stone, each pixel's
+//!     brightest channel matches the same room lit by two white lamps, so
+//!     mixing never darkens;
+//!   - those rooms' chunks take colour slots, and the colour texture grows
+//!     to hold them at least once after the GPU has it, so the pictures
+//!     read colours it copied into the grown texture. wgpu's GL backend
+//!     copies only a 3D texture's first layer, so on GL the route writes
+//!     the grown texture again instead.
+//! - In a world whose colour rooms' lamps are white until it has settled,
+//!   with sky light off, giving the lamps their colours draws every chunk in
+//!   the red room's picture, which holds no pixel of the blue clear colour,
+//!   in the frame they change and in each frame after it. The red lamp's pool
+//!   then settles to exactly 0 green and blue.
+//! - With the `sub_grids` feature, in a world coloured from startup with sky
+//!   light off, a tilted plate of a sub-grid hangs over the floor of a room
+//!   that spans a boundary between two of the world's chunks, lit by a red
+//!   lamp on one side of the boundary and a green lamp on the other. Along
+//!   the plate's top face, which lies off the world's grid, the colour turns
+//!   from red to green with no step anywhere, the chunk boundary included.
+//!
 //! The lamp room's checks run with sky light off because the room spans a
 //! chunk boundary with more open columns than a chunk's walk can settle, so
 //! its lower chunk shows direct sky until a sky probe disproves it.
 //!
 //! It exits with a failure if a check fails. With a directory after `check`,
 //! it also saves each picture there. `check-sky-off`, `check-sky-on`,
-//! `check-sky-openness`, `check-fill-paths` and `check-fill-openness` each run
-//! one part of the checks.
+//! `check-sky-openness`, `check-fill-paths`, `check-fill-openness`,
+//! `check-color`, `check-first-flip` and, with `sub_grids`, `check-sub-grid`
+//! each run one part of the checks. The sub-grid check runs with
+//!
+//! ```text
+//! cargo test --release --features light_propagation,sub_grids --test light_render -- check-sub-grid
+//! ```
 //!
 //! In the browser, `check` can't start processes of its own, so each part
 //! runs from its own page load: `?check-sky-off`, `?check-sky-on`,
-//! `?check-sky-openness`, `?check-fill-paths` and `?check-fill-openness`. Each
+//! `?check-sky-openness`, `?check-fill-paths`, `?check-fill-openness`,
+//! `?check-color`, `?check-first-flip` and `?check-sub-grid`. Each
 //! logs `PASS` or `FAIL` per check and a last line saying whether all passed.
 //!
 //! With the argument `budget`, it measures what voxel edits cost: once the
@@ -56,7 +95,10 @@
 //! on the main thread, within the world's `wasm_relight_budget` each frame.
 //!
 //! A `sky_reach=N` argument sets the world's sky reach, 30 by default on
-//! native and 16 on WASM, as a WASM application should use.
+//! native and 16 on WASM, as a WASM application should use. A
+//! `material=standard` argument gives the world plain `StandardMaterial` in
+//! place of the crate's default material, so the checks run on the crate's
+//! lit PBR shader.
 //!
 //! On WASM it takes its arguments from the page address's query, split at
 //! `&`, and draws into the page's canvas whose id is `bevy`. Build it with
@@ -70,15 +112,25 @@ use bevy::{
     camera::RenderTarget,
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     light::CascadeShadowConfigBuilder,
+    pbr::{
+        SpecializedMaterialPipelineCache, SpecializedPrepassMaterialPipelineCache,
+        SpecializedShadowMaterialPipelineCache,
+    },
+    platform::collections::HashSet,
     prelude::*,
     render::{
-        render_resource::{TextureFormat, TextureUsages},
+        render_resource::{
+            CachedPipelineState, PipelineCache, TextureFormat, TextureUsages,
+        },
         view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
+        Render, RenderApp, RenderSystems,
     },
     window::ExitCondition,
 };
 use bevy_voxel_world::prelude::*;
 use noise::{NoiseFn, Perlin};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[path = "../benches/common/fill_worlds.rs"]
 mod fill_worlds;
@@ -101,6 +153,11 @@ const DIRT: u8 = 1;
 const STONE: u8 = 2;
 const LAMP: u8 = 3;
 const DIM_LAMP: u8 = 4;
+/// The lamps of the colour rooms, emissive only in the colour checks' world.
+const RED_LAMP: u8 = 5;
+const GREEN_LAMP: u8 = 6;
+const BLUE_LAMP: u8 = 7;
+const WHITE_LAMP: u8 = 8;
 
 /// The level the dim lamp is declared at.
 const DIM_LEVEL: f32 = 8.0;
@@ -177,6 +234,52 @@ const DIM_LAMP_AT: IVec3 = IVec3::new(332, -41, -310);
 /// An overhang: a slab sticking out of a mesa.
 const MESA: Bounds = Bounds::new([-48, 32, 290], [48, 84, 340]);
 const SLAB: Bounds = Bounds::new([-48, 72, 340], [48, 84, 404]);
+
+/// The colour rooms, sealed in the rock below the cave floor, each in a chunk
+/// of its own, by the material of its lamp and of its closet's lamp.
+const COLOR_ROOMS: [(u8, IVec3, u8); 4] = [
+    (RED_LAMP, IVec3::new(0, -18, 0), GREEN_LAMP),
+    (GREEN_LAMP, IVec3::new(2, -18, 0), RED_LAMP),
+    (BLUE_LAMP, IVec3::new(4, -18, 0), RED_LAMP),
+    (WHITE_LAMP, IVec3::new(6, -18, 0), RED_LAMP),
+];
+/// Each colour room, in its chunk's voxels.
+const COLOR_ROOM: Bounds = Bounds::new([8, 4, 8], [24, 14, 24]);
+/// The lamp on each colour room's floor, in its chunk's voxels.
+const COLOR_LAMP: IVec3 = IVec3::new(16, 4, 22);
+/// A closet one voxel big, sealed from its colour room, and the lamp beside
+/// it, in its chunk's voxels. Its lamp has another light colour than the
+/// room's, so the chunk's faces see two light colours and it takes a colour
+/// slot.
+const CLOSET: IVec3 = IVec3::new(1, 1, 1);
+const CLOSET_LAMP: IVec3 = IVec3::new(2, 1, 1);
+
+/// The mixing rooms, built as the colour rooms are: one lit by a red and a
+/// green lamp, and its twin lit by two white lamps in the same places.
+const MIX_ROOMS: [(IVec3, [u8; 2]); 2] = [
+    (IVec3::new(8, -18, 0), [RED_LAMP, GREEN_LAMP]),
+    (IVec3::new(10, -18, 0), [WHITE_LAMP, WHITE_LAMP]),
+];
+/// The two lamps on each mixing room's floor, in its chunk's voxels, close
+/// enough that their pools overlap across the floor.
+const MIX_LAMPS: [IVec3; 2] = [IVec3::new(10, 4, 16), IVec3::new(22, 4, 16)];
+
+/// The sub-grid room, sealed in the rock beside the mixing rooms, built as
+/// they are but two chunks long along x, so that it spans the boundary
+/// between its chunk and the chunk east of it. Its voxels are given from its
+/// chunk's minimum corner.
+const SUB_GRID_ROOM_CHUNK: IVec3 = IVec3::new(12, -18, 0);
+const SUB_GRID_ROOM: Bounds = Bounds::new([8, 4, 1], [56, 24, 31]);
+/// The sub-grid room's lamps on its floor, a red one west of the chunk
+/// boundary at x = 32 and a green one east of it, close enough that their
+/// pools meet across it.
+const SUB_GRID_LAMPS: [(IVec3, u8); 2] = [
+    (IVec3::new(23, 4, 16), RED_LAMP),
+    (IVec3::new(39, 4, 16), GREEN_LAMP),
+];
+/// The size of the plate of stone the sub-grid check hangs in the sub-grid
+/// room, in voxels.
+const PLATE: IVec3 = IVec3::new(16, 1, 6);
 
 const PLATEAUS: [Plateau; 4] = [
     Plateau {
@@ -285,6 +388,34 @@ impl Scene {
     fn voxel(&self, position: IVec3) -> WorldVoxel {
         let IVec3 { x, y, z } = position;
         let surface = self.surface(x, z);
+        for (lamp, chunk, closet_lamp) in COLOR_ROOMS {
+            let local = position - chunk * 32;
+            if local == COLOR_LAMP {
+                return WorldVoxel::Solid(lamp);
+            }
+            if local == CLOSET_LAMP {
+                return WorldVoxel::Solid(closet_lamp);
+            }
+            if local == CLOSET || COLOR_ROOM.contains(local.x, local.y, local.z) {
+                return WorldVoxel::Air;
+            }
+        }
+        let local = position - SUB_GRID_ROOM_CHUNK * 32;
+        if let Some((_, lamp)) = SUB_GRID_LAMPS.iter().find(|(at, _)| *at == local) {
+            return WorldVoxel::Solid(*lamp);
+        }
+        if SUB_GRID_ROOM.contains(local.x, local.y, local.z) {
+            return WorldVoxel::Air;
+        }
+        for (chunk, lamps) in MIX_ROOMS {
+            let local = position - chunk * 32;
+            if let Some(at) = MIX_LAMPS.iter().position(|lamp| *lamp == local) {
+                return WorldVoxel::Solid(lamps[at]);
+            }
+            if COLOR_ROOM.contains(local.x, local.y, local.z) {
+                return WorldVoxel::Air;
+            }
+        }
         if self.open(x, y, z, surface) {
             return WorldVoxel::Air;
         }
@@ -344,6 +475,15 @@ struct CaveWorld {
     /// fill under this model, over the worlds laid out by [`fill_world_at`]
     /// in place of the caves.
     check_fill: Option<SkyFill>,
+    /// For the pixel checks of light colour: the colour rooms' lamps are
+    /// emissive, in their colours.
+    check_color: bool,
+    /// For the check of the first flip: the colour rooms' lamps are white
+    /// until the check gives them their colours.
+    white_lamps: bool,
+    /// For the check of sub-grid faces: a sub-grid's plate hangs in the
+    /// sub-grid room, at [`plate_pose`].
+    check_sub_grid: bool,
     /// How far sky light spreads past where it falls.
     sky_reach: u8,
     /// How light looks. The pixel checks change it while running.
@@ -358,6 +498,9 @@ impl Default for CaveWorld {
             check_sky: None,
             check_openness: false,
             check_fill: None,
+            check_color: false,
+            white_lamps: false,
+            check_sub_grid: false,
             sky_reach: sky_reach(),
             look: LightLook::default(),
             precision: LightPrecision::default(),
@@ -479,10 +622,26 @@ impl VoxelWorldConfig for CaveWorld {
     }
 
     fn emissive_materials(&self) -> Vec<(Self::MaterialIndex, Emission)> {
-        vec![
+        let mut emissive = vec![
             (LAMP, Emission::level(15.0)),
             (DIM_LAMP, Emission::level(DIM_LEVEL)),
-        ]
+        ];
+        if self.check_color && self.white_lamps {
+            let lamp = Emission::level(15.0);
+            emissive.extend(
+                [RED_LAMP, GREEN_LAMP, BLUE_LAMP, WHITE_LAMP]
+                    .map(|lamp_at| (lamp_at, lamp)),
+            );
+        } else if self.check_color {
+            let lamp = Emission::level(15.0);
+            emissive.extend([
+                (RED_LAMP, lamp.with_color(LinearRgba::RED)),
+                (GREEN_LAMP, lamp.with_color(LinearRgba::GREEN)),
+                (BLUE_LAMP, lamp.with_color(LinearRgba::BLUE)),
+                (WHITE_LAMP, lamp),
+            ]);
+        }
+        emissive
     }
 }
 
@@ -502,6 +661,10 @@ const fn camera(position: [f32; 3], look_at: [f32; 3]) -> FixedCamera {
 
 const LAMP_ROOM_CAMERA: FixedCamera =
     camera([306.0, -30.0, -332.0], [320.5, -40.0, -319.5]);
+/// Looks along the lamp room's floor from the bright lamp out to where its
+/// pool of light ends, short of the room's west wall.
+const POOL_EDGE_CAMERA: FixedCamera =
+    camera([322.0, -27.0, -319.5], [307.0, -40.0, -319.5]);
 const POCKET_CAMERA: FixedCamera = camera([-324.5, 43.0, 124.0], [-316.0, 42.0, 132.0]);
 
 /// Looks under the slab sticking out of the mesa, at the mesa's shaded face.
@@ -511,6 +674,59 @@ const SUNLIT_FACE_CAMERA: FixedCamera = camera([20.0, 60.0, 250.0], [0.0, 40.0, 
 /// Looks past the slab from the side the sun shines in from, at ground whose
 /// sky light falls off beside the slab and the cave mouths beyond it.
 const DRIP_LINE_CAMERA: FixedCamera = camera([90.0, 50.0, 372.0], [30.0, 34.0, 372.0]);
+
+/// A camera in the colour room of chunk `x` along x, looking away from its
+/// lamp, so it sees only the lamp's pool.
+const fn pool_camera(x: f32) -> FixedCamera {
+    camera(
+        [x * 32.0 + 16.5, -566.0, 20.0],
+        [x * 32.0 + 16.5, -571.0, 9.0],
+    )
+}
+
+const RED_POOL_CAMERA: FixedCamera = pool_camera(0.0);
+const GREEN_POOL_CAMERA: FixedCamera = pool_camera(2.0);
+const BLUE_POOL_CAMERA: FixedCamera = pool_camera(4.0);
+
+/// A camera in the colour room of chunk `x` along x, looking at its lamp.
+const fn lamp_camera(x: f32) -> FixedCamera {
+    camera(
+        [x * 32.0 + 16.5, -567.0, 10.0],
+        [x * 32.0 + 16.5, -571.0, 22.5],
+    )
+}
+
+const GREEN_LAMP_CAMERA: FixedCamera = lamp_camera(2.0);
+const WHITE_LAMP_CAMERA: FixedCamera = lamp_camera(6.0);
+
+/// A camera in the mixing room of chunk `x` along x, looking down at the
+/// floor between its lamps.
+const fn mix_camera(x: f32) -> FixedCamera {
+    camera(
+        [x * 32.0 + 16.0, -563.0, 9.0],
+        [x * 32.0 + 16.0, -572.0, 16.5],
+    )
+}
+
+const MIX_CAMERA: FixedCamera = mix_camera(8.0);
+const WHITE_MIX_CAMERA: FixedCamera = mix_camera(10.0);
+
+/// Where the sub-grid check's plate hangs: its middle over the chunk
+/// boundary of the sub-grid room, eight voxels over its floor, tilted about
+/// x and z so that its faces lie off the world's grid.
+fn plate_pose() -> Transform {
+    let middle = (SUB_GRID_ROOM_CHUNK * 32).as_vec3() + Vec3::new(31.0, 12.0, 16.0);
+    let rotation = Quat::from_rotation_z(0.25) * Quat::from_rotation_x(0.2);
+    Transform::from_translation(middle - rotation * (PLATE.as_vec3() / 2.0))
+        .with_rotation(rotation)
+}
+
+/// Looks down at the plate's top face from high up at the sub-grid room's end
+/// nearest z = 0.
+const SUB_GRID_CAMERA: FixedCamera = camera(
+    [12.0 * 32.0 + 31.0, -18.0 * 32.0 + 23.0, 2.0],
+    [12.0 * 32.0 + 31.0, -18.0 * 32.0 + 12.0, 16.0],
+);
 
 fn transform_of(camera: &FixedCamera) -> Transform {
     Transform::from_translation(camera.position).looking_at(camera.look_at, Vec3::Y)
@@ -546,11 +762,15 @@ fn main() {
         Some("check-fill-openness") => {
             check_fill_part("openness", SkyFill::Openness(OpenFill::default()))
         }
+        Some("check-color") => check_color_part(),
+        Some("check-first-flip") => check_first_flip_part(),
+        Some("check-sub-grid") => check_sub_grid_part(),
         Some("budget") => budget(),
         Some(other) => {
             eprintln!(
                 "unknown argument {other:?}: expected check, check-sky-off, check-sky-on, \
-                 check-sky-openness, check-fill-paths, check-fill-openness or budget"
+                 check-sky-openness, check-fill-paths, check-fill-openness, check-color, \
+                 check-first-flip, check-sub-grid or budget"
             );
             std::process::exit(2);
         }
@@ -584,6 +804,14 @@ struct Check {
     next_frame: bool,
     /// How many levels light holds for the picture.
     precision: LightPrecision,
+    /// Whether it takes the picture on the first frame every chunk is ready
+    /// and [`RendererReady`] is set, without waiting for light to settle. The
+    /// camera must be where the app starts it.
+    first_ready: bool,
+    /// Whether, once the world has settled with the colour rooms' lamps
+    /// white, it gives them their colours and judges a picture of each frame
+    /// from that frame on.
+    flips_color: bool,
 }
 
 type Judge =
@@ -611,6 +839,8 @@ const fn settled_check(
         look: LightLook::default,
         next_frame: false,
         precision: LightPrecision::Steps16,
+        first_ready: false,
+        flips_color: false,
     }
 }
 
@@ -637,6 +867,8 @@ const fn look_check(
         look,
         next_frame: true,
         precision: LightPrecision::Steps16,
+        first_ready: false,
+        flips_color: false,
     }
 }
 
@@ -658,7 +890,7 @@ fn curve_look(curve: LevelCurve) -> LightLook {
     }
 }
 
-const CHECKS: [Check; 23] = [
+const CHECKS: [Check; 25] = [
     settled_check(
         "a lamp declared below the top level still glows, scaled by its level",
         "lamp_room.png",
@@ -738,6 +970,27 @@ const CHECKS: [Check; 23] = [
         matches_earlier,
     ),
     settled_check(
+        "under the default voxel falloff, a pool fades to black at its edge",
+        "pool_edge.png",
+        false,
+        &POOL_EDGE_CAMERA,
+        true,
+        None,
+        pool_fades_out,
+    ),
+    look_check(
+        "under a falloff whose level 1 isn't black, a pool ends in a step",
+        "pool_edge_step.png",
+        false,
+        &POOL_EDGE_CAMERA,
+        None,
+        pool_ends_in_a_step,
+        || LightLook {
+            voxel_falloff: LevelCurve::exponential(0.7),
+            ..default()
+        },
+    ),
+    settled_check(
         "a sealed pocket with no light in reach is exactly black",
         "sealed_pocket.png",
         true,
@@ -812,6 +1065,8 @@ const CHECKS: [Check; 23] = [
         look: LightLook::default,
         next_frame: false,
         precision: LightPrecision::Steps16,
+        first_ready: false,
+        flips_color: false,
     },
     settled_check(
         "a sun with no shadow map leaves a sealed pocket exactly black",
@@ -911,6 +1166,148 @@ const CHECKS: [Check; 23] = [
     ),
 ];
 
+/// The checks of light colour, in a world coloured from startup with sky
+/// light off.
+const COLOR_CHECKS: [Check; 10] = [
+    Check {
+        first_ready: true,
+        ..settled_check(
+            "a world coloured from startup draws every chunk from its first frame",
+            "color_startup.png",
+            false,
+            &RED_POOL_CAMERA,
+            true,
+            None,
+            only_red,
+        )
+    },
+    settled_check(
+        "a red lamp's pool shows exactly 0 green and blue",
+        "color_red.png",
+        false,
+        &RED_POOL_CAMERA,
+        true,
+        None,
+        only_red,
+    ),
+    settled_check(
+        "a green lamp's pool shows exactly 0 red and blue",
+        "color_green.png",
+        false,
+        &GREEN_POOL_CAMERA,
+        true,
+        None,
+        only_green,
+    ),
+    settled_check(
+        "a blue lamp's pool shows exactly 0 red and green",
+        "color_blue.png",
+        false,
+        &BLUE_POOL_CAMERA,
+        true,
+        None,
+        only_blue,
+    ),
+    settled_check(
+        "a green lamp's own faces glow in their base colour",
+        "color_green_glow.png",
+        false,
+        &GREEN_LAMP_CAMERA,
+        true,
+        None,
+        green_lamp_untinted,
+    ),
+    look_check(
+        "tinted glow tints a green lamp's own faces on the next frame",
+        "color_green_glow_tinted.png",
+        false,
+        &GREEN_LAMP_CAMERA,
+        Some("color_green_glow.png"),
+        green_lamp_tinted,
+        || LightLook {
+            tinted_glow: true,
+            ..default()
+        },
+    ),
+    settled_check(
+        "a white lamp's own faces glow",
+        "color_white_glow.png",
+        false,
+        &WHITE_LAMP_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    look_check(
+        "tinted glow leaves a white lamp's glow as it was",
+        "color_white_glow_tinted.png",
+        false,
+        &WHITE_LAMP_CAMERA,
+        Some("color_white_glow.png"),
+        matches_earlier,
+        || LightLook {
+            tinted_glow: true,
+            ..default()
+        },
+    ),
+    settled_check(
+        "two white lamps light the white mixing room",
+        "color_mix_white.png",
+        false,
+        &WHITE_MIX_CAMERA,
+        true,
+        None,
+        renders,
+    ),
+    settled_check(
+        "red and green pools mixing never darken",
+        "color_mix.png",
+        false,
+        &MIX_CAMERA,
+        true,
+        Some("color_mix_white.png"),
+        mixing_never_darkens,
+    ),
+];
+
+/// The checks of a running world's first flip to light colour, in a world
+/// whose colour rooms' lamps start white, with sky light off.
+const FIRST_FLIP_CHECKS: [Check; 2] = [
+    Check {
+        flips_color: true,
+        ..settled_check(
+            "a running world that turns coloured draws every chunk from the frame it turns",
+            "first_flip.png",
+            false,
+            &RED_POOL_CAMERA,
+            true,
+            None,
+            draws_every_chunk,
+        )
+    },
+    settled_check(
+        "a red lamp's pool shows exactly 0 green and blue after the first flip",
+        "first_flip_red.png",
+        false,
+        &RED_POOL_CAMERA,
+        true,
+        None,
+        only_red,
+    ),
+];
+
+/// The check of sub-grid faces, in a world coloured from startup with sky
+/// light off.
+const SUB_GRID_CHECKS: [Check; 1] = [settled_check(
+    "a tilted sub-grid over coloured world light blends colour off the grid with no seam",
+    "sub_grid_faces.png",
+    false,
+    &SUB_GRID_CAMERA,
+    true,
+    None,
+    plate_blends_without_a_seam,
+)];
+
 /// The checks run with sky fill on under sky openness.
 const OPENNESS_CHECKS: [Check; 1] = [settled_check(
     "a sealed pocket under sky openness is exactly black",
@@ -988,6 +1385,47 @@ fn switch_lamps(voxel_world: &mut VoxelWorld<CaveWorld>, lit_room: bool) {
     voxel_world.set_voxel(DARK_CHUNK * 32 + SEALED_LAMP, lamp(!lit_room));
 }
 
+/// Whether Bevy has compiled every pipeline that draws no chunk, in both the
+/// main world and the render world.
+///
+/// Bevy loads its own shaders in the background, so in the first frames its
+/// mesh preprocessing pipelines can still be waiting on them, and then no
+/// mesh draws at all, whatever its material.
+#[derive(Resource, Clone, Default)]
+struct RendererReady(Arc<AtomicBool>);
+
+/// Sets [`RendererReady`] once every pipeline but those Bevy specialized for
+/// a material's meshes has compiled.
+fn follow_renderer_ready(
+    ready: Res<RendererReady>,
+    pipelines: Res<PipelineCache>,
+    main_pass: Res<SpecializedMaterialPipelineCache>,
+    prepass: Res<SpecializedPrepassMaterialPipelineCache>,
+    shadows: Res<SpecializedShadowMaterialPipelineCache>,
+) {
+    if ready.0.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut materials: HashSet<usize> = main_pass
+        .values()
+        .flat_map(|view| view.values().map(|id| id.id()))
+        .collect();
+    materials.extend(
+        prepass
+            .values()
+            .flat_map(|view| view.values().map(|(_, id, _)| id.id())),
+    );
+    materials.extend(
+        shadows
+            .values()
+            .flat_map(|view| view.values().map(|(id, _, _)| id.id())),
+    );
+    let compiled = pipelines.pipelines().enumerate().all(|(id, pipeline)| {
+        materials.contains(&id) || matches!(pipeline.state, CachedPipelineState::Ok(_))
+    });
+    ready.0.store(compiled, Ordering::Relaxed);
+}
+
 #[derive(Resource)]
 struct CheckPlan {
     target: Handle<Image>,
@@ -997,6 +1435,9 @@ struct CheckPlan {
     moved_at_frame: u32,
     /// The last frame on which a chunk wasn't Ready or light hadn't settled.
     last_busy_frame: u32,
+    /// The last frame on which a chunk wasn't Ready, or none was spawned, or
+    /// Bevy hadn't compiled its own pipelines.
+    last_unready_frame: u32,
     frame: u32,
     waiting: bool,
     failed: bool,
@@ -1005,6 +1446,9 @@ struct CheckPlan {
     /// Pictures of the switching frames not yet judged, and how many failed.
     shots_out: u32,
     shots_failed: u32,
+    /// Whether the check of the first flip has given the colour rooms' lamps
+    /// their colours, which `follow_plan_look` gives the world.
+    lamps_colored: bool,
     /// Where to save the pictures, if anywhere.
     directory: Option<std::path::PathBuf>,
     /// The look the current check wants, which `follow_plan_look` gives the
@@ -1022,7 +1466,8 @@ struct CheckPlan {
 fn check() {
     error!(
         "in the browser, run ?check-sky-off, ?check-sky-on, ?check-sky-openness, \
-         ?check-fill-paths and ?check-fill-openness, each in a page load"
+         ?check-fill-paths, ?check-fill-openness, ?check-color, ?check-first-flip and \
+         ?check-sub-grid, each in a page load"
     );
 }
 
@@ -1032,13 +1477,19 @@ fn check() {
 #[cfg(not(target_arch = "wasm32"))]
 fn check() {
     let mut failed = false;
-    for sky in [
+    let mut parts = vec![
         "sky-off",
         "sky-on",
         "sky-openness",
         "fill-paths",
         "fill-openness",
-    ] {
+        "color",
+        "first-flip",
+    ];
+    if cfg!(feature = "sub_grids") {
+        parts.push("sub-grid");
+    }
+    for sky in parts {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg(format!("check-{sky}"))
             .args(std::env::args().skip(2))
@@ -1082,19 +1533,146 @@ fn check_fill_part(model: &'static str, fill: SkyFill) {
     );
 }
 
+/// Runs the checks of light colour, in a world coloured from startup with
+/// sky light off. The clear colour is blue, so a chunk that doesn't draw shows
+/// as blue in the red room.
+fn check_color_part() {
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            ..default()
+        },
+        COLOR_CHECKS.iter().collect(),
+    );
+}
+
+/// Runs the checks of a running world's first flip to light colour, with sky
+/// light off. The clear colour is blue, so a chunk that doesn't draw shows as
+/// blue in the red room.
+fn check_first_flip_part() {
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            white_lamps: true,
+            ..default()
+        },
+        FIRST_FLIP_CHECKS.iter().collect(),
+    );
+}
+
+/// Runs the check of sub-grid faces, in a world coloured from startup with
+/// sky light off. Without the `sub_grids` feature it fails, since the world
+/// can't hold a sub-grid.
+fn check_sub_grid_part() {
+    if !cfg!(feature = "sub_grids") {
+        report!("FAIL check-sub-grid needs the sub_grids feature");
+        std::process::exit(1);
+    }
+    run_check_app(
+        CaveWorld {
+            check_sky: Some(false),
+            check_color: true,
+            check_sub_grid: true,
+            ..default()
+        },
+        SUB_GRID_CHECKS.iter().collect(),
+    );
+}
+
 fn run_check_app(world: CaveWorld, checks: Vec<&'static Check>) {
-    App::new()
-        .add_plugins(plugins_without_window())
-        .add_plugins(VoxelWorldPlugin::with_config(world))
-        .init_resource::<Pictures>()
+    let check_color = world.check_color;
+    let check_sub_grid = world.check_sub_grid;
+    let white_lamps = world.white_lamps;
+    let clear = if world.check_color {
+        Color::srgb(0.0, 0.0, 1.0)
+    } else {
+        ClearColor::default().0
+    };
+    let mut app = App::new();
+    app.insert_resource(ClearColor(clear))
+        .add_plugins(plugins_without_window());
+    if arguments()
+        .iter()
+        .any(|argument| argument == "material=standard")
+    {
+        app.add_plugins(
+            VoxelWorldPlugin::with_config(world)
+                .with_material(StandardMaterial::default()),
+        );
+    } else {
+        app.add_plugins(VoxelWorldPlugin::with_config(world));
+    }
+    app.init_resource::<Pictures>()
         .add_systems(
             Startup,
             move |commands: Commands, images: ResMut<Assets<Image>>| {
                 setup_check(commands, images, checks.clone())
             },
         )
-        .add_systems(Update, (run_checks, follow_plan_look).chain())
-        .run();
+        .add_systems(Update, (run_checks, follow_plan_look).chain());
+    let renderer_ready = RendererReady::default();
+    app.insert_resource(renderer_ready.clone());
+    app.sub_app_mut(RenderApp)
+        .insert_resource(renderer_ready)
+        .add_systems(Render, follow_renderer_ready.in_set(RenderSystems::Cleanup));
+    // The sub-grid check's camera never reaches the colour rooms.
+    if check_color && !white_lamps && !check_sub_grid {
+        app.add_systems(Update, colour_rooms_take_colour_slots.before(run_checks));
+    }
+    #[cfg(feature = "sub_grids")]
+    if check_sub_grid {
+        app.add_systems(Update, spawn_plate.before(run_checks));
+    }
+    app.run();
+}
+
+/// Spawns the sub-grid check's plate of stone at [`plate_pose`], once.
+#[cfg(feature = "sub_grids")]
+fn spawn_plate(mut voxel_world: VoxelWorld<CaveWorld>, mut spawned: Local<bool>) {
+    if std::mem::replace(&mut *spawned, true) {
+        return;
+    }
+    let plate = voxel_world.spawn_sub_grid(plate_pose());
+    let mut grid = voxel_world.grid_mut(Grid::SubGrid(plate)).unwrap();
+    for x in 0..PLATE.x {
+        for z in 0..PLATE.z {
+            grid.set_voxel(IVec3::new(x, 0, z), WorldVoxel::Solid(STONE));
+        }
+    }
+}
+
+/// Once every check has judged its picture, checks that chunks took a colour
+/// slot at least once for each colour room and the red and green mixing
+/// room, so that the colour checks read light colours from colour slots, and
+/// that the colour texture grew by copying at least once.
+/// Only the chunks near the camera are loaded, so each room's chunk takes
+/// one as the camera reaches it.
+fn colour_rooms_take_colour_slots(world: &mut World, mut done: Local<bool>) {
+    let plan = world.resource::<CheckPlan>();
+    if *done || plan.next != plan.checks.len() || plan.waiting {
+        return;
+    }
+    *done = true;
+    let stats = bevy_voxel_world::light_bench::light_stats::<CaveWorld>(world);
+    let taken = stats.as_ref().map_or(0, |stats| stats.color_allocations);
+    let wanted = COLOR_ROOMS.len() as u64 + 1;
+    let name = "the colour rooms and the mixing room take colour slots";
+    if taken >= wanted {
+        report!("PASS {name}: {taken} taken");
+    } else {
+        report!("FAIL {name}: {taken} taken, of {wanted}");
+        world.resource_mut::<CheckPlan>().failed = true;
+    }
+    let copies = stats.map_or(0, |stats| stats.color_growth_copies);
+    let name = "the colour texture grows by copying its colours on the GPU";
+    if copies > 0 {
+        report!("PASS {name}: {copies} times");
+    } else {
+        report!("FAIL {name}: it never did, so the colour checks didn't cover it");
+        world.resource_mut::<CheckPlan>().failed = true;
+    }
 }
 
 /// A check of each shot of each sky fill world under the model named
@@ -1163,6 +1741,9 @@ fn lit_share(
 
 /// Gives the world the look the current check wants.
 fn follow_plan_look(plan: Res<CheckPlan>, mut world: ResMut<CaveWorld>) {
+    if plan.lamps_colored && world.white_lamps {
+        world.white_lamps = false;
+    }
     if world.look != plan.look {
         world.look = plan.look.clone();
     }
@@ -1195,12 +1776,14 @@ fn setup_check(
         next: 0,
         moved_at_frame: 0,
         last_busy_frame: 0,
+        last_unready_frame: 0,
         frame: 0,
         waiting: false,
         failed: false,
         switched: 0,
         shots_out: 0,
         shots_failed: 0,
+        lamps_colored: false,
         directory: arguments()
             .get(1)
             .filter(|argument| !argument.contains('='))
@@ -1222,15 +1805,20 @@ fn run_checks(
     mut suns: Query<&mut DirectionalLight>,
     chunks: Query<&Chunk<CaveWorld>>,
     mut voxel_world: VoxelWorld<CaveWorld>,
+    renderer_ready: Res<RendererReady>,
     mut exit: MessageWriter<AppExit>,
 ) {
     plan.frame += 1;
     let frame = plan.frame;
-    if !voxel_world.light_is_settled()
+    let unready = !renderer_ready.0.load(Ordering::Relaxed)
+        || chunks.is_empty()
         || chunks
             .iter()
-            .any(|chunk| voxel_world.chunk_state(chunk.key()) != Some(ChunkStatus::Ready))
-    {
+            .any(|chunk| chunk_status(&voxel_world, chunk) != Some(ChunkStatus::Ready));
+    if unready {
+        plan.last_unready_frame = frame;
+    }
+    if unready || !voxel_world.light_is_settled() {
         plan.last_busy_frame = frame;
     }
     if plan.waiting {
@@ -1276,14 +1864,20 @@ fn run_checks(
         }
         return;
     }
+    if check.flips_color && plan.switched > 0 {
+        flip_and_judge(&mut commands, &mut plan, check.name);
+        return;
+    }
     if check.switches_lamps && plan.switched > 0 {
         switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
     }
     let waited = frame - plan.moved_at_frame;
     let quiet = frame - plan.last_busy_frame.max(plan.moved_at_frame);
-    // A look change shows on the next frame, with no waiting.
-    if !check.next_frame && !(quiet >= 60 && waited >= 120) {
+    // A look change shows on the next frame, with no waiting, and a check of
+    // the first frame every chunk is ready waits for nothing more.
+    let ready = check.first_ready && plan.last_unready_frame < frame;
+    if !check.next_frame && !ready && !(quiet >= 60 && waited >= 120) {
         if waited >= 3600 {
             report!("FAIL {}: the world never settled", check.name);
             plan.failed = true;
@@ -1292,6 +1886,10 @@ fn run_checks(
         return;
     }
 
+    if check.flips_color {
+        flip_and_judge(&mut commands, &mut plan, check.name);
+        return;
+    }
     if check.switches_lamps {
         switch_and_judge(&mut commands, &mut plan, &mut voxel_world, check.name);
         return;
@@ -1323,6 +1921,17 @@ fn run_checks(
             plan.next += 1;
         },
     );
+}
+
+/// Where `chunk` is in the chunk lifecycle, in its own grid.
+fn chunk_status(
+    voxel_world: &VoxelWorld<CaveWorld>,
+    chunk: &Chunk<CaveWorld>,
+) -> Option<ChunkStatus> {
+    #[cfg(feature = "sub_grids")]
+    return voxel_world.grid(chunk.grid())?.chunk_state(chunk.key());
+    #[cfg(not(feature = "sub_grids"))]
+    voxel_world.chunk_state(chunk.key())
 }
 
 /// Whether `image` matches the earlier check's picture, within one step of
@@ -1423,6 +2032,81 @@ fn differs_from_earlier(
     }
 }
 
+/// How many frames the check of the first flip judges, from the frame of the
+/// flip on.
+const FLIPPED_FRAMES: u32 = 30;
+
+/// Gives the colour rooms' lamps their colours, and judges a picture of that
+/// frame and of each frame after it, until [`FLIPPED_FRAMES`] are judged.
+fn flip_and_judge(commands: &mut Commands, plan: &mut CheckPlan, name: &'static str) {
+    if plan.switched < FLIPPED_FRAMES {
+        plan.lamps_colored = true;
+        plan.switched += 1;
+        plan.shots_out += 1;
+        let frame = plan.switched;
+        let mut screenshot = commands.spawn(Screenshot::image(plan.target.clone()));
+        if frame == 1 {
+            if let Some(directory) = &plan.directory {
+                std::fs::create_dir_all(directory).unwrap();
+                screenshot.observe(save_to_disk(directory.join("first_flip_frame.png")));
+            }
+        }
+        screenshot.observe(
+            move |captured: On<ScreenshotCaptured>, mut plan: ResMut<CheckPlan>| {
+                plan.shots_out -= 1;
+                if let Err(note) = draws_every_chunk(
+                    &captured.image,
+                    &Camera::default(),
+                    &GlobalTransform::default(),
+                    None,
+                ) {
+                    report!("  frame {frame}: {note}");
+                    plan.shots_failed += 1;
+                }
+            },
+        );
+        return;
+    }
+    if plan.shots_out > 0 {
+        return;
+    }
+    if plan.shots_failed == 0 {
+        report!("PASS {name}: {FLIPPED_FRAMES} frames drew every chunk");
+    } else {
+        report!(
+            "FAIL {name}: {} of {FLIPPED_FRAMES} frames showed the clear colour",
+            plan.shots_failed
+        );
+        plan.failed = true;
+    }
+    plan.switched = 0;
+    plan.shots_failed = 0;
+    plan.next += 1;
+}
+
+/// Whether no pixel of `image` is the blue clear colour, so every chunk in
+/// view drew, and at least a tenth of its pixels are lit.
+fn draws_every_chunk(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let clear = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[..3] == [0, 0, 255])
+        .count();
+    let rendered = renders(image, camera, global, earlier)?;
+    if clear == 0 {
+        Ok(rendered)
+    } else {
+        Err(format!("{clear} pixels show the clear colour, {rendered}"))
+    }
+}
+
 /// Whether at least a tenth of `image`'s pixels aren't black.
 fn renders(
     image: &Image,
@@ -1472,6 +2156,264 @@ fn glow_changes_and_scales(
         "bright lamp {bright}, dim lamp {dim}, dim lamp before the change {dim_before}"
     );
     if dim > 0 && dim < bright && dim != dim_before {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether every pixel of `image` holds exactly 0 in each channel `missing`
+/// names, and at least a tenth of its pixels are lit.
+fn only_in(image: &Image, missing: [bool; 3]) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pixels = data.as_chunks::<4>().0;
+    let wrong = pixels
+        .iter()
+        .filter(|pixel| (0..3).any(|channel| missing[channel] && pixel[channel] != 0))
+        .count();
+    let lit = pixels
+        .iter()
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    let note = format!(
+        "{wrong} pixels show a missing component, {lit} of {} lit",
+        pixels.len()
+    );
+    if wrong == 0 && lit * 10 >= pixels.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+fn only_red(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [false, true, true])
+}
+
+fn only_green(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [true, false, true])
+}
+
+fn only_blue(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    only_in(image, [true, true, false])
+}
+
+/// Whether each pixel's brightest channel matches the earlier picture's,
+/// the same room lit white, within two steps at it or a pixel beside it,
+/// and the red and green pools meet somewhere in the picture. A pixel in
+/// 10,000 may miss, where an edge's or a seam's pixel blends with what's
+/// behind it in one picture and not the other.
+///
+/// The room's stone is grey, so a pixel's brightest channel is the
+/// brightness of its light whatever its light colour, which mixing scales
+/// back to a brightest component of 1.
+fn mixing_never_darkens(
+    image: &Image,
+    _: &Camera,
+    _: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let earlier = earlier
+        .and_then(|earlier| earlier.data.as_ref())
+        .ok_or("no earlier picture")?;
+    let pixels = data.as_chunks::<4>().0;
+    let white = earlier.as_chunks::<4>().0;
+    let brightest = |pixel: &[u8; 4]| pixel[0].max(pixel[1]).max(pixel[2]);
+    let (width, height) = (WIDTH as usize, HEIGHT as usize);
+    let mut darker = 0;
+    let mut worst = 0;
+    for (index, pixel) in pixels.iter().enumerate() {
+        let (x, y) = (index % width, index / width);
+        // The rooms lie at different places in the world, so a few pixels
+        // of a texture's edges or a mesh's seams land one pixel apart.
+        let off = (y.saturating_sub(1)..(y + 2).min(height))
+            .flat_map(|y| (x.saturating_sub(1)..(x + 2).min(width)).map(move |x| (x, y)))
+            .map(|(x, y)| brightest(pixel).abs_diff(brightest(&white[y * width + x])))
+            .min()
+            .unwrap_or(u8::MAX);
+        worst = worst.max(off);
+        if off > 2 {
+            darker += 1;
+        }
+    }
+    // Where the pools meet, a pixel shows both red and green, at least half
+    // as much of the dimmer as of the brighter.
+    let yellow = pixels
+        .iter()
+        .filter(|pixel| {
+            let (red, green) = (pixel[0] as u16, pixel[1] as u16);
+            pixel[2] == 0 && red.min(green) * 2 >= red.max(green) && red > 8
+        })
+        .count();
+    let note = format!(
+        "{darker} pixels off by more than 2 in their brightest channel, at most {worst}; \
+         {yellow} of {} pixels yellow",
+        pixels.len()
+    );
+    if darker * 10_000 <= pixels.len() && yellow * 20 >= pixels.len() {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Samples of the plate's top face per voxel, along the line
+/// [`plate_blends_without_a_seam`] reads.
+const PLATE_SAMPLES_PER_VOXEL: usize = 8;
+
+/// The largest step in hue between two samples next to each other along the
+/// plate that passes as smooth. Hue turns fastest where the two lamps' light
+/// is equally bright, halfway between them, a little under this.
+const PLATE_SEAM: f32 = 0.08;
+
+/// Whether the top face of the sub-grid check's plate turns from red to green
+/// along its length with no seam. It reads the hue as green's share of red
+/// and green, along the middle of the face from end to end, and wants:
+///
+/// - below 0.25 at the red end and above 0.75 at the green end;
+/// - no step between samples next to each other above [`PLATE_SEAM`];
+/// - the step across the boundary between the world's chunks at most twice
+///   the largest step within a voxel on either side of it, so a seam there
+///   shows even where it's smaller than the steepest smooth step.
+///
+/// The plate's stone is grey, so its pixels' hue is the light's. The plate is
+/// dimly lit, so its pixels' channels are small and hue moves in uneven
+/// steps from sample to sample, many of them 0, which the window of a voxel
+/// either side evens out.
+fn plate_blends_without_a_seam(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let pose = plate_pose();
+    let samples = PLATE.x as usize * PLATE_SAMPLES_PER_VOXEL;
+    let mut hues = Vec::with_capacity(samples);
+    let mut chunks = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let along = (sample as f32 + 0.5) / PLATE_SAMPLES_PER_VOXEL as f32;
+        let point = pose.transform_point(Vec3::new(along, 1.0, PLATE.z as f32 / 2.0));
+        let at = camera
+            .world_to_viewport(global, point)
+            .map_err(|error| format!("{point} isn't in view: {error:?}"))?;
+        let (x, y) = (at.x as usize, at.y as usize);
+        if x >= WIDTH as usize || y >= HEIGHT as usize {
+            return Err(format!("{point} is outside the picture"));
+        }
+        let index = (y * WIDTH as usize + x) * 4;
+        let (red, green) = (data[index] as f32, data[index + 1] as f32);
+        if red + green == 0.0 {
+            return Err(format!("the plate is black at sample {sample}"));
+        }
+        hues.push(green / (red + green));
+        chunks.push((point.x / 32.0).floor() as i32);
+    }
+    let steps: Vec<f32> = hues
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .collect();
+    let (most, at) = steps.iter().enumerate().fold((0.0, 0), |most, (at, step)| {
+        if *step > most.0 {
+            (*step, at)
+        } else {
+            most
+        }
+    });
+    let boundary = chunks
+        .windows(2)
+        .position(|pair| pair[0] != pair[1])
+        .filter(|at| {
+            *at >= PLATE_SAMPLES_PER_VOXEL && *at + PLATE_SAMPLES_PER_VOXEL < steps.len()
+        })
+        .ok_or("the plate doesn't cross a chunk boundary")?;
+    let across = steps[boundary];
+    let beside = steps
+        [boundary - PLATE_SAMPLES_PER_VOXEL..=boundary + PLATE_SAMPLES_PER_VOXEL]
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != PLATE_SAMPLES_PER_VOXEL)
+        .fold(0.0f32, |most, (_, step)| most.max(*step));
+    let (first, last) = (hues[0], hues[samples - 1]);
+    let note = format!(
+        "hue {first:.2} at the red end, {last:.2} at the green end; at most {most:.3} \
+         between samples, after sample {at} of {samples}; {across:.3} across the chunk \
+         boundary after sample {boundary}, at most {beside:.3} within a voxel of it"
+    );
+    if first < 0.25 && last > 0.75 && most <= PLATE_SEAM && across <= 2.0 * beside + 0.005
+    {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// The channels of the pixel where the middle of the top face of the green
+/// colour room's lamp shows.
+fn green_lamp_top(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<[u8; 3], String> {
+    let data = image.data.as_ref().ok_or("no pixels")?;
+    let lamp = COLOR_ROOMS[1].1 * 32 + COLOR_LAMP;
+    let point = lamp.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+    let at = camera
+        .world_to_viewport(global, point)
+        .map_err(|error| format!("{point} isn't in view: {error:?}"))?;
+    let (x, y) = (
+        (at.x as usize).min(WIDTH as usize - 1),
+        (at.y as usize).min(HEIGHT as usize - 1),
+    );
+    let index = (y * WIDTH as usize + x) * 4;
+    Ok([data[index], data[index + 1], data[index + 2]])
+}
+
+/// Whether the green lamp's top face shows red or blue, from its base colour.
+fn green_lamp_untinted(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let top = green_lamp_top(image, camera, global)?;
+    let note = format!("the lamp's top face shows {top:?}");
+    if top[0] > 0 || top[2] > 0 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether the green lamp's top face shows green alone, where the earlier
+/// picture showed something else.
+fn green_lamp_tinted(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    earlier: Option<&Image>,
+) -> Result<String, String> {
+    let earlier = earlier.ok_or("no earlier picture")?;
+    let top = green_lamp_top(image, camera, global)?;
+    let before = green_lamp_top(earlier, camera, global)?;
+    let note = format!("the lamp's top face shows {top:?}, and before {before:?}");
+    if top[0] == 0 && top[2] == 0 && top[1] > 0 && top != before {
         Ok(note)
     } else {
         Err(note)
@@ -1539,6 +2481,95 @@ fn dim_lamp_glows(
     let dim = brightness_at(image, camera, global, DIM_LAMP_AT.as_vec3() + top)?;
     let note = format!("bright lamp {bright}, dim lamp at level {DIM_LEVEL} {dim}");
     if dim > 16 && dim < bright {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Samples of the lamp room's floor per voxel, along the line the pool edge
+/// checks read.
+const POOL_SAMPLES_PER_VOXEL: usize = 8;
+
+/// The linear brightness of the lamp room's floor along the line from beside
+/// the bright lamp west to near the wall, eight samples per voxel, read from
+/// the brightest channel of the pixels around each.
+fn pool_profile(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<Vec<f32>, String> {
+    let start = BRIGHT_LAMP_AT.x as f32 - 6.5;
+    let floor = LAMP_ROOM.min[1] as f32;
+    let z = BRIGHT_LAMP_AT.z as f32 + 0.5;
+    (0..12 * POOL_SAMPLES_PER_VOXEL)
+        .map(|sample| {
+            let x = start - sample as f32 / POOL_SAMPLES_PER_VOXEL as f32;
+            let srgb = brightness_at(image, camera, global, Vec3::new(x, floor, z))?;
+            Ok(Srgba::gamma_function(srgb as f32 / 255.0))
+        })
+        .collect()
+}
+
+/// How far the floor's brightness drops where the pool goes black, as a share
+/// of the brightness two voxels further in, with the samples' note.
+fn pool_edge_step(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+) -> Result<(f32, String), String> {
+    let profile = pool_profile(image, camera, global)?;
+    let black = profile
+        .iter()
+        .position(|brightness| *brightness == 0.0)
+        .ok_or("the pool reaches the end of the line")?;
+    let inside = 2 * POOL_SAMPLES_PER_VOXEL;
+    if black <= inside {
+        return Err(format!("the floor is black {black} samples from the lamp"));
+    }
+    let last = profile[black - 1];
+    let further_in = profile[black - 1 - inside];
+    if profile[black..].iter().any(|brightness| *brightness > 0.0) {
+        return Err("the floor lights again past the pool's edge".into());
+    }
+    let share = last / further_in;
+    Ok((
+        share,
+        format!(
+            "black from sample {black}; the last lit sample is {:.0}% of the floor \
+             two voxels further in",
+            share * 100.0
+        ),
+    ))
+}
+
+/// Whether the lamp room's floor fades smoothly into black at the edge of the
+/// bright lamp's pool: its last lit sample is far dimmer than the floor two
+/// voxels further in.
+fn pool_fades_out(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let (share, note) = pool_edge_step(image, camera, global)?;
+    if share <= 0.25 {
+        Ok(note)
+    } else {
+        Err(note)
+    }
+}
+
+/// Whether the lamp room's floor drops into black in a step at the edge of
+/// the bright lamp's pool, which shows [`pool_fades_out`] tells the two apart.
+fn pool_ends_in_a_step(
+    image: &Image,
+    camera: &Camera,
+    global: &GlobalTransform,
+    _: Option<&Image>,
+) -> Result<String, String> {
+    let (share, note) = pool_edge_step(image, camera, global)?;
+    if share > 0.25 {
         Ok(note)
     } else {
         Err(note)
