@@ -21,9 +21,11 @@
 //! border shows them, as [`across`], whenever either chunk's light changes. A
 //! neighbour that isn't loaded shows them nothing.
 
+use std::cell::RefCell;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
+use bevy::platform::collections::HashMap;
 use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
@@ -295,12 +297,54 @@ pub(crate) struct ChunkBorders {
     pub colors: Option<[BorderPlane; 6]>,
 }
 
+thread_local! {
+    /// Each thread's border planes that hold one texel throughout, by
+    /// precision and the sky and voxel levels of that texel, built once and
+    /// shared.
+    static UNIFORM_PLANES: RefCell<HashMap<(bool, u8, u8), BorderPlane>> =
+        RefCell::new(HashMap::default());
+    /// Each thread's colour shell plane of white, built once and shared.
+    static WHITE_COLORS: BorderPlane =
+        BorderPlane::new(vec![0; PLANE_TEXELS * COLOR_TEXEL_BYTES].into_boxed_slice());
+}
+
 impl ChunkBorders {
     /// The border planes of `light`, with border colours if `colors`, the
     /// packed light colour of each emissive material index, is given.
+    ///
+    /// A face whose plane holds one texel throughout, such as the face of a
+    /// solid or unlit chunk, or of a chunk of air lit evenly, with no
+    /// emissive voxel on it, shares a plane built once.
     pub fn of(light: &ChunkLight, colors: Option<&[u16]>) -> Self {
-        let levels = Face::ALL
-            .map(|face| BorderPlane::new(border_plane(light, face, light.precision)));
+        let lamps = Face::ALL.map(|face| {
+            let mut on = false;
+            for_lamps_on(&light.inputs.emissive, face, |_, _, _| on = true);
+            on
+        });
+        let uniform = match (&light.inputs.occupancy, &light.sky, &light.voxel) {
+            (Occupancy::Solid, _, _) => Some((0, 0)),
+            (_, ChunkLevels::Uniform(0), ChunkLevels::Uniform(0)) => Some((0, 0)),
+            (Occupancy::Open, ChunkLevels::Uniform(sky), ChunkLevels::Uniform(voxel)) => {
+                Some((*sky, *voxel))
+            }
+            _ => None,
+        };
+        let levels = Face::ALL.map(|face| match uniform {
+            Some((sky, voxel)) if !lamps[face as usize] => {
+                let key = (light.precision == LightPrecision::Steps256, sky, voxel);
+                UNIFORM_PLANES.with_borrow_mut(|planes| {
+                    planes
+                        .entry(key)
+                        .or_insert_with(|| {
+                            BorderPlane::new(border_plane(light, face, light.precision))
+                        })
+                        .clone()
+                })
+            }
+            _ => BorderPlane::new(border_plane(light, face, light.precision)),
+        });
+        let white = matches!(light.voxel, ChunkLevels::Uniform(0))
+            || light.color == ChunkColor::White;
         let colors = colors.map(|colors| {
             let lamp_color = |material: u16| {
                 colors
@@ -308,7 +352,13 @@ impl ChunkBorders {
                     .copied()
                     .unwrap_or(super::color::WHITE)
             };
-            Face::ALL.map(|face| BorderPlane::new(border_colors(light, face, lamp_color)))
+            Face::ALL.map(|face| {
+                if white && !lamps[face as usize] {
+                    WHITE_COLORS.with(BorderPlane::clone)
+                } else {
+                    BorderPlane::new(border_colors(light, face, lamp_color))
+                }
+            })
         });
         Self {
             precision: light.precision,
@@ -1237,6 +1287,47 @@ fn for_lamps_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn border_planes_shared_between_chunks_hold_what_each_chunks_own_would() {
+        let precision = LightPrecision::default();
+        let light = |occupancy: Occupancy, sky: u8, voxel: u8| ChunkLight {
+            inputs: Arc::new(LightInputs {
+                occupancy,
+                emissive: Default::default(),
+                columns: crate::light::sky::ColumnAnswer::none(),
+                ring: false,
+            }),
+            sky: ChunkLevels::Uniform(sky),
+            voxel: ChunkLevels::Uniform(voxel),
+            color: ChunkColor::White,
+            borders: Default::default(),
+            precision,
+        };
+        let mut mixed = Occupancy::Open;
+        mixed.set(0, 0, 0, true);
+        mixed.normalize();
+        for light in [
+            light(Occupancy::Solid, 15, 3),
+            light(Occupancy::Open, 15, 3),
+            light(Occupancy::Open, 9, 0),
+            light(mixed, 0, 0),
+        ] {
+            // Once to build the shared planes, once to take them.
+            for _ in 0..2 {
+                let borders = ChunkBorders::of(&light, Some(&[]));
+                for face in Face::ALL {
+                    let own = border_plane(&light, face, precision);
+                    assert_eq!(*borders.levels[face as usize].plane, *own);
+                    assert_eq!(borders.levels[face as usize].hash, plane_hash(&own));
+                    let colors =
+                        border_colors(&light, face, |_| super::super::color::WHITE);
+                    let shared = &borders.colors.as_ref().unwrap()[face as usize];
+                    assert_eq!(*shared.plane, *colors);
+                }
+            }
+        }
+    }
 
     #[test]
     fn each_shell_cell_lies_in_front_of_its_border_voxel() {

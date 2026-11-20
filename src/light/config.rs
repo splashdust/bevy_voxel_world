@@ -73,13 +73,16 @@ use bevy::reflect::Reflect;
 /// is false until every relight has landed.
 ///
 /// A change of an emissive material's light colour alone relights only the
-/// chunks whose light box holds an emissive voxel of that material: see
+/// chunks that hold an emissive voxel of that material or have one in the 26
+/// chunks around them: see
 /// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials).
 ///
 /// A chunk of air with no solid beside it isn't relit, so
 /// [`VoxelWorld::light_at`](crate::prelude::VoxelWorld::light_at) there can
 /// read light from the old settings. A chunk above LOD level 0 takes the new
-/// settings only when its chunk task runs again.
+/// settings only when its chunk task runs again, except for a change of
+/// precision or of the emissive list, which solves it again: see
+/// [`emissive_materials`](crate::prelude::VoxelWorldConfig::emissive_materials).
 ///
 /// Whether `light_propagation` returns `None`, and [`shown`](Self::shown), are
 /// read once at plugin build: changing either later logs a warning once and
@@ -1041,7 +1044,7 @@ impl LevelCurve {
     pub fn exponential_to_black(base: f32) -> Self {
         let exponential = Self::exponential(base);
         let floor = exponential.brightness[1];
-        if 1.0 - floor <= f32::EPSILON {
+        if (1.0 - floor).abs() <= f32::EPSILON {
             return Self::from_fn(|level| level.saturating_sub(1) as f32 / 14.0);
         }
         Self::from_fn(|level| {

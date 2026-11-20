@@ -350,21 +350,23 @@ pub(crate) fn relight_edits<C: VoxelWorldConfig>(
                 .iter()
                 .position(|emitter| emitter.at() == (x, y, z));
             let now = emitter_of(new).map(|emitter| EmissiveVoxel::new(x, y, z, emitter));
+            let before = was.map(|index| emissive[index]);
+            if before == now {
+                continue;
+            }
             // In a world whose light is all white, a swap between emissive
-            // materials of one level changes no light.
-            let changed = if emission.is_colored() {
-                was.map(|index| emissive[index]) != now
-            } else {
-                was.map(|index| emissive[index].level()) != now.map(EmissiveVoxel::level)
-            };
-            if changed {
-                if let Some(index) = was {
-                    emissive.swap_remove(index);
-                }
-                if let Some(emitter) = now {
-                    emissive.push(emitter);
-                }
+            // materials of one level changes no light, but the inputs still
+            // take the new material, for a later recolour to find.
+            if emission.is_colored()
+                || before.map(EmissiveVoxel::level) != now.map(EmissiveVoxel::level)
+            {
                 relight.insert(*position);
+            }
+            if let Some(index) = was {
+                emissive.swap_remove(index);
+            }
+            if let Some(emitter) = now {
+                emissive.push(emitter);
             }
         }
         occupancy.normalize();

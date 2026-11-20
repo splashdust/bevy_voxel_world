@@ -86,7 +86,7 @@ use bevy::platform::collections::HashMap;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use super::color::{mix_weighted, mixing_weight, pack, unpack, EmissionTable, WHITE};
+use super::color::{EmissionTable, RunMixer, WHITE};
 use super::config::{LightPrecision, LightShape};
 use super::faces::Face;
 use super::kernel::{LightBox, Plane, Row, Seed, TwoWords, MAX_ONE_WORD_REACH};
@@ -659,38 +659,14 @@ fn spread_colors<I>(
             .color_runs
             .fetch_add(runs.len() as u64, Ordering::Relaxed);
     }
-    let precision = scale.precision();
-    let weights: Vec<f32> = (0..=precision.top())
-        .map(|steps| mixing_weight(precision.level_of(steps)))
-        .collect();
-    let unpacked: Vec<LinearRgba> = colors.iter().map(|color| unpack(*color)).collect();
+    let mixer = RunMixer::new(colors, scale.precision());
     let mut levels = vec![0; SLOT_TEXELS];
     let mut packed = vec![WHITE; SLOT_TEXELS];
     for texel in 0..SLOT_TEXELS {
-        let (mut top, mut lit, mut only) = (0, 0, 0);
-        for (run, run_levels) in runs.iter().enumerate() {
-            if run_levels[texel] > 0 {
-                top = top.max(run_levels[texel]);
-                lit += 1;
-                only = run;
-            }
+        if let Some((top, color)) = mixer.mix(|run| runs[run][texel]) {
+            levels[texel] = top;
+            packed[texel] = color;
         }
-        if lit == 0 {
-            continue;
-        }
-        levels[texel] = top;
-        packed[texel] = if lit == 1 {
-            colors[only]
-        } else {
-            pack(mix_weighted(
-                runs.iter()
-                    .zip(&unpacked)
-                    .filter(|(run_levels, _)| run_levels[texel] > 0)
-                    .map(|(run_levels, color)| {
-                        (*color, weights[run_levels[texel] as usize])
-                    }),
-            ))
-        };
     }
     (levels, packed)
 }

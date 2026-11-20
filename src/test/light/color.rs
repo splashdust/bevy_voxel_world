@@ -368,7 +368,7 @@ fn turning_coloured_and_back_at_runtime_gains_and_loses_light_color() {
 }
 
 #[test]
-fn only_a_running_worlds_first_flip_waits_on_pipelines() {
+fn each_flip_of_a_running_world_waits_on_pipelines() {
     let mut world = lamps(vec![(MIDDLE, ORANGE_LAMP)]);
     let colored = world.emissive.clone();
     let white = vec![(ORANGE_LAMP, Emission::level(15.0))];
@@ -388,7 +388,7 @@ fn only_a_running_worlds_first_flip_waits_on_pipelines() {
         app.update();
         waits.push(first_flip_materials::<LampWorld>(app.world()).len());
     }
-    assert_eq!(waits, [1, 0, 0, 0, 0, 0]);
+    assert_eq!(waits, [1, 0, 1, 0, 1, 0]);
 }
 
 #[test]

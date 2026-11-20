@@ -812,9 +812,7 @@ where
 struct ColorBinding<C> {
     bound: AssetId<Image>,
     light_color: bool,
-    /// Whether the def has changed since the world started.
-    flipped: bool,
-    /// The materials whose def first changed this frame, whose new pipelines
+    /// The materials whose def changed this frame, whose new pipelines
     /// the render world waits on.
     first_flip: Vec<UntypedAssetId>,
     _world: PhantomData<C>,
@@ -825,14 +823,13 @@ impl<C: VoxelWorldConfig> ColorBinding<C> {
         Self {
             bound: route.color_texture().id(),
             light_color: route.is_colored(),
-            flipped: false,
             first_flip: Vec::new(),
             _world: PhantomData,
         }
     }
 }
 
-/// The materials of world `C` whose `LIGHT_COLOR` shader def first changed
+/// The materials of world `C` whose `LIGHT_COLOR` shader def changed
 /// this frame.
 #[cfg(test)]
 pub(crate) fn first_flip_materials<C: VoxelWorldConfig>(
@@ -866,8 +863,10 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
         return;
     }
     let old = std::mem::replace(&mut binding.bound, texture.id());
-    let first_flip = light_color != binding.light_color && !binding.flipped;
-    binding.flipped |= light_color != binding.light_color;
+    // Every flip waits, since a view or pipeline key that came since the
+    // last one has never compiled the new def. Pipelines already compiled
+    // cost the wait nothing.
+    let first_flip = light_color != binding.light_color;
     binding.light_color = light_color;
     // Each world has its own placeholder and colour texture, so the materials
     // binding the old texture are this world's: its material, and any earlier
@@ -893,13 +892,13 @@ fn bind_colors<C: VoxelWorldConfig, M: Material>(
     }
 }
 
-/// The materials whose `LIGHT_COLOR` shader def first changed this frame, in
+/// The materials whose `LIGHT_COLOR` shader def changed this frame, in
 /// the render world, from every lit world.
 #[derive(Resource, Default)]
 struct FirstFlipMaterials(Vec<UntypedAssetId>);
 
 /// Sets up the render world to wait on the new pipelines of world `C`'s
-/// chunks in the frame its `LIGHT_COLOR` shader def first changes.
+/// chunks in each frame its `LIGHT_COLOR` shader def changes.
 fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -917,7 +916,7 @@ fn add_first_flip_wait<C: VoxelWorldConfig>(app: &mut App) {
     render_app.add_systems(ExtractSchedule, extract_first_flip::<C>);
 }
 
-/// Takes the materials of world `C` whose def first changed this frame.
+/// Takes the materials of world `C` whose def changed this frame.
 fn extract_first_flip<C: VoxelWorldConfig>(
     binding: Extract<Option<Res<ColorBinding<C>>>>,
     mut flipped: ResMut<FirstFlipMaterials>,
@@ -928,7 +927,7 @@ fn extract_first_flip<C: VoxelWorldConfig>(
 }
 
 /// Waits for the pipelines of the main pass, the prepass and shadows that
-/// draw the chunks of a material whose def first changed this frame.
+/// draw the chunks of a material whose def changed this frame.
 ///
 /// It runs after Bevy specializes the chunks for their new key, and takes
 /// the pipeline ids from Bevy's caches of specialized pipelines, for every

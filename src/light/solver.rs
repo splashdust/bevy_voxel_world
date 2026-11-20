@@ -73,9 +73,7 @@ use std::time::Duration;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
-use super::color::{
-    mix_weighted, mixing_weight, pack, unpack, ChunkColor, EmissionTable, Emitter, WHITE,
-};
+use super::color::{unpack, ChunkColor, EmissionTable, Emitter, RunMixer, WHITE};
 use super::config::LightPrecision;
 use super::config::LightShape;
 use super::faces::{could_reach_sooner, run_hashes, BorderLevels, Face, FaceHashes};
@@ -1001,11 +999,9 @@ fn mixed(
     occupancy: &Occupancy,
     precision: LightPrecision,
 ) -> (ChunkLevels, [u64; 6], ChunkColor, BorderLevels) {
-    let weights: Vec<f32> = (0..=precision.top())
-        .map(|steps| mixing_weight(precision.level_of(steps)))
-        .collect();
     let levels: Vec<Vec<u8>> = runs.iter().map(|run| voxel_levels(&run.planes)).collect();
-    let colors: Vec<LinearRgba> = runs.iter().map(|run| unpack(run.color)).collect();
+    let run_colors: Vec<u16> = runs.iter().map(|run| run.color).collect();
+    let mixer = RunMixer::new(&run_colors, precision);
     let mut packed = vec![WHITE; CHUNK * CHUNK * CHUNK];
     let mut planes = empty_planes(precision);
     let (mut one, mut uniform) = (None, true);
@@ -1015,28 +1011,10 @@ fn mixed(
             let z = open.trailing_zeros() as usize;
             open &= open - 1;
             let index = column + z * CHUNK * CHUNK;
-            let (mut top, mut lit, mut only) = (0, 0, 0);
-            for (run, levels) in levels.iter().enumerate() {
-                if levels[index] > 0 {
-                    top = top.max(levels[index]);
-                    lit += 1;
-                    only = run;
-                }
-            }
-            if lit == 0 {
+            let Some((top, color)) = mixer.mix(|run| levels[run][index]) else {
                 continue;
-            }
-            packed[index] = if lit == 1 {
-                runs[only].color
-            } else {
-                pack(mix_weighted(
-                    levels
-                        .iter()
-                        .zip(&colors)
-                        .filter(|(levels, _)| levels[index] > 0)
-                        .map(|(levels, color)| (*color, weights[levels[index] as usize])),
-                ))
             };
+            packed[index] = color;
             // Whether every lit voxel has the one light colour.
             uniform &= *one.get_or_insert(packed[index]) == packed[index];
             for (bit, plane) in planes.iter_mut().enumerate() {

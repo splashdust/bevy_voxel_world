@@ -53,8 +53,9 @@
 //!     mixing never darkens;
 //!   - those rooms' chunks take colour slots, and the colour texture grows
 //!     to hold them at least once after the GPU has it, so the pictures
-//!     read colours it copied into the grown texture. On WebGL2, wgpu
-//!     copies a 3D texture one layer at a time.
+//!     read colours it copied into the grown texture. wgpu's GL backend
+//!     copies only a 3D texture's first layer, so on GL the route writes
+//!     the grown texture again instead.
 //! - In a world whose colour rooms' lamps are white until it has settled,
 //!   with sky light off, giving the lamps their colours draws every chunk in
 //!   the red room's picture, which holds no pixel of the blue clear colour,

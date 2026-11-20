@@ -83,7 +83,9 @@
 //! doubles as chunks take more, up to one colour slot per slot, so
 //! `slot_capacity` bounds them. Each new texture is filled on the GPU from
 //! the old one, so no colour slot moves and no tag or entry changes, and
-//! materials bind the new one from then on. It never shrinks. The device's
+//! materials bind the new one from then on. wgpu's GL backend copies only
+//! a 3D texture's first layer, so there every entry and colour slot is
+//! written into the new texture again instead. It never shrinks. The device's
 //! largest 3D texture bounds it too, and past that the colour slots give
 //! way as above. Its GPU memory grows with the most chunks at once whose
 //! faces see more than one light colour.
@@ -204,7 +206,8 @@ use bevy::render::{
         TexelCopyTextureInfo, Texture, TextureAspect, TextureDimension, TextureFormat,
         TextureUsages,
     },
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
+    settings::Backends,
     texture::GpuImage,
     ExtractSchedule, MainWorld, Render, RenderApp, RenderSystems,
 };
@@ -295,6 +298,10 @@ pub(crate) struct SlotCounters {
     pub planes_built: u64,
     /// Colour shell planes built on the main thread from a neighbour's light.
     pub color_planes_built: u64,
+    /// Colour shell planes written alone, after a neighbour's light changed.
+    pub color_plane_writes: u64,
+    /// Colour slots written whole.
+    pub color_full_writes: u64,
     /// Times a chunk's faces were read across one face again, after its
     /// neighbour there landed light: see [`across`].
     pub faces_read: u64,
@@ -369,24 +376,38 @@ struct RouteChunk {
     /// What its faces read across each face, by [`Face`].
     across: [FacesSee; 6],
     slot: Option<u32>,
-    /// A hash of each shell plane in the slot, by [`Face`], or `None` for a
-    /// plane of zeros.
-    shell: [Option<u64>; 6],
-    /// Each shell plane last built for the slot, by [`Face`], with the light
-    /// it was built from.
-    planes: [Option<BuiltPlane>; 6],
+    /// The shell in its slot.
+    shell: Shell,
     /// Its colour slot, which it holds only while it holds a slot.
     color_slot: Option<u32>,
-    /// A hash of each colour shell plane in the colour slot, by [`Face`], or
-    /// `None` for a plane of zeros.
-    color_shell: [Option<u64>; 6],
-    /// Each colour shell plane last built for the colour slot, by [`Face`],
-    /// with the light it was built from.
-    color_planes: [Option<BuiltPlane>; 6],
+    /// The shell in its colour slot.
+    color_shell: Shell,
     /// The hashes of the border planes its light last landed with, if its
     /// solve built them.
     border_hashes: Option<BorderHashes>,
     tag: u32,
+}
+
+/// Which of a level-0 chunk's slots: its slot, holding light levels, or its
+/// colour slot, holding light colours.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SlotKind {
+    Light,
+    Color,
+}
+
+/// What a level-0 chunk keeps of the shell in one of its slots.
+///
+/// A neighbour that's gone leaves its last plane in the slot, and here,
+/// until the slot is given back: see [`LightRoute::forget`].
+#[derive(Default)]
+struct Shell {
+    /// A hash of each shell plane in the slot, by [`Face`], or `None` for a
+    /// plane of zeros.
+    hashes: [Option<u64>; 6],
+    /// Each shell plane last built for the slot, by [`Face`], with the light
+    /// it was built from.
+    planes: [Option<BuiltPlane>; 6],
 }
 
 /// A shell plane in a slot, with the light of the neighbour it came from.
@@ -524,6 +545,10 @@ pub(crate) struct LightRoute<C> {
     /// The device's largest 3D texture side, if there's a device, noted
     /// before the first slot is taken.
     max_side: Option<u32>,
+    /// Whether the device's backend copies every layer of a 3D texture.
+    /// wgpu's GL backend copies only the first, so a colour texture that
+    /// grows there is written again from the route instead.
+    copies_3d: bool,
     /// The packed light colour of each material index of the world's
     /// emission table, or `None` in a world whose emissive materials all give
     /// white, where every chunk shows white.
@@ -654,6 +679,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             color_starved: HashSet::default(),
             color_grown_from: None,
             max_side: None,
+            copies_3d: true,
             light_colors: None,
             precision: config.precision,
             slots: SlotPool::new(config.slot_capacity),
@@ -683,6 +709,13 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         self.set_max_side(device.map(|device| device.limits().max_texture_dimension_3d));
     }
 
+    /// Notes whether the adapter's backend copies every layer of a 3D
+    /// texture: every backend but GL does.
+    pub fn set_adapter(&mut self, adapter: Option<&RenderAdapterInfo>) {
+        self.copies_3d =
+            adapter.is_none_or(|adapter| Backends::from(adapter.backend) != Backends::GL);
+    }
+
     /// Notes `side` as the device's largest 3D texture side, as
     /// [`set_device`](Self::set_device) does. Once a slot is taken this does
     /// nothing.
@@ -710,10 +743,40 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// show white everywhere with `None`. Chunks already placed keep what
     /// they show until their light lands again.
     pub fn set_light_colors(&mut self, colors: Option<&[u16]>) {
+        let flipped = self.light_colors.is_some() != colors.is_some();
         self.light_colors = colors.map(Box::from);
         // Colour shell planes hold emissive voxels' colours from the list.
         for chunk in self.chunks.values_mut() {
-            chunk.color_planes = Default::default();
+            chunk.color_shell.planes = Default::default();
+        }
+        if !flipped {
+            return;
+        }
+        // What chunks' faces see was worked out with colours or without,
+        // and a chunk whose light lands again doesn't always work it out
+        // again.
+        let colored = self.is_colored();
+        let ids: Vec<RouteId> = self.chunks.keys().copied().collect();
+        for id in ids {
+            let chunk = &self.chunks[&id];
+            let Some(light) = chunk.light.clone() else {
+                continue;
+            };
+            let key = chunk.key;
+            let across = Face::ALL.map(|face| {
+                self.neighbour_light(key, face)
+                    .map_or(FacesSee::default(), |neighbour| {
+                        across(&light.inputs, face, &neighbour, self.precision, colored)
+                    })
+            });
+            let own_color = if colored {
+                own_colors_seen(&light, |material| self.lamp_color(material))
+            } else {
+                Seen::Nothing
+            };
+            let chunk = self.chunks.get_mut(&id).unwrap();
+            chunk.across = across;
+            chunk.own.color = own_color;
         }
     }
 
@@ -917,11 +980,9 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                 across.voxel = convert(across.voxel);
             }
             chunk.slot = None;
-            chunk.shell = [None; 6];
-            chunk.planes = Default::default();
+            chunk.shell = Shell::default();
             chunk.color_slot = None;
-            chunk.color_shell = [None; 6];
-            chunk.color_planes = Default::default();
+            chunk.color_shell = Shell::default();
             chunk.bytes = None;
             chunk.color_bytes = None;
             if starved && chunk.placed() {
@@ -1050,14 +1111,46 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     /// Takes the colour texture made for the route. One that replaces a
     /// smaller one, after chunks took more colour slots, is filled on the GPU
     /// from the old one in the frame it's first written, so no entry or
-    /// colour slot moves. The old one waits in
-    /// [`take_released`](Self::take_released).
+    /// colour slot moves. On a backend that can't copy a 3D texture, every
+    /// entry and colour slot is written into it again instead. The old one
+    /// waits in [`take_released`](Self::take_released).
     pub fn color_texture_made(&mut self, texture: Handle<Image>) {
         if let Some(old) = self.color_texture.replace(texture) {
-            self.color_grown_from = Some(old.id());
+            if self.copies_3d {
+                self.color_grown_from = Some(old.id());
+            } else {
+                self.write_colors_again();
+            }
             self.released.push(old);
         }
         self.color_texture_wanted = false;
+    }
+
+    /// Queues every entry other than white, and every colour slot held, to
+    /// be written whole. Its cost grows with the entries and colour slots
+    /// held.
+    fn write_colors_again(&mut self) {
+        self.entry_uploads.extend(self.entries_held.iter());
+        let held: Vec<(RouteId, u32)> = self
+            .chunks
+            .iter()
+            .filter_map(|(id, chunk)| Some((*id, chunk.color_slot?)))
+            .collect();
+        for (id, slot) in held {
+            if let Some((light, _)) = self.placed_light(id) {
+                self.write_full(id, slot, SlotKind::Color, &light);
+            }
+        }
+        for chunk in self.coarse.values() {
+            if let (Some(slot), Some(bytes)) = (chunk.color_slot, &chunk.color.bytes) {
+                self.color_uploads.insert(slot, Upload::Full(bytes.clone()));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_copies_3d(&mut self, copies_3d: bool) {
+        self.copies_3d = copies_3d;
     }
 
     /// The packed light colour queued for the entry of `slot` and not yet
@@ -1241,7 +1334,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         let slot = chunk.slot.take();
         chunk.bytes = None;
         chunk.color_bytes = None;
-        chunk.planes = Default::default();
+        chunk.shell = Shell::default();
         if let Some(slot) = slot {
             self.free_slot(slot);
         }
@@ -1255,21 +1348,29 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
 
     /// Takes the light that landed for the light entry at `key`, which
     /// the chunks beside it read through their shells, as they read a
-    /// chunk's.
-    pub fn entry_landed(&mut self, key: GridKey, light: Arc<ChunkLight>) {
+    /// chunk's, with the border planes its solve built, if it built them.
+    pub fn entry_landed(
+        &mut self,
+        key: GridKey,
+        light: Arc<ChunkLight>,
+        borders: Option<ChunkBorders>,
+    ) {
         if self.at.contains_key(&key) {
             return;
         }
         self.entries.insert(key, light.clone());
         #[cfg(feature = "sub_grids")]
         self.tag_map_touch(key);
+        self.following = borders.map(|borders| (light.clone(), borders));
         self.neighbours_follow(key, &light, [false; 6]);
+        self.following = None;
     }
 
     /// Forgets the light entry at `key`. The shells beside it keep its
     /// last planes, as they keep a despawned chunk's.
     pub fn entry_dropped(&mut self, key: GridKey) {
-        if self.entries.remove(&key).is_some() {
+        if let Some(light) = self.entries.remove(&key) {
+            self.keep_color_planes(key, &light);
             #[cfg(feature = "sub_grids")]
             self.tag_map_touch(key);
         }
@@ -1385,8 +1486,40 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         if let Some(slot) = chunk.color_slot {
             self.color_slots.give_back(slot);
         }
+        if let Some(light) = &chunk.light {
+            self.keep_color_planes(chunk.key, light);
+        }
         #[cfg(feature = "sub_grids")]
         self.tag_map_forget(id, chunk.key);
+    }
+
+    /// Gives each face neighbour of the chunk or light entry at `key` that
+    /// holds a slot the colour shell plane `light` puts across their face, in
+    /// a coloured world, if it hasn't built it: `light` is going, and its
+    /// last planes stay in the shells beside it.
+    fn keep_color_planes(&mut self, key: GridKey, light: &Arc<ChunkLight>) {
+        if !self.is_colored() {
+            return;
+        }
+        for face in Face::ALL {
+            let Some(id) = self.at.get(&(key + face.offset())).copied() else {
+                continue;
+            };
+            let back = face.opposite() as usize;
+            let kept = self.chunks.get(&id).is_none_or(|chunk| {
+                chunk.slot.is_none()
+                    || chunk.color_shell.planes[back]
+                        .as_ref()
+                        .is_some_and(|built| built.is_from(light))
+            });
+            if kept {
+                continue;
+            }
+            let plane = self.border_plane_of(SlotKind::Color, light, face);
+            if let Some(chunk) = self.chunks.get_mut(&id) {
+                chunk.color_shell.planes[back] = Some(BuiltPlane::new(light, plane));
+            }
+        }
     }
 
     /// Takes the light that landed for the coarse chunk `entity` with `key`:
@@ -1436,7 +1569,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
     pub fn shell_copy_bytes(&self) -> usize {
         self.chunks
             .values()
-            .flat_map(|chunk| chunk.planes.iter().chain(&chunk.color_planes))
+            .flat_map(|chunk| chunk.shell.planes.iter().chain(&chunk.color_shell.planes))
             .flatten()
             .map(|built| built.plane.plane.len())
             .sum()
@@ -1630,14 +1763,14 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         } else if sees.needs_slot() {
             match (slot, face) {
                 (Some(slot), Some(face)) => {
-                    self.write_plane(id, slot, face);
+                    self.write_plane(id, slot, SlotKind::Light, face);
                     Shows::Slot(
                         slot,
                         self.settle_color_slot(id, &light, &sees, Some(face)),
                     )
                 }
                 (Some(slot), None) => {
-                    self.write_full(id, slot, &light);
+                    self.write_full(id, slot, SlotKind::Light, &light);
                     Shows::Slot(slot, self.settle_color_slot(id, &light, &sees, None))
                 }
                 (None, _) => {
@@ -1647,7 +1780,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
                             if face.is_some() {
                                 self.counters.late_allocations += 1;
                             }
-                            self.write_full(id, slot, &light);
+                            self.write_full(id, slot, SlotKind::Light, &light);
                             Shows::Slot(
                                 slot,
                                 self.settle_color_slot(id, &light, &sees, None),
@@ -1674,7 +1807,7 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         chunk.color_bytes = None;
         if chunk.slot.is_none() {
             chunk.bytes = None;
-            chunk.planes = Default::default();
+            chunk.shell = Shell::default();
             if self.free_color_slot(id) {
                 self.counters.color_given_back += 1;
             }
@@ -1721,21 +1854,33 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
             }
         };
         match face {
-            Some(face) if !whole => self.write_color_plane(id, slot, face),
-            _ => self.write_color_full(id, slot, light),
+            Some(face) if !whole => self.write_plane(id, slot, SlotKind::Color, face),
+            _ => self.write_full(id, slot, SlotKind::Color, light),
         }
         color_slot_entry(slot)
     }
 
     /// Gives back the colour slot of the level-0 chunk `id`, if it holds
     /// one, and stops it waiting for one. Returns whether it held one.
+    ///
+    /// While it holds a slot, it keeps the colour shell planes of
+    /// neighbours that are gone, as its slot keeps their shell planes, for a
+    /// colour slot it takes later.
     fn free_color_slot(&mut self, id: RouteId) -> bool {
         self.color_starved.remove(&id);
-        let Some(chunk) = self.chunks.get_mut(&id) else {
+        let Some(chunk) = self.chunks.get(&id) else {
             return false;
         };
-        chunk.color_shell = [None; 6];
-        chunk.color_planes = Default::default();
+        let key = chunk.key;
+        let gone = match chunk.slot {
+            Some(_) => Face::ALL.map(|face| self.neighbour_light(key, face).is_none()),
+            None => [false; 6],
+        };
+        let chunk = self.chunks.get_mut(&id).unwrap();
+        chunk.color_shell.hashes = [None; 6];
+        for face in Face::ALL.into_iter().filter(|face| !gone[*face as usize]) {
+            chunk.color_shell.planes[face as usize] = None;
+        }
         let Some(slot) = chunk.color_slot.take() else {
             return false;
         };
@@ -1975,171 +2120,134 @@ impl<C: VoxelWorldConfig> LightRoute<C> {
         }
     }
 
-    /// Queues the whole slot of the level-0 chunk `id`: its own voxels' light
-    /// and its neighbours' border planes.
-    fn write_full(&mut self, id: RouteId, slot: u32, light: &ChunkLight) {
-        let key = self.chunks[&id].key;
-        let mut bytes = self
-            .chunks
-            .get_mut(&id)
-            .unwrap()
-            .bytes
-            .take()
-            .unwrap_or_else(|| slot_bytes(light));
-        let precision = self.precision;
-        let mut shell = [None; 6];
-        for face in Face::ALL {
-            let neighbour = self.neighbour_light(key, face);
-            let built = &mut self.chunks.get_mut(&id).unwrap().planes[face as usize];
-            let Some(neighbour) = neighbour else {
-                *built = None;
-                continue;
-            };
-            if !built
-                .as_ref()
-                .is_some_and(|built| built.is_from(&neighbour))
-            {
-                let plane = border_plane(&neighbour, face.opposite(), precision);
-                *built = Some(BuiltPlane::new(&neighbour, BorderPlane::new(plane)));
-                self.counters.planes_built += 1;
-            }
-            let built = &built.as_ref().unwrap().plane;
-            write_shell(&mut bytes, face, Some(&built.plane), texel_bytes(precision));
-            shell[face as usize] = Some(built.hash);
-        }
-        self.chunks.get_mut(&id).unwrap().shell = shell;
-        self.uploads.insert(slot, Upload::Full(bytes));
-        self.counters.full_writes += 1;
-    }
-
-    /// Queues the shell plane of the level-0 chunk `id` in front of `face`,
-    /// if the neighbour's border plane there changed.
-    fn write_plane(&mut self, id: RouteId, slot: u32, face: Face) {
-        let key = self.chunks[&id].key;
-        let Some(neighbour) = self.neighbour_light(key, face) else {
-            return;
-        };
-        if self.chunks[&id].planes[face as usize]
-            .as_ref()
-            .is_some_and(|built| built.is_from(&neighbour))
-        {
-            return;
-        }
-        let precision = self.precision;
-        let given = self
-            .following_borders(&neighbour)
-            .map(|borders| borders.levels[face.opposite() as usize].clone());
-        let plane = given.unwrap_or_else(|| {
-            self.counters.planes_built += 1;
-            BorderPlane::new(border_plane(&neighbour, face.opposite(), precision))
-        });
-        let hash = Some(plane.hash);
-        let chunk = self.chunks.get_mut(&id).unwrap();
-        chunk.planes[face as usize] = Some(BuiltPlane::new(&neighbour, plane.clone()));
-        let shell = &mut chunk.shell[face as usize];
-        if *shell == hash {
-            return;
-        }
-        *shell = hash;
-        self.counters.plane_writes += 1;
-        queue_plane(
-            &mut self.uploads,
-            slot,
-            face,
-            Box::from(&plane.plane[..]),
-            texel_bytes(precision),
-        );
-    }
-
-    /// Queues the whole colour slot of the level-0 chunk `id`, lit by
-    /// `light`: its own voxels' light colours and its neighbours' colour
-    /// shell planes.
+    /// Queues the whole slot of `kind` of the level-0 chunk `id`, lit by
+    /// `light`: its own voxels' part and its neighbours' shell planes. A
+    /// neighbour that's gone leaves its last plane, as it does in a plane
+    /// write.
     ///
-    /// Its cost grows with the chunk's lit voxels and its neighbours' border
-    /// voxels.
-    fn write_color_full(&mut self, id: RouteId, slot: u32, light: &ChunkLight) {
-        let key = self.chunks[&id].key;
-        let mut bytes = self
-            .chunks
-            .get_mut(&id)
-            .unwrap()
-            .color_bytes
-            .take()
-            .unwrap_or_else(|| {
-                color_slot_bytes(light, |material| self.lamp_color(material))
-            });
-        let colors = self.light_colors.clone();
-        let lamp_color = |material: u16| {
-            colors
-                .as_ref()
-                .and_then(|colors| colors.get(material as usize).copied())
-                .unwrap_or(WHITE)
+    /// Its cost grows with the chunk's voxels, and with its neighbours'
+    /// border voxels where their planes weren't built already.
+    fn write_full(&mut self, id: RouteId, slot: u32, kind: SlotKind, light: &ChunkLight) {
+        let chunk = self.chunks.get_mut(&id).unwrap();
+        let (key, own) = match kind {
+            SlotKind::Light => (chunk.key, chunk.bytes.take()),
+            SlotKind::Color => (chunk.key, chunk.color_bytes.take()),
         };
-        let mut shell = [None; 6];
-        for face in Face::ALL {
-            let neighbour = self.neighbour_light(key, face);
-            let built =
-                &mut self.chunks.get_mut(&id).unwrap().color_planes[face as usize];
-            let Some(neighbour) = neighbour else {
-                *built = None;
-                continue;
-            };
-            if !built
-                .as_ref()
-                .is_some_and(|built| built.is_from(&neighbour))
-            {
-                let plane = border_colors(&neighbour, face.opposite(), lamp_color);
-                *built = Some(BuiltPlane::new(&neighbour, BorderPlane::new(plane)));
-                self.counters.color_planes_built += 1;
+        let mut bytes = own.unwrap_or_else(|| match kind {
+            SlotKind::Light => slot_bytes(light),
+            SlotKind::Color => {
+                color_slot_bytes(light, |material| self.lamp_color(material))
             }
-            let built = &built.as_ref().unwrap().plane;
-            write_shell(&mut bytes, face, Some(&built.plane), COLOR_TEXEL_BYTES);
-            shell[face as usize] = Some(built.hash);
+        });
+        let wide = self.texel_width(kind);
+        let mut hashes = [None; 6];
+        for face in Face::ALL {
+            let index = face as usize;
+            if let Some(neighbour) = self.neighbour_light(key, face) {
+                let built = self.chunks[&id].shell(kind).planes[index]
+                    .as_ref()
+                    .is_some_and(|built| built.is_from(&neighbour));
+                if !built {
+                    let plane = self.border_plane_of(kind, &neighbour, face.opposite());
+                    self.chunks.get_mut(&id).unwrap().shell_mut(kind).planes[index] =
+                        Some(BuiltPlane::new(&neighbour, plane));
+                }
+            }
+            if let Some(built) = &self.chunks[&id].shell(kind).planes[index] {
+                write_shell(&mut bytes, face, Some(&built.plane.plane), wide);
+                hashes[index] = Some(built.plane.hash);
+            }
         }
-        self.chunks.get_mut(&id).unwrap().color_shell = shell;
-        self.color_uploads.insert(slot, Upload::Full(bytes));
+        self.chunks.get_mut(&id).unwrap().shell_mut(kind).hashes = hashes;
+        match kind {
+            SlotKind::Light => {
+                self.uploads.insert(slot, Upload::Full(bytes));
+                self.counters.full_writes += 1;
+            }
+            SlotKind::Color => {
+                self.color_uploads.insert(slot, Upload::Full(bytes));
+                self.counters.color_full_writes += 1;
+            }
+        }
     }
 
-    /// Queues the colour shell plane of the level-0 chunk `id` in front of
-    /// `face`, if the neighbour's border colours there changed.
-    fn write_color_plane(&mut self, id: RouteId, slot: u32, face: Face) {
+    /// Queues the shell plane in front of `face` in the slot of `kind` of
+    /// the level-0 chunk `id`, if the neighbour's border plane there
+    /// changed.
+    fn write_plane(&mut self, id: RouteId, slot: u32, kind: SlotKind, face: Face) {
         let key = self.chunks[&id].key;
         let Some(neighbour) = self.neighbour_light(key, face) else {
             return;
         };
-        if self.chunks[&id].color_planes[face as usize]
+        let index = face as usize;
+        if self.chunks[&id].shell(kind).planes[index]
             .as_ref()
             .is_some_and(|built| built.is_from(&neighbour))
         {
             return;
         }
-        let given = self
-            .following_borders(&neighbour)
-            .and_then(|borders| borders.colors.as_ref())
-            .map(|colors| colors[face.opposite() as usize].clone());
-        let plane = given.unwrap_or_else(|| {
-            self.counters.color_planes_built += 1;
-            let plane = border_colors(&neighbour, face.opposite(), |material| {
-                self.lamp_color(material)
-            });
-            BorderPlane::new(plane)
-        });
+        let plane = self.border_plane_of(kind, &neighbour, face.opposite());
         let hash = Some(plane.hash);
-        let chunk = self.chunks.get_mut(&id).unwrap();
-        chunk.color_planes[face as usize] =
-            Some(BuiltPlane::new(&neighbour, plane.clone()));
-        let shell = &mut chunk.color_shell[face as usize];
-        if *shell == hash {
+        let shell = self.chunks.get_mut(&id).unwrap().shell_mut(kind);
+        shell.planes[index] = Some(BuiltPlane::new(&neighbour, plane.clone()));
+        if shell.hashes[index] == hash {
             return;
         }
-        *shell = hash;
-        queue_plane(
-            &mut self.color_uploads,
-            slot,
-            face,
-            Box::from(&plane.plane[..]),
-            COLOR_TEXEL_BYTES,
-        );
+        shell.hashes[index] = hash;
+        let wide = self.texel_width(kind);
+        let uploads = match kind {
+            SlotKind::Light => {
+                self.counters.plane_writes += 1;
+                &mut self.uploads
+            }
+            SlotKind::Color => {
+                self.counters.color_plane_writes += 1;
+                &mut self.color_uploads
+            }
+        };
+        queue_plane(uploads, slot, face, Box::from(&plane.plane[..]), wide);
+    }
+
+    /// The plane `neighbour`'s light puts on its `face` into a slot of
+    /// `kind`: the one its solve built, if its neighbours are following it,
+    /// or one built now.
+    fn border_plane_of(
+        &mut self,
+        kind: SlotKind,
+        neighbour: &Arc<ChunkLight>,
+        face: Face,
+    ) -> BorderPlane {
+        let given = self
+            .following_borders(neighbour)
+            .and_then(|borders| match kind {
+                SlotKind::Light => Some(&borders.levels[face as usize]),
+                SlotKind::Color => {
+                    borders.colors.as_ref().map(|colors| &colors[face as usize])
+                }
+            });
+        if let Some(plane) = given {
+            return plane.clone();
+        }
+        match kind {
+            SlotKind::Light => {
+                self.counters.planes_built += 1;
+                BorderPlane::new(border_plane(neighbour, face, self.precision))
+            }
+            SlotKind::Color => {
+                self.counters.color_planes_built += 1;
+                BorderPlane::new(border_colors(neighbour, face, |material| {
+                    self.lamp_color(material)
+                }))
+            }
+        }
+    }
+
+    /// How many bytes a texel of a slot of `kind` has.
+    fn texel_width(&self, kind: SlotKind) -> usize {
+        match kind {
+            SlotKind::Light => texel_bytes(self.precision),
+            SlotKind::Color => COLOR_TEXEL_BYTES,
+        }
     }
 
     /// The border planes of `light`, if it's the light whose neighbours are
@@ -2599,7 +2707,7 @@ impl<C: VoxelWorldConfig> Holders<Tagged> for LightRoute<C> {
                 let shows = self.most_common_shows(id);
                 let chunk = self.chunks.get_mut(&id).unwrap();
                 chunk.slot = None;
-                chunk.planes = Default::default();
+                chunk.shell = Shell::default();
                 if self.free_color_slot(id) {
                     self.counters.color_given_back += 1;
                 }
@@ -2641,8 +2749,7 @@ impl<C: VoxelWorldConfig> Holders<ColorHolder> for LightRoute<C> {
         };
         let chunk = self.chunks.get_mut(&id).unwrap();
         chunk.color_slot = None;
-        chunk.color_shell = [None; 6];
-        chunk.color_planes = Default::default();
+        chunk.color_shell = Shell::default();
         let Some(slot) = chunk.slot else {
             return;
         };
@@ -2669,13 +2776,26 @@ impl RouteChunk {
             color_bytes: None,
             across: [FacesSee::default(); 6],
             slot: None,
-            shell: [None; 6],
-            planes: Default::default(),
+            shell: Shell::default(),
             color_slot: None,
-            color_shell: [None; 6],
-            color_planes: Default::default(),
+            color_shell: Shell::default(),
             border_hashes: None,
             tag: 0,
+        }
+    }
+
+    /// The shell in its slot of `kind`.
+    fn shell(&self, kind: SlotKind) -> &Shell {
+        match kind {
+            SlotKind::Light => &self.shell,
+            SlotKind::Color => &self.color_shell,
+        }
+    }
+
+    fn shell_mut(&mut self, kind: SlotKind) -> &mut Shell {
+        match kind {
+            SlotKind::Light => &mut self.shell,
+            SlotKind::Color => &mut self.color_shell,
         }
     }
 
@@ -2820,6 +2940,7 @@ pub(crate) fn tag_chunk<C: VoxelWorldConfig>(chunk: &mut EntityCommands) {
         chunk.world_scope(|world| {
             world.resource_scope::<LightRoute<C>, _>(|world, mut route| {
                 route.set_device(world.get_resource::<RenderDevice>());
+                route.set_adapter(world.get_resource::<RenderAdapterInfo>());
                 let tag = route.show(entity, key, coarse);
                 for (changed, tag) in route.take_changed_tags() {
                     if let Ok(mut changed) = world.get_entity_mut(changed) {
@@ -3840,6 +3961,45 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_slot_taken_after_a_neighbour_despawned_holds_its_last_colours_as_the_slot_holds_its_light(
+    ) {
+        let mut route = route();
+        route.set_light_colors(Some(&[pack(LinearRgba::RED)]));
+        let (origin, beside) = (
+            Entity::from_raw_u32(1).unwrap(),
+            Entity::from_raw_u32(2).unwrap(),
+        );
+        let keys = [IVec3::ZERO, IVec3::X].map(in_world);
+        // The origin holds a slot, but its faces see one colour.
+        let (light, own) = light_needing_a_slot();
+        route.light_landed(keys[0], origin, light, own, SlotParts::default(), true);
+        route.show(origin, keys[0], false);
+        let (gone, own) = light_seeing_two_colors();
+        route.light_landed(
+            keys[1],
+            beside,
+            gone.clone(),
+            own,
+            SlotParts::default(),
+            true,
+        );
+        route.show(beside, keys[1], false);
+        assert!(route.chunks[&RouteId::Entity(origin)].slot.is_some());
+        assert!(route.chunks[&RouteId::Entity(origin)].color_slot.is_none());
+
+        route.forget(beside);
+        // New light gives the origin a colour slot, written whole.
+        let (light, own) = light_seeing_two_colors();
+        route.light_landed(keys[0], origin, light, own, SlotParts::default(), true);
+        let chunk = &route.chunks[&RouteId::Entity(origin)];
+        assert!(chunk.color_slot.is_some());
+        let last = BorderPlane::new(border_colors(&gone, Face::NegX, |_| WHITE));
+        let face = Face::PosX as usize;
+        assert_eq!(chunk.color_shell.hashes[face], Some(last.hash));
+        assert!(chunk.shell.hashes[face].is_some());
+    }
+
+    #[test]
     fn light_colours_worked_out_by_the_solve_place_as_those_worked_out_on_landing() {
         let colors = [pack(LinearRgba::BLUE)];
         let (light, own) = light_seeing_two_colors();
@@ -3991,6 +4151,48 @@ mod tests {
             .map(|entity| entry_of(&route, *entity))
             .collect();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn where_the_backend_cant_copy_a_3d_texture_growing_the_colour_texture_writes_every_entry_and_colour_slot_again(
+    ) {
+        let (mut route, entities) = route_with_colored_chunks(None, 3);
+        route.set_copies_3d(false);
+        let mut images = Assets::<Image>::default();
+        route.color_texture_made(images.add(route.color_texture_image()));
+        // The render world takes what was queued.
+        route.entry_uploads.clear();
+        route.color_uploads.clear();
+
+        let (light, own) = light_seeing_two_colors();
+        let grown: Vec<Entity> = [20, 22]
+            .map(|x| {
+                let entity = Entity::from_raw_u32(100 + x).unwrap();
+                let key = in_world(IVec3::new(x as i32, 0, 0));
+                route.light_landed(
+                    key,
+                    entity,
+                    light.clone(),
+                    own,
+                    SlotParts::default(),
+                    true,
+                );
+                route.show(entity, key, false);
+                entity
+            })
+            .into();
+        assert!(route.color_texture_wanted());
+        route.color_texture_made(images.add(route.color_texture_image()));
+        assert!(route.color_grown_from.is_none());
+
+        for entity in entities.iter().chain(&grown) {
+            let (entry, tag) = entry_of(&route, *entity);
+            assert_eq!(entry >> 14, 3);
+            assert_eq!(route.queued_entry(tag & 0xFF_FFFF), Some(entry));
+            assert!(route
+                .queued_color_upload(u32::from(entry & 0x3FFF))
+                .is_some());
+        }
     }
 
     #[test]

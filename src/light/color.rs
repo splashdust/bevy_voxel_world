@@ -165,6 +165,58 @@ pub(crate) fn mixing_weight(level: f32) -> f32 {
     ((MIXING_BASE.powf(15.0 - level) - floor) / (1.0 - floor)).max(0.0)
 }
 
+/// The mixing rule for a solve's per-colour runs: at each voxel, the
+/// brightest run's level, and the light colours of the runs lighting it
+/// mixed by [`mix_weighted`]. A voxel only one run lights takes that run's
+/// light colour as it is. Level-0 and coarse chunks both mix this way.
+pub(crate) struct RunMixer<'a> {
+    colors: &'a [u16],
+    unpacked: Vec<LinearRgba>,
+    /// The [`mixing_weight`] of each level in steps of the precision.
+    weights: Vec<f32>,
+}
+
+impl<'a> RunMixer<'a> {
+    /// A mixer for runs of the packed light colours `colors`, whose levels
+    /// are in steps of `precision`.
+    pub fn new(colors: &'a [u16], precision: super::config::LightPrecision) -> Self {
+        Self {
+            colors,
+            unpacked: colors.iter().map(|color| unpack(*color)).collect(),
+            weights: (0..=precision.top())
+                .map(|steps| mixing_weight(precision.level_of(steps)))
+                .collect(),
+        }
+    }
+
+    /// The level and packed light colour at a voxel where run `i` reaches
+    /// level `level(i)`, or `None` where no run lights it.
+    #[inline]
+    pub fn mix(&self, level: impl Fn(usize) -> u8) -> Option<(u8, u16)> {
+        let (mut top, mut lit, mut only) = (0, 0, 0);
+        for run in 0..self.colors.len() {
+            let level = level(run);
+            if level > 0 {
+                top = top.max(level);
+                lit += 1;
+                only = run;
+            }
+        }
+        match lit {
+            0 => None,
+            1 => Some((top, self.colors[only])),
+            _ => Some((
+                top,
+                pack(mix_weighted((0..self.colors.len()).filter_map(|run| {
+                    let level = level(run);
+                    (level > 0)
+                        .then(|| (self.unpacked[run], self.weights[level as usize]))
+                }))),
+            )),
+        }
+    }
+}
+
 /// [`mix_weighted`] of `lights`, each a light colour and its level on the 0
 /// to 15 scale. A light at level 0 doesn't count.
 #[cfg(any(test, feature = "sub_grids"))]

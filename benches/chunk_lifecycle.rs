@@ -2797,6 +2797,8 @@ fn scenario_stream_in_lamps() -> Metrics {
         ("evictions", stats.evictions),
         ("plane_writes", stats.plane_writes),
         ("full_writes", stats.full_writes),
+        ("color_plane_writes", stats.color_plane_writes),
+        ("color_full_writes", stats.color_full_writes),
     ] {
         metrics.insert(format!("{prefix}.{name}"), count as f64);
     }

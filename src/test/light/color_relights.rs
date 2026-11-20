@@ -260,7 +260,7 @@ fn edit_and_undo_beside(
     let white = frames_to_last_change(&scene, white_edits, true);
     for (colored, white) in colored.into_iter().zip(white) {
         assert!(
-            white > 2 || colored <= 2,
+            colored <= white.max(2),
             "{edits:?}'s light last changed on frame {colored}, and {white} in white"
         );
     }

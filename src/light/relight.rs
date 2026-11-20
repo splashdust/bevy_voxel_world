@@ -873,8 +873,22 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             return;
         };
         chunk.only_recolored = false;
-        if chunk.state == LightState::Clean {
-            chunk.state = LightState::Dirty;
+        match chunk.state {
+            LightState::Clean => {
+                chunk.state = LightState::Dirty;
+                self.settings_queue.insert(key);
+            }
+            // A fill-only relight may skip its solve.
+            LightState::Dirty => self.solve_fill_queued(key),
+            LightState::Relighting { .. } => {}
+        }
+    }
+
+    /// Moves the chunk at `key` from the fill queue, if it waits there, to
+    /// the settings queue, whose relight always solves: a fill-only relight
+    /// skips its solve when its sky fill seeds are unchanged.
+    fn solve_fill_queued(&mut self, key: GridKey) {
+        if self.fill_queue.remove(&key) {
             self.settings_queue.insert(key);
         }
     }
@@ -921,7 +935,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 chunk.only_recolored = true;
                 self.settings_queue.insert(key);
             }
-            LightState::Dirty | LightState::Relighting { dirty: true } => {}
+            LightState::Dirty => self.solve_fill_queued(key),
+            LightState::Relighting { dirty: true } => {}
             LightState::Relighting { dirty: false } => {
                 chunk.state = LightState::Relighting { dirty: true };
                 chunk.only_recolored = true;
@@ -1069,7 +1084,10 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                     // A light entry's first solve changes no inputs a
                     // neighbour reads, so it ripples nowhere.
                     let fresh = self.fresh.remove(&key);
+                    // A recolour relight lands even with the same light, for
+                    // the new colour of the chunk's own lamps.
                     if solved.rescanned.is_none()
+                        && ripples
                         && chunk.light.same_light_and_borders(&solved.light)
                     {
                         self.landed.changed_nothing += 1;
@@ -1278,6 +1296,8 @@ impl<C: VoxelWorldConfig> LightWork<C> {
         let mut triggers = Vec::new();
         let same = {
             let mut view = view.write();
+            // Held light lands later, solved from what it read here.
+            let outdated = inputs_replaced(&view, key, &landing.solved.read);
             let Some(chunk) = view.chunks.get_mut(&key) else {
                 return;
             };
@@ -1285,6 +1305,9 @@ impl<C: VoxelWorldConfig> LightWork<C> {
                 || !Arc::ptr_eq(&chunk.light.inputs, landing.solved.read_inputs())
             {
                 return;
+            }
+            if outdated {
+                triggers.push(key);
             }
             for face in Face::ALL {
                 if landing.ripples
@@ -1296,6 +1319,7 @@ impl<C: VoxelWorldConfig> LightWork<C> {
             }
             chunk.faces = landing.solved.faces;
             landing.solved.rescanned.is_none()
+                && landing.ripples
                 && chunk.light.same_light_and_borders(&landing.solved.light)
         };
         let (urgent, cause) = (landing.urgent, landing.cause);
@@ -1680,7 +1704,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
             if let Some(route) = route.as_mut() {
                 route.forget(entity);
                 if let Some((key, Left::Entry(light))) = &left {
-                    route.entry_landed(*key, light.clone());
+                    route.entry_landed(*key, light.clone(), None);
                 }
             }
             // Only the world's chunks have sky probes.
@@ -1988,7 +2012,7 @@ impl<C: VoxelWorldConfig> Relights<C> {
                 }
                 if let (Some(route), Some(landed)) = (route.as_mut(), landed) {
                     if landed.entity == ENTRY {
-                        route.entry_landed(landed.key, landed.light);
+                        route.entry_landed(landed.key, landed.light, landed.slot.borders);
                     } else {
                         route.light_landed(
                             landed.key,
@@ -2235,8 +2259,6 @@ impl<C: VoxelWorldConfig> Rescans<'_, C> {
     }
 }
 
-/// The 26 chunks around the chunk at `key`, on its grid, whose solves read
-/// its emissive voxels.
 /// Whether `solved` was solved under light colours changed since for an
 /// emissive material its light box holds: whether a material the chunks it
 /// read note has a later colour generation in `recolored` than its own.
@@ -2253,6 +2275,8 @@ fn solved_before_recolor(solved: &Solved, recolored: &[u64]) -> bool {
         })
 }
 
+/// The 26 chunks around the chunk at `key`, on its grid, whose solves read
+/// its emissive voxels.
 fn around(key: GridKey) -> impl Iterator<Item = GridKey> {
     (-1..=1).flat_map(move |z| {
         (-1..=1).flat_map(move |y| {

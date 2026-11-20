@@ -840,7 +840,8 @@ pub(crate) fn follow_config<C: VoxelWorldConfig>(
         )
     });
 
-    if let (true, Some(route)) = (emission_changed, route.as_mut()) {
+    // A recolour that comes with a relighting change lands here too.
+    if let (true, Some(route)) = (emission_differs, route.as_mut()) {
         route.set_light_colors(light_colors(&settings.task.emission));
     }
     if let (true, Some(route)) = (texture_changed, route.as_mut()) {
@@ -1034,23 +1035,32 @@ fn recolor<C: VoxelWorldConfig>(
     }
 }
 
-/// The chunks and light entries whose light box, the chunk and the 26
-/// around it in its grid, holds an emissive voxel of a material index in
-/// `materials`, as the chunks' notes of their emissive materials tell. A
-/// sub-grid's chunks count as the world's do.
+/// The chunks and light entries that hold, or lie beside, an emissive voxel
+/// of a material index in `materials`, as the notes of their emissive
+/// materials tell, hinted air's included: each holder's own chunk and the 26
+/// around it in its grid. A sub-grid's chunks count as the world's do.
 fn holding_materials(view: &LightView, materials: &[u16]) -> Vec<GridKey> {
     let view = view.read();
     let mut holding = HashSet::new();
-    let holders = view.chunks.iter().filter(|(_, chunk)| {
-        chunk
-            .light
-            .inputs
+    let holds = |inputs: &inputs::LightInputs| {
+        inputs
             .emissive
             .materials()
             .iter()
             .any(|material| materials.contains(material))
-    });
-    for (key, _) in holders {
+    };
+    let holders = view
+        .chunks
+        .iter()
+        .filter(|(_, chunk)| holds(&chunk.light.inputs))
+        .map(|(key, _)| key)
+        .chain(
+            view.air
+                .iter()
+                .filter(|(_, air)| holds(&air.inputs))
+                .map(|(key, _)| key),
+        );
+    for key in holders {
         for z in -1..=1 {
             for y in -1..=1 {
                 for x in -1..=1 {
@@ -1145,8 +1155,6 @@ fn relight_settings<C: VoxelWorldConfig>(
     }
 }
 
-/// The packed light colour of each material index of `emission`, for a
-/// world's route, or `None` where every one is white.
 /// Makes `route` read the light colours of world `C`'s emissive materials,
 /// before [`build`] does.
 pub(crate) fn read_light_colors<C: VoxelWorldConfig>(
@@ -1157,6 +1165,8 @@ pub(crate) fn read_light_colors<C: VoxelWorldConfig>(
     route.set_light_colors(light_colors(&table));
 }
 
+/// The packed light colour of each material index of `emission`, for a
+/// world's route, or `None` where every one is white.
 fn light_colors<I>(emission: &color::EmissionTable<I>) -> Option<&[u16]> {
     emission.is_colored().then(|| emission.colors())
 }

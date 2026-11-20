@@ -462,6 +462,10 @@ pub struct LightStats {
     pub plane_writes: u64,
     /// Slots written whole.
     pub full_writes: u64,
+    /// Colour shell planes written alone, after a neighbour's light changed.
+    pub color_plane_writes: u64,
+    /// Colour slots written whole.
+    pub color_full_writes: u64,
     /// Sky probes started.
     pub probes: u64,
     /// Voxel lookups sky probes made.
@@ -618,6 +622,8 @@ pub fn light_stats<C: VoxelWorldConfig>(world: &World) -> Option<LightStats> {
         planes_built: slots.planes_built + slots.color_planes_built,
         plane_writes: slots.plane_writes,
         full_writes: slots.full_writes,
+        color_plane_writes: slots.color_plane_writes,
+        color_full_writes: slots.color_full_writes,
         emissive_scans: counters.emissive_scans.load(Ordering::Relaxed),
         solves: counters.solves.load(Ordering::Relaxed),
         color_runs: counters.color_runs.load(Ordering::Relaxed),
