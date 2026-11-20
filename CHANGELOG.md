@@ -10,10 +10,6 @@ A sub-grid is a set of voxels on a grid of its own, which a game moves freely ag
 
 Sub-grids can be created either from scratch, by creating an empty subgrid and editing its voxels, or by 'lifting' a portion of the world out in to a sub-grid. En example of the latter would be an overhang being broken of a cliff, or a tree branching being severed and falling to the ground (see the `light_mountain_house` example)
 
-### Sub-grid lighting
-
-Light propagation works withing sub-grids, where a emissive voxel in the grid lights that grid. Sub-grids will also pick up light from the sky and from the parent world, but will not currently light the world or other sub-grids. Regular Bevy lights can be used for that purpose instead.
-
 ### Dislodged fragments
 
 Another off-by-default feature called `dislodged_fragments` finds the voxels an edit cuts off from the rest of their grid. A world opts in by returning `FragmentDetection` settings from `VoxelWorldConfig::detect_dislodged_fragments`.
@@ -24,47 +20,16 @@ When sub-grids are also enabled, `FragmentDetection::auto_lift` can be set to au
 
 ### Light colour
 
-Voxel light can now take a colour. An emissive material declares one with `Emission::with_color`, and where light of several colours meets, the colours mix. A world whose emissive materials are all white does no colour work.
+Voxel light can now take a colour. An emissive material declares it with `Emission::with_color`, and where light of several colours meets, the colours mix. A world whose emissive materials are all white does no colour computation, so performance should not be impacted unless colour is used.
 
-What a coloured world costs more grows with the light colours within light reach of each chunk (solving), the chunks where colours mix (memory), the most chunks at once whose faces see more than one colour (GPU memory) and the faces of chunks whose light isn't all white (shader work). The "Light colour" section of `LightPropagation`'s docs has the details, and its WASM section now also covers how many of WebGL2's textures a lit chunk material takes, and how to keep a world's light white on WASM.
+The computational cost of coloured light grows mainly with these factors:
 
-#### Added
-
-- `Emission::with_color`, which gives an emissive material's light a colour. The level alone still sets how bright the light is and how far it reaches.
-- `LightLevels::voxel_color`, the colour of the voxel light that `light_at` reads.
-- `LightLook::tinted_glow`, off by default, which tints an emissive voxel's own faces by its light colour.
-- `LightPropagation::skip_unreached_colors`, on by default, which skips solving the light colours whose light can't reach a chunk. It never changes the light.
-- `LevelCurve::exponential_to_black`, an exponential curve that reaches black at level 1.
-- The `LIGHT_COLOR` shader def, which a custom shader can test. The crate's materials add it while a world has a light colour other than white.
-
-#### Changed
-
-- The default `voxel_falloff` is `LevelCurve::exponential_to_black(0.7)`, so the last few voxels of every pool of voxel light are dimmer and fade out at its edge, white light's too. Set `voxel_falloff` to `LevelCurve::exponential(0.7)` for the old look.
-- A change to `emissive_materials` now solves again the coarse chunks holding a changed material, in a white world too. Before, a coarse chunk kept its old light until its chunk task ran again.
-
-#### Breaking
-
-- The shader's `LightLevels`: its levels changed from `vec3` to `f32`, and it gained `voxel_color` and `own_voxel_color`. See [Migrating from 0.19.3](#migrating-from-0193).
-
-### Examples
-
-- `sub_grids`: A walkthrough of sub-grids on a few pillars and rods, which can be cut, built on, and stamped back into the world.
-
-- `light_mountain_house`: Trees can now be felled. It needs `sub_grids` and `dislodged_fragments` as well.
-
-- `save_load` and `multiplayer_loopback` now lift and stamp sub-grids too, and need the `sub_grids` feature.
-
-- `multiplayer_loopback` updated for brevity, and now also shows how sub-grid edits may be sent over network. Need the `sub_grids` feature.
-
-- `light_tuning` has a cabin place for `SubGridSky` on key 9, and needs `sub_grids` as well.
-
-- `light_tuning` has a Chamber place lit by coloured lamps and crystals, with panel rows for light colour, `tinted_glow` and `skip_unreached_colors`. Its `audit` mode counts light colour changes.
+- The number of colours within propagation reach of each chunk (solving)
+- The number of chunks where colours mix (memory)
 
 ### Other changes
 
 - Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
-- The `rendering` module docs list every vertex output and its space.
-- `raycast` and `raycast_fn` now document what they cast through: the world's voxels only, not sub-grids.
 
 ### Bug fixes
 
