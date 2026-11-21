@@ -13,7 +13,9 @@ To do this, we'll declare a few different materials, and load up an array textur
 This is the texture we'll use:
 <center><img alt="An array texture" src="img/texturing.png" /></center>
 
-You can right click on the image and download it. This texture was generated from a Python script written by Claude Code, so feel free to use it how ever you like. This is a fairly low-res texture, and it gives a pixelated style to the voxels. However, you can use any resolution you want for the texture. It will scale to fit automatically.
+You can right click on the image and download it. This texture was generated from a Python script written by Claude Code, so feel free to use it how ever you like.
+
+This is a fairly low-res texture, and it gives a pixelated style to the voxels. However, you can use any resolution you want for a texture. It will scale to fit automatically.
 
 ## Setting up materials
 
