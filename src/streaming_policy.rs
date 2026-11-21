@@ -10,7 +10,9 @@ use bevy::{math::Affine3A, platform::collections::HashSet, prelude::*};
 use rand::{Rng, RngExt};
 
 use crate::{
-    chunk::{chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_I, MAX_LOD_LEVEL},
+    chunk::{
+        chunk_containing, ChunkData, ChunkKey, CHUNK_SIZE_F, CHUNK_SIZE_I, MAX_LOD_LEVEL,
+    },
     configuration::{
         ChunkDespawnStrategy, ChunkSpawnStrategy, FillHint, LodLevel, VoxelWorldConfig,
     },
@@ -582,31 +584,31 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     /// Whether a line from `from` to `to`, a point in the chunk at `target`,
     /// meets a solid chunk before it enters that chunk.
     ///
-    /// Published and hinted chunks count, as they do for a spawning ray. A chunk
-    /// not yet published doesn't, since it may turn out not to be solid.
+    /// The line crosses chunks as a spawning ray does, through
+    /// [`walk`](Self::walk). Published and hinted chunks count, as they do for
+    /// a spawning ray. A chunk not yet published doesn't, since it may turn out
+    /// not to be solid.
     fn solid_chunk_between(&self, from: Vec3, to: Vec3, target: ChunkKey) -> bool {
         let Ok(direction) = Dir3::new(to - from) else {
             return false;
         };
-        let length = from.distance(to);
-        let mut t = 0.0;
-        while t < length {
-            let current = from + direction * t;
-            let chunk_pos = chunk_containing(current.floor().as_ivec3());
-            if ChunkKey::containing_chunk(chunk_pos, target.lod_level) == target {
+        let mut blocked = false;
+        self.walk(from, *direction, from.distance(to), |crossing| {
+            if ChunkKey::containing_chunk(crossing.chunk_position, target.lod_level)
+                == target
+            {
                 return false;
             }
-            let (key, occupancy, behind) = self.chunk_along_ray(chunk_pos);
-            let occupancy = match occupancy {
-                Occupancy::Missing => self.hinted(key).unwrap_or(behind),
+            let occupancy = match crossing.occupancy {
+                Occupancy::Missing => {
+                    self.hinted(crossing.key).unwrap_or(crossing.behind)
+                }
                 occupancy => occupancy,
             };
-            if occupancy == Occupancy::Full {
-                return true;
-            }
-            t += key.voxel_extent() as f32;
-        }
-        false
+            blocked = occupancy == Occupancy::Full;
+            !blocked
+        });
+        blocked
     }
 
     // --- Spawning -----------------------------------------------------------
@@ -759,9 +761,9 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     /// Shoots a ray from the given point and queues yet unpublished chunks.
     /// Returns how many were added to the queue.
     ///
-    /// Each step takes the ray into the next chunk along its path. Far from the
-    /// camera, where `chunk_lod` asks for large chunks, the steps are large too,
-    /// so the ray crosses open air in a few steps.
+    /// The ray visits every chunk it crosses, through [`walk`](Self::walk).
+    /// Far from the camera, where `chunk_lod` asks for large chunks, the chunks
+    /// it crosses are large too, so the ray crosses open air in a few steps.
     ///
     /// The ray passes through chunks that contain air. It stops at a chunk that
     /// is completely solid, because nothing behind it can be seen. It also stops
@@ -789,37 +791,87 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         };
         let mut found = 0;
         let mut lookahead = RAY_LOOKAHEAD;
-        let mut current = ray.origin;
-        let mut t = 0.0;
-        while t < (self.spawning_distance * CHUNK_SIZE_I) as f32 {
-            let chunk_pos = chunk_containing(current.floor().as_ivec3());
-            let (key, mut occupancy, behind) = self.chunk_along_ray(chunk_pos);
+        let length = (self.spawning_distance * CHUNK_SIZE_I) as f32;
+        self.walk(ray.origin, *ray.direction, length, |crossing| {
+            let mut occupancy = crossing.occupancy;
             if occupancy == Occupancy::Missing {
-                match self.hinted(key) {
+                match self.hinted(crossing.key) {
                     Some(hinted) => occupancy = hinted,
                     None => {
-                        if queued.insert(key) {
-                            queue.push_back(key);
+                        if queued.insert(crossing.key) {
+                            queue.push_back(crossing.key);
                             found += 1;
                         }
                         lookahead -= 1;
                         if lookahead == 0 {
-                            break;
+                            return false;
                         }
-                        occupancy = behind;
+                        occupancy = crossing.behind;
                     }
                 }
             }
             match occupancy {
-                Occupancy::Missing | Occupancy::Empty => {}
+                Occupancy::Missing | Occupancy::Empty => true,
                 // Past a chunk with solid voxels, the next one is likely solid.
-                Occupancy::Mixed => lookahead = lookahead.min(1),
-                Occupancy::Full | Occupancy::Unpublished => break,
+                Occupancy::Mixed => {
+                    lookahead = lookahead.min(1);
+                    true
+                }
+                Occupancy::Full | Occupancy::Unpublished => false,
             }
-            t += key.voxel_extent() as f32;
-            current = ray.origin + ray.direction * t;
-        }
+        });
         found
+    }
+
+    /// Walks a ray from `origin` along `direction` through every chunk it
+    /// crosses, for `length` voxels. Calls `visit` with each chunk in turn, and
+    /// stops early when `visit` returns false.
+    ///
+    /// Each chunk is the one wanted where the ray enters it, as
+    /// [`chunk_along_ray`](Self::chunk_along_ray) finds it. The next chunk is
+    /// found across the face the ray leaves by, in integer chunk positions.
+    /// Stepping along the ray a chunk length at a time instead skips the
+    /// chunks whose corners the ray clips. Finding the next chunk from a point
+    /// a little past the face can, far from the origin, round back into the
+    /// chunk the ray leaves.
+    fn walk(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        length: f32,
+        mut visit: impl FnMut(&Crossing) -> bool,
+    ) {
+        // A segment crosses at most `length / CHUNK_SIZE` faces along each
+        // axis, plus one, so this ends the walk however rounding goes.
+        let max_steps = 3 * (length / CHUNK_SIZE_F).ceil() as usize + 4;
+        let mut chunk_position = chunk_containing(origin.floor().as_ivec3());
+        for _ in 0..max_steps {
+            let (key, occupancy, behind) = self.chunk_along_ray(chunk_position);
+            let (t_exit, exit) =
+                exit_of(key.min_voxel(), key.voxel_extent(), origin, direction);
+            let crossing = Crossing {
+                chunk_position,
+                key,
+                occupancy,
+                behind,
+            };
+            if !visit(&crossing) || t_exit >= length {
+                return;
+            }
+
+            // The next chunk lies across the exit face, level with the point
+            // where the ray leaves.
+            let axis = exit.axis();
+            let leaving = origin + direction * t_exit;
+            let mut next = chunk_containing(leaving.floor().as_ivec3())
+                .clamp(key.position, key.position + (key.extent() - 1));
+            next[axis] = if exit.is_high() {
+                key.position[axis] + key.extent()
+            } else {
+                key.position[axis] - 1
+            };
+            chunk_position = next;
+        }
     }
 
     /// What a ray finds at the level-0 chunk at `chunk_pos`.
@@ -847,6 +899,64 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         let behind = covering.map_or(Occupancy::Empty, |(_, occupancy)| occupancy);
         (key, occupancy, behind)
     }
+}
+
+/// One chunk a ray crosses, as [`Planner::walk`] visits it.
+struct Crossing {
+    /// The level-0 chunk where the ray enters the chunk.
+    chunk_position: IVec3,
+    /// The key of the chunk wanted at `chunk_position`.
+    key: ChunkKey,
+    /// The occupancy of the chunk at `key`.
+    occupancy: Occupancy,
+    /// The occupancy of the chunk covering `chunk_position` now, which
+    /// decides whether the ray goes on while the chunk at `key` is missing.
+    behind: Occupancy,
+}
+
+/// One of the six faces of a chunk.
+///
+/// Face `2 * axis` is on the low side of the axis and face `2 * axis + 1` on
+/// the high side, so the faces run `-x`, `+x`, `-y`, `+y`, `-z`, `+z`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Face(u8);
+
+impl Face {
+    /// The face on the high side of `axis` when `high` is set, and on the low
+    /// side otherwise.
+    fn new(axis: usize, high: bool) -> Self {
+        Self(2 * axis as u8 + high as u8)
+    }
+
+    /// The axis the face is across: 0 for x, 1 for y and 2 for z.
+    fn axis(self) -> usize {
+        (self.0 >> 1) as usize
+    }
+
+    /// Whether the face is on the high side of its axis.
+    fn is_high(self) -> bool {
+        self.0 & 1 == 1
+    }
+}
+
+/// Where a ray from `origin` along `direction` leaves the cube with corner
+/// `min` and sides `extent` voxels long, as the distance along the ray, and
+/// the face of the cube it leaves by.
+fn exit_of(min: IVec3, extent: i32, origin: Vec3, direction: Vec3) -> (f32, Face) {
+    let mut exit = (f32::INFINITY, Face::new(0, true));
+    for axis in 0..3 {
+        let d = direction[axis];
+        if d == 0.0 {
+            continue;
+        }
+        let high = d > 0.0;
+        let side = min[axis] + if high { extent } else { 0 };
+        let t = (side as f32 - origin[axis]) / d;
+        if t < exit.0 {
+            exit = (t, Face::new(axis, high));
+        }
+    }
+    exit
 }
 
 /// The level-0 chunk of the chunk at `key` nearest to `chunk_position`.
@@ -944,7 +1054,6 @@ const HALF_DIAGONAL: f32 = 0.87;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::CHUNK_SIZE_F;
     use bevy::{camera::CameraProjection, platform::collections::HashMap};
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -1474,6 +1583,113 @@ mod tests {
                 walks_through,
                 "the chunk behind a {occupancy:?} chunk"
             );
+        }
+    }
+
+    /// The level-0 chunks a segment passes through before its end, sampled
+    /// every hundredth of a voxel. A segment that only clips a chunk can pass
+    /// between samples.
+    fn sampled_chunks(origin: Vec3, direction: Vec3, length: f32) -> HashSet<IVec3> {
+        let samples = (length * 100.0) as usize;
+        (0..samples)
+            .map(|i| {
+                let point = origin + direction * (length * i as f32 / samples as f32);
+                chunk_containing(point.floor().as_ivec3())
+            })
+            .collect()
+    }
+
+    /// Random segments from points in the chunk at `C`, then segments along
+    /// axes and diagonals from its corner.
+    fn segments(rng: &mut StdRng) -> Vec<(Vec3, Vec3)> {
+        let corner = C.as_vec3() * CHUNK_SIZE_F;
+        let mut segments: Vec<(Vec3, Vec3)> = (0..300)
+            .filter_map(|_| {
+                let mut random = || rng.random_range(-1.0..1.0f32);
+                let direction =
+                    Vec3::new(random(), random(), random()).try_normalize()?;
+                let offset = Vec3::new(random(), random(), random()) * 0.5 + 0.5;
+                Some((corner + offset * CHUNK_SIZE_F, direction))
+            })
+            .collect();
+        for direction in [
+            Vec3::X,
+            Vec3::NEG_Y,
+            Vec3::new(1.0, 1.0, 0.0).normalize(),
+            Vec3::new(-1.0, 1.0, 1.0).normalize(),
+        ] {
+            segments.push((corner, direction));
+        }
+        segments
+    }
+
+    #[test]
+    fn a_walk_visits_every_chunk_a_ray_crosses_one_face_at_a_time() {
+        let config = TestWorld::default();
+        let cameras = [camera(C, Vec3::NEG_Z)];
+        let occupied = Occupied::new();
+        let planner = Planner::new(&config, &cameras, &occupied);
+        let length = 6.0 * CHUNK_SIZE_F;
+
+        for (origin, direction) in segments(&mut StdRng::seed_from_u64(3)) {
+            let mut visited = Vec::new();
+            planner.walk(origin, direction, length, |crossing| {
+                visited.push(crossing.chunk_position);
+                true
+            });
+
+            for pair in visited.windows(2) {
+                assert_eq!(
+                    (pair[1] - pair[0]).abs().element_sum(),
+                    1,
+                    "the walk from {origin} along {direction} jumped from {} to {}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            let visited: HashSet<IVec3> = visited.into_iter().collect();
+            for chunk in sampled_chunks(origin, direction, length) {
+                assert!(
+                    visited.contains(&chunk),
+                    "the walk from {origin} along {direction} missed {chunk}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_walk_crosses_coarse_chunks_whole() {
+        let config = TestWorld {
+            spawning_distance: 12,
+            lod_bands: vec![(2, 0), (4, 1)],
+            far_lod: 2,
+            ..default()
+        };
+        let cameras = [camera(C, Vec3::NEG_Z)];
+        let occupied = Occupied::new();
+        let planner = Planner::new(&config, &cameras, &occupied);
+        let length = 12.0 * CHUNK_SIZE_F;
+
+        for (origin, direction) in segments(&mut StdRng::seed_from_u64(4)) {
+            let mut visited = Vec::new();
+            planner.walk(origin, direction, length, |crossing| {
+                visited.push(crossing.key);
+                true
+            });
+
+            assert!(
+                visited.iter().any(|key| key.lod_level == 2),
+                "the walk from {origin} along {direction} met no level-2 chunk"
+            );
+            for chunk in sampled_chunks(origin, direction, length) {
+                assert!(
+                    visited
+                        .iter()
+                        .any(|key| ChunkKey::containing_chunk(chunk, key.lod_level)
+                            == *key),
+                    "the walk from {origin} along {direction} missed {chunk}"
+                );
+            }
         }
     }
 
