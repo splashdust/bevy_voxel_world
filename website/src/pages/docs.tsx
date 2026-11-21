@@ -20,7 +20,7 @@ mountPage(
             <h2>
               <a href={pageUrl('guides')}>Guides</a>
             </h2>
-            <p>How each part of the crate works, with the API it uses.</p>
+            <p>A tutorial from basic to advanced usage of BVW. Work in progress!</p>
             <ol className="docs-card-topics">
               {api.topics.map((topic) => (
                 <li key={topic.id}>
