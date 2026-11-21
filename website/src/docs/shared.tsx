@@ -325,8 +325,7 @@ export function FeaturesOverview({ api, topicHref }: { api: ApiView; topicHref: 
     <div className="prose features-overview">
       <h2 id="features">Cargo features</h2>
       <p>
-        The guides and the API cover every feature. A chip marks what needs one, and the API
-        page can show only what the features you pick add.
+        All the features that can be enabled for <strong>bevy_voxel_world</strong>
       </p>
       <table>
         <tbody>
