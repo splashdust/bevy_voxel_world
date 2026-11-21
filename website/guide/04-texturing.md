@@ -19,7 +19,7 @@ This is a fairly low-res texture, and it gives a pixelated style to the voxels. 
 
 ## Setting up materials
 
-First, we can declare an Enum that holds our different materials:
+First, we'll declare an Enum that holds our different materials:
 
 ```rust
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Default)]
@@ -34,9 +34,9 @@ enum MyWorldMaterial {
 }
 ```
 
-This enum is how we'll distinguish which material a voxel is made off.
+This enum is how we'll distinguish which material a voxel is made of.
 
-We can now let our `VoxelWorldConfig` know the type of our material Enum:
+Then, we need to let our `VoxelWorldConfig` know the type of our material Enum:
 
 ```rust
 impl VoxelWorldConfig for MyWorld {
@@ -87,7 +87,7 @@ Take the `SnowyStone` material for instance:
 
 <img alt src="img/voxel_textures_snowy_stone.svg" />
 
-We point to index 4 for the top, 5 for the sides and three for the bottom.
+We point to index 4 for the top, 5 for the sides and 3 for the bottom.
 
 So in other words, each material is textured through a composition of textures in the array texture, and any combination of those can be used.
 
