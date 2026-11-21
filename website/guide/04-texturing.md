@@ -118,7 +118,7 @@ impl VoxelWorldConfig for MyWorld {
 
 Now you'll notice that Rust complains about `WorldVoxel::Solid(0)`. That's because there is no longer a material `0`. Update the Voxel lookup closure to return `WorldVoxel::Solid(MyWorldMaterial::Grass)` instead. This is how you can now use the materials you created!
 
-Now try updating the generator to use a few of the materials:
+Try updating the generator to use a few of the materials:
 
 ```rust
 // Nice wavy sine hills with snowy peaks!
