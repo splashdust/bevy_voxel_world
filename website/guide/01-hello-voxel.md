@@ -49,7 +49,7 @@ struct MyWorld;
 // Implement the VoxelWorldConfig trait for MyWorld.
 // This is where bevy_voxel_world will be configured.
 impl VoxelWorldConfig for MyWorld {
-    type MaterialIndex = u8; // a `u8` will hold the material of the voxel
+    type MaterialIndex = u8; // We'll configure this properly in the Texturing chapter!
     type ChunkUserBundle = ();
 }
 

@@ -14,7 +14,7 @@ import {
   guideHref,
   SHOW_ALL,
   TopicGuide,
-  topicOfKey,
+  topicsOfKey,
   useApiLinks,
 } from './shared';
 
@@ -27,11 +27,13 @@ export function Guides({ api }: { api: ApiView }) {
     document.title = `${topic.title} · Guides · bevy_voxel_world`;
   }, [topic]);
 
-  // A link into this topic opens its row; one into another topic loads that
-  // topic's page, and one to an item no guide explains opens the API page.
+  // A link to an item in this topic opens its row; one to an item only other
+  // topics hold loads the first of them, and one to an item no guide explains
+  // opens the API page.
   useApiLinks((key) => {
-    const target = topicOfKey(api, key);
-    if (target === topic.id) {
+    const targets = topicsOfKey(api, key);
+    const target = targets[0];
+    if (targets.includes(topic.id)) {
       history.replaceState(null, '', `#${key}`);
       if (!reference.reveal(key)) {
         document.getElementById(key)?.scrollIntoView();

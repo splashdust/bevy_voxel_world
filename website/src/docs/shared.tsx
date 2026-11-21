@@ -125,9 +125,14 @@ export function itemOfKey(api: ApiView, key: string): ItemView | undefined {
   return undefined;
 }
 
-/** The topic a key belongs to: its item's, or that of the module it names. */
-export function topicOfKey(api: ApiView, key: string): string | undefined {
-  return itemOfKey(api, key)?.topic ?? api.topics.find((t) => t.moduleDocs?.path === key)?.id;
+/** The topics a key belongs to: its item's, or that of the module it names. */
+export function topicsOfKey(api: ApiView, key: string): string[] {
+  const topics = itemOfKey(api, key)?.topics ?? [];
+  if (topics.length > 0) {
+    return topics;
+  }
+  const module = api.topics.find((t) => t.moduleDocs?.path === key);
+  return module ? [module.id] : [];
 }
 
 /** Scrolls to the element with this id once React has drawn it. */
@@ -320,8 +325,7 @@ export function FeaturesOverview({ api, topicHref }: { api: ApiView; topicHref: 
     <div className="prose features-overview">
       <h2 id="features">Cargo features</h2>
       <p>
-        The guides and the API cover every feature. A chip marks what needs one, and the API
-        page can show only what the features you pick add.
+        All the features that can be enabled for <strong>bevy_voxel_world</strong>
       </p>
       <table>
         <tbody>

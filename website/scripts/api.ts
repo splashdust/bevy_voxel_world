@@ -3,7 +3,9 @@
 // reads api.json, which `npm run build:api` writes.
 //
 // Each guide file is one topic. Its front matter names the topic and lists the
-// API items whose reference it holds:
+// API items whose reference it holds. An item that several topics use, like
+// VoxelWorldConfig, can be in several lists; the API page shows it under the
+// first guide that lists it.
 //
 //   ---
 //   title: Light
@@ -86,8 +88,11 @@ export type ItemView = {
   deprecated?: string;
   members: MemberView[];
   traits: { name: string; href?: string; features: string[] }[];
-  /** The guide whose reference holds the item. Not every item is in a guide. */
-  topic?: string;
+  /**
+   * The guides whose reference holds the item, in guide order. The API page
+   * shows the item under the first. Not every item is in a guide.
+   */
+  topics: string[];
 };
 
 /** A run of a guide's HTML, or the API items and members an `api` block shows. */
@@ -426,14 +431,17 @@ async function buildView(): Promise<{ view: ApiView; files: string[]; images: st
     if (typeof data.title !== 'string') {
       throw new Error(`${file} needs a title in its front matter`);
     }
-    const items = ((data.api ?? []) as string[]).flatMap((reference) => {
+    const items: string[] = [];
+    for (const reference of (data.api ?? []) as string[]) {
       const key = resolve(reference);
       if (!key || !api.items.some((item) => item.path === key)) {
         errors.push(`${file}: api lists ${reference}, which isn't a public item`);
-        return [];
+      } else if (items.includes(key)) {
+        errors.push(`${file}: api lists ${reference} twice`);
+      } else {
+        items.push(key);
       }
-      return [key];
-    });
+    }
     // [`Name`] links to the API, as in a doc comment.
     const links: Record<string, string> = {};
     for (const match of body.matchAll(/\[`([^`\]\n]+)`\](?!\()/g)) {
@@ -461,17 +469,14 @@ async function buildView(): Promise<{ view: ApiView; files: string[]; images: st
     };
   });
 
-  const topicOf = new Map<string, string>();
+  const topicsOf = new Map<string, string[]>();
   for (const guide of guides) {
     for (const path of guide.items) {
-      if (topicOf.has(path)) {
-        errors.push(`${guide.file}: ${path} is already in ${topicOf.get(path)}`);
-      }
-      topicOf.set(path, guide.file);
+      topicsOf.set(path, [...(topicsOf.get(path) ?? []), guide.id]);
     }
   }
   // An item no guide explains is still in the API page, under Other.
-  const unguided = api.items.filter((item) => !topicOf.has(item.path)).map((item) => item.path);
+  const unguided = api.items.filter((item) => !topicsOf.has(item.path)).map((item) => item.path);
   if (errors.length > 0) {
     throw new Error(`The guide doesn't match the API:\n  ${errors.join('\n  ')}`);
   }
@@ -498,7 +503,7 @@ async function buildView(): Promise<{ view: ApiView; files: string[]; images: st
         html: render.docs(member.docs, member.links, 4),
       })),
       traits: item.traits.map((t) => ({ ...t, features: t.features.filter((f) => !item.features.includes(f)) })),
-      topic: guides.find((g) => g.file === topicOf.get(item.path))?.id,
+      topics: topicsOf.get(item.path) ?? [],
     };
   }
 
@@ -522,7 +527,7 @@ async function buildView(): Promise<{ view: ApiView; files: string[]; images: st
     const feature = guide.feature;
     const elsewhere = feature
       ? Object.values(items)
-          .filter((item) => item.topic !== guide.id && !item.features.includes(feature))
+          .filter((item) => !item.topics.includes(guide.id) && !item.features.includes(feature))
           .map((item) => ({
             item: item.path,
             members: item.members.filter((m) => m.features.includes(feature)).map((m) => m.anchor),
