@@ -1,7 +1,7 @@
 // The list that the API page and each guide's reference share. One
 // row per item with its summary, which opens in place to the item's full docs.
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import {
   type ApiView,
   FeatureChips,
@@ -75,7 +75,7 @@ export function ItemList({
     <ul className="item-list">
       {rows.map(({ item, hits = [] }) => {
         const isOpen = open.has(item.path);
-        const guide = guideLinks && item.topic ? api.topics.find((t) => t.id === item.topic) : undefined;
+        const guides = guideLinks ? api.topics.filter((t) => item.topics.includes(t.id)) : [];
         return (
           <li key={item.path} id={item.path} className={isOpen ? 'open' : undefined}>
             <button
@@ -107,9 +107,15 @@ export function ItemList({
             </button>
             {isOpen && (
               <div className="item-detail">
-                {guide && (
+                {guides.length > 0 && (
                   <p className="item-detail-guide">
-                    Explained in <a href={guideHref(guide.id, item.path)}>{guide.title}</a>
+                    Explained in{' '}
+                    {guides.map((guide, i) => (
+                      <Fragment key={guide.id}>
+                        {i === 0 ? '' : i === guides.length - 1 ? ' and ' : ', '}
+                        <a href={guideHref(guide.id, item.path)}>{guide.title}</a>
+                      </Fragment>
+                    ))}
                   </p>
                 )}
                 <ItemDoc item={item} filter={filter} headless />

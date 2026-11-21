@@ -91,7 +91,7 @@ fn setup(mut commands: Commands) {
 }
 ```
 
-Behold, sine hills!
+Behold, sine hills forever!
 
 <img alt="Sine hills" src="img/sine_hills.png" />
 
@@ -99,6 +99,6 @@ Behold, sine hills!
 
 As you can imagine, in an infinitely large world there are a lot of voxel locations to cover!
 
-`bevy_voxel_world` handles this by only asking about the locations that are currently relevant. The streaming engine figures it out by continuosly casting detection rays out from the camera, discovering chunks the pass through. This ensures that only chunks that are in view are generated, and work is not wasted on things the player cannot see.
+`bevy_voxel_world` handles this by only asking about the locations that are currently relevant. The streaming engine figures it out by continuosly casting detection rays out from the camera, discovering chunks the ray passes through. This ensures that only chunks that are in view are generated, and work is not wasted on things the player cannot see.
 
 There are various ways you can configure your world for performance, such as `FillHint`s and `LodLevel`s. We'll go deeper into those topics in future chapters!

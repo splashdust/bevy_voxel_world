@@ -117,7 +117,13 @@ export function ApiSearch({ api }: { api: ApiView }) {
   const rowsOf = (paths: string[]) =>
     paths.map((path) => row(api.items[path])).filter((r): r is ItemRow => r !== undefined);
   const groups = [
-    ...api.topics.map((topic) => ({ id: topic.id, title: topic.title, topic, rows: rowsOf(topic.items) })),
+    // An item that several guides hold shows once, under the first of them.
+    ...api.topics.map((topic) => ({
+      id: topic.id,
+      title: topic.title,
+      topic,
+      rows: rowsOf(topic.items.filter((path) => api.items[path].topics[0] === topic.id)),
+    })),
     { id: 'other', title: 'Other', topic: undefined, rows: rowsOf(api.unguided) },
   ].filter((group) => group.rows.length > 0);
   const count = groups.reduce((sum, group) => sum + group.rows.length, 0);
