@@ -548,10 +548,20 @@ h1 {
   pointer-events: none;
 }
 
-/* Fills the screen when its touch controls ask for it. */
-.demo-frame:fullscreen {
+/* Fills the window when its touch controls ask for it. See useFullScreen. */
+.demo-frame.full-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  max-width: none;
+  max-height: none;
+  margin: 0;
   aspect-ratio: auto;
   box-shadow: none;
+}
+
+:root:has(.demo-frame.full-screen) {
+  overflow: hidden;
 }
 
 /* Touch controls, over the scene on a touch screen. */
