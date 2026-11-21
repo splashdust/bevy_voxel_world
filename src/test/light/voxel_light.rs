@@ -568,7 +568,22 @@ fn a_chunk_whose_only_lamp_is_too_many_face_steps_away_solves_no_voxel_light() {
     // among the chunks around it, but not the lamp in its light box. Such a
     // chunk culls the lamp whatever the shape when it solves after the chunk
     // of the lamp lands.
-    let mut round = origin_ready(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
+    //
+    // The test waits for the light of every chunk around the origin to land,
+    // not only for the light of the chunk at the origin. `light_is_settled`
+    // doesn't count chunk tasks still running. The chunk of the lamp can land
+    // after the chunk at the origin has, and the relights its light starts
+    // then bring the light to the origin.
+    let mut round = self::app(lamps_in_air(vec![(lamp, LAMP)], LightShape::Round));
+    update_until(&mut round, "the light around the origin to land", |app| {
+        std::iter::once(IVec3::ZERO)
+            .chain(neighbours.iter().copied())
+            .all(|chunk| {
+                chunk_status::<LampWorld>(app, chunk) == Some(ChunkStatus::Ready)
+                    && landed_stamp(app, chunk).is_some()
+            })
+            && super::sky_light::light_is_settled(app)
+    });
     let reference = reference(LightShape::Round);
     for p in origin_voxels() {
         assert_eq!(
