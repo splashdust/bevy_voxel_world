@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadDemo, type VoxelDemo } from './loadDemo';
+import { FIRST_CHOICES, TouchControls } from './TouchControls';
 
 type Phase =
   | { name: 'waiting' }
@@ -51,6 +52,11 @@ export function Demo() {
   const demo = useRef<VoxelDemo | undefined>(undefined);
   const onScreen = useRef(true);
   const [phase, setPhase] = useState<Phase>({ name: 'waiting' });
+  // Touch controls show on a touch screen, and give way to the mouse and
+  // keyboard as soon as a mouse is pressed, as on a laptop with a touch screen.
+  const [touch, setTouch] = useState(() => matchMedia('(pointer: coarse)').matches);
+  const [touchChoices, setTouchChoices] = useState(FIRST_CHOICES);
+  const running = phase.name === 'running';
 
   const start = useCallback(() => {
     setPhase({ name: 'downloading', loadedBytes: 0 });
@@ -99,10 +105,32 @@ export function Demo() {
     return () => observer.disconnect();
   }, [start]);
 
+  useEffect(() => {
+    const element = frame.current!;
+    const choose = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') {
+        setTouch(true);
+      } else if (event.pointerType === 'mouse') {
+        setTouch(false);
+      }
+    };
+    element.addEventListener('pointerdown', choose, { capture: true });
+    return () => element.removeEventListener('pointerdown', choose, { capture: true });
+  }, []);
+
+  useEffect(() => {
+    if (running) {
+      demo.current!.set_touch_controls(touch);
+    }
+  }, [running, touch]);
+
   return (
     <div className="demo-frame" ref={frame}>
       <canvas id="voxel-demo" aria-label="A voxel house on a mountain ledge at dusk, which you can walk through" />
-      <div className={`demo-overlay ${phase.name === 'running' ? 'hidden' : ''}`} aria-live="polite">
+      {running && touch && (
+        <TouchControls demo={demo.current!} frame={frame} choices={touchChoices} onChoose={setTouchChoices} />
+      )}
+      <div className={`demo-overlay ${running ? 'hidden' : ''}`} aria-live="polite">
         {phase.name === 'waiting' && 'Loading'}
         {phase.name === 'startable' && (
           <button className="button" type="button" onClick={start}>

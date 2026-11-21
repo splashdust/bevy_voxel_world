@@ -1,6 +1,10 @@
 /** The functions the demo's WebAssembly module exports to the page. */
 export type VoxelDemo = {
   set_canvas_visible(visible: boolean): void;
+  set_touch_controls(active: boolean): void;
+  touch_walk(right: number, forward: number, run: boolean): void;
+  touch_look(dx: number, dy: number): void;
+  touch_button(name: string, held: boolean): void;
 };
 
 type DemoModule = VoxelDemo & {

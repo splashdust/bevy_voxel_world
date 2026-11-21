@@ -548,6 +548,154 @@ h1 {
   pointer-events: none;
 }
 
+/* Fills the screen when its touch controls ask for it. */
+.demo-frame:fullscreen {
+  aspect-ratio: auto;
+  box-shadow: none;
+}
+
+/* Touch controls, over the scene on a touch screen. */
+
+.touch-controls {
+  --touch-inset: clamp(8px, 2vw, 16px);
+  --touch-small: clamp(30px, 8vw, 40px);
+  --touch-large: clamp(48px, 13vw, 60px);
+  position: absolute;
+  inset: 0;
+  /* Every touch on the scene walks, looks or presses a button, so none scrolls the page. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  color: var(--cream);
+  font: 600 0.62rem/1 var(--font-display);
+  font-stretch: 90%;
+}
+
+.touch-bar {
+  position: absolute;
+  top: var(--touch-inset);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.touch-bar.start {
+  left: var(--touch-inset);
+}
+
+.touch-bar.end {
+  right: var(--touch-inset);
+}
+
+.touch-button {
+  display: grid;
+  place-items: center;
+  width: var(--touch-small);
+  height: var(--touch-small);
+  padding: 0;
+  border: 2px solid rgb(244 236 217 / 0.75);
+  background: rgb(15 31 43 / 0.5);
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0.02em;
+  touch-action: none;
+  cursor: pointer;
+}
+
+.touch-button.down,
+.touch-button[aria-pressed='true'] {
+  background: var(--cream);
+  color: var(--ink);
+}
+
+.touch-icon {
+  width: 55%;
+  height: 55%;
+  fill: currentColor;
+}
+
+.touch-glow {
+  fill: #ffb04a;
+}
+
+.touch-swatch,
+.touch-swatch[aria-pressed='true'],
+.touch-swatch.down {
+  background-size: 100% 1800%;
+  background-color: var(--rock);
+  border-color: rgb(15 31 43 / 0.6);
+  image-rendering: pixelated;
+}
+
+.touch-swatch[aria-pressed='true'] {
+  border-color: var(--cream);
+  box-shadow: 0 0 0 2px var(--ink);
+}
+
+.touch-sun {
+  display: flex;
+  align-items: center;
+}
+
+.touch-sun-icon {
+  display: grid;
+  place-items: center;
+  width: calc(var(--touch-small) * 0.7);
+  height: var(--touch-small);
+}
+
+.touch-sun-icon .touch-icon {
+  width: 80%;
+  height: 80%;
+  fill: #ffd27a;
+  filter: drop-shadow(0 0 2px rgb(15 31 43 / 0.6));
+}
+
+.touch-actions {
+  position: absolute;
+  right: var(--touch-inset);
+  bottom: var(--touch-inset);
+  display: grid;
+  grid-template-columns: repeat(2, var(--touch-large));
+  gap: 6px;
+}
+
+.touch-actions .touch-button {
+  width: auto;
+  height: var(--touch-large);
+}
+
+.touch-actions .jump {
+  grid-column: span 2;
+  height: calc(var(--touch-large) * 0.75);
+}
+
+.touch-stick {
+  position: absolute;
+  border: 2px solid rgb(244 236 217 / 0.6);
+  border-radius: 50%;
+  background: rgb(15 31 43 / 0.3);
+  pointer-events: none;
+}
+
+.touch-stick.resting {
+  opacity: 0.55;
+}
+
+.touch-knob {
+  position: absolute;
+  inset: 25%;
+  border-radius: 50%;
+  background: rgb(244 236 217 / 0.85);
+}
+
+.touch-stick.running .touch-knob {
+  background: var(--grass);
+  box-shadow: 0 0 0 2px var(--cream);
+}
+
 .progress {
   display: grid;
   justify-items: center;
