@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadDemo, type VoxelDemo } from './loadDemo';
+import { useFullScreen } from './fullScreen';
 import { FIRST_CHOICES, TouchControls } from './TouchControls';
 
 type Phase =
@@ -56,6 +57,7 @@ export function Demo() {
   // keyboard as soon as a mouse is pressed, as on a laptop with a touch screen.
   const [touch, setTouch] = useState(() => matchMedia('(pointer: coarse)').matches);
   const [touchChoices, setTouchChoices] = useState(FIRST_CHOICES);
+  const [fullScreen, setFullScreen] = useFullScreen(frame);
   const running = phase.name === 'running';
 
   const start = useCallback(() => {
@@ -125,10 +127,16 @@ export function Demo() {
   }, [running, touch]);
 
   return (
-    <div className="demo-frame" ref={frame}>
+    <div className={`demo-frame ${fullScreen ? 'full-screen' : ''}`} ref={frame}>
       <canvas id="voxel-demo" aria-label="A voxel house on a mountain ledge at dusk, which you can walk through" />
       {running && touch && (
-        <TouchControls demo={demo.current!} frame={frame} choices={touchChoices} onChoose={setTouchChoices} />
+        <TouchControls
+          demo={demo.current!}
+          choices={touchChoices}
+          onChoose={setTouchChoices}
+          fullScreen={fullScreen}
+          onFullScreen={setFullScreen}
+        />
       )}
       <div className={`demo-overlay ${running ? 'hidden' : ''}`} aria-live="polite">
         {phase.name === 'waiting' && 'Loading'}

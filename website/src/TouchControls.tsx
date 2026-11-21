@@ -1,11 +1,9 @@
 import {
-  useEffect,
   useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
-  type RefObject,
 } from 'react';
 import type { VoxelDemo } from './loadDemo';
 
@@ -49,10 +47,6 @@ function capture(event: ReactPointerEvent<HTMLElement>) {
   }
 }
 
-function fullscreenSupported(): boolean {
-  return document.fullscreenEnabled;
-}
-
 /**
  * Controls for a touch screen, over the demo's canvas. A touch on the left of
  * the scene walks with a stick that appears under the thumb, and a touch
@@ -61,25 +55,20 @@ function fullscreenSupported(): boolean {
  */
 export function TouchControls({
   demo,
-  frame,
   choices,
   onChoose,
+  fullScreen,
+  onFullScreen,
 }: {
   demo: VoxelDemo;
-  frame: RefObject<HTMLDivElement | null>;
   choices: TouchChoices;
   onChoose: (choices: TouchChoices) => void;
+  fullScreen: boolean;
+  onFullScreen: (on: boolean) => void;
 }) {
   const stick = useRef<Stick | null>(null);
   const look = useRef<Drag | null>(null);
   const [shownStick, setShownStick] = useState<Stick | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
-
-  useEffect(() => {
-    const follow = () => setFullscreen(document.fullscreenElement === frame.current);
-    document.addEventListener('fullscreenchange', follow);
-    return () => document.removeEventListener('fullscreenchange', follow);
-  }, [frame]);
 
   function walk(next: Stick | null) {
     stick.current = next;
@@ -121,14 +110,6 @@ export function TouchControls({
       walk(null);
     } else if (look.current?.pointer === event.pointerId) {
       look.current = null;
-    }
-  }
-
-  function toggleFullscreen() {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
-    } else {
-      void frame.current?.requestFullscreen({ navigationUI: 'hide' });
     }
   }
 
@@ -180,19 +161,17 @@ export function TouchControls({
         >
           <LanternIcon />
         </HoldButton>
-        {fullscreenSupported() && (
-          <button
-            type="button"
-            className="touch-button"
-            aria-label="Full screen"
-            aria-pressed={fullscreen}
-            tabIndex={-1}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={toggleFullscreen}
-          >
-            <FullscreenIcon />
-          </button>
-        )}
+        <button
+          type="button"
+          className="touch-button"
+          aria-label="Full screen"
+          aria-pressed={fullScreen}
+          tabIndex={-1}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => onFullScreen(!fullScreen)}
+        >
+          <FullScreenIcon leave={fullScreen} />
+        </button>
       </div>
 
       <div className="touch-actions">
@@ -335,10 +314,17 @@ function LanternIcon() {
   );
 }
 
-function FullscreenIcon() {
+/** Corners that point out, or point in to leave full screen. */
+function FullScreenIcon({ leave }: { leave: boolean }) {
   return (
     <Icon>
-      <path d="M1 1h4v1H2v3H1zM7 1h4v4h-1V2H7zM1 7h1v3h3v1H1zM10 7h1v4H7v-1h3z" />
+      <path
+        d={
+          leave
+            ? 'M4 1h1v4H1V4h3zM7 1h1v3h3v1H7zM1 7h4v4H4V8H1zM7 7h4v1H8v3H7z'
+            : 'M1 1h4v1H2v3H1zM7 1h4v4h-1V2H7zM1 7h1v3h3v1H1zM10 7h1v4H7v-1h3z'
+        }
+      />
     </Icon>
   );
 }
