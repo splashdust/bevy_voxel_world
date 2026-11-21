@@ -29,8 +29,8 @@ mountPage(
           <strong>On a touch screen</strong>, drag on the left of the scene to
           walk, and drag past the edge of the stick to run. Drag anywhere else
           to look around. The buttons place and remove voxels and jump, and the
-          ones along the top choose what to place, lower and raise the sun, and
-          carry a lantern.
+          ones along the top choose what to place, lower and raise the sun,
+          carry a lantern and fill the screen.
         </p>
         <p className="demo-note">
           A browser gives the demo a single thread and WebGL2, so a plain sky
