@@ -25,6 +25,13 @@ mountPage(
           1 to 4 choose what to place, [ and ] lower and raise the sun, and Esc
           frees the mouse.
         </p>
+        <p>
+          <strong>On a touch screen</strong>, drag on the left of the scene to
+          walk, and drag past the edge of the stick to run. Drag anywhere else
+          to look around. The buttons place and remove voxels and jump, and the
+          ones along the top choose what to place, lower and raise the sun, and
+          carry a lantern.
+        </p>
         <p className="demo-note">
           A browser gives the demo a single thread and WebGL2, so a plain sky
           stands in for Bevy’s atmosphere, sky light reaches less far, and the

@@ -1,9 +1,13 @@
 //! The live demo on the website: the `light_mountain_house` example, running in
 //! a canvas on the page.
 //!
-//! The scene and its controls come from the example's `MountainHousePlugin`.
+//! The scene and its controls come from `MountainHousePlugin` in the example.
 //! This crate adds the window and asset settings a page needs, and tells the
 //! page when the demo starts drawing and whether its canvas is on screen.
+//!
+//! The `touch` module adds touch controls for phones and tablets. They live
+//! here rather than in the example, and drive the keyboard and mouse controls
+//! of the example.
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -24,6 +28,8 @@ use wasm_bindgen::prelude::*;
 mod light_mountain_house;
 
 use light_mountain_house::MountainHousePlugin;
+
+mod touch;
 
 #[wasm_bindgen(inline_js = "export function announce_ready() {
     window.dispatchEvent(new Event('voxel-demo-ready'));
@@ -80,7 +86,7 @@ fn start() {
                     ..default()
                 }),
         )
-        .add_plugins(MountainHousePlugin)
+        .add_plugins((MountainHousePlugin, touch::TouchControlsPlugin))
         .add_systems(Update, announce_ready.run_if(run_once))
         .add_systems(Update, follow_canvas_visibility)
         .run();
