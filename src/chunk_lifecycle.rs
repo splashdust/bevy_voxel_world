@@ -23,7 +23,7 @@ use crate::{
         LevelCounts,
     },
     chunk_map::{ChunkMap, ChunkMapData, ChunkMapRemoveBuffer, ChunkMapUpdateBuffer},
-    configuration::{FillHint, LodLevel, VoxelLookupFn, VoxelWorldConfig},
+    configuration::{FillHint, LodLevel, RayPassage, VoxelLookupFn, VoxelWorldConfig},
     grid::{GridId, GridKey, GridTable, PerGrid},
     mesh_cache::{MeshCache, MeshCacheInsertBuffer, MeshRef},
     pool_budget::{JobKind, PendingChunks, PoolBudget},
@@ -1480,6 +1480,13 @@ impl<C: VoxelWorldConfig> TaskStarter<'_, C> {
                 .chunk_edits_in(grid_key, padding_depth(data_shape, key.lod_level)),
             hint,
         );
+        // Spawning rays cross only the chunks of the world, so a chunk of a
+        // sub-grid skips working out which faces its air joins.
+        chunk_task.ray_passage = if in_world {
+            self.configuration.spawning_ray_passage()
+        } else {
+            RayPassage::AnyAir
+        };
 
         #[cfg(not(feature = "light_propagation"))]
         let _ = lookup_delegate;

@@ -29,10 +29,12 @@ The computational cost of coloured light grows mainly with these factors:
 
 ### Other changes
 
+- Spawning rays see out of a chunk that is solid in places only by the faces that the air of the chunk joins to the face they came in by. A world of caves no longer spawns every chunk behind the walls of the cave the camera is in, and a coarse chunk no longer waits for finer chunks behind such walls before it retires. `VoxelWorldConfig::spawning_ray_passage` picks the rule: `RayPassage::FaceJoined`, the default, suits meshes of blocks, `CornerJoined` suits meshes drawn between voxel samples, and `AnyAir` lets rays through any chunk with air, as before.
 - Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
 
 ### Bug fixes
 
+- Fix: spawning rays visit every chunk they cross. They stepped a chunk length at a time and skipped the chunks whose corners they clipped, so a chunk seen through a gap could stay missing.
 - Fix: a voxel's top texture stays on its own top under a rotated `WorldRoot`. The default fragment shader now picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`.
 - Fix: all six circles of a voxel gizmo sit on the faces of the voxel it marks. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
 - Fix: `debug_draw_chunks` puts each chunk's box through the chunk's whole transform, so the box stays on the chunk under a rotated or scaled `WorldRoot`.
@@ -85,6 +87,19 @@ let around = voxel_falloff(levels.voxel);
 
 // now: an f32 level, times its light colour
 let around = voxel_falloff(levels.voxel) * levels.voxel_color;
+```
+
+#### 5. A mesh drawn between voxel samples, or seen through solid voxels, may need `spawning_ray_passage`
+
+Spawning rays now stop in a chunk whose air doesn't join the face they leave by to the face they came in by, counting air voxels that share a face. A mesh that draws its surface between voxel samples can show air between voxels that share only an edge or a corner. A mesh that shows something through solid voxels, such as glass, shows more. Such a world can leave chunks missing that the camera sees, and picks a rule that lets more rays through:
+
+```rust
+fn spawning_ray_passage(&self) -> RayPassage {
+    // A surface drawn between voxel samples.
+    RayPassage::CornerJoined
+    // Or, to let rays through any chunk with air, as before:
+    // RayPassage::AnyAir
+}
 ```
 
 ## 0.19.3

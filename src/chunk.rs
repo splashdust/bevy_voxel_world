@@ -11,8 +11,10 @@ use crate::{
     grid::{GridId, GridKey},
     mesh_cache::WeakMeshMap,
     prelude::{
-        ChunkMeshingFn, FillHint, LodLevel, TextureIndexMapperFn, VoxelWorldConfig,
+        ChunkMeshingFn, FillHint, LodLevel, RayPassage, TextureIndexMapperFn,
+        VoxelWorldConfig,
     },
+    streaming_policy::{passages::passages_of, Passages},
     voxel::WorldVoxel,
     voxel_edits::ChunkEdits,
 };
@@ -258,6 +260,9 @@ pub struct ChunkData<I> {
     pub(crate) has_generated: bool,
     pub(crate) data_shape: UVec3,
     pub(crate) mesh_shape: UVec3,
+    /// Which pairs of faces of the chunk its air joins, for spawning rays. The
+    /// chunk task works them out in `ChunkTask::post_voxel`.
+    pub(crate) passages: Passages,
 }
 
 impl<I: Hash + Copy + PartialEq> ChunkData<I> {
@@ -273,6 +278,7 @@ impl<I: Hash + Copy + PartialEq> ChunkData<I> {
             has_generated: false,
             data_shape: UVec3::splat(PADDED_CHUNK_SIZE),
             mesh_shape: UVec3::splat(PADDED_CHUNK_SIZE),
+            passages: Passages::ALL,
         }
     }
 
@@ -707,6 +713,9 @@ where
     /// checked against in debug builds.
     pub hint: FillHint<I>,
     pub disagrees_with_hint: bool,
+    /// How spawning rays pass through the chunk, which decides the passages
+    /// `post_voxel` works out.
+    pub ray_passage: RayPassage,
     pub mesh: Option<Mesh>,
     pub user_bundle: Option<C::ChunkUserBundle>,
     /// What the task needs to solve the chunk's light, in a world with light
@@ -739,6 +748,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             edits,
             hint,
             disagrees_with_hint: false,
+            ray_passage: RayPassage::default(),
             mesh: None,
             user_bundle: None,
             #[cfg(feature = "light_propagation")]
@@ -846,11 +856,16 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     /// for chunks that generated empty or full.
     ///
     /// It is the place for work that depends on the voxels and must be done
-    /// before the chunk is published, whether or not it gets a mesh: in a world
-    /// with light propagation, solving the chunk's light.
+    /// before the chunk is published, whether or not it gets a mesh. That work
+    /// is:
+    ///
+    /// - working out which pairs of faces the air of the chunk joins, for
+    ///   spawning rays;
+    /// - in a world with light propagation, solving the light of the chunk.
     pub fn post_voxel(&mut self) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("post_voxel").entered();
+        self.chunk_data.passages = passages_of(&self.chunk_data, self.ray_passage);
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light.take() {
             self.solved_light = Some(light.solve(&self.chunk_data));

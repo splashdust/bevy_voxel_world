@@ -19,6 +19,10 @@ use crate::{
     voxel::WorldVoxel,
 };
 
+pub(crate) mod passages;
+
+pub(crate) use passages::Passages;
+
 /// What the streaming policy needs to know about one camera.
 ///
 /// The view and projection matrices are kept apart, as in Bevy's camera, so
@@ -139,8 +143,9 @@ pub(crate) enum Occupancy {
     Unpublished,
     /// A chunk exists here and its published voxels are all air.
     Empty,
-    /// A chunk exists here and its published voxels are solid in places.
-    Mixed,
+    /// A chunk exists here and its published voxels are solid in places. The
+    /// passages say which pairs of its faces its air joins.
+    Mixed(Passages),
     /// A chunk exists here and its published voxels are all solid.
     Full,
 }
@@ -148,21 +153,51 @@ pub(crate) enum Occupancy {
 impl Occupancy {
     /// Whether a chunk exists here with its voxels published.
     fn is_published(self) -> bool {
-        matches!(self, Occupancy::Empty | Occupancy::Mixed | Occupancy::Full)
+        matches!(
+            self,
+            Occupancy::Empty | Occupancy::Mixed(_) | Occupancy::Full
+        )
     }
 
     /// The occupancy of a chunk with published `data`.
     ///
     /// Every solid voxel counts as opaque, so a ray sees nothing behind a full
-    /// chunk. Supporting translucent voxels means changing this and
-    /// [`Occupancy::of_uniform`] together.
+    /// chunk. Supporting translucent voxels means changing this,
+    /// [`Occupancy::of_uniform`] and [`passages_of`](passages::passages_of)
+    /// together, so that a translucent voxel counts as air in all three.
     pub fn of_data<I>(data: &ChunkData<I>) -> Self {
         if data.is_full {
             Occupancy::Full
         } else if data.is_empty {
             Occupancy::Empty
         } else {
-            Occupancy::Mixed
+            Occupancy::Mixed(data.passages)
+        }
+    }
+
+    /// Whether a ray that comes into a chunk with this occupancy by `entry`
+    /// sees out of it by `exit`. A ray that starts in the chunk has no `entry`,
+    /// and sees out by any face.
+    ///
+    /// A full chunk blocks the ray, and so does a chunk whose air doesn't join
+    /// the two faces. A chunk that is missing or not yet published lets the
+    /// ray through here, and the caller decides whether the ray goes on.
+    fn lets_through(self, entry: Option<Face>, exit: Face) -> bool {
+        match self {
+            Occupancy::Full => false,
+            Occupancy::Mixed(passages) => {
+                entry.is_none_or(|entry| passages.joins(entry, exit))
+            }
+            Occupancy::Missing | Occupancy::Unpublished | Occupancy::Empty => true,
+        }
+    }
+
+    /// This occupancy, with the air of a chunk solid in places joining every
+    /// pair of faces.
+    fn joining_every_face(self) -> Self {
+        match self {
+            Occupancy::Mixed(_) => Occupancy::Mixed(Passages::ALL),
+            occupancy => occupancy,
         }
     }
 
@@ -542,13 +577,16 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         }
     }
 
-    /// Whether solid chunks hide the missing chunk at `key` from every camera.
+    /// Whether the chunks in front of the missing chunk at `key` hide it from
+    /// every camera.
     ///
-    /// A spawning ray stops at a solid chunk, so it may never reach a chunk
-    /// behind one. The check follows the same rule along lines from each camera
-    /// to the chunk's centre and corners, leaving out the ones out of that
-    /// camera's view when only chunks in view are spawned, since no ray goes
-    /// there.
+    /// A spawning ray stops at a solid chunk, and at a chunk whose air doesn't
+    /// lead on to the face it is heading for. So the ray may never reach a
+    /// chunk behind those. The check follows the same rule along lines from
+    /// each camera to the centre and the corners of the chunk, through
+    /// [`blocked_before`](Self::blocked_before). It leaves out the lines out of
+    /// view of the camera when only chunks in view are spawned, since no ray
+    /// goes there.
     ///
     /// Any line that gets through means rays can reach the chunk, so it spawns
     /// and is waited for. Lines between those points aren't checked, so a gap
@@ -556,8 +594,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     /// hidden until a ray through the gap finds it, which is like any other
     /// missing chunk coming into view.
     ///
-    /// Chunks in a camera's protected radius always spawn, so they are never
-    /// hidden.
+    /// The check has to stop every line that a spawning ray along it stops at.
+    /// A line that gets through where rays can't makes a coarse chunk wait for
+    /// a finer chunk that never spawns, so the coarse chunk never retires.
+    ///
+    /// Chunks in the protected radius of a camera always spawn, so they are
+    /// never hidden.
     fn hidden(&self, key: ChunkKey) -> bool {
         if self.is_close_to_any_camera(key, self.protected_distance_squared) {
             return false;
@@ -576,19 +618,19 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 }))
                 .all(|point| {
                     (self.in_view_only && !camera.sees_point(point, 0.0))
-                        || self.solid_chunk_between(camera.position, point, key)
+                        || self.blocked_before(camera.position, point, key)
                 })
         })
     }
 
     /// Whether a line from `from` to `to`, a point in the chunk at `target`,
-    /// meets a solid chunk before it enters that chunk.
+    /// meets a chunk that blocks it before it enters that chunk.
     ///
     /// The line crosses chunks as a spawning ray does, through
-    /// [`walk`](Self::walk). Published and hinted chunks count, as they do for
-    /// a spawning ray. A chunk not yet published doesn't, since it may turn out
-    /// not to be solid.
-    fn solid_chunk_between(&self, from: Vec3, to: Vec3, target: ChunkKey) -> bool {
+    /// [`walk`](Self::walk), and published and hinted chunks block it as they
+    /// block a spawning ray. A chunk not yet published doesn't block it, since
+    /// it may turn out to be air.
+    fn blocked_before(&self, from: Vec3, to: Vec3, target: ChunkKey) -> bool {
         let Ok(direction) = Dir3::new(to - from) else {
             return false;
         };
@@ -605,7 +647,7 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 }
                 occupancy => occupancy,
             };
-            blocked = occupancy == Occupancy::Full;
+            blocked = !occupancy.lets_through(crossing.entry, crossing.exit);
             !blocked
         });
         blocked
@@ -765,12 +807,18 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     /// Far from the camera, where `chunk_lod` asks for large chunks, the chunks
     /// it crosses are large too, so the ray crosses open air in a few steps.
     ///
-    /// The ray passes through chunks that contain air. It stops at a chunk that
-    /// is completely solid, because nothing behind it can be seen. It also stops
+    /// The ray passes through chunks of air. It stops at a chunk that is
+    /// completely solid, because nothing behind it can be seen. It also stops
     /// at a chunk that is spawned but not yet published, because what lies
     /// behind it is unknown until it has generated. As a result, chunks spawn
     /// from the camera outwards as the chunks in front of them publish, and
     /// chunks hidden behind solid ones are rarely spawned.
+    ///
+    /// In a chunk that is solid in places, the ray goes on only when the air of
+    /// the chunk joins the face the ray leaves by to the face it came in by, as
+    /// [`Occupancy::lets_through`] decides. The ray sees out of the chunk only
+    /// along air voxels, so it can't see out by any other face. The chunk the
+    /// ray starts in lets it out by any face.
     ///
     /// When the ray reaches a chunk that has not been spawned yet, it queues it
     /// and continues. It queues at most `RAY_LOOKAHEAD` such chunks, then stops.
@@ -813,9 +861,9 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             match occupancy {
                 Occupancy::Missing | Occupancy::Empty => true,
                 // Past a chunk with solid voxels, the next one is likely solid.
-                Occupancy::Mixed => {
+                Occupancy::Mixed(_) => {
                     lookahead = lookahead.min(1);
-                    true
+                    occupancy.lets_through(crossing.entry, crossing.exit)
                 }
                 Occupancy::Full | Occupancy::Unpublished => false,
             }
@@ -845,15 +893,28 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         // axis, plus one, so this ends the walk however rounding goes.
         let max_steps = 3 * (length / CHUNK_SIZE_F).ceil() as usize + 4;
         let mut chunk_position = chunk_containing(origin.floor().as_ivec3());
+        // The face the ray crossed into `chunk_position` by, and where that
+        // face lies along its axis, in voxels.
+        let mut crossed: Option<(Face, i32)> = None;
         for _ in 0..max_steps {
             let (key, occupancy, behind) = self.chunk_along_ray(chunk_position);
-            let (t_exit, exit) =
-                exit_of(key.min_voxel(), key.voxel_extent(), origin, direction);
+            let min = key.min_voxel();
+            let extent = key.voxel_extent();
+            // While a split or merge is under way, the chunk wanted here can
+            // reach back past the face the ray crossed. The ray is then already
+            // inside the chunk, and enters by none of its faces.
+            let entry = crossed.and_then(|(face, plane)| {
+                let side = min[face.axis()] + if face.is_high() { extent } else { 0 };
+                (side == plane).then_some(face)
+            });
+            let (t_exit, exit) = exit_of(min, extent, origin, direction);
             let crossing = Crossing {
                 chunk_position,
                 key,
                 occupancy,
                 behind,
+                entry,
+                exit,
             };
             if !visit(&crossing) || t_exit >= length {
                 return;
@@ -870,6 +931,8 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             } else {
                 key.position[axis] - 1
             };
+            let plane = min[axis] + if exit.is_high() { extent } else { 0 };
+            crossed = Some((exit.opposite(), plane));
             chunk_position = next;
         }
     }
@@ -896,7 +959,11 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             }
             _ => Occupancy::Missing,
         };
-        let behind = covering.map_or(Occupancy::Empty, |(_, occupancy)| occupancy);
+        // The covering chunk has another extent than the wanted one, so its
+        // faces aren't the faces the ray crosses, and the ray passes it by any.
+        let behind = covering.map_or(Occupancy::Empty, |(_, occupancy)| {
+            occupancy.joining_every_face()
+        });
         (key, occupancy, behind)
     }
 }
@@ -912,6 +979,12 @@ struct Crossing {
     /// The occupancy of the chunk covering `chunk_position` now, which
     /// decides whether the ray goes on while the chunk at `key` is missing.
     behind: Occupancy,
+    /// The face of the chunk at `key` the ray enters by. It is `None` in the
+    /// chunk the ray starts in, and in a chunk that reaches back past the face
+    /// the ray crossed, as a chunk can while a split or merge is under way.
+    entry: Option<Face>,
+    /// The face of the chunk at `key` the ray leaves by.
+    exit: Face,
 }
 
 /// One of the six faces of a chunk.
@@ -919,13 +992,19 @@ struct Crossing {
 /// Face `2 * axis` is on the low side of the axis and face `2 * axis + 1` on
 /// the high side, so the faces run `-x`, `+x`, `-y`, `+y`, `-z`, `+z`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Face(u8);
+pub(crate) struct Face(u8);
 
 impl Face {
     /// The face on the high side of `axis` when `high` is set, and on the low
     /// side otherwise.
-    fn new(axis: usize, high: bool) -> Self {
+    pub(crate) fn new(axis: usize, high: bool) -> Self {
         Self(2 * axis as u8 + high as u8)
+    }
+
+    /// The face across the chunk from this one. A ray that leaves a chunk by
+    /// a face enters the next chunk by the opposite face.
+    fn opposite(self) -> Self {
+        Self(self.0 ^ 1)
     }
 
     /// The axis the face is across: 0 for x, 1 for y and 2 for z.
@@ -1179,6 +1258,9 @@ mod tests {
             UVec2::new(1280, 720),
         )
     }
+
+    /// A chunk solid in places, whose air joins every pair of faces.
+    const MIXED: Occupancy = Occupancy::Mixed(Passages::ALL);
 
     /// The key of the level-0 chunk at `position`.
     fn existing(position: IVec3) -> ChunkKey {
@@ -1569,7 +1651,7 @@ mod tests {
 
         for (occupancy, walks_through) in [
             (Occupancy::Empty, true),
-            (Occupancy::Mixed, true),
+            (MIXED, true),
             (Occupancy::Full, false),
             (Occupancy::Unpublished, false),
         ] {
@@ -1634,20 +1716,28 @@ mod tests {
         for (origin, direction) in segments(&mut StdRng::seed_from_u64(3)) {
             let mut visited = Vec::new();
             planner.walk(origin, direction, length, |crossing| {
-                visited.push(crossing.chunk_position);
+                visited.push((crossing.chunk_position, crossing.entry, crossing.exit));
                 true
             });
 
+            assert_eq!(visited[0].1, None, "the first chunk has no entry face");
             for pair in visited.windows(2) {
+                let ((from, _, exit), (to, entry, _)) = (pair[0], pair[1]);
+                let mut step = IVec3::ZERO;
+                step[exit.axis()] = if exit.is_high() { 1 } else { -1 };
                 assert_eq!(
-                    (pair[1] - pair[0]).abs().element_sum(),
-                    1,
-                    "the walk from {origin} along {direction} jumped from {} to {}",
-                    pair[0],
-                    pair[1]
+                    to - from,
+                    step,
+                    "the walk from {origin} along {direction} left {from} by {exit:?} for {to}"
+                );
+                assert_eq!(
+                    entry,
+                    Some(exit.opposite()),
+                    "the walk entered {to} by {entry:?}"
                 );
             }
-            let visited: HashSet<IVec3> = visited.into_iter().collect();
+            let visited: HashSet<IVec3> =
+                visited.into_iter().map(|(chunk, _, _)| chunk).collect();
             for chunk in sampled_chunks(origin, direction, length) {
                 assert!(
                     visited.contains(&chunk),
@@ -1693,6 +1783,64 @@ mod tests {
         }
     }
 
+    /// The six faces of a chunk: `-x`, `+x`, `-y`, `+y`, `-z` and `+z`.
+    const FACES: [Face; 6] = [Face(0), Face(1), Face(2), Face(3), Face(4), Face(5)];
+
+    #[test]
+    fn rays_leave_a_chunk_solid_in_places_only_by_a_face_its_air_joins_to_the_one_they_came_in_by(
+    ) {
+        let config = TestWorld {
+            spawning_distance: 4,
+            spawn_in_view: true,
+            ..default()
+        };
+        let ahead = C + IVec3::new(0, 0, -2);
+        let behind_it = C + IVec3::new(0, 0, -3);
+        // The camera looks along -z from the middle of its chunk, so every ray
+        // that reaches the chunk behind enters the chunk ahead by its +z face
+        // and leaves it by its -z face.
+        let [low_x, high_x, low_y, high_y, low_z, high_z] = FACES;
+
+        for (passages, walks_through) in [
+            (Passages::touching(&[high_z, low_z]), true),
+            (Passages::ALL, true),
+            (
+                Passages::touching(&[high_z, low_x, high_x, low_y, high_y]),
+                false,
+            ),
+            (Passages::touching(&[low_x, low_z]), false),
+            (Passages::NONE, false),
+        ] {
+            let mut occupied = air_around(C);
+            occupied.insert(existing(ahead), Occupancy::Mixed(passages));
+
+            let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
+
+            assert_eq!(
+                spawned(&plan).contains(&behind_it),
+                walks_through,
+                "the chunk behind a chunk with {passages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chunk_a_ray_starts_in_lets_it_out_by_any_face() {
+        let config = TestWorld {
+            spawning_distance: 4,
+            spawn_in_view: true,
+            ..default()
+        };
+        let mut occupied = air_around(C);
+        occupied.insert(existing(C), Occupancy::Mixed(Passages::NONE));
+
+        let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
+
+        // Outside the protected radius, so only a ray out of the camera chunk
+        // spawns it.
+        assert!(spawned(&plan).contains(&(C + IVec3::new(0, 0, -2))));
+    }
+
     #[test]
     fn rays_spawn_two_chunks_past_the_published_ones_and_one_past_a_solid_one() {
         let config = TestWorld {
@@ -1703,11 +1851,9 @@ mod tests {
         let ahead = |distance: i32| C + IVec3::new(0, 0, -distance);
 
         // What is two chunks ahead, and how far ahead the farthest spawn is.
-        for (occupancy, farthest) in [
-            (Occupancy::Missing, 3),
-            (Occupancy::Empty, 4),
-            (Occupancy::Mixed, 3),
-        ] {
+        for (occupancy, farthest) in
+            [(Occupancy::Missing, 3), (Occupancy::Empty, 4), (MIXED, 3)]
+        {
             let mut occupied = air_around(C);
             if occupancy != Occupancy::Missing {
                 occupied.insert(existing(ahead(2)), occupancy);
@@ -1886,10 +2032,7 @@ mod tests {
         let parent = ChunkKey::new(C + IVec3::new(2, 0, 0), 1);
         let children: Vec<_> = parent.children().collect();
 
-        let occupied: Occupied = children
-            .iter()
-            .map(|child| (*child, Occupancy::Mixed))
-            .collect();
+        let occupied: Occupied = children.iter().map(|child| (*child, MIXED)).collect();
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
 
         assert!(!plan.spawn.contains(&parent), "spawned {:?}", plan.spawn);
@@ -2093,7 +2236,7 @@ mod tests {
         assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
 
         // Every child is published.
-        occupied.insert(children[3], Occupancy::Mixed);
+        occupied.insert(children[3], MIXED);
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
         assert_eq!(plan.retire, vec![parent]);
     }
@@ -2156,9 +2299,8 @@ mod tests {
         // now wanted around it. The level-1 chunks cover their parent, but the
         // parent doesn't cover the level-1 chunk around the camera, since the
         // policy wants neither.
-        let mut occupied: Occupied =
-            parent.children().map(|k| (k, Occupancy::Mixed)).collect();
-        occupied.insert(parent, Occupancy::Mixed);
+        let mut occupied: Occupied = parent.children().map(|k| (k, MIXED)).collect();
+        occupied.insert(parent, MIXED);
 
         let is_covered = |occupied: &Occupied, position: IVec3| {
             (0..=MAX_LOD_LEVEL).any(|lod_level| {
@@ -2194,7 +2336,7 @@ mod tests {
                 }
             }
             for key in unpublished.drain(..) {
-                occupied.insert(key, Occupancy::Mixed);
+                occupied.insert(key, MIXED);
             }
             for key in plan.spawn {
                 occupied.insert(key, Occupancy::Unpublished);
@@ -2267,11 +2409,9 @@ mod tests {
             ..default()
         };
         let parent = parent_at_c();
-        let mut occupied: Occupied = parent
-            .children()
-            .map(|child| (child, Occupancy::Mixed))
-            .collect();
-        occupied.insert(parent, Occupancy::Mixed);
+        let mut occupied: Occupied =
+            parent.children().map(|child| (child, MIXED)).collect();
+        occupied.insert(parent, MIXED);
 
         let plan = plan_with_retiring(&config, &occupied, parent);
 
@@ -2283,11 +2423,9 @@ mod tests {
         let config = two_levels();
         let parent = parent_at_c();
         let children: Vec<_> = parent.children().collect();
-        let mut occupied: Occupied = children
-            .iter()
-            .map(|child| (*child, Occupancy::Mixed))
-            .collect();
-        occupied.insert(parent, Occupancy::Mixed);
+        let mut occupied: Occupied =
+            children.iter().map(|child| (*child, MIXED)).collect();
+        occupied.insert(parent, MIXED);
 
         let plan = plan_with_retiring(&config, &occupied, children[0]);
 
@@ -2320,18 +2458,31 @@ mod tests {
         )
     }
 
-    /// Air above row 11, a surface in it, and solid below it, except for the
-    /// shaft of chunks in `opening`, which have air in them.
-    fn surface_with_opening(key: ChunkKey, opening: Option<IVec2>) -> Occupancy {
+    /// Air above row 11, a surface in it, and chunks that are `below` under
+    /// it, except for the shaft of chunks in `opening`, whose air joins every
+    /// face.
+    fn surface_with_opening(
+        key: ChunkKey,
+        opening: Option<IVec2>,
+        below: Occupancy,
+    ) -> Occupancy {
         let in_opening = opening
             .is_some_and(|opening| key.lod_level == 0 && key.position.xz() == opening);
         if key.position.y >= 12 {
             Occupancy::Empty
         } else if key.position.y + key.extent() <= 11 && !in_opening {
-            Occupancy::Full
+            below
         } else {
-            Occupancy::Mixed
+            MIXED
         }
+    }
+
+    /// What lies under the surface: solid chunks, and chunks whose air runs
+    /// along their top, out to their sides but not down to their bottom.
+    fn below_the_surface() -> [Occupancy; 2] {
+        let [low_x, high_x, _, high_y, low_z, high_z] = FACES;
+        let sealed = Passages::touching(&[high_y, low_x, high_x, low_z, high_z]);
+        [Occupancy::Full, Occupancy::Mixed(sealed)]
     }
 
     /// Plans `frames` frames in which every spawned chunk publishes at once and
@@ -2342,6 +2493,7 @@ mod tests {
         coarse: ChunkKey,
         cameras: &[CameraSnapshot],
         opening: Option<IVec2>,
+        below: Occupancy,
         frames: usize,
     ) -> Option<usize> {
         let config = near_level_0_in_view();
@@ -2350,7 +2502,7 @@ mod tests {
             let keys: Vec<_> = occupied.keys().copied().collect();
             let plan = plan(&config, cameras, keys, &*occupied, 1000, &mut rng);
             for key in plan.spawn {
-                occupied.insert(key, surface_with_opening(key, opening));
+                occupied.insert(key, surface_with_opening(key, opening, below));
             }
             let retired = plan.retire.contains(&coarse);
             for key in plan.retire {
@@ -2366,72 +2518,94 @@ mod tests {
     #[test]
     fn a_coarse_chunk_retires_without_waiting_for_finer_chunks_hidden_behind_solid_ones()
     {
-        let (coarse, camera) = chunk_below_camera();
-        let cameras = [camera];
-        let mut occupied: Occupied = [(coarse, surface_with_opening(coarse, None))]
-            .into_iter()
-            .collect();
+        for below in below_the_surface() {
+            let (coarse, camera) = chunk_below_camera();
+            let cameras = [camera];
+            let mut occupied: Occupied =
+                [(coarse, surface_with_opening(coarse, None, below))]
+                    .into_iter()
+                    .collect();
 
-        let retired = run_until_retired(&mut occupied, coarse, &cameras, None, 400);
+            let retired =
+                run_until_retired(&mut occupied, coarse, &cameras, None, below, 400);
 
-        assert!(retired.is_some(), "the coarse chunk never retired");
-        let row = |y: i32| {
-            (8..12)
-                .flat_map(|x| (8..12).map(move |z| IVec3::new(x, y, z)))
-                .filter(|&position| occupied.contains_key(&existing(position)))
-                .count()
-        };
-        assert_eq!(row(11), 16, "the surface is published at level 0");
-        assert_eq!(row(9), 0, "no chunk is spawned behind the solid row");
-
-        // With the camera still, the chunks have settled.
-        let config = near_level_0_in_view();
-        let mut rng = StdRng::seed_from_u64(8);
-        for _ in 0..50 {
-            let keys: Vec<_> = occupied.keys().copied().collect();
-            let plan = plan(&config, &cameras, keys, &occupied, 1000, &mut rng);
-            assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
             assert!(
-                !plan.spawn.contains(&coarse),
-                "the coarse chunk spawned again"
+                retired.is_some(),
+                "the coarse chunk over {below:?} never retired"
             );
-            for key in plan.spawn {
-                assert!(key.position.y >= 10, "{key} spawned behind the solid row");
-                occupied.insert(key, surface_with_opening(key, None));
+            let row = |y: i32| {
+                (8..12)
+                    .flat_map(|x| (8..12).map(move |z| IVec3::new(x, y, z)))
+                    .filter(|&position| occupied.contains_key(&existing(position)))
+                    .count()
+            };
+            assert_eq!(row(11), 16, "the surface is published at level 0");
+            assert_eq!(row(9), 0, "a chunk is spawned behind a row of {below:?}");
+
+            // With the camera still, the chunks have settled.
+            let config = near_level_0_in_view();
+            let mut rng = StdRng::seed_from_u64(8);
+            for _ in 0..50 {
+                let keys: Vec<_> = occupied.keys().copied().collect();
+                let plan = plan(&config, &cameras, keys, &occupied, 1000, &mut rng);
+                assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
+                assert!(
+                    !plan.spawn.contains(&coarse),
+                    "the coarse chunk over {below:?} spawned again"
+                );
+                for key in plan.spawn {
+                    assert!(
+                        key.position.y >= 10,
+                        "{key} spawned behind a row of {below:?}"
+                    );
+                    occupied.insert(key, surface_with_opening(key, None, below));
+                }
             }
         }
     }
 
     #[test]
     fn a_coarse_chunk_waits_for_finer_chunks_seen_through_an_opening_in_the_solid_ones() {
-        let (coarse, camera) = chunk_below_camera();
-        let cameras = [camera];
-        let opening = IVec2::new(10, 10);
-        let below_opening = existing(IVec3::new(10, 9, 10));
-        // Rows 10 and 11 are published, with the opening in row 10.
-        let mut occupied: Occupied = [(coarse, Occupancy::Mixed)].into_iter().collect();
-        for y in 10..12 {
-            for x in 8..12 {
-                for z in 8..12 {
-                    let key = existing(IVec3::new(x, y, z));
-                    occupied.insert(key, surface_with_opening(key, Some(opening)));
+        for below in below_the_surface() {
+            let (coarse, camera) = chunk_below_camera();
+            let cameras = [camera];
+            let opening = IVec2::new(10, 10);
+            let below_opening = existing(IVec3::new(10, 9, 10));
+            // Rows 10 and 11 are published, with the opening in row 10.
+            let mut occupied: Occupied = [(coarse, MIXED)].into_iter().collect();
+            for y in 10..12 {
+                for x in 8..12 {
+                    for z in 8..12 {
+                        let key = existing(IVec3::new(x, y, z));
+                        occupied
+                            .insert(key, surface_with_opening(key, Some(opening), below));
+                    }
                 }
             }
+
+            let plan_now = plan_with(&near_level_0_in_view(), &cameras, &occupied);
+            assert!(
+                !plan_now.retire.contains(&coarse),
+                "retired with a chunk visible through the opening in {below:?} still missing"
+            );
+
+            let retired = run_until_retired(
+                &mut occupied,
+                coarse,
+                &cameras,
+                Some(opening),
+                below,
+                400,
+            );
+            assert!(
+                retired.is_some(),
+                "the coarse chunk over {below:?} never retired"
+            );
+            assert!(
+                occupied.contains_key(&below_opening),
+                "the coarse chunk retired before the chunk below the opening in {below:?} spawned"
+            );
         }
-
-        let plan_now = plan_with(&near_level_0_in_view(), &cameras, &occupied);
-        assert!(
-            !plan_now.retire.contains(&coarse),
-            "retired with a chunk visible through the opening still missing"
-        );
-
-        let retired =
-            run_until_retired(&mut occupied, coarse, &cameras, Some(opening), 400);
-        assert!(retired.is_some(), "the coarse chunk never retired");
-        assert!(
-            occupied.contains_key(&below_opening),
-            "the coarse chunk retired before the chunk below the opening spawned"
-        );
     }
 
     #[test]
@@ -2448,7 +2622,7 @@ mod tests {
             .map(|position| (existing(position), Occupancy::Full))
             .collect();
         occupied.remove(&missing);
-        occupied.insert(parent, Occupancy::Mixed);
+        occupied.insert(parent, MIXED);
 
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
 
@@ -2470,7 +2644,7 @@ mod tests {
         // the camera, and the parent wanted in their place missing.
         let parent = ChunkKey::new(IVec3::new(10, 10, 8), 1);
         let child = parent.children().next().unwrap();
-        let mut occupied: Occupied = [(child, Occupancy::Mixed)].into_iter().collect();
+        let mut occupied: Occupied = [(child, MIXED)].into_iter().collect();
         for x in (0..20).step_by(2) {
             for y in (0..20).step_by(2) {
                 occupied.insert(ChunkKey::new(IVec3::new(x, y, 14), 1), Occupancy::Full);
@@ -2496,10 +2670,8 @@ mod tests {
         let children: Vec<_> = parent.children().collect();
 
         // The level-0 chunks are published; level 1 is wanted everywhere.
-        let mut occupied: Occupied = children
-            .iter()
-            .map(|child| (*child, Occupancy::Mixed))
-            .collect();
+        let mut occupied: Occupied =
+            children.iter().map(|child| (*child, MIXED)).collect();
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
         assert!(plan.spawn.contains(&parent), "spawned {:?}", plan.spawn);
         assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
@@ -2508,7 +2680,7 @@ mod tests {
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
         assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
 
-        occupied.insert(parent, Occupancy::Mixed);
+        occupied.insert(parent, MIXED);
         let plan = plan_with(&config, &[camera(C, Vec3::NEG_Z)], &occupied);
         let retired: HashSet<_> = plan.retire.iter().copied().collect();
         assert_eq!(retired, children.iter().copied().collect());

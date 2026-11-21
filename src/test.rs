@@ -3864,6 +3864,82 @@ fn a_chunk_with_uneven_spacing_samples_and_answers_at_rounded_down_positions() {
     );
 }
 
+/// A world solid everywhere but a tunnel along x through the chunk at the
+/// origin, at y and z from 10 to 12.
+#[derive(Resource, Clone, Default)]
+struct TunnelWorld;
+
+impl VoxelWorldConfig for TunnelWorld {
+    type MaterialIndex = u8;
+    type ChunkUserBundle = ();
+
+    fn spawning_distance(&self) -> u32 {
+        1
+    }
+
+    fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
+        ChunkDespawnStrategy::FarAway
+    }
+
+    fn voxel_lookup_delegate(&self) -> VoxelLookupDelegate<Self::MaterialIndex> {
+        Box::new(|_, _, _| {
+            Box::new(|pos, _| {
+                if (10..13).contains(&pos.y) && (10..13).contains(&pos.z) {
+                    WorldVoxel::Air
+                } else {
+                    WorldVoxel::Solid(1)
+                }
+            })
+        })
+    }
+}
+
+#[test]
+fn a_chunk_task_works_out_which_faces_the_air_joins_again_after_an_edit() {
+    use crate::streaming_policy::Face;
+
+    let mut app = App::new();
+    app.add_plugins((test_plugins(), VoxelWorldPlugin::<TunnelWorld>::minimal()))
+        .add_systems(Startup, spawn_camera::<TunnelWorld>);
+    let passages = |app: &mut App| {
+        chunk_data::<TunnelWorld>(app, IVec3::ZERO).map(|data| data.passages)
+    };
+    let (low_x, high_x) = (Face::new(0, false), Face::new(0, true));
+    let (low_y, high_y) = (Face::new(1, false), Face::new(1, true));
+
+    update_until(&mut app, "the chunk at the origin to publish", |app| {
+        passages(app).is_some()
+    });
+    let tunnel = passages(&mut app).unwrap();
+    assert!(tunnel.joins(low_x, high_x), "the tunnel joins the x faces");
+    assert!(
+        !tunnel.joins(low_x, high_y),
+        "nothing reaches the high y face"
+    );
+
+    // A shaft from the tunnel up to the high y face.
+    app.world_mut()
+        .run_system_once(|mut voxel_world: VoxelWorld<TunnelWorld>| {
+            for y in 13..CHUNK_SIZE_I {
+                voxel_world.set_voxel(IVec3::new(16, y, 11), WorldVoxel::Air);
+            }
+        })
+        .unwrap();
+    update_until(&mut app, "the edited chunk to publish", |app| {
+        passages(app) != Some(tunnel)
+    });
+
+    let shaft = passages(&mut app).unwrap();
+    assert!(
+        shaft.joins(low_x, high_y),
+        "the shaft joins the low x face to the high y face"
+    );
+    assert!(
+        !shaft.joins(low_y, high_y),
+        "nothing reaches the low y face"
+    );
+}
+
 #[cfg(feature = "dislodged_fragments")]
 mod dislodged_fragments;
 mod edits;

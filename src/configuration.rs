@@ -102,6 +102,38 @@ pub enum ChunkSpawnStrategy {
     Close,
 }
 
+/// How a spawning ray passes through a chunk that is solid in places.
+///
+/// See [`VoxelWorldConfig::spawning_ray_passage`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RayPassage {
+    /// The ray leaves the chunk only by a face that the air of the chunk joins
+    /// to the face the ray came in by. Air joins through voxels that share a
+    /// face.
+    ///
+    /// This suits a mesh that draws each solid voxel as a block. A camera
+    /// then sees through a chunk only along air voxels that share faces, so
+    /// the rule never stops a ray before a chunk the camera could see.
+    #[default]
+    FaceJoined,
+    /// As `FaceJoined`, but air also joins through voxels that share only an
+    /// edge or a corner, and through the voxels just past the faces of the
+    /// chunk.
+    ///
+    /// This suits a mesh that draws its surface between voxel samples, where
+    /// air can show between voxels that share only an edge or a corner. It
+    /// spawns more chunks hidden behind solid voxels than `FaceJoined`, and
+    /// costs each chunk task more.
+    CornerJoined,
+    /// The ray passes through every chunk that holds any air, by any face.
+    ///
+    /// This suits a mesh that lets the camera see through some solid voxels,
+    /// such as glass, since every solid voxel blocks a ray under the other
+    /// rules. It spawns the most chunks hidden behind solid voxels, and costs
+    /// the chunk tasks nothing.
+    AnyAir,
+}
+
 /// `bevy_voxel_world` configuation structs need to implement this trait
 pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// The type used to index materials. A value of this type will be stored in each voxel,
@@ -147,15 +179,39 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
 
     /// Number of rays to cast when spawning chunks.
     ///
-    /// A ray passes through generated chunks that are not completely solid, and
-    /// through missing chunks whose [fill hint](Self::chunk_fill_hint) says they
-    /// are empty. It spawns the first chunks past them. So chunks spawn from the
-    /// camera outwards as the chunks in front of them are generated.
+    /// A ray passes through generated chunks it can see through, as
+    /// [`spawning_ray_passage`](Self::spawning_ray_passage) decides, and
+    /// through missing chunks whose [fill hint](Self::chunk_fill_hint) says
+    /// they are empty. It spawns the first chunks past them. So chunks spawn
+    /// from the camera outwards as the chunks in front of them are generated.
     ///
     /// Higher values will result in more chunks being spawned per frame, but
     /// will also increase cpu load.
     fn spawning_rays(&self) -> usize {
         100
+    }
+
+    /// How a spawning ray passes through a chunk that is solid in places.
+    ///
+    /// A ray passes through chunks of air and stops at solid chunks (see
+    /// [`spawning_rays`](Self::spawning_rays)). In a chunk that is solid in
+    /// places, the ray sees out only by the faces that the air inside the
+    /// chunk joins to the face the ray came in by. A ray that passed through
+    /// every such chunk would spawn every chunk behind the walls of a cave,
+    /// though no camera sees them.
+    ///
+    /// The default, [`RayPassage::FaceJoined`], suits a mesh that draws solid
+    /// voxels as blocks. Pick [`RayPassage::CornerJoined`] for a mesh that
+    /// draws its surface between voxel samples, and [`RayPassage::AnyAir`]
+    /// for a mesh that shows something through solid voxels.
+    ///
+    /// Each chunk task works out which faces the air of its chunk joins, once
+    /// its voxels are generated. The cost grows with the voxels of the chunk,
+    /// and `CornerJoined` costs more than `FaceJoined`. A chunk keeps what its
+    /// task worked out until the chunk generates again, so a change of rule
+    /// reaches the chunks that exist as they regenerate.
+    fn spawning_ray_passage(&self) -> RayPassage {
+        RayPassage::default()
     }
 
     /// What the world knows about the voxels of the chunk at `key` before it is
