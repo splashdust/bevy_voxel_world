@@ -36,6 +36,7 @@ The computational cost of coloured light grows mainly with these factors:
 ### Bug fixes
 
 - Fix: spawning rays visit every chunk they cross. They stepped a chunk length at a time and skipped the chunks whose corners they clipped, so a chunk seen through a gap could stay missing.
+- Fix: spawning rays count only the chunks that can spawn. Chunks beyond the spawning distance, or out of view where only chunks in view spawn, counted toward the chunks a frame looks for. A frame could then stop looking with chunks still to start, and chunks coming into view at the edge a camera turns toward spawned late.
 - Fix: a voxel's top texture stays on its own top under a rotated `WorldRoot`. The default fragment shader now picks each face's top, side or bottom texture from `local_normal` instead of `world_normal`.
 - Fix: all six circles of a voxel gizmo sit on the faces of the voxel it marks. Before, three sat at the centre of the diagonal neighbour and three at the voxel's centre.
 - Fix: `debug_draw_chunks` puts each chunk's box through the chunk's whole transform, so the box stays on the chunk under a rotated or scaled `WorldRoot`.

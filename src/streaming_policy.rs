@@ -486,11 +486,32 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 .any(|camera| camera.sees_chunk(key, 0.0))
     }
 
-    /// Whether the policy wants no chunk at the key. True when it is beyond the
-    /// spawning distance, or out of view while `in_view_only` is set.
+    /// Why the policy wants no chunk at the key, if it wants none.
+    ///
+    /// The spawn stage takes no chunk this rejects, spawning rays count none as
+    /// found, and the retire checks count its region as covered. One test for
+    /// all three keeps them from drifting apart. A ray that counted a chunk the
+    /// spawn stage then dropped would stop the extra rays of the frame, though
+    /// the spawn budget went unfilled.
+    ///
+    /// It is kept out of line, because spawning rays call it from their walk.
+    /// Inlined there, it slows every step of the walk, though it runs only at
+    /// missing chunks.
+    #[inline(never)]
+    fn unwanted(&self, key: ChunkKey) -> Option<Unwanted> {
+        if !self.is_close_to_any_camera(key, self.spawning_distance_squared) {
+            Some(Unwanted::OutOfRange)
+        } else if self.in_view_only && self.out_of_view_and_unprotected(key) {
+            Some(Unwanted::OutOfView)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the policy wants no chunk at the key, as
+    /// [`unwanted`](Self::unwanted) decides.
     fn unwanted_region(&self, key: ChunkKey) -> bool {
-        !self.is_close_to_any_camera(key, self.spawning_distance_squared)
-            || (self.in_view_only && self.out_of_view_and_unprotected(key))
+        self.unwanted(key).is_some()
     }
 
     // --- Retiring -----------------------------------------------------------
@@ -765,11 +786,7 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 continue;
             }
 
-            if !self.is_close_to_any_camera(key, self.spawning_distance_squared) {
-                continue;
-            }
-
-            if self.in_view_only && self.out_of_view_and_unprotected(key) {
+            if self.unwanted_region(key) {
                 continue;
             }
 
@@ -833,6 +850,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     ///
     /// When the ray reaches a chunk that has not been spawned yet, it queues it
     /// and continues. It queues at most `RAY_LOOKAHEAD` such chunks, then stops.
+    /// It queues only chunks the spawn stage takes, as
+    /// [`unwanted`](Self::unwanted) decides:
+    ///
+    /// - At a chunk beyond the spawning distance, the ray stops.
+    /// - At a chunk out of view, where only chunks in view spawn, the ray goes
+    ///   on as past a queued chunk, but queues and counts nothing.
     ///
     /// A chunk with a fill hint is never queued. The ray passes through a chunk
     /// hinted empty and stops at a chunk hinted solid, just as if the chunk
@@ -857,10 +880,23 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 match self.hinted(crossing.key) {
                     Some(hinted) => occupancy = hinted,
                     None => {
-                        if queued.insert(crossing.key) {
-                            queue.push_back(crossing.key);
-                            found += 1;
+                        match self.unwanted(crossing.key) {
+                            // The chunks further along lie further out still.
+                            Some(Unwanted::OutOfRange) => return false,
+                            // The view test looks at the centre and the corners
+                            // of a chunk, so a ray in view can cross a chunk
+                            // that counts as out of view. The chunks further
+                            // along can still be in view.
+                            Some(Unwanted::OutOfView) => {}
+                            None => {
+                                if queued.insert(crossing.key) {
+                                    queue.push_back(crossing.key);
+                                    found += 1;
+                                }
+                            }
                         }
+                        // What lies behind a missing chunk is unknown, queued
+                        // or not, so the ray goes only so far past known ones.
                         lookahead -= 1;
                         if lookahead == 0 {
                             return false;
@@ -1101,6 +1137,16 @@ fn r2_point(index: u64) -> Vec2 {
         (0.5 + i / PLASTIC_RATIO).fract() as f32,
         (0.5 + i / (PLASTIC_RATIO * PLASTIC_RATIO)).fract() as f32,
     )
+}
+
+/// Why the policy wants no chunk at a key, as [`Planner::unwanted`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unwanted {
+    /// The chunk is beyond the spawning distance of every camera.
+    OutOfRange,
+    /// The chunk is out of view of every camera and outside the protected
+    /// radius of each, while only chunks in view spawn.
+    OutOfView,
 }
 
 /// One chunk a ray crosses, as [`Planner::walk`] visits it.
@@ -2072,6 +2118,79 @@ mod tests {
         // Points far into the sequence still differ from their neighbours.
         let late = 1 << 40;
         assert!(r2_point(late).distance(r2_point(late + 1)) > 0.1);
+    }
+
+    /// The chunks a ray from the camera at `C` through `point` queues, and how
+    /// many it counts as found.
+    fn queued_by_ray(
+        config: &TestWorld,
+        occupied: &Occupied,
+        point: Vec2,
+    ) -> (Vec<ChunkKey>, usize) {
+        let cameras = [camera(C, Vec3::NEG_Z)];
+        let planner = Planner::new(config, &cameras, occupied);
+        let mut queue = VecDeque::new();
+        let found = planner.queue_chunks_intersecting_ray_from_point(
+            &cameras[0],
+            point,
+            &mut queue,
+            &mut HashSet::new(),
+        );
+        (queue.into(), found)
+    }
+
+    #[test]
+    fn a_ray_counts_no_chunk_beyond_the_spawning_distance() {
+        // Near enough that a ray through a corner of the viewport crosses a
+        // chunk beyond the spawning distance before it ends.
+        let config = TestWorld {
+            spawning_distance: 2,
+            ..default()
+        };
+        let distance = config.spawning_distance as i32;
+        // Air out to the spawning distance, and nothing beyond.
+        let occupied = level_0(within(C, distance), Occupancy::Empty);
+        let cameras = [camera(C, Vec3::NEG_Z)];
+        let planner = Planner::new(&config, &cameras, &occupied);
+        let length = (distance * CHUNK_SIZE_I) as f32;
+        let corner = [Vec2::ZERO, Vec2::new(1280.0, 0.0), Vec2::new(0.0, 720.0)]
+            .into_iter()
+            .find(|&point| {
+                let ray = cameras[0].viewport_ray(point).unwrap();
+                let mut beyond = false;
+                planner.walk(ray.origin, *ray.direction, length, |crossing| {
+                    beyond |=
+                        crossing.chunk_position.distance_squared(C) > distance.pow(2);
+                    true
+                });
+                beyond
+            })
+            .expect("a ray through a corner crosses a chunk beyond the distance");
+
+        let (queued, found) = queued_by_ray(&config, &occupied, corner);
+
+        assert_eq!((queued, found), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn where_only_chunks_in_view_spawn_a_ray_counts_no_chunk_out_of_view() {
+        // A point far to the left of the viewport, whose ray crosses only
+        // chunks out of view past the air around the camera.
+        let point = Vec2::new(-2000.0, 360.0);
+        let occupied = air_around(C);
+        let in_view = TestWorld {
+            spawn_in_view: true,
+            ..default()
+        };
+
+        let (queued, found) = queued_by_ray(&in_view, &occupied, point);
+        let (queued_anywhere, _) = queued_by_ray(&TestWorld::default(), &occupied, point);
+
+        assert_eq!((queued, found), (Vec::new(), 0));
+        assert!(
+            !queued_anywhere.is_empty(),
+            "the ray reaches no missing chunk"
+        );
     }
 
     #[test]
