@@ -46,6 +46,7 @@ impl Passages {
 
     /// Whether the air joins faces `a` and `b`. A face counts as joined to
     /// itself.
+    #[inline]
     pub fn joins(self, a: Face, b: Face) -> bool {
         a == b || self.0 & pair_bit(a, b) != 0
     }
@@ -75,6 +76,7 @@ impl Passages {
 ///
 /// The pairs are numbered in order: faces 0 and 1 are pair 0, faces 0 and 5
 /// are pair 4, faces 1 and 2 are pair 5, and faces 4 and 5 are pair 14.
+#[inline]
 fn pair_bit(a: Face, b: Face) -> u16 {
     let (low, high) = (a.0.min(b.0), a.0.max(b.0));
     let first = [0, 5, 9, 12, 14][low as usize];

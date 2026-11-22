@@ -182,6 +182,7 @@ impl Occupancy {
     /// A full chunk blocks the ray, and so does a chunk whose air doesn't join
     /// the two faces. A chunk that is missing or not yet published lets the
     /// ray through here, and the caller decides whether the ray goes on.
+    #[inline]
     fn lets_through(self, entry: Option<Face>, exit: Face) -> bool {
         match self {
             Occupancy::Full => false,
@@ -887,12 +888,74 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         origin: Vec3,
         direction: Vec3,
         length: f32,
-        mut visit: impl FnMut(&Crossing) -> bool,
+        visit: impl FnMut(&Crossing) -> bool,
     ) {
         // A segment crosses at most `length / CHUNK_SIZE` faces along each
         // axis, plus one, so this ends the walk however rounding goes.
         let max_steps = 3 * (length / CHUNK_SIZE_F).ceil() as usize + 4;
+        let ray = WalkedRay::new(origin, direction);
+        if self.coarsest == 0 {
+            self.walk_level_0(&ray, length, max_steps, visit);
+        } else {
+            self.walk_levels(&ray, length, max_steps, visit);
+        }
+    }
+
+    /// Walks `ray` as [`walk`](Self::walk) does, while only level 0 is
+    /// planned.
+    ///
+    /// Every chunk the ray crosses is then a level-0 chunk, so the ray enters
+    /// each chunk after the first by the face opposite the one it left the
+    /// last by. Spawning rays take this walk every frame in a world without
+    /// LOD levels, so it carries nothing that only chunks of other levels
+    /// need.
+    fn walk_level_0(
+        &self,
+        ray: &WalkedRay,
+        length: f32,
+        max_steps: usize,
+        mut visit: impl FnMut(&Crossing) -> bool,
+    ) {
+        let mut chunk_position = chunk_containing(ray.origin.floor().as_ivec3());
+        // How far along the ray it crosses the next face of the chunk on each
+        // axis.
+        let mut next_faces = ray.next_faces(chunk_position);
+        let mut entry = None;
+        for _ in 0..max_steps {
+            let key = ChunkKey::new(chunk_position, 0);
+            let (t_exit, exit) = ray.nearest(next_faces);
+            let crossing = Crossing {
+                chunk_position,
+                key,
+                occupancy: self.lookup.occupancy(key),
+                behind: Occupancy::Empty,
+                entry,
+                exit,
+            };
+            if !visit(&crossing) || t_exit >= length {
+                return;
+            }
+            let along = axis_mask(exit.axis());
+            chunk_position += IVec3::from(along) * ray.step;
+            next_faces = Vec3::select(along, next_faces + ray.face_spacing, next_faces);
+            entry = Some(exit.opposite());
+        }
+    }
+
+    /// Walks `ray` as [`walk`](Self::walk) does, while chunks of more than one
+    /// level are planned.
+    fn walk_levels(
+        &self,
+        ray: &WalkedRay,
+        length: f32,
+        max_steps: usize,
+        mut visit: impl FnMut(&Crossing) -> bool,
+    ) {
+        let (origin, direction) = (ray.origin, ray.direction);
         let mut chunk_position = chunk_containing(origin.floor().as_ivec3());
+        // How far along the ray it crosses the next face of a level-0 chunk on
+        // each axis, from the level-0 chunk at `chunk_position`.
+        let mut next_faces = ray.next_faces(chunk_position);
         // The face the ray crossed into `chunk_position` by, and where that
         // face lies along its axis, in voxels.
         let mut crossed: Option<(Face, i32)> = None;
@@ -904,10 +967,16 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             // reach back past the face the ray crossed. The ray is then already
             // inside the chunk, and enters by none of its faces.
             let entry = crossed.and_then(|(face, plane)| {
-                let side = min[face.axis()] + if face.is_high() { extent } else { 0 };
+                let side =
+                    component(min, face.axis()) + extent * i32::from(face.is_high());
                 (side == plane).then_some(face)
             });
-            let (t_exit, exit) = exit_of(min, extent, origin, direction);
+            let fine = key.lod_level == 0;
+            let (t_exit, exit) = if fine {
+                ray.nearest(next_faces)
+            } else {
+                ray.nearest(ray.faces(min + IVec3::from(ray.high) * extent))
+            };
             let crossing = Crossing {
                 chunk_position,
                 key,
@@ -920,20 +989,29 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
                 return;
             }
 
-            // The next chunk lies across the exit face, level with the point
-            // where the ray leaves.
-            let axis = exit.axis();
-            let leaving = origin + direction * t_exit;
-            let mut next = chunk_containing(leaving.floor().as_ivec3())
-                .clamp(key.position, key.position + (key.extent() - 1));
-            next[axis] = if exit.is_high() {
-                key.position[axis] + key.extent()
-            } else {
-                key.position[axis] - 1
-            };
-            let plane = min[axis] + if exit.is_high() { extent } else { 0 };
+            let along = axis_mask(exit.axis());
+            let plane = component(min, exit.axis()) + extent * i32::from(exit.is_high());
             crossed = Some((exit.opposite(), plane));
-            chunk_position = next;
+            if fine {
+                // The next level-0 chunk along the exit axis, whose far face
+                // on that axis lies one chunk further along the ray.
+                chunk_position += IVec3::from(along) * ray.step;
+                next_faces =
+                    Vec3::select(along, next_faces + ray.face_spacing, next_faces);
+            } else {
+                // The next chunk lies across the exit face, level with the
+                // point where the ray leaves.
+                let leaving = origin + direction * t_exit;
+                let level = chunk_containing(leaving.floor().as_ivec3())
+                    .clamp(key.position, key.position + (key.extent() - 1));
+                let across = IVec3::select(
+                    ray.high,
+                    key.position + key.extent(),
+                    key.position - 1,
+                );
+                chunk_position = level + IVec3::from(along) * (across - level);
+                next_faces = ray.next_faces(chunk_position);
+            }
         }
     }
 
@@ -943,12 +1021,6 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
     /// occupancy of the chunk covering the position now, if any. While the
     /// wanted chunk is missing, the last one decides whether the ray goes on.
     fn chunk_along_ray(&self, chunk_pos: IVec3) -> (ChunkKey, Occupancy, Occupancy) {
-        if self.coarsest == 0 {
-            // Only level 0 is planned, so the wanted chunk is the level-0 chunk
-            // here.
-            let key = ChunkKey::new(chunk_pos, 0);
-            return (key, self.lookup.occupancy(key), Occupancy::Empty);
-        }
         let covering = self.lookup.covering(chunk_pos);
         let key = self.wanted_key(chunk_pos, covering.map(|(key, _)| key.lod_level));
         let occupancy = match covering {
@@ -1018,27 +1090,108 @@ impl Face {
     }
 }
 
-/// Where a ray from `origin` along `direction` leaves the cube with corner
-/// `min` and sides `extent` voxels long, as the distance along the ray, and
-/// the face of the cube it leaves by.
-fn exit_of(min: IVec3, extent: i32, origin: Vec3, direction: Vec3) -> (f32, Face) {
-    let mut exit = (f32::INFINITY, Face::new(0, true));
-    for axis in 0..3 {
-        let d = direction[axis];
-        if d == 0.0 {
-            continue;
-        }
-        let high = d > 0.0;
-        let side = min[axis] + if high { extent } else { 0 };
-        let t = (side as f32 - origin[axis]) / d;
-        if t < exit.0 {
-            exit = (t, Face::new(axis, high));
+/// A ray as [`Planner::walk`] follows it, with what each step needs to find
+/// where the ray leaves a chunk.
+///
+/// The axis a ray leaves a chunk by changes from step to step in no order a
+/// branch predicts well. So a step picks everything that depends on the axis
+/// with arithmetic and masks, never with a branch on the axis.
+///
+/// Each step also waits on the one before it, for the chunk to look up next.
+/// Across level-0 chunks, the walk keeps how far along the ray the next face
+/// on each axis lies, and moves the one it crosses on by a chunk. That keeps
+/// the wait to a few instructions, where working the faces out again from the
+/// chunk takes several times as long.
+struct WalkedRay {
+    origin: Vec3,
+    direction: Vec3,
+    /// The reciprocal of each component of the direction, so that a step
+    /// multiplies rather than divides.
+    inverse: Vec3,
+    /// Whether the ray moves towards the high side of each axis.
+    high: BVec3,
+    /// `high` as bits, bit 0 for x.
+    high_bits: u32,
+    /// Whether the ray moves along each axis at all.
+    moving: BVec3,
+    /// The step from one level-0 chunk to the next along each axis.
+    step: IVec3,
+    /// How far along the ray the faces of level-0 chunks lie apart on each
+    /// axis.
+    face_spacing: Vec3,
+}
+
+impl WalkedRay {
+    fn new(origin: Vec3, direction: Vec3) -> Self {
+        let inverse = direction.recip();
+        let high = direction.cmpgt(Vec3::ZERO);
+        // A component too small to have a finite reciprocal counts as no
+        // movement at all.
+        let moving = inverse.is_finite_mask();
+        Self {
+            origin,
+            direction,
+            inverse,
+            high,
+            high_bits: high.bitmask(),
+            moving,
+            step: IVec3::select(high, IVec3::ONE, IVec3::NEG_ONE),
+            face_spacing: Vec3::select(
+                moving,
+                CHUNK_SIZE_F * inverse.abs(),
+                Vec3::INFINITY,
+            ),
         }
     }
-    exit
+
+    /// How far along the ray it reaches the plane of `sides` on each axis,
+    /// in voxels. The ray never reaches a plane on an axis it doesn't move
+    /// along.
+    #[inline]
+    fn faces(&self, sides: IVec3) -> Vec3 {
+        Vec3::select(
+            self.moving,
+            (sides.as_vec3() - self.origin) * self.inverse,
+            Vec3::INFINITY,
+        )
+    }
+
+    /// How far along the ray it leaves the level-0 chunk at `chunk_position`
+    /// by the face it heads for on each axis.
+    #[inline]
+    fn next_faces(&self, chunk_position: IVec3) -> Vec3 {
+        self.faces((chunk_position + IVec3::from(self.high)) * CHUNK_SIZE_I)
+    }
+
+    /// The nearest of the faces the ray reaches at `faces`, as the distance
+    /// along the ray and the face. Where it reaches two at once, the face of
+    /// the lower axis is nearest.
+    #[inline]
+    fn nearest(&self, faces: Vec3) -> (f32, Face) {
+        let y_first = usize::from(faces.y < faces.x);
+        let t_xy = faces.x.min(faces.y);
+        let z_first = usize::from(faces.z < t_xy);
+        let axis = y_first + z_first * (2 - y_first);
+        let high = self.high_bits >> axis & 1 == 1;
+        (t_xy.min(faces.z), Face::new(axis, high))
+    }
+}
+
+/// True along `axis` and false along the other two.
+#[inline]
+fn axis_mask(axis: usize) -> BVec3 {
+    BVec3::new(axis == 0, axis == 1, axis == 2)
+}
+
+/// The component of `v` along `axis`, picked with a mask rather than by
+/// indexing, which branches on the axis.
+#[inline]
+fn component(v: IVec3, axis: usize) -> i32 {
+    (v * IVec3::from(axis_mask(axis))).element_sum()
 }
 
 /// The level-0 chunk of the chunk at `key` nearest to `chunk_position`.
+#[inline]
 fn nearest_chunk(key: ChunkKey, chunk_position: IVec3) -> IVec3 {
     // A level-0 chunk is its own nearest chunk. This runs for every existing
     // chunk every frame, so it skips the clamp there.

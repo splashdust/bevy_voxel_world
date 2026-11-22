@@ -36,13 +36,12 @@ struct Chunks<'a, C: VoxelWorldConfig> {
 }
 
 impl<C: VoxelWorldConfig> Chunks<'_, C> {
-    /// The occupancy of a chunk that exists. Data left by a despawned chunk at
-    /// the same key doesn't count as published.
-    fn published(&self, key: ChunkKey) -> Occupancy {
-        let entity = self.index.get(key);
+    /// The occupancy of the chunk at `key`, which exists as `entity`. Data left
+    /// by a despawned chunk at the same key doesn't count as published.
+    fn published(&self, key: ChunkKey, entity: Entity) -> Occupancy {
         self.chunk_map
             .get(&key)
-            .filter(|data| Some(data.entity) == entity)
+            .filter(|data| data.entity == entity)
             .map_or(Occupancy::Unpublished, Occupancy::of_data)
     }
 }
@@ -50,14 +49,16 @@ impl<C: VoxelWorldConfig> Chunks<'_, C> {
 impl<C: VoxelWorldConfig> ChunkLookup for Chunks<'_, C> {
     fn covering(&self, chunk_position: IVec3) -> Option<(ChunkKey, Occupancy)> {
         let key = self.index.covering_chunk(chunk_position)?;
-        Some((key, self.published(key)))
+        Some((key, self.occupancy(key)))
     }
 
+    // Spawning rays ask this of every chunk they cross, so it looks the chunk
+    // up in the index once, for its entity, rather than asking first whether
+    // the index holds it.
     fn occupancy(&self, key: ChunkKey) -> Occupancy {
-        if !self.index.contains(key) {
-            return Occupancy::Missing;
-        }
-        self.published(key)
+        self.index
+            .get(key)
+            .map_or(Occupancy::Missing, |entity| self.published(key, entity))
     }
 
     fn is_retiring(&self, key: ChunkKey) -> bool {
