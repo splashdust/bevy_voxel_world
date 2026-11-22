@@ -207,7 +207,9 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     ///
     /// Each chunk task works out which faces the air of its chunk joins, once
     /// its voxels are generated. The cost grows with the voxels of the chunk,
-    /// and `CornerJoined` costs more than `FaceJoined`. A chunk keeps what its
+    /// and `CornerJoined` costs more than `FaceJoined`. A chunk whose own
+    /// voxels are all air costs next to nothing, and so does one whose own
+    /// voxels are all solid under `FaceJoined`. A chunk keeps what its
     /// task worked out until the chunk generates again, so a change of rule
     /// reaches the chunks that exist as they regenerate.
     fn spawning_ray_passage(&self) -> RayPassage {

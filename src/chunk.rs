@@ -659,6 +659,8 @@ struct Sampled<I> {
     voxels: Vec<WorldVoxel<I>>,
     /// How many voxels are solid.
     filled_count: usize,
+    /// How many voxels inside the padding are solid.
+    interior_filled: usize,
     /// The first solid voxel, and whether every solid voxel is the same as it.
     first_solid: Option<WorldVoxel<I>>,
     one_material: bool,
@@ -675,10 +677,14 @@ fn sample<I: Copy + PartialEq>(
     let [xs, ys, zs] = world_coordinates;
     let mut voxels = Vec::with_capacity(xs.len() * ys.len() * zs.len());
     let mut filled_count = 0;
+    let mut interior_filled = 0;
     let mut first_solid = None;
     let mut one_material = true;
+    let interior = |index: usize, length: usize| index > 0 && index + 1 < length;
     for (z_index, &z) in zs.iter().enumerate() {
         for (y_index, &y) in ys.iter().enumerate() {
+            let row_start = voxels.len();
+            let filled_before = filled_count;
             for (x_index, &x) in xs.iter().enumerate() {
                 let voxel = voxel_at(IVec3::new(x, y, z), x_index, y_index, z_index);
                 voxels.push(voxel);
@@ -690,11 +696,21 @@ fn sample<I: Copy + PartialEq>(
                     }
                 }
             }
+            // The solid voxels of an interior row, less the two at its ends,
+            // which lie in the padding. Counting a row at a time keeps the
+            // loop over the voxels as it is.
+            if interior(y_index, ys.len()) && interior(z_index, zs.len()) && xs.len() > 2
+            {
+                let ends = usize::from(voxels[row_start].is_solid())
+                    + usize::from(voxels[voxels.len() - 1].is_solid());
+                interior_filled += filled_count - filled_before - ends;
+            }
         }
     }
     Sampled {
         voxels,
         filled_count,
+        interior_filled,
         first_solid,
         one_material,
     }
@@ -716,6 +732,10 @@ where
     /// How spawning rays pass through the chunk, which decides the passages
     /// `post_voxel` works out.
     pub ray_passage: RayPassage,
+    /// How many voxels inside the padding are solid, as `generate` counted
+    /// them. `post_voxel` skips working the passages out from the voxels when
+    /// they are all air or all solid.
+    interior_filled: Option<usize>,
     pub mesh: Option<Mesh>,
     pub user_bundle: Option<C::ChunkUserBundle>,
     /// What the task needs to solve the chunk's light, in a world with light
@@ -749,6 +769,7 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
             hint,
             disagrees_with_hint: false,
             ray_passage: RayPassage::default(),
+            interior_filled: None,
             mesh: None,
             user_bundle: None,
             #[cfg(feature = "light_propagation")]
@@ -826,12 +847,14 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
         let Sampled {
             voxels,
             filled_count,
+            interior_filled,
             first_solid,
             one_material,
         } = sampled;
 
         self.chunk_data.is_empty = filled_count == 0;
         self.chunk_data.is_full = filled_count == voxels.len();
+        self.interior_filled = Some(interior_filled);
 
         match first_solid {
             Some(voxel) if self.chunk_data.is_full && one_material => {
@@ -865,7 +888,8 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
     pub fn post_voxel(&mut self) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("post_voxel").entered();
-        self.chunk_data.passages = passages_of(&self.chunk_data, self.ray_passage);
+        self.chunk_data.passages =
+            passages_of(&self.chunk_data, self.ray_passage, self.interior_filled);
         #[cfg(feature = "light_propagation")]
         if let Some(light) = self.light.take() {
             self.solved_light = Some(light.solve(&self.chunk_data));
@@ -926,6 +950,37 @@ impl<C: VoxelWorldConfig + Send + Sync + 'static, I: Hash + Copy + Eq> ChunkTask
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampling_counts_the_solid_voxels_inside_the_padding() {
+        let shape = UVec3::new(7, 5, 6);
+        let world_coordinates: [Vec<i32>; 3] =
+            std::array::from_fn(|axis| (0..shape[axis] as i32).collect());
+        let solid = |p: IVec3| (p.x * 7 + p.y * 3 + p.z * 5) % 4 == 0;
+
+        let sampled = sample(&world_coordinates, |p, _, _, _| {
+            if solid(p) {
+                WorldVoxel::Solid(1u8)
+            } else {
+                WorldVoxel::Air
+            }
+        });
+
+        let inside = |c: i32, axis: usize| c > 0 && c + 1 < shape[axis] as i32;
+        let mut expected = 0;
+        for z in 0..shape.z as i32 {
+            for y in 0..shape.y as i32 {
+                for x in 0..shape.x as i32 {
+                    let p = IVec3::new(x, y, z);
+                    expected += usize::from(
+                        solid(p) && inside(x, 0) && inside(y, 1) && inside(z, 2),
+                    );
+                }
+            }
+        }
+        assert_eq!(sampled.interior_filled, expected);
+        assert!(expected > 0 && expected < sampled.filled_count);
+    }
 
     #[test]
     fn a_level_0_key_is_the_chunk_position_of_the_voxel() {

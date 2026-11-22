@@ -27,6 +27,15 @@
 //! chunk for reading the rows, and with the runs of air for the fill. Joining
 //! across edges and corners visits eight neighbouring rows from each run in
 //! place of four, and fills the padding too.
+//!
+//! Two cases cost less:
+//!
+//! - Sampling counts the solid voxels inside the padding, a row at a time. When
+//!   the voxels there are all air, or all solid under `RayPassage::FaceJoined`,
+//!   the count settles the passages, and nothing is read or filled. A chunk of
+//!   flat ground, solid only in its padding, is such a case.
+//! - The fill stops once one body of air touches all six faces, since every
+//!   pair of faces is then joined.
 
 use bevy::math::UVec3;
 
@@ -87,9 +96,20 @@ fn pair_bit(a: Face, b: Face) -> u16 {
 ///
 /// A chunk with no air has no passages, and a chunk with no solid voxels joins
 /// every pair of faces. So does any chunk under [`RayPassage::AnyAir`].
+///
+/// `interior_filled` is how many voxels inside the padding are solid, where
+/// sampling counted them. Two counts settle the passages without reading the
+/// voxels:
+///
+/// - With no solid voxel there, the air inside the padding is one body that
+///   touches every face, so every pair of faces is joined.
+/// - With every voxel there solid, no pair is joined across voxel faces.
+///   Under [`RayPassage::CornerJoined`] the air of the padding still counts,
+///   so that rule reads the voxels.
 pub(crate) fn passages_of<I: PartialEq>(
     data: &ChunkData<I>,
     rule: RayPassage,
+    interior_filled: Option<usize>,
 ) -> Passages {
     if data.is_full {
         return Passages::NONE;
@@ -102,14 +122,16 @@ pub(crate) fn passages_of<I: PartialEq>(
         // No voxels inside the padding, so nothing to block a ray.
         return Passages::ALL;
     }
-    match rule {
-        RayPassage::AnyAir => Passages::ALL,
-        RayPassage::FaceJoined => {
+    let interior = (shape - 2).element_product() as usize;
+    match (rule, interior_filled) {
+        (RayPassage::AnyAir, _) | (_, Some(0)) => Passages::ALL,
+        (RayPassage::FaceJoined, Some(filled)) if filled == interior => Passages::NONE,
+        (RayPassage::FaceJoined, _) => {
             let air = AirRows::of(voxels, shape, UVec3::ONE, shape - 2);
             let high = UVec3::new(air.cells_x - 1, air.size.y - 1, air.size.z - 1);
             joined(&air, FACE_NEIGHBOURS, UVec3::ZERO, high)
         }
-        RayPassage::CornerJoined => {
+        (RayPassage::CornerJoined, _) => {
             // A surface drawn between voxel samples near a face of the chunk
             // comes from the voxels on both sides of the face, so the padding
             // is filled too. The faces of the chunk are still the first and
@@ -183,6 +205,10 @@ impl AirRows {
     }
 }
 
+/// A bit for each of the six faces, as `joined` marks the faces a body of air
+/// touches.
+const ALL_FACES: u8 = (1 << 6) - 1;
+
 /// The rows a run of air joins across voxel faces, as offsets in y and z.
 const FACE_NEIGHBOURS: &[(i32, i32)] = &[(-1, 0), (1, 0), (0, -1), (0, 1)];
 
@@ -238,6 +264,11 @@ fn joined(air: &AirRows, neighbours: &[(i32, i32)], low: UVec3, high: UVec3) -> 
                     | u8::from(y == high.y) << 3
                     | u8::from(z == low.z) << 4
                     | u8::from(z == high.z) << 5;
+                // One body that touches every face joins every pair, so the
+                // rest of the fill can't add a pair.
+                if touched == ALL_FACES {
+                    return Passages::ALL;
+                }
                 let reach = if corners {
                     (run | run << 1 | run >> 1) & in_row
                 } else {
@@ -352,7 +383,7 @@ mod tests {
             !((10..13).contains(&p.y) && (10..13).contains(&p.z))
         });
 
-        let passages = passages_of(&data, RayPassage::FaceJoined);
+        let passages = passages_of(&data, RayPassage::FaceJoined, None);
 
         assert_eq!(passages, Passages::touching(&[LOW_X, HIGH_X]));
     }
@@ -366,7 +397,7 @@ mod tests {
             !(along_x || up)
         });
 
-        let passages = passages_of(&data, RayPassage::FaceJoined);
+        let passages = passages_of(&data, RayPassage::FaceJoined, None);
 
         assert_eq!(passages, Passages::touching(&[LOW_X, HIGH_Y]));
     }
@@ -379,7 +410,7 @@ mod tests {
             !(along_x || along_z)
         });
 
-        let passages = passages_of(&data, RayPassage::FaceJoined);
+        let passages = passages_of(&data, RayPassage::FaceJoined, None);
 
         assert_eq!(
             passages.0,
@@ -393,7 +424,10 @@ mod tests {
     fn air_in_the_padding_alone_joins_no_faces_across_voxel_faces() {
         let data = chunk(SHAPE, |p| (1..33).contains(&p.x) && (1..33).contains(&p.y));
 
-        assert_eq!(passages_of(&data, RayPassage::FaceJoined), Passages::NONE);
+        assert_eq!(
+            passages_of(&data, RayPassage::FaceJoined, None),
+            Passages::NONE
+        );
     }
 
     #[test]
@@ -406,8 +440,8 @@ mod tests {
             !(from_x || from_y)
         });
 
-        let faces = passages_of(&data, RayPassage::FaceJoined);
-        let corners = passages_of(&data, RayPassage::CornerJoined);
+        let faces = passages_of(&data, RayPassage::FaceJoined, None);
+        let corners = passages_of(&data, RayPassage::CornerJoined, None);
 
         assert!(!faces.joins(LOW_X, HIGH_Y));
         assert!(corners.joins(LOW_X, HIGH_Y));
@@ -424,11 +458,11 @@ mod tests {
             RayPassage::CornerJoined,
             RayPassage::AnyAir,
         ] {
-            assert_eq!(passages_of(&air, rule), Passages::ALL);
-            assert_eq!(passages_of(&solid, rule), Passages::NONE);
+            assert_eq!(passages_of(&air, rule, None), Passages::ALL);
+            assert_eq!(passages_of(&solid, rule, None), Passages::NONE);
         }
-        assert_eq!(passages_of(&mixed, RayPassage::AnyAir), Passages::ALL);
-        assert!(!passages_of(&mixed, RayPassage::FaceJoined).joins(LOW_Y, HIGH_Y));
+        assert_eq!(passages_of(&mixed, RayPassage::AnyAir, None), Passages::ALL);
+        assert!(!passages_of(&mixed, RayPassage::FaceJoined, None).joins(LOW_Y, HIGH_Y));
     }
 
     /// The passages of `data` found one voxel at a time, joining voxels that
@@ -531,11 +565,63 @@ mod tests {
                     (RayPassage::CornerJoined, true),
                 ] {
                     assert_eq!(
-                        passages_of(data, rule),
+                        passages_of(data, rule, None),
                         reference(data, corners),
                         "chunk {i} of shape {shape} under {rule:?}"
                     );
                 }
+            }
+        }
+    }
+
+    /// How many voxels of `data` inside the padding are solid.
+    fn interior_filled(data: &ChunkData<u8>) -> usize {
+        let shape = data.data_shape;
+        let voxels = data.voxels.as_ref().unwrap();
+        let inside = |c: u32, axis: usize| c > 0 && c + 1 < shape[axis];
+        let mut filled = 0;
+        for z in 0..shape.z {
+            for y in 0..shape.y {
+                for x in 0..shape.x {
+                    let index = (x + shape.x * (y + shape.y * z)) as usize;
+                    filled += usize::from(
+                        voxels[index].is_solid()
+                            && inside(x, 0)
+                            && inside(y, 1)
+                            && inside(z, 2),
+                    );
+                }
+            }
+        }
+        filled
+    }
+
+    #[test]
+    fn the_count_of_solid_voxels_inside_the_padding_gives_the_passages_the_voxels_give() {
+        let inside = |p: UVec3| {
+            (1..33).contains(&p.x) && (1..33).contains(&p.y) && (1..33).contains(&p.z)
+        };
+        let mut chunks = vec![
+            // Air inside, solid padding, as above the ground of flat terrain.
+            chunk(SHAPE, |p| !inside(p)),
+            // Solid inside, air in the padding above it.
+            chunk(SHAPE, |p| p.y < 33),
+            // Solid inside, air all around in the padding.
+            chunk(SHAPE, inside),
+        ];
+        chunks.extend(random_chunks(SHAPE, 4));
+        for (i, data) in chunks.iter().enumerate() {
+            let filled = interior_filled(data);
+            for rule in [
+                RayPassage::FaceJoined,
+                RayPassage::CornerJoined,
+                RayPassage::AnyAir,
+            ] {
+                assert_eq!(
+                    passages_of(data, rule, Some(filled)),
+                    passages_of(data, rule, None),
+                    "chunk {i} under {rule:?}"
+                );
             }
         }
     }
@@ -552,7 +638,7 @@ mod tests {
                     (RayPassage::FaceJoined, false),
                     (RayPassage::CornerJoined, true),
                 ] {
-                    let passages = passages_of(data, rule);
+                    let passages = passages_of(data, rule, None);
                     let exact = reference(data, corners);
                     assert_eq!(
                         passages.0 & exact.0,
