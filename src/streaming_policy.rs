@@ -273,13 +273,18 @@ pub(crate) struct StreamingPlan {
 ///
 /// `chunks` are the chunks that exist, and `lookup` gives the occupancy of any
 /// chunk key. `wanted` is how many chunks the chunk lifecycle could start right
-/// away beyond those already Pending. `rng` picks where to cast spawning rays.
+/// away beyond those already Pending.
+///
+/// `points` holds where the spawning rays of each camera go next, and carries
+/// it from one plan to the next. `rng` picks the camera of each ray, and the
+/// points of the extra rays cast near earlier hits.
 pub(crate) fn plan<C: VoxelWorldConfig>(
     config: &C,
     cameras: &[CameraSnapshot],
     chunks: impl IntoIterator<Item = ChunkKey>,
     lookup: &impl ChunkLookup,
     wanted: usize,
+    points: &mut RayPoints,
     rng: &mut impl Rng,
 ) -> StreamingPlan {
     let mut plan = StreamingPlan::default();
@@ -288,7 +293,7 @@ pub(crate) fn plan<C: VoxelWorldConfig>(
     }
     let planner = Planner::new(config, cameras, lookup);
 
-    plan.spawn = planner.chunks_to_spawn(wanted, rng);
+    plan.spawn = planner.chunks_to_spawn(wanted, points, rng);
     if planner.coarsest == 0 && lookup.coarsest_level() == 0 {
         // Every chunk is at level 0 and level 0 is wanted everywhere, so only
         // range and view retire chunks, and the per-chunk LOD checks are skipped.
@@ -656,7 +661,12 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
 
     // --- Spawning -----------------------------------------------------------
 
-    fn chunks_to_spawn(&self, wanted: usize, rng: &mut impl Rng) -> Vec<ChunkKey> {
+    fn chunks_to_spawn(
+        &self,
+        wanted: usize,
+        points: &mut RayPoints,
+        rng: &mut impl Rng,
+    ) -> Vec<ChunkKey> {
         let config = self.config;
         let cameras = self.cameras;
         let spawn_strategy = config.chunk_spawn_strategy();
@@ -692,16 +702,18 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             }
         }
 
-        // Each frame, `spawning_rays` rays are cast through random points of the
-        // viewports. While the chunk lifecycle could start more chunks than the
-        // rays have found, extra rays are cast, up to `MAX_RAYS_PER_SPAWNING_RAY`
-        // times as many, until `spawning_rays` rays in a row find nothing. A ray
-        // that stops at an unpublished chunk finds nothing, so once every ray
-        // does, the chunks found so far must publish before more can be found.
+        // Each frame, `spawning_rays` rays are cast through the viewports, each
+        // through a camera picked at random and the next of its `points`. While
+        // the chunk lifecycle could start more chunks than the rays have found,
+        // extra rays are cast, up to `MAX_RAYS_PER_SPAWNING_RAY` times as many,
+        // until `spawning_rays` rays in a row find nothing. A ray that stops at
+        // an unpublished chunk finds nothing, so once every ray does, the chunks
+        // found so far must publish before more can be found.
         //
         // Missing chunks tend to lie in patches of the view, such as the sky
-        // above a distant hill, so every other extra ray is cast near a point
-        // where an earlier ray found chunks this frame.
+        // above a distant hill, so every other extra ray is cast at random near
+        // a point where an earlier ray found chunks this frame. The other extra
+        // rays take the next of `points`, as the first rays do.
         let base_rays = config.spawning_rays();
         let max_rays = base_rays.saturating_mul(MAX_RAYS_PER_SPAWNING_RAY);
         let m = config.spawning_ray_margin();
@@ -713,23 +725,21 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
             || (found < wanted && misses < base_rays && rays < max_rays)
         {
             rays += 1;
-            let (camera_index, point) = if rays > base_rays
-                && !hits.is_empty()
-                && rng.random()
-            {
-                let (camera_index, hit) = hits[rng.random_range(0..hits.len())];
-                let jitter =
-                    Vec2::new(rng.random_range(-1.0..=1.0), rng.random_range(-1.0..=1.0))
-                        * cameras[camera_index].viewport_size.as_vec2()
+            let (camera_index, point) =
+                if rays > base_rays && !hits.is_empty() && rng.random() {
+                    let (camera_index, hit) = hits[rng.random_range(0..hits.len())];
+                    let jitter = Vec2::new(
+                        rng.random_range(-1.0..=1.0),
+                        rng.random_range(-1.0..=1.0),
+                    ) * cameras[camera_index].viewport_size.as_vec2()
                         * RAY_JITTER;
-                (camera_index, hit + jitter)
-            } else {
-                let camera_index = rng.random_range(0..cameras.len());
-                let viewport_size = cameras[camera_index].viewport_size;
-                let x = rng.random::<f32>() * (viewport_size.x + m * 2) as f32 - m as f32;
-                let y = rng.random::<f32>() * (viewport_size.y + m * 2) as f32 - m as f32;
-                (camera_index, Vec2::new(x, y))
-            };
+                    (camera_index, hit + jitter)
+                } else {
+                    let camera_index = rng.random_range(0..cameras.len());
+                    let area = (cameras[camera_index].viewport_size + m * 2).as_vec2();
+                    let point = points.next(camera_index) * area - m as f32;
+                    (camera_index, point)
+                };
 
             let found_by_ray = self.queue_chunks_intersecting_ray_from_point(
                 &cameras[camera_index],
@@ -1038,6 +1048,59 @@ impl<'a, C: VoxelWorldConfig, L: ChunkLookup> Planner<'a, C, L> {
         });
         (key, occupancy, behind)
     }
+}
+
+/// Where the spawning rays of each camera go through its viewport, carried
+/// from one plan to the next.
+///
+/// The points of a camera follow the R2 sequence over its viewport and the
+/// margin around it. Each point of the sequence lands in about the largest
+/// gap that the points before it left. So the rays of one frame cover the
+/// view evenly, and each frame fills the gaps the frames before it left.
+/// Random points leave some gaps open for many frames, and with them the
+/// chunks that no ray finds.
+///
+/// Each camera has a sequence of its own, so that its rays spread evenly
+/// whichever cameras the other rays pick. The sequences follow the order of
+/// the cameras the plan gets. A camera added or taken away moves the others
+/// onto other sequences, which only starts their spread afresh.
+#[derive(Default)]
+pub(crate) struct RayPoints {
+    /// The index of the next point of each camera.
+    next: Vec<u64>,
+}
+
+impl RayPoints {
+    /// The next point of the camera at `camera_index`, in the unit square.
+    fn next(&mut self, camera_index: usize) -> Vec2 {
+        if self.next.len() <= camera_index {
+            self.next.resize(camera_index + 1, 0);
+        }
+        let index = self.next[camera_index];
+        self.next[camera_index] += 1;
+        r2_point(index)
+    }
+}
+
+/// The plastic ratio, the real root of `x³ = x + 1`, which spaces the points of
+/// the R2 sequence.
+const PLASTIC_RATIO: f64 = 1.324_717_957_244_746;
+
+/// Point `index` of the R2 sequence, in the unit square.
+///
+/// Point `i` is `(frac(0.5 + i / g), frac(0.5 + i / g²))`, where `g` is
+/// `PLASTIC_RATIO`. Points 0, 1 and 2 are about (0.5, 0.5), (0.25, 0.07) and
+/// (0.01, 0.64).
+///
+/// The index grows by the rays of every frame. In `f32`, `i / g` keeps too few
+/// bits below the point within minutes of play. The points then fall on a
+/// coarse grid. In `f64` they stay apart for years.
+fn r2_point(index: u64) -> Vec2 {
+    let i = index as f64;
+    Vec2::new(
+        (0.5 + i / PLASTIC_RATIO).fract() as f32,
+        (0.5 + i / (PLASTIC_RATIO * PLASTIC_RATIO)).fract() as f32,
+    )
 }
 
 /// One chunk a ray crosses, as [`Planner::walk`] visits it.
@@ -1509,6 +1572,7 @@ mod tests {
             occupied.keys().copied(),
             occupied,
             wanted,
+            &mut RayPoints::default(),
             &mut StdRng::seed_from_u64(1),
         )
     }
@@ -1978,6 +2042,39 @@ mod tests {
     }
 
     #[test]
+    fn the_ray_points_of_a_camera_spread_evenly_and_carry_on_from_plan_to_plan() {
+        let mut points = RayPoints::default();
+        let mut first = Vec::new();
+        for i in 0..100 {
+            first.push(points.next(0));
+            if i % 3 == 0 {
+                points.next(1);
+            }
+        }
+
+        // The rays of another camera don't move this camera on.
+        let mut alone = RayPoints::default();
+        let first_alone: Vec<_> = (0..100).map(|_| alone.next(0)).collect();
+        assert_eq!(first, first_alone);
+        // Each cell of a 5 by 5 grid over the viewport holds about as many of
+        // the first 100 points as the others.
+        let mut cells = [0; 25];
+        for point in &first {
+            let cell = (point * 5.0).as_uvec2().min(UVec2::splat(4));
+            cells[(cell.x + 5 * cell.y) as usize] += 1;
+        }
+        assert!(
+            cells.iter().all(|&count| (2..=6).contains(&count)),
+            "{cells:?}"
+        );
+        // The next plan carries on where this one stopped.
+        assert_eq!(points.next(0), r2_point(100));
+        // Points far into the sequence still differ from their neighbours.
+        let late = 1 << 40;
+        assert!(r2_point(late).distance(r2_point(late + 1)) > 0.1);
+    }
+
+    #[test]
     fn the_chunk_a_ray_starts_in_lets_it_out_by_any_face() {
         let config = TestWorld {
             spawning_distance: 4,
@@ -2094,6 +2191,7 @@ mod tests {
             occupied.keys().copied(),
             &lookup,
             0,
+            &mut RayPoints::default(),
             &mut StdRng::seed_from_u64(1),
         );
 
@@ -2551,6 +2649,7 @@ mod tests {
             occupied.keys().copied().filter(|key| *key != retiring),
             &lookup,
             0,
+            &mut RayPoints::default(),
             &mut StdRng::seed_from_u64(1),
         )
     }
@@ -2650,10 +2749,19 @@ mod tests {
         frames: usize,
     ) -> Option<usize> {
         let config = near_level_0_in_view();
+        let mut points = RayPoints::default();
         let mut rng = StdRng::seed_from_u64(7);
         for frame in 0..frames {
             let keys: Vec<_> = occupied.keys().copied().collect();
-            let plan = plan(&config, cameras, keys, &*occupied, 1000, &mut rng);
+            let plan = plan(
+                &config,
+                cameras,
+                keys,
+                &*occupied,
+                1000,
+                &mut points,
+                &mut rng,
+            );
             for key in plan.spawn {
                 occupied.insert(key, surface_with_opening(key, opening, below));
             }
@@ -2697,10 +2805,19 @@ mod tests {
 
             // With the camera still, the chunks have settled.
             let config = near_level_0_in_view();
+            let mut points = RayPoints::default();
             let mut rng = StdRng::seed_from_u64(8);
             for _ in 0..50 {
                 let keys: Vec<_> = occupied.keys().copied().collect();
-                let plan = plan(&config, &cameras, keys, &occupied, 1000, &mut rng);
+                let plan = plan(
+                    &config,
+                    &cameras,
+                    keys,
+                    &occupied,
+                    1000,
+                    &mut points,
+                    &mut rng,
+                );
                 assert!(plan.retire.is_empty(), "retired {:?}", plan.retire);
                 assert!(
                     !plan.spawn.contains(&coarse),

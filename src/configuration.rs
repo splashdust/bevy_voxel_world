@@ -185,8 +185,13 @@ pub trait VoxelWorldConfig: Resource + Default + Clone {
     /// they are empty. It spawns the first chunks past them. So chunks spawn
     /// from the camera outwards as the chunks in front of them are generated.
     ///
-    /// Higher values will result in more chunks being spawned per frame, but
-    /// will also increase cpu load.
+    /// The rays of a frame go through points spread evenly over each viewport
+    /// and its [margin](Self::spawning_ray_margin). The points of each frame
+    /// fall in the gaps the frames before it left, so over a few frames the
+    /// rays cover the whole view finely.
+    ///
+    /// More rays find the chunks in view sooner, and spawn more chunks per
+    /// frame. The time the rays take grows with their number.
     fn spawning_rays(&self) -> usize {
         100
     }

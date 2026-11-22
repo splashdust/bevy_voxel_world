@@ -15,7 +15,7 @@ use crate::{
     mesh_cache::*,
     plugin::WorldMaterial,
     pool_budget::PoolBudget,
-    streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy},
+    streaming_policy::{self, CameraSnapshot, ChunkLookup, Occupancy, RayPoints},
     voxel_edits::{CommittedEdits, VoxelEdits},
     voxel_material::LoadingTexture,
     voxel_world::VoxelWorldCamera,
@@ -136,6 +136,9 @@ where
     }
 
     /// Plans this frame's spawns and retirements, and requests them.
+    ///
+    /// `ray_points` carries where the spawning rays of each camera go from one
+    /// frame to the next, so that each frame fills the gaps the last one left.
     #[allow(clippy::too_many_arguments)]
     pub fn stream_chunks(
         mut requests: ResMut<ChunkRequests<C>>,
@@ -147,6 +150,7 @@ where
         world_root: Query<Entity, With<WorldRoot<C>>>,
         configuration: Res<C>,
         camera_info: CameraInfo<C>,
+        mut ray_points: Local<RayPoints>,
     ) {
         #[cfg(feature = "trace")]
         let _span = bevy::log::info_span!("stream_chunks").entered();
@@ -192,6 +196,7 @@ where
             &lookup,
             budget
                 .spawn_budget(configuration.max_active_chunk_threads(), index.waiting()),
+            &mut ray_points,
             &mut rand::rng(),
         );
         let root = configuration

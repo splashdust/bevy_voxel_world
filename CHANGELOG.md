@@ -31,6 +31,7 @@ The computational cost of coloured light grows mainly with these factors:
 
 - Spawning rays see out of a chunk that is solid in places only by the faces that the air of the chunk joins to the face they came in by. A world of caves no longer spawns every chunk behind the walls of the cave the camera is in, and a coarse chunk no longer waits for finer chunks behind such walls before it retires. `VoxelWorldConfig::spawning_ray_passage` picks the rule: `RayPassage::FaceJoined`, the default, suits meshes of blocks, `CornerJoined` suits meshes drawn between voxel samples, and `AnyAir` lets rays through any chunk with air, as before.
 - Voxel gizmos now draw in `PostUpdate`, after transform propagation, so a gizmo on a sub-grid stays on its voxel as the sub-grid moves.
+- Spawning rays go through points spread evenly over each viewport rather than random ones. The points of each frame fall in the gaps the frames before left, so chunks in view are found sooner and fewer stay missing for long.
 
 ### Bug fixes
 
