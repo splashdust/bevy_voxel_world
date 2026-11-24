@@ -13,13 +13,13 @@ To do this, we'll declare a few different materials, and load up an array textur
 This is the texture we'll use:
 <center><img alt="An array texture" src="img/texturing.png" /></center>
 
-You can right click on the image and download it. This texture was generated from a Python script written by Claude Code, so feel free to use it how ever you like.
+You can right click on the image and download it. Put it in the `assets/` directory, where the Bevy asset loader will find it by convention. This texture was generated from a Python script written by Claude Code, so feel free to use it how ever you like.
 
 This is a fairly low-res texture, and it gives a pixelated style to the voxels. However, you can use any resolution you want for a texture. It will scale to fit automatically.
 
 ## Setting up materials
 
-First, we'll declare an Enum that holds our different materials:
+First, we'll declare an `enum` that holds our different materials:
 
 ```rust
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Default)]
@@ -34,7 +34,7 @@ enum MyWorldMaterial {
 }
 ```
 
-This enum is how we'll distinguish which material a voxel is made of.
+This `enum` is how we'll distinguish which material a voxel is made of.
 
 Then, we need to let our `VoxelWorldConfig` know the type of our material Enum:
 
@@ -48,7 +48,7 @@ impl VoxelWorldConfig for MyWorld {
 
 ## Setting up and mapping the textures
 
-Now that we have declared a material Enum, we need to say which textures each material should use. So we need to load the PNG image for the texture and set up a `texture_index_mapper` function in our config.
+Now that we have declared a material `enum`, we need to say which textures each material should use. So we need to load the PNG image for the texture and set up a `texture_index_mapper` function in our config.
 
 ### The texture image
 ```rust
